@@ -1,0 +1,215 @@
+---
+title: "iOS WidgetKit"
+description: "The iOS widgets currently use these endpoints (should migrate to widget endpoints above):"
+---
+
+# SoT - iOS WidgetKit
+
+## Scope
+- iOS WidgetKit home screen widgets for DormWay.
+- Widget authentication using Clerk SDK with shared Keychain.
+- V2 API endpoint integration for widget data.
+- Widget types, refresh intervals, and data providers.
+
+## Non-goals
+- Web Home V2 widgets (see SoT - Home & Widgets).
+- Widget UI/visual design details.
+- Lock screen widgets (Live Activities).
+- Interactive widget actions (iOS 17+).
+
+## Current vs Target
+
+- **Current (WIP):** Widgets use Clerk SDK with shared Keychain for authentication. Data fetched from v2 API endpoints. Basic widget set implemented. Format needs refinement.
+- **Target:** Full widget suite with polished UI, proper error states, deep linking, and interactive elements (iOS 17+).
+- **Branch:** `feat/widgetkit-v2-endpoints`
+
+## Invariants & Contracts
+
+### Authentication (Critical)
+- Widgets use Clerk SDK with **shared Keychain** for authentication.
+- Keychain access group: `group.9796V9ZFQ6.com.dormway.app` (team ID prefixed).
+- Both main app and widget extension must have matching App Groups entitlement.
+- Widget initializes Clerk with same `KeychainConfig` as main app.
+- Widget calls `session.getToken()` to get fresh JWTs (Clerk handles refresh automatically).
+- **Never cache JWT tokens in UserDefaults** - they expire in 60 seconds.
+
+### App Groups
+- Both targets use: `group.com.dormway.app` and `group.9796V9ZFQ6.com.dormway.app`
+- Clerk publishable key stored in App Group UserDefaults by main app.
+- Widget reads publishable key from App Group to configure Clerk.
+
+### API Endpoints (V2 Widgets)
+
+**Recommended:** Use dedicated widget endpoints at `/api/v2/widgets/*` which return enriched data with widget-specific fields (e.g., `isOnBreak`, `breakName`).
+
+| Widget | Endpoint | Refresh Interval | Notes |
+|--------|----------|------------------|-------|
+| today | `/api/v2/widgets/today` | 15 min | Date, weather, next event |
+| schedule | `/api/v2/widgets/schedule` | 15 min | Timeline with dayplan + time blocks |
+| tasks | `/api/v2/widgets/tasks` | 15 min | Pending tasks |
+| academic | `/api/v2/widgets/academic` | 60 min | **Includes `isOnBreak`, `breakName`, `currentWeek`** |
+| workload | `/api/v2/widgets/workload` | 60 min | Term workload analysis |
+| weather | `/api/v2/widgets/weather` | 30 min | Campus weather |
+| campus | `/api/v2/widgets/campus` | 60 min | Campus context + logistics |
+| action_cta | `/api/v2/widgets/action-cta` | 15 min | AI-suggested next action |
+
+**Batch endpoint:** `/api/v2/widgets/batch?types=today,schedule,tasks,academic`
+
+### Current iOS Endpoints (to migrate)
+
+The iOS widgets currently use these endpoints (should migrate to widget endpoints above):
+
+| Widget | Current Endpoint | Migrate To |
+|--------|------------------|------------|
+| nextAction | `/api/v2/students/me/next-action` | `/api/v2/widgets/action-cta` |
+| todaysPlan | `/api/v2/students/me/dayplan` | `/api/v2/widgets/today` |
+| tasks | `/api/v2/students/me/tasks` | `/api/v2/widgets/tasks` |
+| workload | `/api/v2/students/me/current-term/workload` | `/api/v2/widgets/academic` |
+| schedule | `/api/v2/students/me/dayplan` | `/api/v2/widgets/schedule` |
+| topCard | `/api/v2/students/me/feed?limit=1` | (no widget endpoint yet) |
+
+### API Debugging (curl examples)
+
+```bash
+# Today widget (daily snapshot)
+curl -s "http://localhost:3001/api/v2/widgets/today" \
+  -H "X-User-Id: <user-id>" -H "X-User-Role: authenticated" | jq .
+
+# Academic widget (has isOnBreak, breakName, currentWeek)
+curl -s "http://localhost:3001/api/v2/widgets/academic" \
+  -H "X-User-Id: <user-id>" -H "X-User-Role: authenticated" | jq .
+
+# Schedule widget (merged timeline)
+curl -s "http://localhost:3001/api/v2/widgets/schedule" \
+  -H "X-User-Id: <user-id>" -H "X-User-Role: authenticated" | jq .
+
+# Batch multiple widgets at once
+curl -s "http://localhost:3001/api/v2/widgets/batch?types=today,academic,schedule" \
+  -H "X-User-Id: <user-id>" -H "X-User-Role: authenticated" | jq .
+
+# Current term (raw - for debugging)
+curl -s "http://localhost:3001/api/v2/students/me/current-term" \
+  -H "X-User-Id: <user-id>" -H "X-User-Role: authenticated" | jq .
+```
+
+**Backend source:** `api-router/src/routes/v2/widgets.routes.ts`
+
+### Widget Types
+| widgetType | Sizes | Description |
+|------------|-------|-------------|
+| nextAction | small, medium | What to do right now |
+| todaysPlan | small, medium | Day at a glance |
+| tasks | small, medium | Upcoming tasks |
+| workload | small, medium | Term workload visualization |
+| schedule | small, medium | Today's schedule events |
+| topCard | small, medium | Top feed card |
+
+## Key Flows
+
+### Widget Authentication Flow
+```
+1. Main app signs in via Clerk SDK
+2. Clerk stores session in shared Keychain (group.9796V9ZFQ6.com.dormway.app)
+3. Main app stores Clerk publishable key in App Group UserDefaults
+4. Widget extension initializes Clerk with same KeychainConfig
+5. Widget calls Clerk.shared.load() to load session from shared Keychain
+6. Widget calls session.getToken() to get fresh JWT
+7. Widget makes authenticated API request
+```
+
+### Timeline Provider Flow
+```
+1. iOS calls getTimeline(for:completion:)
+2. WidgetDataProvider fetches data via fetchContent()
+3. WidgetAuthProvider gets fresh token from Clerk SDK
+4. NetworkService makes authenticated request to v2 endpoint
+5. Response mapped to widget-specific content model
+6. Timeline entry created with refresh policy
+```
+
+### Preview Data Flow (Widget Gallery)
+```
+1. iOS calls getSnapshot(in:completion:) with context.isPreview = true
+2. Widget returns hardcoded sample data (no API calls)
+3. Avoids auth issues in widget gallery
+```
+
+## Data Models
+
+### WidgetContent (enum)
+```swift
+enum WidgetContent {
+    case loading
+    case error(String)
+    case nextAction(NextActionWidgetContent)
+    case todaysPlan(TodaysPlanWidgetContent)
+    case tasks(TasksWidgetContent)
+    case workload(WorkloadWidgetContent)
+    case schedule(ScheduleWidgetContent)
+    case topCard(TopCardWidgetContent)
+}
+```
+
+### DWWidgetEntry (TimelineEntry)
+```swift
+struct DWWidgetEntry: TimelineEntry {
+    let date: Date
+    let configuration: DWWidgetConfiguration
+    let content: WidgetContent
+}
+```
+
+## Key Files
+
+### Widget Extension
+- `DormWayWidgets/DormWayWidgets.swift` - Widget bundle entry point
+
+### DWWidgetKit Package
+- `Provider/WidgetDataProvider.swift` - Central data fetching and auth
+- `Widgets/NextActionWidget.swift` - Next action widget
+- `Widgets/TodaysPlanWidget.swift` - Today's plan widget
+- `Widgets/TasksWidget.swift` - Tasks widget
+- `Widgets/WorkloadWidget.swift` - Workload widget
+- `Widgets/ScheduleWidget.swift` - Schedule widget
+- `Widgets/TopCardWidget.swift` - Top card widget
+- `Models/` - Widget content models and API response types
+
+### Main App
+- `Packages/DWServices/Sources/DWServices/ClerkService.swift` - Clerk config with shared Keychain
+
+### Entitlements
+- `DormWay.entitlements` - Main app entitlements (App Groups)
+- `DormWayWidgetsExtension.entitlements` - Widget extension entitlements (App Groups)
+
+## Update Checklist
+
+- **Adding a widget type:** Create widget in `Widgets/`, add content model, add case to `WidgetContent` enum, add to `WidgetDataProvider.fetchWidgetData()`, register in `DormWayWidgetsBundle`.
+- **Changing auth:** Update `KeychainConfig` in both `ClerkService.swift` and `WidgetDataProvider.swift` with matching access group.
+- **Changing API endpoint:** Update `WidgetDataProvider` fetch methods and corresponding API response types.
+- **Changing refresh interval:** Update `getTimeline()` in the specific widget's TimelineProvider.
+
+## Known Issues (WIP)
+
+- [ ] Widget format/layout needs refinement
+- [ ] **DORM-809**: Widget shows "Week 1" during break - API may return stale term data
+- [ ] Need to test on physical device after simulator validation
+- [ ] Consider adding widget configuration intents
+- [ ] Deep linking from widget taps not implemented
+- [ ] **DORM-808**: Live Activities not yet implemented (future feature)
+
+## Recent Changes
+
+- 2025-12-28: Added API debugging curl examples; linked DORM-808 (Live Activities) and DORM-809 (Week 1 bug).
+- 2025-12-27: Implemented Clerk SDK Keychain sharing for widget auth (replaced stale UserDefaults token approach).
+- 2025-12-27: Added team ID prefixed app group (`group.9796V9ZFQ6.com.dormway.app`) for Keychain access.
+- 2025-12-27: Updated all widgets with `context.isPreview` check for widget gallery sample data.
+- 2025-12-27: Created 6 widget types using v2 API endpoints.
+- 2025-12-27: Main app stores Clerk publishable key in App Group for widget initialization.
+
+## References
+
+- SoT - Home & Widgets - Web widget system (separate from iOS WidgetKit)
+- SoT - Auth & Identity - Clerk authentication architecture
+- [Apple WidgetKit Documentation](https://developer.apple.com/documentation/widgetkit)
+- [Clerk iOS SDK - getToken](https://clerk.com/docs/reference/ios/get-token)
+- [Sharing Auth State (Medium)](https://medium.com/@thomsmed/share-authentication-state-across-your-apps-app-clips-and-widgets-ios-e7e7f24e5525)
