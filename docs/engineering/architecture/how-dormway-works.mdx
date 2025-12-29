@@ -59,16 +59,16 @@ flowchart LR
   end
 
   subgraph Edge["Edge / Gateway"]
-    Zuplo[Zuplo Gateway<br>dormway-api-2]
+    Zuplo["Zuplo Gateway dormway-api-2"]
   end
 
-  subgraph Backend["Backend (dormway-platform)"]
+  subgraph Backend["Backend dormway-platform"]
     APIRouter[api-router]
-    Engine[engine<br>Temporal worker]
+    Engine["engine Temporal worker"]
   end
 
   subgraph Data["Data + External Systems"]
-    PG[(Postgres<br>Neon/Aurora)]
+    PG[("Postgres Neon/Aurora")]
     Temporal[(Temporal Cloud)]
     Clerk[(Clerk)]
     Portkey[(Portkey)]
@@ -87,7 +87,7 @@ flowchart LR
   APIRouter <--> Clerk
   APIRouter <--> Ragie
   APIRouter <--> Ably
-  APIRouter -->|start/signal/query| Temporal
+  APIRouter -->|"start/signal/query"| Temporal
 
   Engine <--> Temporal
   Engine <--> PG
@@ -253,24 +253,24 @@ Then routes typically apply `authMiddleware` which resolves the user identity (o
 ```mermaid
 sequenceDiagram
   autonumber
-  participant Client as Client (iOS/Web/Admin)
+  participant Client as Client iOS/Web/Admin
   participant Zuplo as Zuplo Gateway
   participant API as api-router
   participant CoreGW as dormway-core gateway auth
   participant CoreAuth as dormway-core auth middleware
   participant DB as Postgres
 
-  Client->>Zuplo: Request + Clerk token (Auth0 legacy)
-  Zuplo->>Zuplo: Verify token<br>(ClerkJwtInboundPolicy / Auth0JwtInboundPolicy [legacy])
-  Zuplo->>Zuplo: Add headers<br>x-user-id/x-user-email/x-user-role
+  Client->>Zuplo: Request + Clerk token Auth0 legacy
+  Zuplo->>Zuplo: Verify token ClerkJwtInboundPolicy / Auth0JwtInboundPolicy legacy
+  Zuplo->>Zuplo: Add headers x-user-id/x-user-email/x-user-role
   Zuplo->>Zuplo: Add gateway-api-key
   Zuplo->>API: Forward request
   API->>CoreGW: Validate gateway-api-key
   CoreGW-->>API: OK / reject
   API->>CoreAuth: Resolve req.user
-  CoreAuth->>CoreAuth: Prefer internal API key / temporal key / device key (legacy) / Clerk JWT / x-user-* headers
+  CoreAuth->>CoreAuth: Prefer internal API key / temporal key / device key legacy / Clerk JWT / x-user-* headers
   CoreAuth-->>API: req.user populated
-  API->>DB: Handle route (queries/updates)
+  API->>DB: Handle route queries/updates
   DB-->>API: Result
   API-->>Client: Response
 ```
@@ -306,16 +306,16 @@ sequenceDiagram
   participant Temporal as Temporal
   participant Engine as engine worker
 
-  Clerk-->>API: POST /api/webhooks/clerk<br>user.created
+  Clerk-->>API: POST /api/webhooks/clerk user.created
   API->>API: Verify Svix signature
-  API->>DB: INSERT/UPDATE accounts (service RLS)
-  DB-->>API: backend_user_id (DormWay UUID)
-  API->>Clerk: Update public metadata<br>backend_user_id + role
-  API->>Temporal: Start workflow<br>studentWatcherWorkflow<br>workflowId=student-watcher-{backend_user_id}
-  Temporal-->>Engine: Dispatch to task queue (student-worker)
+  API->>DB: INSERT/UPDATE accounts service RLS
+  DB-->>API: backend_user_id DormWay UUID
+  API->>Clerk: Update public metadata backend_user_id + role
+  API->>Temporal: Start workflow studentWatcherWorkflow workflowId=student-watcher-backend_user_id
+  Temporal-->>Engine: Dispatch to task queue student-worker
   Engine-->>Temporal: Workflow running
-  API-->>Clerk: 200 OK (ack webhook)
-  Note over Zuplo: On future requests, Clerk JWT includes backend_user_id (via template)<br>Zuplo forwards x-user-id=backend_user_id
+  API-->>Clerk: 200 OK ack webhook
+  Note over Zuplo: On future requests Clerk JWT includes backend_user_id via template Zuplo forwards x-user-id=backend_user_id
 ```
 
 ### 5.3 Device keys (mobile header auth, legacy)
@@ -353,21 +353,21 @@ Important behaviors that affect “How DormWay Works”:
 ```mermaid
 sequenceDiagram
   autonumber
-  participant Browser as Browser (LockedIn)
-  participant LockedIn as dormway-lockedin<br>/api/proxy/*
+  participant Browser as Browser LockedIn
+  participant LockedIn as dormway-lockedin api-proxy
   participant Zuplo as Zuplo Gateway
   participant API as api-router
 
-  Browser->>LockedIn: fetch(/api/proxy/{path})
-  LockedIn->>LockedIn: getProxyAuthHeaders()<br>from Clerk session cookie
+  Browser->>LockedIn: fetch api-proxy-path
+  LockedIn->>LockedIn: getProxyAuthHeaders from Clerk session cookie
   alt impersonation OR onboarding endpoint without session
-    LockedIn->>API: Forward directly (bypass Zuplo)
+    LockedIn->>API: Forward directly bypass Zuplo
   else normal
     LockedIn->>Zuplo: Forward with gateway auth + auth headers
     Zuplo->>API: Forward + x-user-* + gateway-api-key
   end
   API-->>LockedIn: Response
-  LockedIn-->>Browser: Response (no-store)
+  LockedIn-->>Browser: Response no-store
 ```
 
 Related internal route used by API Router:
@@ -405,12 +405,12 @@ sequenceDiagram
   participant CoreAuth as dormway-core auth middleware
 
   iOS->>iOS: Build URLRequest
-  iOS->>iOS: Add Authorization (Clerk JWT)
-  iOS->>iOS: Optionally sign request<br>X-App-* headers (AppHMACSigner)
+  iOS->>iOS: Add Authorization Clerk JWT
+  iOS->>iOS: Optionally sign request X-App-* headers AppHMACSigner
   iOS->>Zuplo: Request
   Zuplo->>API: Forward + x-user-* + gateway-api-key
-  API->>HMAC: Verify X-App-* (shadow/enforce)
-  API->>CoreAuth: Verify user auth (Clerk/x-user-id/etc)
+  API->>HMAC: Verify X-App-* shadow/enforce
+  API->>CoreAuth: Verify user auth Clerk/x-user-id/etc
   API-->>iOS: Response
 ```
 
@@ -437,10 +437,10 @@ Task queues:
 
 ```mermaid
 flowchart TD
-  APIRouter[api-router] -->|start/signal/query| Temporal[(Temporal Cloud)]
-  Temporal -->|task queue: student-worker| Engine[engine worker]
-  Temporal -->|task queue: semester-processor| Engine
-  Temporal -->|task queue: campus-worker| Engine
+  APIRouter[api-router] -->|"start/signal/query"| Temporal[(Temporal Cloud)]
+  Temporal -->|"task queue: student-worker"| Engine[engine worker]
+  Temporal -->|"task queue: semester-processor"| Engine
+  Temporal -->|"task queue: campus-worker"| Engine
   Engine -->|activities| PG[(Postgres)]
   Engine -->|activities| Portkey[(Portkey)]
   Engine -->|activities| Ragie[(Ragie)]
@@ -480,19 +480,19 @@ Temporal schedule policies (important behavior):
 ```mermaid
 sequenceDiagram
   autonumber
-  participant Engine as engine (startup)
+  participant Engine as engine startup
   participant Temporal as Temporal Schedules
   participant SyncWF as runScheduledSyncWorkflow
   participant SyncAct as syncSchedulerActivities
-  participant API as api-router /cron
+  participant API as api-router cron
 
-  Engine->>Temporal: ensureSyncSchedules() (create/update schedules)
+  Engine->>Temporal: ensureSyncSchedules create/update schedules
   Temporal-->>Engine: schedules present
 
-  Note over Temporal: On schedule tick (e.g., hourly)
-  Temporal-->>SyncWF: startWorkflow(args include scheduleId/mode/limit/force/dryRun)
-  SyncWF-->>SyncAct: triggerSyncOrchestration()
-  SyncAct->>API: GET /cron/sync/orchestrate?mode=...&limit=...&force=...&schedule_id=...
+  Note over Temporal: On schedule tick e.g. hourly
+  Temporal-->>SyncWF: startWorkflow args include scheduleId/mode/limit/force/dryRun
+  SyncWF-->>SyncAct: triggerSyncOrchestration
+  SyncAct->>API: GET cron/sync/orchestrate mode=...limit=...force=...schedule_id=...
   API-->>SyncAct: orchestration summary + results
 ```
 
@@ -523,18 +523,18 @@ Core selection rules (as implemented):
 
 ```mermaid
 flowchart TD
-  A[/cron/sync/orchestrate/] --> B[getSyncCandidates(mode, limit)]
+  A["cron sync orchestrate"] --> B["getSyncCandidates mode, limit"]
   B --> C{respect_next_sync_at?}
-  C -- yes --> D[Filter: next_sync_at <= now OR null]
+  C -- yes --> D["Filter: next_sync_at <= now OR null"]
   C -- no --> E[Skip next_sync_at gate]
-  D --> F[Compute current_priority via calculate_sync_priority()]
+  D --> F["Compute current_priority via calculate_sync_priority"]
   E --> F
-  F --> G[Sort: type(city first) -> priority desc -> hours_since_sync desc]
-  G --> H[makeSyncDecisions()]
+  F --> G["Sort: type city first -> priority desc -> hours_since_sync desc"]
+  G --> H["makeSyncDecisions"]
   H --> I{resource limits hit?}
   I -- yes --> J[skip with reason]
-  I -- no --> K[executeSyncs(): start Temporal workflows]
-  K --> L[updateSyncTracking(): contexts.sync_metadata]
+  I -- no --> K["executeSyncs: start Temporal workflows"]
+  K --> L["updateSyncTracking: contexts.sync_metadata"]
   L --> M[Optionally trigger overlay fold workflows]
 ```
 
@@ -571,13 +571,13 @@ High-level inputs (per migration):
 
 ```mermaid
 flowchart LR
-  A[Context (city/campus)] --> B[calculate_sync_priority()]
+  A["Context city/campus"] --> B["calculate_sync_priority"]
   B --> C{campus?}
   C -- yes --> D[students + active students + enrollment + Canvas flags]
   C -- no --> E[city campus growth signals]
   D --> F[base + student_score + activity_score + time_score + Canvas bonus]
   E --> F
-  F --> G[priority_score (numeric)]
+  F --> G["priority_score numeric"]
 ```
 
 #### `calculate_next_sync_time(uuid)` (next sync timestamp)
@@ -658,17 +658,17 @@ Start points:
 ```mermaid
 flowchart LR
   subgraph Starters["Who starts StudentWatcher?"]
-    ClerkWebhook[Clerk webhook<br>user.created]
+    ClerkWebhook["Clerk webhook user.created"]
     OnboardingWF[onboardStudent workflow]
-    AdminAction[Admin / debug actions]
+    AdminAction["Admin / debug actions"]
   end
 
   ClerkWebhook -->|startWorkflow studentWatcherWorkflow| Temporal[(Temporal)]
   OnboardingWF -->|startStudentWatcher activity| Temporal
-  AdminAction -->|signal generate_plan / start if missing| Temporal
+  AdminAction -->|"signal generate_plan / start if missing"| Temporal
 
   Temporal --> Engine[engine worker]
-  Engine --> Watcher[studentWatcherWorkflow<br>workflowId=student-watcher-{userId}]
+  Engine --> Watcher["studentWatcherWorkflow workflowId=student-watcher-userId"]
 ```
 
 ### 7.3 Signals and queries (how the rest of the system “talks” to it)
@@ -705,11 +705,11 @@ sequenceDiagram
   participant Temporal as Temporal
   participant Watcher as studentWatcherWorkflow
 
-  Ragie-->>API: POST /webhooks/s3/ragie<br>file.indexed / file.updated / ...
-  API-->>Ragie: 200 OK (ack early)
-  API->>Temporal: signalWorkflow(workflowId=student-watcher-{userId})<br>signal=context_update
+  Ragie-->>API: POST webhooks/s3/ragie file.indexed / file.updated / ...
+  API-->>Ragie: 200 OK ack early
+  API->>Temporal: signalWorkflow workflowId=student-watcher-userId signal=context_update
   Temporal-->>Watcher: Deliver signal handler
-  Watcher->>Watcher: context_update handler<br>(may trigger plan regen / context inference)
+  Watcher->>Watcher: context_update handler may trigger plan regen / context inference
 ```
 
 ### 7.4 Daily loop (what it does without any external signals)
@@ -727,20 +727,20 @@ Code:
 
 ```mermaid
 flowchart TD
-  A[Tick (every 5 min)] --> B{5:00 AM user time<br>and new day?}
-  B -- yes --> C[generateMorningPlan(sendNotifications=true)]
+  A["Tick every 5 min"] --> B{"5:00 AM user time and new day?"}
+  B -- yes --> C["generateMorningPlan sendNotifications=true"]
   B -- no --> D{Evening briefing time?}
   D -- yes --> E[sendEveningBriefing]
   D -- no --> F{Hourly check}
-  F -- calendar stale --> G[executeChild(scheduleProcessor)]
-  F -- canvas stale --> H[executeChild(canvas sync)]
+  F -- calendar stale --> G["executeChild scheduleProcessor"]
+  F -- canvas stale --> H["executeChild canvas sync"]
   F -- none --> I[Sleep 5 min]
   C --> I
   E --> I
   G --> I
   H --> I
   I --> J{Midnight user time?}
-  J -- yes --> K[continueAsNew()]
+  J -- yes --> K["continueAsNew"]
   J -- no --> A
 ```
 
@@ -766,38 +766,38 @@ sequenceDiagram
   participant Watcher as studentWatcherWorkflow
   participant State as workflowState.activities
   participant Temporal as Temporal
-  participant Sched as scheduleProcessor (child WF)
-  participant Sem as processSemester (child WF)
+  participant Sched as scheduleProcessor child WF
+  participant Sem as processSemester child WF
   participant DayPlan as dayplan.activities
   participant Notify as notification.activities
   participant CIO as Customer.io
   participant DB as Postgres
 
-  Watcher->>State: loadWorkflowState()
+  Watcher->>State: loadWorkflowState
   State->>DB: SELECT student_watcher_state
   DB-->>State: state_data + last_* dates
   State-->>Watcher: state
 
-  Watcher->>Temporal: executeChild(scheduleProcessor)
+  Watcher->>Temporal: executeChild scheduleProcessor
   Temporal-->>Sched: run
   Sched-->>Temporal: complete
   Temporal-->>Watcher: schedule result
 
-  Watcher->>Temporal: executeChild(processSemester)
+  Watcher->>Temporal: executeChild processSemester
   Temporal-->>Sem: run
   Sem-->>Temporal: complete
   Temporal-->>Watcher: semester done
 
-  Watcher->>DayPlan: generateDayPlan()
+  Watcher->>DayPlan: generateDayPlan
   DayPlan->>DB: fetch student/calendar/canvas inputs
   DayPlan-->>Watcher: DayPlan object
 
-  Watcher->>Notify: sendPushNotification()
+  Watcher->>Notify: sendPushNotification
   Notify->>CIO: deliver push
-  Watcher->>DayPlan: sendDayPlanEmail() (if enabled)
+  Watcher->>DayPlan: sendDayPlanEmail if enabled
   DayPlan->>CIO: deliver email
 
-  Watcher->>State: updateNotificationDates()/saveWorkflowState()
+  Watcher->>State: updateNotificationDates/saveWorkflowState
   State->>DB: UPSERT student_watcher_state
 ```
 
@@ -828,11 +828,11 @@ sequenceDiagram
   autonumber
   participant Engine as engine workflowState.activities
   participant DB as Postgres
-  participant Trigger as update_student_watcher_state_updated_at()
+  participant Trigger as update_student_watcher_state_updated_at
 
   Engine->>DB: UPDATE/UPSERT student_watcher_state
   DB->>Trigger: BEFORE UPDATE trigger
-  Trigger-->>DB: NEW.updated_at = now()
+  Trigger-->>DB: NEW.updated_at = now
   DB-->>Engine: OK
 ```
 
@@ -1010,30 +1010,30 @@ sequenceDiagram
   participant Temporal as Temporal
   participant WF as scheduleProcessor
   participant Acts as studentActivities
-  participant DB as Postgres (Neon)
+  participant DB as Postgres Neon
   participant Ably as Ably
 
-  Caller->>Temporal: executeChild('scheduleProcessor', studentId)
+  Caller->>Temporal: executeChild scheduleProcessor studentId
   Temporal-->>WF: start
 
-  WF->>Acts: fetchGoogleCalendar(studentId)
-  WF->>Acts: fetchStudentLMSData(studentId) (LMS ICS calendar)
-  WF->>Acts: fetchMobileCalendar(studentId) (context updates)
-  WF->>Acts: fetchSyllabusEvents(studentId)
-  Note right of Acts: (deep dive: Syllabus Processing & Overlays Deep Dive)
-  WF->>Acts: fetchEnrolledCourseEvents(studentId, termId?)
+  WF->>Acts: fetchGoogleCalendar studentId
+  WF->>Acts: fetchStudentLMSData studentId LMS ICS calendar
+  WF->>Acts: fetchMobileCalendar studentId context updates
+  WF->>Acts: fetchSyllabusEvents studentId
+  Note right of Acts: deep dive: Syllabus Processing & Overlays Deep Dive
+  WF->>Acts: fetchEnrolledCourseEvents studentId termId
 
-  WF->>Acts: normalizeCalendars(...)
+  WF->>Acts: normalizeCalendars ...
   Acts-->>WF: normalized TimeBlock list
 
-  WF->>Acts: consolidateAndStoreCalendarEvents(blocks, studentId)
-  Acts->>DB: SELECT existing student_time_blocks (user_id)
-  Acts->>DB: DELETE removed blocks (by id)
-  Acts->>DB: UPSERT new blocks (unique on user_id,start_time,label,source)
-  Acts->>DB: UPDATE changed blocks (by id)
-  Acts-->>WF: {success,eventCount}
+  WF->>Acts: consolidateAndStoreCalendarEvents blocks studentId
+  Acts->>DB: SELECT existing student_time_blocks user_id
+  Acts->>DB: DELETE removed blocks by id
+  Acts->>DB: UPSERT new blocks unique on user_id start_time label source
+  Acts->>DB: UPDATE changed blocks by id
+  Acts-->>WF: success eventCount
 
-  WF->>Ably: publishDashboardUpdate(studentId, schedule_reconciliation_complete)
+  WF->>Ably: publishDashboardUpdate studentId schedule_reconciliation_complete
   WF-->>Temporal: complete
   Temporal-->>Caller: result
 ```
@@ -1259,16 +1259,16 @@ sequenceDiagram
   participant Zuplo as Zuplo
   participant API as api-router
   participant Ragie as Ragie
-  participant Portkey as Portkey (chat.completions)
+  participant Portkey as Portkey chat.completions
 
-  Client->>Zuplo: POST /api/search/query (q, scope)
+  Client->>Zuplo: POST api/search/query q scope
   Zuplo->>API: Forward + x-user-* + gateway-api-key
-  API->>Ragie: query(partitions, filters, topK)
-  Ragie-->>API: sources (+ answer fallback)
+  API->>Ragie: query partitions filters topK
+  Ragie-->>API: sources + answer fallback
   API->>API: compose messages + snippets
-  API->>Portkey: chat.completions.create(model, messages)
+  API->>Portkey: chat.completions.create model messages
   Portkey-->>API: LLM answer text
-  API-->>Client: { answer, sources, scopeLabel }
+  API-->>Client: answer sources scopeLabel
 ```
 
 ### 8.4 Schedule import (OCR / PDF / ICS) = workflows + LLM parsers
@@ -1287,19 +1287,19 @@ Code:
 ```mermaid
 flowchart TD
   A[Schedule Import Request] --> B{mode}
-  B -- image --> C[Vision/OCR path<br>imageData]
-  B -- pdf --> D[OpenAI Files upload<br>fileId]
-  B -- ics --> E[ICS parse path<br>parseICSWithGPT5]
-  B -- text --> F[Portkey prompt<br>schedule-ocr-parsing]
+  B -- image --> C["Vision/OCR path imageData"]
+  B -- pdf --> D["OpenAI Files upload fileId"]
+  B -- ics --> E["ICS parse path parseICSWithGPT5"]
+  B -- text --> F["Portkey prompt schedule-ocr-parsing"]
 
   C --> G[Parse to ParsedCourse list]
   D --> G
   E --> G
   F --> G
 
-  G --> H[Upsert contexts/courses/schedule items]
+  G --> H["Upsert contexts/courses/schedule items"]
   H --> I[Publish progress updates]
-  I --> J[Signal StudentWatcher (if needed)]
+  I --> J["Signal StudentWatcher if needed"]
 ```
 
 ### 8.5 Generic content ingestion (classification + Ragie indexing)
@@ -1324,25 +1324,25 @@ Important interaction with login:
 ```mermaid
 sequenceDiagram
   autonumber
-  participant U as User (unregistered)
+  participant U as User unregistered
   participant API as api-router
   participant Engine as engine worker
   participant DB as Postgres
   participant Ragie as Ragie
   participant Clerk as Clerk
 
-  U->>API: Upload content (email only)
+  U->>API: Upload content email only
   API->>Engine: Start/trigger generic ingestion
   Engine->>DB: Lookup account by email
   DB-->>Engine: none
-  Engine->>Engine: Use partition user_email_{hash}
-  Engine->>Ragie: index document (partition=user_email_{hash})
+  Engine->>Engine: Use partition user_email_hash
+  Engine->>Ragie: index document partition=user_email_hash
 
   Note over Clerk,API: Later: user registers in Clerk
   Clerk-->>API: user.created webhook
   API->>DB: Create/merge account + assign backend_user_id
-  API->>DB: Claim content by email (set user_id)
-  API-->>API: Log "Ragie migration needed" (email-hash -> user_{uuid})
+  API->>DB: Claim content by email set user_id
+  API-->>API: Log Ragie migration needed email-hash to user_uuid
 ```
 
 ---
