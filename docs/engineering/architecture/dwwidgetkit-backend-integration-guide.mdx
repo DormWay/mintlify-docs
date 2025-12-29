@@ -1,0 +1,1071 @@
+---
+title: "DWWidgetKit   Backend Integration Guide"
+description: "The backend uses a **single composite endpoint** that returns all widget data in one response, not separate endpoints per widget type."
+---
+
+# DWWidgetKit - Backend Integration Guide
+
+**Purpose**: This guide covers backend API integration for DormWay widgets, including authentication, real-time updates, data models, and caching strategies. For iOS implementation patterns and DWDesign usage, see the companion guide: [DWWidgetKit - iOS Architecture & Design System Guide](/docs/engineering/architecture/dwwidgetkit-ios-architecture-design-system-guide).
+
+**Status**: ✅ Verified against actual backend implementation (as of 2025-11-06)
+
+---
+
+## 📋 Quick Reference
+
+**Primary Endpoint**: `GET /dashboard/v1/composite`
+**Authentication**: Device Key (`x-device-key` header) or JWT
+**Real-time**: Ably (`user:{userId}:dashboard` channel)
+**Caching**: ETag-based HTTP caching (304 Not Modified)
+**Context**: Hierarchical (City → Campus → Building → Course → Student)
+
+---
+
+## 🌐 Backend Architecture Overview
+
+### Dashboard Composite API
+
+The backend uses a **single composite endpoint** that returns all widget data in one response, not separate endpoints per widget type.
+
+```
+GET /dashboard/v1/composite
+```
+
+**Location**: `.repos/dormway-platform/services/api-router/src/routes/dashboard-routes.ts`
+
+**Response Structure**:
+```typescript
+{
+  widgets: Widget[],        // Array of all widget types
+  due: DueItem[],           // Assignments, tasks, exams
+  canvasCourses: Course[],  // Canvas LMS integration
+  metadata: {
+    etag: string,           // For HTTP caching
+    timestamp: string,
+    context: ContextInfo,
+    hasMore: boolean
+  }
+}
+```
+
+### Why Composite API?
+
+1. **Single network request** - More efficient than multiple calls
+2. **Consistent timestamp** - All data from same point in time
+3. **ETag caching** - Server determines staleness, not client
+4. **Atomic updates** - All widgets updated together
+5. **Future-proof** - Backend can add widget types without client changes
+
+---
+
+## 🔐 Authentication
+
+### Priority Chain
+
+The backend supports multiple authentication methods (priority order):
+
+1. **Internal Service API Key** - Not for widgets
+2. **Temporal Worker Auth** - Not for widgets
+3. ✅ **Device Key (Mobile)** - **Preferred for widgets**
+4. **Clerk JWT** - Web apps
+5. **API Gateway Lambda** - Infrastructure
+6. **Legacy JWT** - Deprecated
+
+**Location**: `.repos/dormway-platform/services/api-router/src/middleware/auth.ts`
+
+### Device Key Authentication (Recommended)
+
+**Why Device Key?**
+- Specifically designed for mobile/widget contexts
+- Long-lived (doesn't expire like JWT)
+- No refresh flow needed in widget extension
+- Simpler than OAuth in background context
+
+**Setup in Main App** (during onboarding):
+```swift
+// Store device key from Customer.io registration
+UserDefaults.appGroup.setValue(deviceKey, forKey: "deviceKey")
+```
+
+**Usage in Widget**:
+```swift
+private extension UserDefaults {
+    static var appGroup: UserDefaults {
+        UserDefaults(suiteName: "group.com.dormway.app")!
+    }
+}
+
+struct WidgetAuthProvider {
+    func getDeviceKey() -> String? {
+        return UserDefaults.appGroup.string(forKey: "deviceKey")
+    }
+
+    func getAccessToken() -> String? {
+        // Fallback to JWT if device key unavailable
+        return UserDefaults.appGroup.string(forKey: "accessToken")
+    }
+}
+```
+
+**Making Authenticated Requests**:
+```swift
+var request = URLRequest(url: url)
+
+if let deviceKey = authProvider.getDeviceKey() {
+    // Preferred method
+    request.setValue(deviceKey, forHTTPHeaderField: "x-device-key")
+} else if let token = authProvider.getAccessToken() {
+    // Fallback to JWT
+    request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+} else {
+    throw WidgetError.authenticationRequired
+}
+```
+
+---
+
+## 📊 Data Models
+
+### Widget Envelope (Generic Structure)
+
+Backend uses a **flexible envelope** system, not rigid per-type models.
+
+```swift
+import Foundation
+
+/// Generic widget envelope from backend
+public struct WidgetEnvelope: Codable, Identifiable {
+    public let id: String
+    public let type: WidgetType
+    public let title: String?
+    public let priority: Int?
+    public let content: WidgetContent
+    public let grid: GridLayout?
+
+    public enum WidgetType: String, Codable {
+        case academic
+        case schedule
+        case dining
+        case weather
+        case social
+        case wellness
+        case transit
+        case campus
+        case personal
+        case context
+        case timeline
+        case priority
+        case guidance
+        case weekly
+        case syllabus
+        case assignments
+        case mood
+        case generic
+        case unknown
+
+        // Fallback for unknown types
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.singleValueContainer()
+            let rawValue = try container.decode(String.self)
+            self = WidgetType(rawValue: rawValue) ?? .unknown
+        }
+    }
+}
+
+/// Flexible content payload
+public struct WidgetContent: Codable {
+    public let displayType: String?
+    public let data: AnyCodable  // Type-specific payload
+
+    public init(displayType: String? = nil, data: AnyCodable) {
+        self.displayType = displayType
+        self.data = data
+    }
+}
+
+/// Grid layout information
+public struct GridLayout: Codable {
+    public let x: Int
+    public let y: Int
+    public let w: Int
+    public let h: Int
+    public let minW: Int?
+    public let minH: Int?
+    public let preferred: Bool?
+}
+
+/// Helper for Any Codable value
+public struct AnyCodable: Codable {
+    public let value: Any
+
+    public init<T>(_ value: T?) {
+        self.value = value ?? ()
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+
+        if let bool = try? container.decode(Bool.self) {
+            value = bool
+        } else if let int = try? container.decode(Int.self) {
+            value = int
+        } else if let double = try? container.decode(Double.self) {
+            value = double
+        } else if let string = try? container.decode(String.self) {
+            value = string
+        } else if let array = try? container.decode([AnyCodable].self) {
+            value = array.map { $0.value }
+        } else if let dict = try? container.decode([String: AnyCodable].self) {
+            value = dict.mapValues { $0.value }
+        } else {
+            value = ()
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+
+        switch value {
+        case let bool as Bool:
+            try container.encode(bool)
+        case let int as Int:
+            try container.encode(int)
+        case let double as Double:
+            try container.encode(double)
+        case let string as String:
+            try container.encode(string)
+        case let array as [Any]:
+            try container.encode(array.map { AnyCodable($0) })
+        case let dict as [String: Any]:
+            try container.encode(dict.mapValues { AnyCodable($0) })
+        default:
+            try container.encodeNil()
+        }
+    }
+}
+```
+
+### Type-Specific Models (For Decoding)
+
+Once you know the widget type, decode `content.data` to specific model:
+
+```swift
+/// Academic widget (Ace recommendations)
+public struct AcademicWidgetData: Codable {
+    public let suggestion: String
+    public let course: CourseInfo
+    public let confidence: Double
+    public let estimatedDuration: Int?
+    public let priority: String?
+}
+
+/// Schedule widget
+public struct ScheduleWidgetData: Codable {
+    public let nextEvent: ScheduleEvent?
+    public let upcomingEvents: [ScheduleEvent]
+}
+
+public struct ScheduleEvent: Codable {
+    public let title: String
+    public let startTime: Date
+    public let endTime: Date
+    public let location: LocationInfo?
+    public let course: CourseInfo?
+}
+
+/// Course info (shared across widgets)
+public struct CourseInfo: Codable {
+    public let code: String
+    public let name: String
+    public let color: String
+    public let contextId: String?
+}
+
+/// Location info (shared across widgets)
+public struct LocationInfo: Codable {
+    public let name: String
+    public let building: String?
+    public let room: String?
+    public let contextId: String?
+}
+```
+
+### Dashboard Composite Response
+
+```swift
+public struct DashboardCompositeResponse: Codable {
+    public let widgets: [WidgetEnvelope]
+    public let due: [DueItem]
+    public let canvasCourses: [CanvasCourse]
+    public let metadata: Metadata
+
+    public struct Metadata: Codable {
+        public let etag: String
+        public let timestamp: String
+        public let context: ContextInfo?
+        public let hasMore: Bool
+    }
+}
+
+public struct DueItem: Codable {
+    public let id: String
+    public let title: String
+    public let dueDate: Date
+    public let courseCode: String
+    public let courseContextId: String?
+    public let priority: Priority
+    public let status: Status
+    public let type: ItemType
+
+    public enum Priority: String, Codable {
+        case low, medium, high, urgent
+    }
+
+    public enum Status: String, Codable {
+        case pending, completed, overdue
+    }
+
+    public enum ItemType: String, Codable {
+        case assignment, exam, project, quiz, task
+    }
+}
+```
+
+### Usage: Decoding Widget Data
+
+```swift
+func decodeWidgetContent(_ widget: WidgetEnvelope) throws -> AnyWidgetData {
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .iso8601
+
+    // Convert AnyCodable to Data
+    let jsonData = try JSONEncoder().encode(widget.content.data)
+
+    switch widget.type {
+    case .academic:
+        let data = try decoder.decode(AcademicWidgetData.self, from: jsonData)
+        return .academic(data)
+
+    case .schedule:
+        let data = try decoder.decode(ScheduleWidgetData.self, from: jsonData)
+        return .schedule(data)
+
+    case .assignments:
+        // Assignments come from `due` array, not widget.content
+        return .assignments([]) // Handled separately
+
+    default:
+        return .unknown
+    }
+}
+
+enum AnyWidgetData {
+    case academic(AcademicWidgetData)
+    case schedule(ScheduleWidgetData)
+    case assignments([DueItem])
+    case unknown
+}
+```
+
+---
+
+## 🔄 Making API Requests
+
+### Using NetworkService
+
+**Location**: `Packages/DWNetworking/Sources/DWNetworking/NetworkService.swift`
+
+```swift
+import DWNetworking
+
+class WidgetDataProvider {
+    private let networkService: NetworkService
+
+    init() {
+        self.networkService = NetworkService(
+            baseURL: APIConfig.baseURL,
+            tokenProvider: { @Sendable () async -> String? in
+                await WidgetAuthProvider().getAuthenticationHeader()
+            }
+        )
+    }
+
+    func fetchDashboard(context: String? = nil) async throws -> DashboardCompositeResponse {
+        var queryParams: [String: String] = [:]
+        if let context = context {
+            queryParams["context"] = context
+        }
+
+        let response: DashboardCompositeResponse = try await networkService.request(
+            endpoint: "/dashboard/v1/composite",
+            method: "GET",
+            queryParams: queryParams.isEmpty ? nil : queryParams,
+            authType: .deviceKey  // or .jwt
+        )
+
+        return response
+    }
+}
+
+struct WidgetAuthProvider {
+    func getAuthenticationHeader() async -> String? {
+        // Try device key first
+        if let deviceKey = UserDefaults.appGroup.string(forKey: "deviceKey") {
+            return deviceKey
+        }
+
+        // Fallback to JWT
+        if let token = UserDefaults.appGroup.string(forKey: "accessToken") {
+            return token
+        }
+
+        return nil
+    }
+}
+```
+
+### Query Parameters
+
+```swift
+// Filter by tab
+let response = try await fetchDashboard(tab: "academic")
+
+// Filter by context (campus, course, etc.)
+let response = try await fetchDashboard(context: contextId)
+
+// Date range
+let response = try await fetchDashboard(
+    startDate: "2025-11-06",
+    endDate: "2025-11-13"
+)
+
+// Debug information
+let response = try await fetchDashboard(includeDebug: true)
+```
+
+---
+
+## 💾 Caching Strategy
+
+### ETag-Based HTTP Caching
+
+Backend supports ETag caching for efficient 304 Not Modified responses.
+
+**How it works:**
+1. First request returns `ETag` header (e.g., `"abc123"`)
+2. Cache the response with ETag
+3. Next request includes `If-None-Match: "abc123"` header
+4. If unchanged, backend returns `304 Not Modified` (no body, saves bandwidth)
+5. If changed, backend returns `200 OK` with new data and new ETag
+
+**Implementation:**
+
+```swift
+class WidgetDataProvider {
+    private var cachedResponse: CachedDashboard?
+
+    struct CachedDashboard {
+        let response: DashboardCompositeResponse
+        let etag: String
+        let timestamp: Date
+    }
+
+    func fetchDashboardWithCache(context: String? = nil) async throws -> DashboardCompositeResponse {
+        var headers: [String: String] = [:]
+
+        // Add If-None-Match header if we have cached ETag
+        if let cached = cachedResponse {
+            headers["If-None-Match"] = cached.etag
+        }
+
+        do {
+            let (response, responseHeaders) = try await networkService.requestWithHeaders(
+                endpoint: "/dashboard/v1/composite",
+                method: "GET",
+                headers: headers
+            )
+
+            // Cache new response with ETag
+            if let etag = responseHeaders["ETag"] ?? responseHeaders["etag"] {
+                cachedResponse = CachedDashboard(
+                    response: response,
+                    etag: etag,
+                    timestamp: Date()
+                )
+            }
+
+            return response
+
+        } catch NetworkError.notModified {
+            // 304 Not Modified - return cached data
+            guard let cached = cachedResponse else {
+                throw WidgetError.cacheError
+            }
+            return cached.response
+        }
+    }
+}
+```
+
+### Cache TTL Recommendations
+
+With ETag support, you can refresh more frequently:
+
+| Widget Type | Refresh Interval | Rationale |
+|-------------|------------------|-----------|
+| Next Action | 10 minutes | Time-sensitive, but 304 is cheap |
+| Academic (Ace) | 30 minutes | AI recommendations don't change often |
+| Schedule | 15 minutes | Events can change, but ETag helps |
+| Assignments | 60 minutes | Due dates stable, Canvas sync is slow |
+| Weather | 30 minutes | Weather updates periodically |
+
+**Timeline Policies:**
+```swift
+let refreshDate = Calendar.current.date(
+    byAdding: .minute,
+    value: refreshInterval,
+    to: Date()
+)!
+
+let timeline = Timeline(
+    entries: [entry],
+    policy: .after(refreshDate)
+)
+```
+
+---
+
+## ⚡ Real-Time Integration (Ably)
+
+### Why Real-Time?
+
+Instead of only polling, widgets can receive **push updates** when backend data changes:
+- Instant updates when assignments added
+- Live schedule changes
+- Real-time Canvas sync notifications
+- Lower battery usage (no constant polling)
+
+### Setup Ably Client
+
+**Token Endpoint**: `POST /api/v1/realtime/ably-auth`
+
+```swift
+import Ably
+
+class AblyManager {
+    private var realtime: ARTRealtime?
+
+    func setup() async throws {
+        // Get Ably token from backend
+        let tokenRequest = try await fetchAblyToken()
+
+        // Initialize Ably
+        let options = ARTClientOptions()
+        options.authCallback = { params, callback in
+            callback(tokenRequest, nil)
+        }
+
+        realtime = ARTRealtime(options: options)
+    }
+
+    private func fetchAblyToken() async throws -> ARTTokenRequest {
+        let response: AblyTokenResponse = try await networkService.request(
+            endpoint: "/api/v1/realtime/ably-auth",
+            method: "POST",
+            authType: .deviceKey
+        )
+
+        return ARTTokenRequest(
+            tokenRequestDictionary: response.tokenRequest
+        )
+    }
+}
+
+struct AblyTokenResponse: Codable {
+    let tokenRequest: [String: Any]
+}
+```
+
+### Subscribe to Dashboard Updates
+
+```swift
+func subscribeToDashboardUpdates(userId: String) {
+    let channel = realtime?.channels.get("user:\(userId):dashboard")
+
+    channel?.subscribe { message in
+        guard let delta = message.data as? [String: Any] else { return }
+
+        // Parse delta
+        if let type = delta["type"] as? String {
+            switch type {
+            case "widget_update":
+                // Widget data changed
+                self.handleWidgetUpdate(delta)
+
+            case "widget_add":
+                // New widget added
+                self.handleWidgetAdd(delta)
+
+            case "widget_remove":
+                // Widget removed
+                self.handleWidgetRemove(delta)
+
+            case "full_refresh":
+                // Full refresh needed
+                self.refreshAllWidgets()
+
+            default:
+                break
+            }
+        }
+    }
+}
+
+private func refreshAllWidgets() {
+    // Trigger widget timeline refresh
+    WidgetCenter.shared.reloadAllTimelines()
+}
+```
+
+### Delta Structure
+
+```typescript
+{
+  type: 'widget_update' | 'widget_add' | 'widget_remove' | 'full_refresh',
+  widgetId?: string,
+  data?: Partial<Widget>,
+  timestamp: string
+}
+```
+
+### Available Channels
+
+| Channel | Purpose | Capabilities |
+|---------|---------|-------------|
+| `user:{userId}:dashboard` | Dashboard updates | Publish + Subscribe |
+| `user:{userId}:canvas:updates` | Canvas sync events | Publish + Subscribe |
+| `campus:{campusId}:*` | Campus-wide updates | Subscribe only |
+| `city:{cityId}:*` | City-wide updates | Subscribe only |
+
+### Delta Coalescing
+
+Backend automatically coalesces rapid updates:
+- **Window**: 500ms
+- **Rate limit**: 2 messages/sec
+- **Strategy**: Last-write-wins merging
+
+---
+
+## 🌳 Context System
+
+### Hierarchical Structure
+
+Backend uses a **context hierarchy** for data organization:
+
+```
+City (e.g., "Boston")
+ └─ Campus (e.g., "Boston University")
+     └─ Building (e.g., "Mugar Library")
+         └─ Course (e.g., "CS 101")
+             └─ Student (User)
+```
+
+**Database**: `contexts` table with `type` and `parent_id` columns
+
+### Context-Aware Widgets
+
+Widgets can be filtered to specific contexts:
+
+```swift
+// Get current context from main app
+let currentContext = UserDefaults.appGroup.string(forKey: "currentContext")
+
+// Fetch dashboard for specific context
+let response = try await fetchDashboard(context: currentContext)
+
+// Widgets in response are filtered to this context
+// - Campus context: Only campus-specific widgets (dining, transit, etc.)
+// - Course context: Only course-specific widgets (assignments, grades, etc.)
+```
+
+### Context Info Model
+
+```swift
+public struct ContextInfo: Codable {
+    public let id: String
+    public let type: ContextType
+    public let name: String
+    public let parentId: String?
+    public let metadata: [String: AnyCodable]?
+
+    public enum ContextType: String, Codable {
+        case city
+        case campus
+        case building
+        case course
+        case student
+    }
+}
+```
+
+### Main App Responsibility
+
+The main app should:
+1. Update `currentContext` in App Groups when user changes context
+2. Post notification when context changes
+3. Widgets listen for notification and reload timelines
+
+```swift
+// In main app
+extension Notification.Name {
+    static let contextDidChange = Notification.Name("contextDidChange")
+}
+
+// Update context
+UserDefaults.appGroup.setValue(newContextId, forKey: "currentContext")
+NotificationCenter.default.post(name: .contextDidChange, object: nil)
+
+// In widget
+// Widget extensions can't observe NSNotification directly, but main app
+// can call WidgetCenter.shared.reloadAllTimelines() when context changes
+```
+
+---
+
+## 🛠️ Complete Implementation Example
+
+### WidgetDataProvider
+
+```swift
+import Foundation
+import DWNetworking
+import WidgetKit
+
+@MainActor
+public class WidgetDataProvider {
+    private let networkService: NetworkService
+    private var cachedDashboard: CachedDashboard?
+
+    struct CachedDashboard {
+        let response: DashboardCompositeResponse
+        let etag: String
+        let timestamp: Date
+    }
+
+    public init() {
+        self.networkService = NetworkService(
+            baseURL: APIConfig.baseURL,
+            tokenProvider: { @Sendable () async -> String? in
+                await WidgetAuthProvider().getAuthenticationHeader()
+            }
+        )
+    }
+
+    // MARK: - Public API
+
+    public func fetchAcademicWidget() async throws -> AcademicWidgetData {
+        let dashboard = try await fetchDashboardWithCache()
+
+        // Find academic widget
+        guard let academicWidget = dashboard.widgets.first(where: { $0.type == .academic }) else {
+            throw WidgetError.noDataAvailable
+        }
+
+        // Decode content
+        let jsonData = try JSONEncoder().encode(academicWidget.content.data)
+        let data = try JSONDecoder().decode(AcademicWidgetData.self, from: jsonData)
+
+        return data
+    }
+
+    public func fetchScheduleWidget() async throws -> ScheduleWidgetData {
+        let dashboard = try await fetchDashboardWithCache()
+
+        guard let scheduleWidget = dashboard.widgets.first(where: { $0.type == .schedule }) else {
+            throw WidgetError.noDataAvailable
+        }
+
+        let jsonData = try JSONEncoder().encode(scheduleWidget.content.data)
+        let data = try JSONDecoder().decode(ScheduleWidgetData.self, from: jsonData)
+
+        return data
+    }
+
+    public func fetchAssignmentsWidget() async throws -> [DueItem] {
+        let dashboard = try await fetchDashboardWithCache()
+
+        // Assignments come from `due` array, filtered by type
+        let assignments = dashboard.due.filter { $0.type == .assignment }
+
+        return assignments
+    }
+
+    // MARK: - Private Helpers
+
+    private func fetchDashboardWithCache() async throws -> DashboardCompositeResponse {
+        // Get current context
+        let context = UserDefaults.appGroup.string(forKey: "currentContext")
+
+        var headers: [String: String] = [:]
+
+        // Add If-None-Match for ETag caching
+        if let cached = cachedDashboard {
+            headers["If-None-Match"] = cached.etag
+        }
+
+        var queryParams: [String: String] = [:]
+        if let context = context {
+            queryParams["context"] = context
+        }
+
+        do {
+            let (response, responseHeaders): (DashboardCompositeResponse, [String: String]) =
+                try await networkService.requestWithHeaders(
+                    endpoint: "/dashboard/v1/composite",
+                    method: "GET",
+                    headers: headers,
+                    queryParams: queryParams.isEmpty ? nil : queryParams
+                )
+
+            // Cache with ETag
+            if let etag = responseHeaders["ETag"] ?? responseHeaders["etag"] {
+                cachedDashboard = CachedDashboard(
+                    response: response,
+                    etag: etag,
+                    timestamp: Date()
+                )
+            }
+
+            return response
+
+        } catch NetworkError.notModified {
+            // 304 Not Modified - return cached
+            guard let cached = cachedDashboard else {
+                throw WidgetError.cacheError
+            }
+            return cached.response
+        } catch {
+            // Network error - try to return stale cached data
+            if let cached = cachedDashboard {
+                // Return cached if less than 1 hour old
+                let age = Date().timeIntervalSince(cached.timestamp)
+                if age < 3600 {
+                    return cached.response
+                }
+            }
+            throw error
+        }
+    }
+}
+
+// MARK: - Auth Provider
+
+struct WidgetAuthProvider {
+    func getAuthenticationHeader() async -> String? {
+        // Try device key first (preferred)
+        if let deviceKey = UserDefaults.appGroup.string(forKey: "deviceKey") {
+            return deviceKey
+        }
+
+        // Fallback to JWT
+        if let token = UserDefaults.appGroup.string(forKey: "accessToken") {
+            return token
+        }
+
+        return nil
+    }
+}
+
+// MARK: - App Groups Helper
+
+private extension UserDefaults {
+    static var appGroup: UserDefaults {
+        UserDefaults(suiteName: "group.com.dormway.app")!
+    }
+}
+
+// MARK: - Errors
+
+public enum WidgetError: LocalizedError {
+    case authenticationRequired
+    case networkUnavailable
+    case noDataAvailable
+    case cacheError
+    case invalidData
+
+    public var errorDescription: String? {
+        switch self {
+        case .authenticationRequired:
+            return "Please sign in to view widgets"
+        case .networkUnavailable:
+            return "No internet connection"
+        case .noDataAvailable:
+            return "No data available"
+        case .cacheError:
+            return "Cache error"
+        case .invalidData:
+            return "Invalid data format"
+        }
+    }
+}
+```
+
+### Widget Provider Using Data Provider
+
+```swift
+import WidgetKit
+
+struct AceWidgetProvider: TimelineProvider {
+    let dataProvider = WidgetDataProvider()
+
+    func placeholder(in context: Context) -> AceEntry {
+        AceEntry.placeholder
+    }
+
+    func getSnapshot(in context: Context, completion: @escaping (AceEntry) -> Void) {
+        Task {
+            do {
+                let data = try await dataProvider.fetchAcademicWidget()
+                completion(AceEntry(date: Date(), content: data))
+            } catch {
+                completion(AceEntry.error(error))
+            }
+        }
+    }
+
+    func getTimeline(in context: Context, completion: @escaping (Timeline<AceEntry>) -> Void) {
+        Task {
+            do {
+                let data = try await dataProvider.fetchAcademicWidget()
+                let entry = AceEntry(date: Date(), content: data)
+
+                // Refresh in 30 minutes
+                let refreshDate = Calendar.current.date(
+                    byAdding: .minute,
+                    value: 30,
+                    to: Date()
+                )!
+
+                let timeline = Timeline(
+                    entries: [entry],
+                    policy: .after(refreshDate)
+                )
+                completion(timeline)
+
+            } catch {
+                let entry = AceEntry.error(error)
+
+                // Retry in 15 minutes on error
+                let refreshDate = Calendar.current.date(
+                    byAdding: .minute,
+                    value: 15,
+                    to: Date()
+                )!
+
+                let timeline = Timeline(
+                    entries: [entry],
+                    policy: .after(refreshDate)
+                )
+                completion(timeline)
+            }
+        }
+    }
+}
+
+struct AceEntry: TimelineEntry {
+    let date: Date
+    let content: AcademicWidgetData?
+    let error: Error?
+
+    static var placeholder: AceEntry {
+        AceEntry(
+            date: Date(),
+            content: AcademicWidgetData(
+                suggestion: "Review Chapter 5 notes",
+                course: CourseInfo(code: "CS 101", name: "Intro to Computer Science", color: "#FF0000"),
+                confidence: 0.85,
+                estimatedDuration: 30,
+                priority: "high"
+            ),
+            error: nil
+        )
+    }
+
+    static func error(_ error: Error) -> AceEntry {
+        AceEntry(date: Date(), content: nil, error: error)
+    }
+}
+```
+
+---
+
+## ✅ Implementation Checklist
+
+### Phase 1: Core Infrastructure
+- [ ] Implement `WidgetDataProvider` with composite API
+- [ ] Add device key authentication (main app stores key)
+- [ ] Implement ETag-based caching
+- [ ] Add error handling with user-friendly messages
+- [ ] Test with real backend endpoint
+
+### Phase 2: Data Models
+- [ ] Define `WidgetEnvelope` generic model
+- [ ] Define type-specific models (Academic, Schedule, etc.)
+- [ ] Implement `AnyCodable` for flexible payloads
+- [ ] Add JSON decoding helpers
+- [ ] Write unit tests for model parsing
+
+### Phase 3: Widget Integration
+- [ ] Update existing widgets to use composite API
+- [ ] Remove any mock data fallbacks
+- [ ] Implement timeline providers with proper refresh intervals
+- [ ] Add loading and error states
+- [ ] Test on physical device
+
+### Phase 4: Real-Time (Optional)
+- [ ] Implement Ably token fetching
+- [ ] Subscribe to dashboard channel
+- [ ] Handle delta updates
+- [ ] Trigger widget reloads on updates
+- [ ] Test delta coalescing
+
+### Phase 5: Context System (Optional)
+- [ ] Read current context from App Groups
+- [ ] Pass context parameter in API requests
+- [ ] Handle context changes from main app
+- [ ] Test context filtering
+
+---
+
+## 🔗 Related Documentation
+
+**iOS Patterns:**
+- [DWWidgetKit - iOS Architecture & Design System Guide](/docs/engineering/architecture/dwwidgetkit-ios-architecture-design-system-guide) - Swift patterns, DWDesign, UI/UX
+
+**Backend Documentation:**
+- `WIDGET_API_GUIDE.md` - Complete backend API reference (25KB)
+- `.repos/dormway-platform/services/api-router/src/routes/dashboard-routes.ts` - Implementation
+- `.repos/dormway-platform/services/api-router/src/services/ably-service.ts` - Real-time
+
+**General Architecture:**
+- DormWay Platform Architecture - System overview
+- Ably Real-Time Updates Implementation Strategy - Real-time patterns
+
+---
+
+## 💡 Key Takeaways
+
+1. **Single composite endpoint** - Not separate per-widget endpoints
+2. **Device key authentication** - Preferred over JWT for widgets
+3. **ETag caching** - More efficient than TTL-only caching
+4. **Flexible widget envelope** - Backend can add types without iOS changes
+5. **Real-time optional** - Ably provides push updates, but polling works too
+6. **Context-aware** - Filter widgets to specific contexts (campus, course, etc.)
+
+---
+
+**Last Updated:** 2025-11-06
+**Owner:** iOS Team
+**Status:** Current (Verified against actual backend)
+
+For iOS implementation patterns, see: [DWWidgetKit - iOS Architecture & Design System Guide](/docs/engineering/architecture/dwwidgetkit-ios-architecture-design-system-guide)

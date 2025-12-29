@@ -1,0 +1,1198 @@
+---
+title: "DormWay Core Library (@dormway core)"
+description: "npm install @dormway/core"
+---
+
+# DormWay Core Library (@dormway/core)
+
+## Overview
+
+**@dormway/core** is the central shared TypeScript library for the DormWay platform, providing domain services, adapters, utilities, and common patterns used across all backend services (API Router, Engine, Ably Relay, etc.).
+
+**Purpose**: Eliminate code duplication, ensure consistency, and provide battle-tested implementations of common operations.
+
+**Package**: `@dormway/core` v0.1.0-alpha.0
+**Location**: `services/shared/dormway-core/`
+**Registry**: GitHub Packages (private)
+
+---
+
+## Table of Contents
+
+- [Installation](#installation)
+- [Architecture](#architecture)
+- [Domain Services](#domain-services)
+- [Adapters](#adapters)
+- [Utilities](#utilities)
+- [LLM Integration](#llm-integration)
+- [Database Access](#database-access)
+- [Middleware](#middleware)
+- [Common Patterns](#common-patterns)
+- [Testing](#testing)
+- [Contributing](#contributing)
+
+---
+
+## Installation
+
+### In Existing Services
+
+```bash
+npm install @dormway/core
+```
+
+### Package Exports
+
+The library provides multiple entry points for tree-shaking and clean imports:
+
+```typescript
+// Main exports (everything)
+import { createStructuredLogger, CampusService } from '@dormway/core';
+
+// Specific modules
+import { createStructuredLogger } from '@dormway/core/logger';
+import { AppError, ValidationError } from '@dormway/core/errors';
+import { loadConfig } from '@dormway/core/config';
+import { getConnectionPool } from '@dormway/core/database';
+import { loadPrompt, callHelicone } from '@dormway/core/llm';
+import { getTemporalClient } from '@dormway/core/adapters/temporal';
+import { getCacheAdapter } from '@dormway/core/adapters/cache';
+import { getRealtimeAdapter } from '@dormway/core/adapters/realtime';
+```
+
+---
+
+## Architecture
+
+### Directory Structure
+
+```
+dormway-core/
+├── src/
+│   ├── domains/          # Domain services (business logic)
+│   │   ├── campus/       # Campus metadata, weather, housing
+│   │   ├── day-plan-data/# DayPlan data aggregation
+│   │   ├── contexts/     # Context hierarchy operations
+│   │   ├── auth/         # Authentication helpers
+│   │   ├── accounts/     # User account operations
+│   │   ├── service-data/ # Service data CRUD
+│   │   ├── preferences/  # User preferences
+│   │   └── telemetry/    # Telemetry and analytics
+│   ├── adapters/         # External service integrations
+│   │   ├── temporal/     # Temporal workflow client
+│   │   ├── cache/        # Redis caching
+│   │   ├── realtime/     # Ably pub/sub
+│   │   ├── database/     # Database connection pooling
+│   │   ├── analytics/    # Analytics adapters
+│   │   ├── ragie/        # Ragie RAG integration
+│   │   └── customerio/   # Customer.io messaging
+│   ├── database/         # Database utilities
+│   │   └── context-graph/# Context relationship queries
+│   ├── llm/              # LLM utilities
+│   │   ├── portkey/      # Portkey gateway client
+│   │   ├── helicone/     # Helicone (legacy)
+│   │   └── prompts/      # Prompt loading
+│   ├── utils/            # Core utilities
+│   │   ├── logger/       # Structured logging
+│   │   ├── errors/       # Error classes
+│   │   └── config/       # Configuration loader
+│   ├── middleware/       # Express middleware
+│   └── index.ts          # Main entry point
+├── package.json
+├── tsconfig.json
+└── README.md
+```
+
+### Design Principles
+
+1. **Dependency Injection**: All services accept `pool` and optional `logger` in constructor
+2. **ServiceResult Pattern**: Wrap operations that may fail in `ServiceResult<T>`
+3. **Structured Logging**: Use `StructuredLogger` for consistent, queryable logs
+4. **Type Safety**: Comprehensive TypeScript types for all operations
+5. **Connection Pooling**: Reuse PostgreSQL connections via shared pool
+6. **Error Handling**: Consistent error types and serialization
+
+---
+
+## Domain Services
+
+### Overview
+
+Domain services encapsulate business logic for specific entities and operations. All services implement the `BaseDomainService` interface.
+
+### Common Patterns
+
+**Service Construction**:
+```typescript
+import { Pool } from 'pg';
+import { createStructuredLogger } from '@dormway/core/logger';
+import { CampusService } from '@dormway/core';
+
+const pool = getConnectionPool();
+const logger = createStructuredLogger({ service: 'my-service' });
+
+const campusService = new CampusService({ pool, logger });
+```
+
+**ServiceResult Pattern**:
+```typescript
+interface ServiceResult<T> {
+  success: boolean;
+  data?: T;
+  error?: string;
+  errorDetails?: Record<string, unknown>;
+}
+
+// Usage
+const result = await campusService.getCampusConfig(campusId);
+if (!result.success) {
+  logger.error('campus.fetch.error', result.error!, { metadata: result.errorDetails });
+  throw new NotFoundError('Campus not found');
+}
+
+const campus = result.data!;
+```
+
+### Available Services
+
+#### 1. CampusService
+
+**Purpose**: Manage campus configurations, city configs, weather, and housing data.
+
+**Methods**:
+- `getCampusConfig(campusId: string)` - Fetch campus configuration
+- `getCityConfig(cityId: string)` - Fetch city configuration
+- `updateCampusConfig(campusId, updates)` - Update campus config
+- `updateCityConfig(cityId, updates)` - Update city config
+- `getCampusWeather(campusId)` - Get weather from service_data
+- `getCampusHousing(campusId)` - Get housing data from service_data
+
+**Example**:
+```typescript
+import { CampusService } from '@dormway/core';
+
+const service = new CampusService({ pool, logger });
+
+// Get campus config
+const configResult = await service.getCampusConfig('campus-uuid');
+if (configResult.success) {
+  const campus = configResult.data!;
+  console.log(`Campus: ${campus.campus_name}, City: ${campus.city}`);
+}
+
+// Get weather
+const weatherResult = await service.getCampusWeather('campus-uuid');
+if (weatherResult.success && weatherResult.data) {
+  const weather = weatherResult.data;
+  // Process weather data
+}
+```
+
+**Critical Note**: Weather is stored for CITIES, not campuses. Use the city_id from campus config to query weather.
+
+#### 2. DayPlanDataService
+
+**Purpose**: Aggregate all data needed for dayplan generation (student context, courses, schedule, weather, preferences, wellness, etc.).
+
+**Methods**:
+- `getStudentContext(userId)` - Get student's campus and city context
+- `getEnrolledCourses(userId)` - Get student's active courses
+- `getScheduleForStudent(userId, date)` - Get schedule for specific date
+- `getWeatherForStudent(userId, date)` - Get weather (queries city, not campus!)
+- `getPreferencesForStudent(userId)` - Get user preferences
+- `getRecentWellnessData(userId, days)` - Get wellness history
+- `getSemesterInsights(userId)` - Get semester analysis
+- `getStudentCampus(userId)` - Get campus details
+
+**Example**:
+```typescript
+import { DayPlanDataService } from '@dormway/core';
+
+const service = new DayPlanDataService({ pool, logger });
+
+// Get student context (campus + city)
+const contextResult = await service.getStudentContext(userId);
+if (contextResult.success && contextResult.data) {
+  const { campusId, cityId, timezone } = contextResult.data;
+  logger.info('student.context', 'Student context fetched', {
+    metadata: { userId, campusId, cityId, timezone }
+  });
+}
+
+// Get weather (automatically uses city, not campus)
+const weatherResult = await service.getWeatherForStudent(userId, '2025-11-23');
+if (weatherResult.success && weatherResult.data) {
+  const weather = weatherResult.data;
+  // Weather object structure varies by method (fetch_weather, fetch_forecast, processed_city_weather_context)
+}
+```
+
+**Weather Query Details**: The service queries `service_data` using:
+- `context_id` = cityId (NOT campusId!)
+- `method IN ('processed_city_weather_context', 'fetch_weather', 'fetch_forecast')`
+- Prioritizes `processed_city_weather_context` first
+
+#### 3. ContextsService
+
+**Purpose**: Query and manipulate the contexts hierarchy (cities, campuses, buildings, courses, students).
+
+**Methods**:
+- `getContext(contextId)` - Get single context by ID
+- `getContextsByType(type, filters)` - Get all contexts of a type
+- `getContextHierarchy(contextId)` - Get full hierarchy path
+- `getChildContexts(parentId, type)` - Get child contexts
+- `createContext(data)` - Create new context
+- `updateContext(contextId, updates)` - Update context
+- `deleteContext(contextId)` - Soft-delete context
+
+**Example**:
+```typescript
+import { ContextsService } from '@dormway/core';
+
+const service = new ContextsService({ pool, logger });
+
+// Get student's courses
+const coursesResult = await service.getChildContexts(studentContextId, 'course');
+if (coursesResult.success) {
+  const courses = coursesResult.data!;
+  courses.forEach(course => {
+    console.log(`Course: ${course.name}, External ID: ${course.external_id}`);
+  });
+}
+
+// Get hierarchy path (student → campus → city)
+const hierarchyResult = await service.getContextHierarchy(studentContextId);
+```
+
+#### 4. ServiceDataService
+
+**Purpose**: CRUD operations on the partitioned `service_data` table.
+
+**Methods**:
+- `queryServiceData(contextId, method, options)` - Query by context and method
+- `getLatestServiceData(contextId, method)` - Get most recent record
+- `insertServiceData(record)` - Insert new service data
+- `bulkInsertServiceData(records)` - Bulk insert
+- `deleteOldServiceData(contextId, method, beforeDate)` - Cleanup old data
+
+**Example**:
+```typescript
+import { ServiceDataService } from '@dormway/core';
+
+const service = new ServiceDataService({ pool, logger });
+
+// Query calendar events
+const result = await service.queryServiceData(
+  studentContextId,
+  'fetch_calendar',
+  { limit: 50, offset: 0, startDate: '2025-11-01', endDate: '2025-11-30' }
+);
+
+if (result.success) {
+  const events = result.data!;
+  events.forEach(event => {
+    console.log(`Event: ${event.data.summary} at ${event.fetched_at}`);
+  });
+}
+```
+
+**Critical**: Always include date filtering when querying `service_data` for partition pruning!
+
+#### 5. AccountsService
+
+**Purpose**: User account operations (get, update, search).
+
+**Methods**:
+- `getAccountById(userId)` - Get account by UUID
+- `getAccountByEmail(email)` - Get account by email
+- `updateAccount(userId, updates)` - Update account fields
+- `searchAccounts(filters)` - Search with pagination
+- `getCampusForUser(userId)` - Get user's campus via contexts join
+
+**Critical**: The `accounts` table has NO `campus_id` column! Always join through contexts:
+```sql
+SELECT c.* FROM accounts a
+JOIN contexts student_ctx ON student_ctx.user_id = a.id AND student_ctx.type = 'student'
+JOIN contexts c ON c.id = student_ctx.parent_id AND c.type = 'campus'
+WHERE a.id = $1;
+```
+
+#### 6. PreferencesService
+
+**Purpose**: Manage user preferences (study times, notification settings, accessibility).
+
+**Methods**:
+- `getPreferences(userId)` - Get all preferences
+- `updatePreferences(userId, updates)` - Update preferences
+- `resetToDefaults(userId)` - Reset to defaults
+
+#### 7. AuthService
+
+**Purpose**: Authentication helpers (JWT validation, device keys, Clerk integration).
+
+**Methods**:
+- `validateDeviceKey(deviceKey)` - Verify device key
+- `validateClerkJWT(token)` - Verify Clerk JWT
+- `getUserFromToken(token)` - Extract user info from token
+
+#### 8. TelemetryService
+
+**Purpose**: Track events and metrics for analytics.
+
+**Methods**:
+- `trackEvent(userId, eventName, properties)` - Log event
+- `trackMetric(metricName, value, tags)` - Log metric
+- `trackError(error, context)` - Log error with context
+
+#### 9. SyllabusCacheService
+
+**Purpose**: Centralize syllabus deduplication cache access and standardize syllabus cache shapes (so Engine/API Router/etc don’t re-implement the same SQL + JSON shapes).
+
+**Key Exports**:
+- `SYLLABUS_PARSER_VERSION` - Single source of truth for cache invalidation
+- `SyllabusAnalysis`, `SyllabusCacheEntry`, `SyllabusCacheStats` - Shared data shapes
+
+**Methods**:
+- `getCacheEntry(contentHash, parserVersion?)`
+- `upsertCacheEntry(contentHash, analysis, parserVersion?)`
+- `linkUserToCacheEntry({ userId, cacheId, documentId?, contextId? })`
+- `updateSyllabusDocumentHash({ documentId, contentHash })`
+- `getCacheStats()`
+- `invalidateCacheForVersion(oldVersion)`
+
+**Example**:
+```typescript
+import {
+  SyllabusCacheService,
+  SYLLABUS_PARSER_VERSION,
+  type SyllabusAnalysis,
+} from '@dormway/core';
+
+const syllabusCache = new SyllabusCacheService({ pool, logger });
+
+const hit = await syllabusCache.getCacheEntry(contentHash, SYLLABUS_PARSER_VERSION);
+if (hit.success && hit.data) {
+  // Use cached analysis
+}
+
+const analysis: SyllabusAnalysis = {
+  parsedContent: {},
+  assignments: [],
+  courseInfo: { courseCode: 'EECS 485' },
+};
+
+const upsert = await syllabusCache.upsertCacheEntry(contentHash, analysis, SYLLABUS_PARSER_VERSION);
+if (!upsert.success) throw new Error(upsert.error);
+```
+
+**DRY Guardrail (Engine)**:
+- `services/engine/package.json` includes `lint:syllabus-cache` to block direct SQL calls like `get_syllabus_cache_entry` and require using `SyllabusCacheService`.
+
+---
+
+## Adapters
+
+Adapters provide consistent interfaces to external services.
+
+### TemporalAdapter
+
+**Purpose**: Centralized Temporal workflow client with connection pooling.
+
+**Usage**:
+```typescript
+import { getTemporalClient } from '@dormway/core/adapters/temporal';
+
+const client = await getTemporalClient();
+
+// Start workflow
+const handle = await client.workflow.start('studentWatcherWorkflow', {
+  taskQueue: 'student-worker',
+  workflowId: `student-watcher-${studentId}`,
+  args: [studentId],
+});
+
+// Signal workflow
+await client.workflow.signalWithStart('studentWatcherWorkflow', {
+  workflowId: `student-watcher-${studentId}`,
+  signal: 'updatePreferences',
+  signalArgs: [preferences],
+  taskQueue: 'student-worker',
+  args: [studentId],
+});
+```
+
+### CacheAdapter
+
+**Purpose**: Redis caching with TTL support.
+
+**Usage**:
+```typescript
+import { getCacheAdapter } from '@dormway/core/adapters/cache';
+
+const cache = getCacheAdapter();
+
+// Set with TTL
+await cache.set('user:123:preferences', preferences, { ttl: 3600 });
+
+// Get
+const prefs = await cache.get('user:123:preferences');
+
+// Delete
+await cache.delete('user:123:preferences');
+
+// Clear pattern
+await cache.deletePattern('user:123:*');
+```
+
+### RealtimeAdapter
+
+**Purpose**: Ably pub/sub for real-time updates.
+
+**Usage**:
+```typescript
+import { getRealtimeAdapter } from '@dormway/core/adapters/realtime';
+
+const realtime = getRealtimeAdapter();
+
+// Publish message
+await realtime.publish(`user:${userId}:updates`, {
+  type: 'dayplan.generated',
+  data: { planId, date },
+});
+
+// Subscribe (server-side)
+const channel = realtime.channels.get(`user:${userId}:updates`);
+channel.subscribe((message) => {
+  console.log('Received:', message.data);
+});
+```
+
+### DatabaseAdapter
+
+**Purpose**: PostgreSQL connection pool management.
+
+**Usage**:
+```typescript
+import { getConnectionPool } from '@dormway/core/adapters/database';
+
+const pool = getConnectionPool();
+
+// Query
+const result = await pool.query('SELECT * FROM accounts WHERE id = $1', [userId]);
+
+// Transaction
+const client = await pool.connect();
+try {
+  await client.query('BEGIN');
+  await client.query('INSERT INTO ...');
+  await client.query('UPDATE ...');
+  await client.query('COMMIT');
+} catch (error) {
+  await client.query('ROLLBACK');
+  throw error;
+} finally {
+  client.release();
+}
+```
+
+### Other Adapters
+
+- **AnalyticsAdapter**: Track events to analytics services
+- **RagieAdapter**: RAG (Retrieval-Augmented Generation) integration
+- **CustomerioAdapter**: Customer.io transactional messaging
+
+---
+
+## Utilities
+
+### Structured Logger
+
+**Purpose**: Consistent, queryable logging across all services.
+
+**Features**:
+- Structured JSON logs
+- Multiple log levels (debug, info, warn, error)
+- Metadata support
+- Event-based logging
+- OpenTelemetry integration
+
+**Usage**:
+```typescript
+import { createStructuredLogger } from '@dormway/core/logger';
+
+const logger = createStructuredLogger({
+  service: 'api-router',
+  environment: process.env.NODE_ENV || 'development',
+});
+
+// Info log
+logger.info('user.login', 'User logged in successfully', {
+  metadata: { userId, email, ipAddress }
+});
+
+// Error log
+logger.error('payment.failed', 'Payment processing failed', {
+  error: new Error('Stripe error'),
+  metadata: { userId, amount, currency }
+});
+
+// Workflow logging
+logger.info('workflow.started', 'StudentWatcher workflow started', {
+  workflow: { workflowId: 'student-watcher-123', runId: 'abc', taskQueue: 'student-worker' },
+  metadata: { studentId }
+});
+```
+
+**Log Levels**:
+- `debug` - Detailed debugging (not in production)
+- `info` - General informational messages
+- `warn` - Warning conditions
+- `error` - Error conditions
+
+### Error Classes
+
+**Purpose**: Consistent error handling with HTTP status codes.
+
+**Available Errors**:
+- `AppError` - Base error class
+- `ValidationError` - 400 Bad Request
+- `AuthenticationError` - 401 Unauthorized
+- `AuthorizationError` - 403 Forbidden
+- `NotFoundError` - 404 Not Found
+- `ConflictError` - 409 Conflict
+- `RateLimitError` - 429 Too Many Requests
+- `DatabaseError` - 500 Internal Server Error
+- `ExternalServiceError` - 502 Bad Gateway
+- `ServiceUnavailableError` - 503 Service Unavailable
+- `ConfigurationError` - 500 Internal Server Error
+
+**Usage**:
+```typescript
+import { NotFoundError, ValidationError, serializeError } from '@dormway/core/errors';
+
+// Throw error
+if (!user) {
+  throw new NotFoundError('User not found', { userId });
+}
+
+// Validate input
+if (!email || !email.includes('@')) {
+  throw new ValidationError('Invalid email address', { email });
+}
+
+// Serialize for logging/API response
+try {
+  // ...
+} catch (error) {
+  const serialized = serializeError(error);
+  res.status(serialized.statusCode).json({
+    error: serialized.message,
+    details: serialized.details,
+  });
+}
+```
+
+### Config Loader
+
+**Purpose**: Load and validate environment configuration.
+
+**Usage**:
+```typescript
+import { loadConfig } from '@dormway/core/config';
+
+const config = loadConfig();
+
+// Access config
+const dbUrl = config.database.url;
+const redisUrl = config.redis.url;
+const temporalAddress = config.temporal.address;
+```
+
+---
+
+## LLM Integration
+
+### Prompt Loading
+
+**Purpose**: Load prompts from the Git-based prompt registry.
+
+**Usage**:
+```typescript
+import { loadPrompt, callHelicone } from '@dormway/core/llm';
+
+// Load and render prompt
+const prompt = await loadPrompt('syllabus-extraction', {
+  SYLLABUS_CONTENT: extractedText,
+  COURSE_NAME: courseName,
+});
+
+// Call LLM with prompt ID (auto-loads from registry)
+const response = await callHelicone('syllabus-extraction', {
+  SYLLABUS_CONTENT: extractedText,
+  COURSE_NAME: courseName,
+});
+
+const parsed = JSON.parse(response.choices[0].message.content);
+```
+
+### Direct LLM Calls
+
+```typescript
+import { callLLMDirect } from '@dormway/core/llm';
+
+const response = await callLLMDirect({
+  messages: [
+    { role: 'system', content: 'You are a helpful assistant.' },
+    { role: 'user', content: 'What is the capital of France?' },
+  ],
+  model: 'gpt-4o-mini',
+  temperature: 0.7,
+});
+```
+
+### Claude with Document Analysis
+
+```typescript
+import { callClaudeWithDocument } from '@dormway/core/llm';
+
+const response = await callClaudeWithDocument({
+  document: syllabusText,
+  prompt: 'Extract course information',
+  model: 'claude-3-5-sonnet-20241022',
+});
+```
+
+---
+
+## Database Access
+
+### Connection Pooling
+
+```typescript
+import { getConnectionPool } from '@dormway/core/database';
+
+const pool = getConnectionPool();
+
+// Simple query
+const result = await pool.query('SELECT * FROM accounts WHERE id = $1', [userId]);
+const user = result.rows[0];
+
+// Parameterized query with dynamic conditions
+const conditions: string[] = [];
+const params: any[] = [];
+let paramIndex = 1;
+
+if (email) {
+  conditions.push(`email = $${paramIndex}`);
+  params.push(email);
+  paramIndex++;
+}
+
+if (campusId) {
+  conditions.push(`campus_id = $${paramIndex}::uuid`);
+  params.push(campusId);
+  paramIndex++;
+}
+
+const query = `SELECT * FROM accounts WHERE ${conditions.join(' AND ')}`;
+const result = await pool.query(query, params);
+```
+
+### Context Graph Queries
+
+```typescript
+import { getContextRelationships, findContextPath } from '@dormway/core/database/context-graph';
+
+// Get all related contexts
+const relationships = await getContextRelationships(contextId);
+
+// Find path between two contexts
+const path = await findContextPath(sourceContextId, targetContextId);
+```
+
+---
+
+## Middleware
+
+The middleware module provides **factory functions** for Express middleware, enabling dependency injection, easy testing, and reusability.
+
+> **See:** [Middleware Factory Pattern](/docs/engineering/technical/dormway-core/middleware/middleware-factory-pattern) for comprehensive documentation.
+
+### Available Factories
+
+| Factory | Purpose |
+|---------|---------|
+| `createErrorHandler` | Consistent error formatting and logging |
+| `createRequestValidator` | Zod schema validation |
+| `createRateLimiter` | Redis/memory rate limiting |
+| `createAuthMiddleware` | Multi-method authentication |
+| `createRoleCheckMiddleware` | Role-based access control |
+| `createGatewayAuthMiddleware` | API gateway validation |
+| `createDemoReadOnlyGuard` | Block writes for demo users |
+
+### Quick Example
+
+```typescript
+import express from 'express';
+import {
+  createErrorHandler,
+  createAuthMiddleware,
+  createRateLimiter,
+} from '@dormway/core/middleware';
+import { logger } from './utils/logger';
+import { clerkClient } from '@clerk/clerk-sdk-node';
+
+const app = express();
+
+// 1. Authentication
+app.use(createAuthMiddleware({
+  logger,
+  clerkClient,
+  internalApiKey: process.env.API_KEY
+}));
+
+// 2. Rate limiting
+app.use('/api', createRateLimiter({
+  windowSec: 60,
+  max: 100,
+  keyFn: (req) => req.user?.id || req.ip || 'anonymous'
+}));
+
+// Routes here...
+
+// 3. Error handler (must be last!)
+app.use(createErrorHandler({
+  logger,
+  environment: process.env.NODE_ENV
+}));
+```
+
+### Detailed Documentation
+
+- [Middleware Factory Pattern](/docs/engineering/technical/dormway-core/middleware/middleware-factory-pattern) - Philosophy and patterns
+- [Error Handler](/docs/engineering/technical/dormway-core/middleware/error-handler) - Error handling middleware
+- [Request Validator](/docs/engineering/technical/dormway-core/middleware/request-validator) - Zod validation middleware
+- [Rate Limiter](/docs/engineering/technical/dormway-core/middleware/rate-limiter) - Rate limiting middleware
+- [Authentication Middleware](/docs/engineering/technical/dormway-core/middleware/authentication-middleware) - Auth middleware
+- [Role Check Middleware](/docs/engineering/technical/dormway-core/middleware/role-check-middleware) - RBAC middleware
+- [Gateway Auth Middleware](/docs/engineering/technical/dormway-core/middleware/gateway-auth-middleware) - Gateway validation
+- [Demo Read-Only Guard](/docs/engineering/technical/dormway-core/middleware/demo-read-only-guard) - Demo restrictions
+
+---
+
+## Common Patterns
+
+### Service Factory Pattern
+
+Create services lazily with singleton instances:
+
+```typescript
+// services/factory.ts
+import { Pool } from 'pg';
+import { StructuredLogger } from '@dormway/core/logger';
+import { CampusService, DayPlanDataService } from '@dormway/core';
+
+let campusService: CampusService | null = null;
+let dayPlanDataService: DayPlanDataService | null = null;
+
+export function getCampusService(pool: Pool, logger: StructuredLogger): CampusService {
+  if (!campusService) {
+    campusService = new CampusService({ pool, logger });
+  }
+  return campusService;
+}
+
+export function getDayPlanDataService(pool: Pool, logger: StructuredLogger): DayPlanDataService {
+  if (!dayPlanDataService) {
+    dayPlanDataService = new DayPlanDataService({ pool, logger });
+  }
+  return dayPlanDataService;
+}
+```
+
+### Temporal Activity Pattern
+
+Use services in Temporal activities:
+
+```typescript
+// activities/dayplan.activities.ts
+import { getConnectionPool } from '@dormway/core/database';
+import { createStructuredLogger } from '@dormway/core/logger';
+import { DayPlanDataService } from '@dormway/core';
+
+export async function generateDayPlan(userId: string, date: string): Promise<DayPlan> {
+  const pool = getConnectionPool();
+  const logger = createStructuredLogger({ service: 'engine', activity: { name: 'generateDayPlan' } });
+
+  const service = new DayPlanDataService({ pool, logger });
+
+  // Get all data
+  const [context, courses, schedule, weather, preferences] = await Promise.all([
+    service.getStudentContext(userId),
+    service.getEnrolledCourses(userId),
+    service.getScheduleForStudent(userId, date),
+    service.getWeatherForStudent(userId, date),
+    service.getPreferencesForStudent(userId),
+  ]);
+
+  if (!context.success) {
+    throw new NotFoundError('Student context not found', { userId });
+  }
+
+  // Build dayplan using aggregated data
+  const dayplan = buildDayPlan({
+    context: context.data!,
+    courses: courses.data || [],
+    schedule: schedule.data || [],
+    weather: weather.data,
+    preferences: preferences.data,
+  });
+
+  return dayplan;
+}
+```
+
+### API Route Pattern
+
+Use services in Express routes:
+
+```typescript
+// routes/campus.routes.ts
+import express from 'express';
+import { getConnectionPool } from '@dormway/core/database';
+import { createStructuredLogger } from '@dormway/core/logger';
+import { CampusService } from '@dormway/core';
+import { NotFoundError } from '@dormway/core/errors';
+
+const router = express.Router();
+const pool = getConnectionPool();
+const logger = createStructuredLogger({ service: 'api-router' });
+
+router.get('/campus/:campusId/config', async (req, res, next) => {
+  try {
+    const { campusId } = req.params;
+    const service = new CampusService({ pool, logger });
+
+    const result = await service.getCampusConfig(campusId);
+
+    if (!result.success) {
+      throw new NotFoundError('Campus not found', { campusId });
+    }
+
+    res.json(result.data);
+  } catch (error) {
+    next(error);
+  }
+});
+
+export default router;
+```
+
+---
+
+## Testing
+
+### Unit Testing Services
+
+```typescript
+// services/__tests__/campus.service.test.ts
+import { Pool } from 'pg';
+import { CampusService } from '@dormway/core';
+
+describe('CampusService', () => {
+  let pool: Pool;
+  let service: CampusService;
+
+  beforeAll(() => {
+    pool = new Pool({ connectionString: process.env.TEST_DATABASE_URL });
+    service = new CampusService({ pool });
+  });
+
+  afterAll(async () => {
+    await pool.end();
+  });
+
+  it('should get campus config', async () => {
+    const result = await service.getCampusConfig('test-campus-id');
+    expect(result.success).toBe(true);
+    expect(result.data).toBeDefined();
+  });
+});
+```
+
+### Mocking Services
+
+```typescript
+// activities/__tests__/dayplan.activities.test.ts
+import { DayPlanDataService } from '@dormway/core';
+import { generateDayPlan } from '../dayplan.activities';
+
+jest.mock('@dormway/core', () => ({
+  DayPlanDataService: jest.fn().mockImplementation(() => ({
+    getStudentContext: jest.fn().mockResolvedValue({
+      success: true,
+      data: { campusId: 'campus-1', cityId: 'city-1', timezone: 'America/New_York' },
+    }),
+    getEnrolledCourses: jest.fn().mockResolvedValue({
+      success: true,
+      data: [{ id: 'course-1', name: 'CS 101' }],
+    }),
+  })),
+}));
+
+describe('generateDayPlan', () => {
+  it('should generate dayplan', async () => {
+    const dayplan = await generateDayPlan('user-1', '2025-11-23');
+    expect(dayplan).toBeDefined();
+  });
+});
+```
+
+---
+
+## Contributing
+
+### Adding a New Domain Service
+
+1. **Create service directory**:
+   ```bash
+   mkdir -p src/domains/my-service
+   ```
+
+2. **Define types** (`types.ts`):
+   ```typescript
+   import type { BaseDomainServiceOptions, ServiceResult } from '../types';
+
+   export interface MyServiceOptions extends BaseDomainServiceOptions {}
+
+   export interface MyEntity {
+     id: string;
+     name: string;
+     created_at: Date;
+   }
+
+   export interface MyService {
+     getEntity(id: string): Promise<ServiceResult<MyEntity | null>>;
+     createEntity(data: Partial<MyEntity>): Promise<ServiceResult<MyEntity>>;
+     healthCheck(): Promise<boolean>;
+   }
+   ```
+
+3. **Implement service** (`my-service.service.ts`):
+   ```typescript
+   import type { Pool } from 'pg';
+   import type { StructuredLogger } from '../../utils/logger/types';
+   import type { MyService as IMyService, MyServiceOptions, MyEntity } from './types';
+   import type { ServiceResult } from '../types';
+
+   export class MyService implements IMyService {
+     private pool: Pool;
+     private logger?: StructuredLogger;
+
+     constructor(options: MyServiceOptions) {
+       this.pool = options.pool;
+       this.logger = options.logger;
+     }
+
+     async getEntity(id: string): Promise<ServiceResult<MyEntity | null>> {
+       try {
+         const query = 'SELECT * FROM my_entities WHERE id = $1';
+         const result = await this.pool.query(query, [id]);
+         return { success: true, data: result.rows[0] || null };
+       } catch (error) {
+         this.logger?.error('my-service.get.error', 'Failed to get entity', { error, metadata: { id } });
+         return { success: false, error: 'Failed to get entity', errorDetails: { originalError: String(error) } };
+       }
+     }
+
+     async createEntity(data: Partial<MyEntity>): Promise<ServiceResult<MyEntity>> {
+       // Implementation
+     }
+
+     async healthCheck(): Promise<boolean> {
+       try {
+         await this.pool.query('SELECT 1');
+         return true;
+       } catch {
+         return false;
+       }
+     }
+   }
+   ```
+
+4. **Export from index** (`index.ts`):
+   ```typescript
+   export * from './types';
+   export { MyService } from './my-service.service';
+   ```
+
+5. **Add to main exports** (`src/domains/index.ts`):
+   ```typescript
+   export * from './my-service';
+   ```
+
+6. **Add tests** (`__tests__/my-service.service.test.ts`)
+
+7. **Update documentation** (this file!)
+
+### Building and Publishing
+
+```bash
+# Build
+npm run build
+
+# Run tests
+npm test
+
+# Type check
+npm run typecheck
+
+# Lint
+npm run lint:fix
+
+# Publish (requires GitHub PAT)
+npm publish
+```
+
+### Versioning
+
+Follow semantic versioning:
+- **MAJOR**: Breaking changes
+- **MINOR**: New features (backward compatible)
+- **PATCH**: Bug fixes
+
+---
+
+## Best Practices
+
+### 1. Always Use ServiceResult
+
+```typescript
+// ✅ Good
+async function getData(): Promise<ServiceResult<Data>> {
+  try {
+    const data = await fetchData();
+    return { success: true, data };
+  } catch (error) {
+    return { success: false, error: 'Failed to fetch data' };
+  }
+}
+
+// ❌ Bad - throws error, doesn't use ServiceResult
+async function getData(): Promise<Data> {
+  return await fetchData(); // throws on error
+}
+```
+
+### 2. Use Structured Logging
+
+```typescript
+// ✅ Good
+logger.info('user.created', 'User account created', {
+  metadata: { userId, email, source: 'web' }
+});
+
+// ❌ Bad - unstructured
+console.log(`User ${userId} created with email ${email}`);
+```
+
+### 3. Parameterize SQL Queries
+
+```typescript
+// ✅ Good
+const result = await pool.query('SELECT * FROM accounts WHERE id = $1', [userId]);
+
+// ❌ Bad - SQL injection risk
+const result = await pool.query(`SELECT * FROM accounts WHERE id = '${userId}'`);
+```
+
+### 4. Use Connection Pooling
+
+```typescript
+// ✅ Good
+import { getConnectionPool } from '@dormway/core/database';
+const pool = getConnectionPool();
+
+// ❌ Bad - creates new connection each time
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+```
+
+### 5. Handle Null/Undefined Safely
+
+```typescript
+// ✅ Good
+const result = await service.getData(id);
+if (!result.success || !result.data) {
+  throw new NotFoundError('Data not found');
+}
+const data = result.data;
+
+// ❌ Bad - assumes success
+const data = (await service.getData(id)).data!;
+```
+
+---
+
+## Troubleshooting
+
+### Import Errors
+
+**Problem**: "Cannot find module '@dormway/core'"
+
+**Solution**:
+```bash
+cd services/shared/dormway-core
+npm run build
+cd ../api-router
+npm install
+```
+
+### Type Errors
+
+**Problem**: "Type 'Pool' is not assignable..."
+
+**Solution**: Ensure `pg` is installed as a peer dependency:
+```bash
+npm install pg @types/pg
+```
+
+### Connection Pool Errors
+
+**Problem**: "Connection pool exhausted"
+
+**Solution**: Reuse pool instances, don't create new pools:
+```typescript
+// Use singleton
+import { getConnectionPool } from '@dormway/core/database';
+const pool = getConnectionPool();
+```
+
+---
+
+## Related Documentation
+
+### Core Library Modules
+- [Middleware Factory Pattern](/docs/engineering/technical/dormway-core/middleware/middleware-factory-pattern) - Express middleware with dependency injection
+- [Migration Guide](/docs/engineering/technical/dormway-core/migration-guide) - Refactoring to @dormway/core
+
+### Domain Services
+- [DayPlanDataService](/docs/engineering/technical/dormway-core/domain-services/dayplandataservice) - DayPlan data aggregation
+- [CampusService](/docs/engineering/technical/dormway-core/domain-services/campusservice) - Campus operations
+- [ContextsService](/docs/engineering/technical/dormway-core/domain-services/contextsservice) - Context hierarchy
+
+### Adapters
+- [Cache Adapter](/docs/engineering/technical/dormway-core/adapters/cache-adapter) - Redis caching
+- [Temporal Adapter](/docs/engineering/technical/dormway-core/adapters/temporal-adapter) - Workflow client
+- [Realtime Adapter](/docs/engineering/technical/dormway-core/adapters/realtime-adapter) - Ably pub/sub
+
+### External Documentation
+- Engine Workflow DAG Analysis - Temporal workflows using dormway-core
+- [Dashboard BFF Widget System - Complete Guide](/docs/engineering/technical/dashboard-bff-widget-system-complete-guide) - API Router using dormway-core
+- Database Schema Reference - Database structure and query patterns
+- DormWay Platform Architecture - Overall architecture
+
+---
+
+**Last Updated**: 2025-11-26
+**Maintainer**: Platform Team
+**Version**: 0.1.0-alpha.0

@@ -1,0 +1,31 @@
+---
+title: "BFF Dashboard v1"
+---
+
+# BFF Dashboard v1 (Snapshot, Cache, Realtime)
+
+## Current State
+- Endpoint: `/dashboard/v1/composite` (per user/tab/context snapshot).
+- Caching: Canonical ETag + `304 Not Modified`; Redis key `dashboard:v1:{userId}:{tab}:{context}` with context TTLs.
+- ETag: Weak `W/"dcv1-<sha256>"` computed from `{version, tab, context, widgets}` using SHA-256 over canonical JSON.
+- Single-flight: Redis lock for hot keys; serves stale on refresh lock.
+- Realtime: Server publishes ID-based deltas to `user:{userId}:dashboard` with `{ baseEtag, seq, ops[], ts }`; coalesce 500ms; ≤2 msgs/sec/user.
+- Security: Clients have subscribe-only capability on user channels; admin-only cache invalidation and diagnostics.
+
+## iOS Integration
+- Uses `DWServices.DashboardService.fetchDashboardV1` with `If-None-Match` and on-304 cache reuse.
+- `DashboardRealtimeManager` subscribes to `user:{userId}:dashboard`, validates `{baseEtag, seq}`, applies ops, resyncs on mismatch/gap.
+- Widgets rendered via `FlexibleGridView` + `GridWidgetContainer`.
+
+## References (canonical)
+- Router: `dormway-platform/services/api-router/src/routes/dashboard-routes.ts:200`
+- ETag utils: `dormway-platform/services/api-router/src/utils/canonical-etag.ts:1`
+- Deltas: `dormway-platform/services/api-router/src/services/ably-service.ts:131`
+- Spec: `dormway-platform/services/api-router/docs/realtime-dashboard-deltas.md:8`
+- iOS service: `ios-clean/Packages/DWServices/Sources/DWServices/DashboardService.swift:427`
+- iOS realtime: `ios-clean/Core/Services/DashboardRealtimeManager.swift:1`
+
+## Planned Improvements (near-term)
+- Expand transformer with more stable-ID widgets; cap heavy arrays consistently.
+- Persist ETag in iOS from response headers (dedicated field), reduce fallback hashing usage.
+- Add metrics around cache hit %, 304 ratio, delta resyncs.

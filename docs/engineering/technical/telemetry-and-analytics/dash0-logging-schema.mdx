@@ -1,0 +1,41 @@
+---
+title: "Dash0 Logging Schema"
+description: "All runtime services emit JSON logs that conform to the `dw-structured-log/v1` contract. Each entry targets Dash0 ingestion and contains `timestamp`, `servic..."
+---
+
+# Dash0 Logging Schema
+
+## Overview
+All runtime services emit JSON logs that conform to the `dw-structured-log/v1` contract. Each entry targets Dash0 ingestion and contains `timestamp`, `service`, `environment`, `level`, and `event`. Engine workers emit workflow/activity telemetry, while `api-router` emits API request, response, and failure events. The schema enables Dash0 filters such as `event:workflow.failure AND level:error` without per-service adapters.
+
+## Required Fields
+- `timestamp` – ISO8601 string emitted by the shared logger.
+- `service` – `engine`, `api-router`, or other service identifier.
+- `level` – `debug`, `info`, `warn`, `error` (Dash0 severity mapping).
+- `event` – namespaced identifier (`workflow.start`, `workflow.failure`, `activity.failure`, `api.request`, `api.response`, `api.failure`, `system.event`).
+- `schemaVersion` – defaults to `dw-structured-log/v1`.
+- `workflow` – optional block with `workflowId`, `runId`, `workflowType`, and `taskQueue`.
+- `activity` – optional block with `activityId`, `activityType`, `taskQueue`, `attempt`, `heartbeatDetails`.
+- `request` – optional block with `requestId`, `method`, `path`, `statusCode`, `userId`.
+- `traceId`/`spanId` – OpenTelemetry correlation identifiers when available.
+- `metadata` – free-form JSON object for structured properties (response times, campus ids, etc.).
+- `error` – normalized payload with `name`, `message`, `stack`, `code`, optional `cause`/`details`.
+
+## Engine Implementation
+- `services/engine/src/utils/structuredLogger.ts` defines the serializer, error normalizer, and helpers shared by the worker entry point.
+- `services/engine/src/utils/logger.ts` wraps the structured logger for legacy call sites while defaulting to `system.event`.
+- `services/engine/src/interceptors/activityLoggingInterceptor.ts` emits `activity.start`, `activity.complete`, and `activity.failure` with workflow context.
+- `services/engine/src/workflows/interceptors/workflowLoggingInterceptor.ts` runs inside the workflow isolate and reports `workflow.start`, `workflow.complete`, and `workflow.failure` through the `structuredLogging` sink.
+- Worker instances configure `sinks.structuredLogging.log` and register the activity interceptor via `baseWorkerOptions` so every worker/queue inherits the same schema.
+
+## API Router Implementation
+- `services/api-router/src/utils/structuredLogger.ts` mirrors the engine helper in a local module.
+- `services/api-router/src/utils/logger.ts` exposes contextual logging that hydrates `request`, `workflow`, and `metadata` blocks before forwarding to the structured logger.
+- `services/api-router/src/middleware/request-logger.ts` records `api.request` and `api.response` events with `requestId`, latency, and IP data.
+- `services/api-router/src/middleware/error-handler.ts` emits a single `api.failure` record with normalized `error` payload plus `requestId` and resolved HTTP status.
+
+## Dash0 Usage
+- Filter workflow failures: `service:"engine" AND event:"workflow.failure" AND level:error`.
+- Alert on API spikes: `service:"api-router" AND event:"api.failure" AND metadata.responseTimeMs > 2000`.
+- Trace specific syncs: filter by `workflow.workflowId:"sync-campus-*"` or upstream `requestId` propagated through the headers.
+- A future `dw-structured-log/v2` schema can coexist by adjusting `schemaVersion` while retaining backwards compatible filters.

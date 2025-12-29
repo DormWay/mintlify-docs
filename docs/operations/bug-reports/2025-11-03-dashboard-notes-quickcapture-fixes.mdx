@@ -1,0 +1,732 @@
+---
+title: "2025 11 03 dashboard notes quickcapture fixes"
+description: "Three related bugs affecting the home dashboard's note-taking and task capture functionality:"
+---
+
+# Dashboard Notes & Quick Capture Fixes
+
+**Date**: 2025-11-03
+**Linear Issues**: DORM-403, DORM-477, DORM-476
+**Severity**: High (DORM-403), High (DORM-477), Urgent (DORM-476)
+**Component**: dormway-lockedin (Home Dashboard), api-router
+**Estimated Effort**: 6 hours
+
+---
+
+## Summary
+
+Three related bugs affecting the home dashboard's note-taking and task capture functionality:
+
+1. **DORM-403 / DORM-477** (Duplicates): Markdown not rendering in NoteWidget on home dashboard
+2. **DORM-476**: Quick Capture feature completely non-functional due to missing API endpoint
+
+---
+
+## Issues
+
+### DORM-403: Fix markdown support in notes (bullets and numbered lists)
+
+**Status**: Todo
+**Priority**: Urgent
+**Assignee**: DormWay
+**Created**: 2025-10-24
+
+**Description**:
+Notes claim to have full markdown support but numbered and bullet lists don't render correctly.
+
+**Location**:
+- Home page notes section (Column 4)
+- Notes tab in sidebar
+
+**Expected Behavior**:
+Standard markdown list syntax should render properly:
+```markdown
+- Bullet item 1
+- Bullet item 2
+
+1. Numbered item 1
+2. Numbered item 2
+```
+
+---
+
+### DORM-477: Enable markdown support in notes editor
+
+**Status**: Backlog
+**Priority**: High
+**Assignee**: DormWay
+**Created**: 2025-11-01
+**Project**: Core Features
+
+**Description**:
+The notes section doesn't support markdown formatting despite appearing to be a markdown editor.
+
+**Expected Behavior**:
+- Full markdown support (headers, lists, bold, italic, links, etc.)
+- Live preview or rendered output
+- Bullets and numbers should display correctly (currently they indent but don't show the actual bullet/number)
+
+**Impact**:
+Users expect markdown functionality for note-taking
+
+---
+
+### DORM-476: Quick capture feature not working
+
+**Status**: Backlog
+**Priority**: Urgent
+**Assignee**: Ethan Kaplan
+**Created**: 2025-11-01
+**Project**: Core Features
+
+**Description**:
+Quick capture functionality is currently non-functional.
+
+**Steps to Reproduce**:
+1. Attempt to use quick capture feature
+2. No action occurs
+
+**Expected Behavior**:
+Quick capture should allow users to rapidly add tasks/notes
+
+**Impact**:
+Key productivity feature unavailable
+
+---
+
+## Root Cause Analysis
+
+### Investigation Summary
+
+**Files Analyzed**:
+- `services/dormway-lockedin/src/components/home/notes/NoteWidget.tsx`
+- `services/dormway-lockedin/src/components/home/notes/QuickCapture.tsx`
+- `services/dormway-lockedin/src/hooks/home/useQuickCapture.ts`
+- `services/api-router/src/routes/task-routes.ts`
+
+### Issue 1 & 2: Markdown Not Rendering (DORM-403, DORM-477)
+
+**Root Cause**:
+The `NoteWidget` component on the home dashboard uses a plain `<textarea>` element that does not render markdown - it only stores the markdown text.
+
+**Evidence**:
+```tsx
+// NoteWidget.tsx:154-167
+<textarea
+  value={localContent}
+  onChange={(e) => handleContentChange(e.target.value)}
+  placeholder="Start typing..."
+  className="... font-mono ..." // Just a plain textarea
+/>
+
+// Misleading hint shown to users:
+<div className="...">
+  Markdown supported: **bold**, *italic*, # headings, - lists
+</div>
+```
+
+**Why This Happens**:
+- Users can type `**bold**` or `- bullet` but only see plain text
+- The hint suggests markdown is supported, but it's not rendered
+- Markdown is only stored in the backend, never displayed formatted
+
+**Note**: The Notes Hub page (`/dashboard/notes-hub`) DOES work correctly - it uses `MdxNoteEditor` with `@mdxeditor/editor` which has full markdown rendering via `listsPlugin()`, `headingsPlugin()`, etc.
+
+---
+
+### Issue 3: Quick Capture Not Working (DORM-476)
+
+**Root Cause**:
+The frontend calls a non-existent API endpoint.
+
+**Evidence**:
+
+**Frontend Code** (`useQuickCapture.ts:43`):
+```typescript
+const response = await authorizedFetch(
+  proxyPath('/tasks/quick-capture'),  // Calls POST /tasks/quick-capture
+  {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  }
+);
+```
+
+**Backend Reality**:
+```bash
+$ grep -r "quick-capture" services/api-router/src/routes/
+# No results found
+```
+
+The endpoint `POST /tasks/quick-capture` does not exist in `task-routes.ts`.
+
+**Why This Happens**:
+- Frontend was implemented with the assumption the endpoint existed
+- Backend has `POST /api/mobile/tasks` (full task creation) but not the simplified quick-capture variant
+- Returns 404, causing silent failure in the UI
+
+**Existing Infrastructure**:
+- ✅ `tasks` table exists with correct schema
+- ✅ `task-routes.ts` has full CRUD operations for tasks
+- ❌ Missing: `/quick-capture` endpoint
+
+---
+
+## Technical Details
+
+### Database Schema
+
+**Tasks Table** (already exists):
+```sql
+Table: tasks
+Columns:
+  - id: uuid (PK)
+  - user_id: uuid (FK to accounts, NOT NULL)
+  - title: text (NOT NULL)
+  - estimated_duration_minutes: integer (default 30, 1-480 constraint)
+  - priority: text (default 'medium', CHECK: low|medium|high|urgent)
+  - course_code: text (nullable)
+  - due_date: timestamp with time zone (nullable)
+  - status: text (default 'pending', CHECK: pending|scheduled|completed|deleted)
+  - scheduled_block_id: uuid (FK to student_time_blocks)
+  - completed_at: timestamp with time zone
+  - source: text (default 'manual', CHECK: manual|assignment|dayplan|ai_suggestion)
+  - metadata: jsonb (default '{}')
+  - created_at: timestamp with time zone (default now())
+  - updated_at: timestamp with time zone (default now())
+
+Indexes:
+  - idx_tasks_user_pending (user_id, priority DESC, due_date) WHERE status = 'pending'
+  - idx_tasks_user_status (user_id, status) WHERE status <> 'deleted'
+  - idx_tasks_due_date, idx_tasks_course, idx_tasks_scheduled_block, etc.
+```
+
+### Current Task API Endpoints
+
+**Existing** (in `task-routes.ts`):
+- `POST /api/mobile/tasks` - Full task creation with validation
+- `GET /api/mobile/tasks` - List tasks with filters
+- `GET /api/mobile/tasks/:taskId` - Get single task
+- `PUT /api/mobile/tasks/:taskId` - Update task
+- `DELETE /api/mobile/tasks/:taskId` - Soft delete task
+- `POST /api/mobile/tasks/:taskId/schedule` - Schedule to timeline
+- `POST /api/mobile/tasks/:taskId/unschedule` - Move back to task bank
+- `POST /api/mobile/tasks/:taskId/complete` - Mark complete
+
+**Missing**:
+- `POST /api/mobile/tasks/quick-capture` - Simplified endpoint for dashboard widget
+
+### Frontend Components
+
+**NoteWidget** (`services/dormway-lockedin/src/components/home/notes/NoteWidget.tsx`):
+- Location: Home dashboard, Column 4 (70% height)
+- Current: Plain `<textarea>` with no markdown rendering
+- Features: Auto-save (3s debounce), class detection, sync status indicator
+- Uses: `useNoteSync()` hook for backend sync
+
+**QuickCapture** (`services/dormway-lockedin/src/components/home/notes/QuickCapture.tsx`):
+- Location: Home dashboard, Column 4 (30% height)
+- Features: Category selection (task/reminder/note/idea), priority parsing, duration extraction
+- Uses: `useQuickCapture()` hook
+- Smart parsing examples:
+  - `"!!! Finish essay"` → urgent priority
+  - `"Review notes 45m"` → 45 minute duration
+  - `"!! Study for exam 2h"` → high priority, 120 min duration
+
+---
+
+## Implementation Plan
+
+### Phase 1: Add Quick Capture API Endpoint
+
+**Estimated Time**: 2 hours
+
+**File**: `services/api-router/src/routes/task-routes.ts`
+
+**Implementation**:
+
+Add new endpoint after line 121 (after the main `POST /` endpoint):
+
+```typescript
+/**
+ * POST /api/mobile/tasks/quick-capture - Quick capture for dashboard widget
+ *
+ * Simplified endpoint optimized for the QuickCapture component.
+ * Automatically sets source='manual' with quick_capture metadata.
+ *
+ * Body:
+ *   - title: string (required)
+ *   - type: 'task' | 'reminder' | 'note' | 'idea' (UI only, stored in metadata)
+ *   - priority: 'low' | 'medium' | 'high' | 'urgent' (default: 'medium')
+ *   - estimatedDuration: number (minutes, default: 30)
+ *   - metadata: object (optional, merged with defaults)
+ */
+router.post(
+  '/quick-capture',
+  [authMiddleware],
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const userId = req.user?.id;
+      if (!userId) throw new AppError('User ID is required', 401);
+
+      const {
+        title,
+        type = 'task', // UI category, not stored in DB
+        priority = 'medium',
+        estimatedDuration = 30,
+        metadata = {},
+      } = req.body;
+
+      // Validation
+      if (!title || title.trim().length === 0) {
+        throw new AppError('Title is required', 400);
+      }
+
+      if (estimatedDuration < 1 || estimatedDuration > 480) {
+        throw new AppError('Estimated duration must be between 1-480 minutes', 400);
+      }
+
+      if (!['low', 'medium', 'high', 'urgent'].includes(priority)) {
+        throw new AppError('Invalid priority', 400);
+      }
+
+      // Insert task with quick_capture metadata
+      const { data, error } = await auroraClient.query(`
+        INSERT INTO tasks (
+          user_id,
+          title,
+          estimated_duration_minutes,
+          priority,
+          metadata,
+          source
+        )
+        VALUES ($1, $2, $3, $4, $5, 'manual')
+        RETURNING *
+      `, [
+        userId,
+        title.trim(),
+        estimatedDuration,
+        priority,
+        JSON.stringify({
+          ...metadata,
+          source: 'quick_capture',
+          captureType: type,  // Store UI category for reference
+        }),
+      ]);
+
+      if (error || !data || data.length === 0) {
+        logger.error('Quick capture failed', { error, userId });
+        throw new AppError('Failed to create task', 500);
+      }
+
+      logger.info('Quick capture succeeded', {
+        userId,
+        taskId: data[0].id,
+        title: data[0].title,
+        captureType: type,
+      });
+
+      // Invalidate dashboard cache so new task appears immediately
+      await redisCache.invalidateDashboard(userId);
+
+      res.status(201).json({
+        success: true,
+        task: {
+          id: data[0].id,
+          title: data[0].title,
+          estimatedDuration: data[0].estimated_duration_minutes,
+          priority: data[0].priority,
+          status: data[0].status,
+          metadata: data[0].metadata,
+          createdAt: data[0].created_at,
+        },
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+```
+
+**Why This Approach**:
+- Reuses existing task infrastructure (same `tasks` table)
+- Simplified validation for quick capture use case
+- Automatically invalidates dashboard cache for instant UI update
+- Stores capture type in metadata for analytics/filtering
+- Compatible with existing task lifecycle endpoints (schedule, complete, etc.)
+
+**Testing**:
+```bash
+# Test quick capture endpoint
+curl -X POST http://localhost:3001/api/mobile/tasks/quick-capture \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -d '{
+    "title": "!!! Finish essay 2h",
+    "type": "task",
+    "priority": "urgent",
+    "estimatedDuration": 120
+  }'
+```
+
+---
+
+### Phase 2: Add Markdown Preview to NoteWidget
+
+**Estimated Time**: 3 hours
+
+**File**: `services/dormway-lockedin/src/components/home/notes/NoteWidget.tsx`
+
+**Implementation**:
+
+1. **Add Dependencies** (already available):
+   - `react-markdown` (v9.1.0) - already in package.json
+   - `remark-gfm` (v4.0.1) - already in package.json
+
+2. **Add View Mode Toggle**:
+
+```tsx
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import { Eye, Edit3 } from 'lucide-react';
+
+// Add state (around line 33)
+const [viewMode, setViewMode] = useState<'edit' | 'preview'>('edit');
+
+// Add toggle button in CardHeader (around line 127)
+<CardHeader className="flex-shrink-0 pb-2">
+  <div className="w-full flex flex-col items-center justify-center">
+    <div className="w-full flex items-center justify-between mb-1">
+      <CardTitle className="text-lg font-semibold text-[var(--ds-text-primary)]">
+        {headerInfo.title}
+      </CardTitle>
+
+      {/* View mode toggle */}
+      <button
+        onClick={() => setViewMode(m => m === 'edit' ? 'preview' : 'edit')}
+        className="flex items-center gap-1 px-2 py-1 text-xs rounded hover:bg-[var(--ds-bg-tertiary)] transition-colors"
+        title={viewMode === 'edit' ? 'Preview markdown' : 'Edit mode'}
+      >
+        {viewMode === 'edit' ? (
+          <>
+            <Eye className="h-3 w-3" />
+            <span>Preview</span>
+          </>
+        ) : (
+          <>
+            <Edit3 className="h-3 w-3" />
+            <span>Edit</span>
+          </>
+        )}
+      </button>
+    </div>
+
+    {/* Rest of header (description, save status) */}
+    <div className="text-xs text-[var(--ds-text-tertiary)] text-center mt-0.5">
+      {headerInfo.description}
+    </div>
+
+    {saveStatusDisplay && (
+      <div className={`flex items-center gap-1 text-xs ${saveStatusDisplay.color} mt-1`}>
+        <saveStatusDisplay.icon className="h-3 w-3" />
+        <span>{saveStatusDisplay.text}</span>
+      </div>
+    )}
+  </div>
+</CardHeader>
+```
+
+3. **Update Content Area with Conditional Rendering**:
+
+```tsx
+// Replace textarea section (around line 153)
+<div className="w-full h-full relative">
+  {viewMode === 'edit' ? (
+    <>
+      <textarea
+        ref={textareaRef}
+        value={localContent}
+        onChange={(e) => handleContentChange(e.target.value)}
+        placeholder={
+          currentClass
+            ? `# ${currentClass.courseCode} Notes\n\n${new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}\n\nStart typing...`
+            : '# Quick Notes\n\nStart typing...'
+        }
+        className="w-full h-full p-4 bg-transparent border-none outline-none resize-none text-sm font-mono leading-relaxed text-[var(--ds-text-primary)]"
+        style={{ color: 'var(--ds-text-primary)' }}
+        disabled={createNoteMutation.isPending}
+        spellCheck="true"
+      />
+
+      {/* Hint only shown in edit mode */}
+      {!localContent && (
+        <div className="absolute bottom-3 left-4 right-4 text-xs text-[var(--ds-text-tertiary)] opacity-50 pointer-events-none">
+          Markdown supported: **bold**, *italic*, # headings, - lists
+        </div>
+      )}
+    </>
+  ) : (
+    // Preview mode
+    <div className="w-full h-full p-4 overflow-auto">
+      {localContent ? (
+        <ReactMarkdown
+          remarkPlugins={[remarkGfm]}
+          className="prose prose-sm dark:prose-invert max-w-none"
+          components={{
+            // Custom styling for lists
+            ul: ({ node, ...props }) => (
+              <ul className="list-disc list-inside space-y-1 my-2" {...props} />
+            ),
+            ol: ({ node, ...props }) => (
+              <ol className="list-decimal list-inside space-y-1 my-2" {...props} />
+            ),
+            li: ({ node, ...props }) => (
+              <li className="text-[var(--ds-text-primary)]" {...props} />
+            ),
+            // Custom styling for other elements
+            h1: ({ node, ...props }) => (
+              <h1 className="text-2xl font-bold mt-4 mb-2 text-[var(--ds-text-primary)]" {...props} />
+            ),
+            h2: ({ node, ...props }) => (
+              <h2 className="text-xl font-bold mt-3 mb-2 text-[var(--ds-text-primary)]" {...props} />
+            ),
+            h3: ({ node, ...props }) => (
+              <h3 className="text-lg font-semibold mt-2 mb-1 text-[var(--ds-text-primary)]" {...props} />
+            ),
+            p: ({ node, ...props }) => (
+              <p className="mb-2 text-[var(--ds-text-primary)]" {...props} />
+            ),
+            strong: ({ node, ...props }) => (
+              <strong className="font-bold text-[var(--ds-text-primary)]" {...props} />
+            ),
+            em: ({ node, ...props }) => (
+              <em className="italic text-[var(--ds-text-primary)]" {...props} />
+            ),
+            code: ({ node, inline, ...props }) =>
+              inline ? (
+                <code className="px-1 py-0.5 bg-[var(--ds-bg-tertiary)] rounded text-sm font-mono" {...props} />
+              ) : (
+                <code className="block p-2 bg-[var(--ds-bg-tertiary)] rounded text-sm font-mono overflow-x-auto" {...props} />
+              ),
+          }}
+        >
+          {localContent}
+        </ReactMarkdown>
+      ) : (
+        <div className="text-center text-[var(--ds-text-tertiary)] mt-8">
+          No content to preview
+        </div>
+      )}
+    </div>
+  )}
+</div>
+```
+
+**Why This Approach**:
+- ✅ **Simple toggle**: Users can switch between edit and preview
+- ✅ **No breaking changes**: Edit mode works exactly as before
+- ✅ **Auto-save preserved**: Typing in edit mode still triggers auto-save
+- ✅ **Uses existing libraries**: `react-markdown` and `remark-gfm` already in package.json
+- ✅ **Theme-aware**: Custom components use CSS variables for dark/light mode
+- ✅ **Proper list rendering**: Bullets and numbers display correctly in preview
+
+**Alternatives Considered**:
+- ❌ **Split-pane view**: Reduces available writing space (70% column already tight)
+- ❌ **Replace with MDX editor**: Heavier component, may not fit in small column
+- ❌ **Live preview overlay**: Complex interaction model
+
+---
+
+## Testing Plan
+
+### Phase 1: Quick Capture Testing
+
+**Unit Tests** (manual):
+1. Test priority parsing:
+   - `"!!! Urgent task"` → priority: urgent
+   - `"!! High priority"` → priority: high
+   - `"! Medium priority"` → priority: medium
+   - `"Regular task"` → priority: medium (default)
+
+2. Test duration parsing:
+   - `"Task 30m"` → 30 minutes
+   - `"Task 2h"` → 120 minutes
+   - `"Task 1.5h"` → 90 minutes
+   - `"Task"` → 30 minutes (default)
+
+3. Test combined parsing:
+   - `"!!! Finish essay 2h"` → urgent, 120 min
+   - `"!! Review notes 45m"` → high, 45 min
+
+**Integration Tests**:
+1. Quick capture button creates task in database
+2. Task appears in dashboard composite query (task bank)
+3. Dashboard cache is invalidated
+4. Error handling for invalid input
+
+**API Endpoint Tests**:
+```bash
+# Valid request
+curl -X POST http://localhost:3001/api/mobile/tasks/quick-capture \
+  -H "Content-Type: application/json" \
+  -H "x-user-id: test-user" \
+  -d '{
+    "title": "Test task",
+    "priority": "high",
+    "estimatedDuration": 60
+  }'
+
+# Missing title (should fail)
+curl -X POST http://localhost:3001/api/mobile/tasks/quick-capture \
+  -H "Content-Type: application/json" \
+  -H "x-user-id: test-user" \
+  -d '{
+    "priority": "high"
+  }'
+
+# Invalid priority (should fail)
+curl -X POST http://localhost:3001/api/mobile/tasks/quick-capture \
+  -H "Content-Type: application/json" \
+  -H "x-user-id: test-user" \
+  -d '{
+    "title": "Test",
+    "priority": "super-urgent"
+  }'
+```
+
+---
+
+### Phase 2: Markdown Preview Testing
+
+**Visual Tests** (manual):
+1. Test bullet lists:
+   ```markdown
+   - First bullet
+   - Second bullet
+     - Nested bullet
+   - Third bullet
+   ```
+   Expected: Bullets visible with proper indentation
+
+2. Test numbered lists:
+   ```markdown
+   1. First item
+   2. Second item
+   3. Third item
+   ```
+   Expected: Numbers visible, proper spacing
+
+3. Test text formatting:
+   ```markdown
+   **Bold text**
+   *Italic text*
+   `inline code`
+   ```
+   Expected: Formatting applied in preview
+
+4. Test headings:
+   ```markdown
+   # Heading 1
+   ## Heading 2
+   ### Heading 3
+   ```
+   Expected: Proper sizing hierarchy
+
+5. Test mixed content:
+   ```markdown
+   # COMM 404 Notes
+
+   ## Key Points
+   - Point 1
+   - Point 2
+
+   **Important**: Remember to submit essay
+   ```
+   Expected: All formatting renders correctly
+
+**Functional Tests**:
+1. Toggle between edit and preview modes
+2. Auto-save still works in edit mode
+3. Preview updates when switching from edit
+4. Theme colors apply correctly (dark/light mode)
+
+**Regression Tests**:
+1. Verify auto-save still works (3s debounce)
+2. Verify class detection still works
+3. Verify sync status indicator still shows
+4. Verify note creation/loading unchanged
+
+---
+
+## Success Criteria
+
+### DORM-403 / DORM-477 (Markdown Rendering)
+- [ ] Bullet lists display with actual bullets in preview mode
+- [ ] Numbered lists show numbers in preview mode
+- [ ] Bold/italic formatting visible in preview
+- [ ] Headings render with proper sizing
+- [ ] Links are clickable in preview mode
+- [ ] Edit mode works exactly as before (no regressions)
+- [ ] Auto-save functionality preserved
+- [ ] Toggle button is intuitive and responsive
+
+### DORM-476 (Quick Capture)
+- [ ] Quick capture button creates tasks successfully
+- [ ] Priority parsing works (`!!!` → urgent, `!!` → high, `!` → medium)
+- [ ] Duration parsing works (`45m` → 45 minutes, `2h` → 120 minutes)
+- [ ] Tasks appear in task bank/dashboard immediately
+- [ ] Error messages show when API fails
+- [ ] Course code association works when selected
+- [ ] Dashboard composite query includes new tasks
+- [ ] Keyboard shortcut (Cmd+Enter) works
+
+---
+
+## Implementation Timeline
+
+| Phase | Task | Hours | Dependencies |
+|-------|------|-------|--------------|
+| 1 | Add `/quick-capture` endpoint to `task-routes.ts` | 2h | None |
+| 1 | Test quick capture with various inputs | 0.5h | Endpoint deployed |
+| 2 | Add markdown preview toggle to `NoteWidget.tsx` | 2h | None |
+| 2 | Add custom styling for markdown components | 0.5h | Preview implemented |
+| 2 | Test markdown rendering (lists, formatting) | 0.5h | Styling complete |
+| 2 | Test edit mode for regressions | 0.5h | All changes complete |
+| **Total** | | **6 hours** | |
+
+---
+
+## Deployment Notes
+
+### Quick Capture Endpoint
+- Backend change only (api-router)
+- Restart api-router service: `make rs s=api`
+- No database migrations required
+- Frontend already implements the hook correctly
+
+### Markdown Preview
+- Frontend change only (dormway-lockedin)
+- No build required (hot reloads automatically)
+- No backend changes
+- No database changes
+
+### Rollback Plan
+- Quick capture: Remove endpoint, users get 404 (same as current state)
+- Markdown preview: Revert component, users back to textarea (current state)
+
+---
+
+## Related Documents
+
+- Product/Features/Note Taking - Overall note-taking feature design
+- Engineering/Architecture/Task Management System - Task persistence architecture
+- [Linear DORM-403](https://linear.app/dormwayllc/issue/DORM-403)
+- [Linear DORM-477](https://linear.app/dormwayllc/issue/DORM-477)
+- [Linear DORM-476](https://linear.app/dormwayllc/issue/DORM-476)
+
+---
+
+## Tags
+
+#bug-fix #markdown #quick-capture #home-dashboard #frontend #backend #api-router #dormway-lockedin #notes #tasks #high-priority #urgent

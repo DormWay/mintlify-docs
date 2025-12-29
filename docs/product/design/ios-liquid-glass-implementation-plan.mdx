@@ -1,0 +1,1011 @@
+---
+title: "iOS Liquid Glass Implementation Plan"
+description: "This document provides a comprehensive roadmap for modernizing ios-clean's glassmorphic design system using Apple's latest material APIs and best practices...."
+---
+
+# iOS Liquid Glass Implementation Plan
+
+---
+
+## Executive Summary
+
+This document provides a comprehensive roadmap for modernizing ios-clean's glassmorphic design system using Apple's latest material APIs and best practices. The implementation leverages the existing robust DWDesign token system while adopting iOS 17/18 capabilities for improved visual fidelity and performance.
+
+### Current State
+- ✅ **26 semantic material configurations** in `DS.Material.*`
+- ✅ **9-tier blur hierarchy** (0-64pt)
+- ✅ **iOS 26 Liquid Glass framework** (future-ready, 287 lines)
+- ✅ **Context-aware adapters** (campus, stress, academic priority)
+- ✅ **Wide adoption** (nav bars, cards, sheets, overlays)
+
+### Modernization Goals
+1. **Adopt iOS 17/18 APIs** for better system integration
+2. **Unify with web design system** (address color/typography gaps)
+3. **Enhance visual depth** with vibrancy layers
+4. **Improve performance** with shader-based effects
+5. **Future-proof** for visionOS and iOS 26+
+
+---
+
+## Part 1: Design System Alignment
+
+### 1.1 Cross-Platform Token Unification
+
+Based on the design system comparison analysis, these gaps need addressing:
+
+| Token Category | Current State | Action Required |
+|----------------|---------------|-----------------|
+| **Primary Color** | iOS: `#8B5CF6`<br>Web: `#6366f1` | **Decision needed**: Align on single purple |
+| **Typography Scale** | iOS: Complete<br>Web: Missing weights/heights | Extend web to match iOS richness |
+| **Spacing Tokens** | Both use 4px grid<br>Different names | Rename for consistency |
+| **Glass Materials** | iOS: 26 materials<br>Web: 5 themes | Document iOS patterns for web adoption |
+
+#### Recommended Actions
+
+**Priority 1: Color Alignment** (Decision Required)
+```swift
+// Option A: Adopt web's purple (#6366f1)
+extension DS.Color.Semantic.Primary {
+    public static let base = Color(hex: "6366f1") // from #8B5CF6
+}
+
+// Option B: Push iOS purple to web
+// Update web tokens: --ds-color-primary: #8b5cf6
+```
+
+**Priority 2: Typography Extension**
+```swift
+// iOS already has complete typography
+// Document for web team to adopt:
+DS.Typography.heading1 // 32pt, weight 700, line height 40pt
+DS.Typography.heading2 // 24pt, weight 600, line height 32pt
+DS.Typography.body     // 16pt, weight 400, line height 24pt
+DS.Typography.caption  // 12pt, weight 400, line height 16pt
+
+// Web needs to add these token dimensions
+```
+
+**Priority 3: Spacing Naming**
+```swift
+// Current iOS naming is clean
+DS.Spacing.xs    // 4pt
+DS.Spacing.small // 8pt
+DS.Spacing.medium // 16pt
+DS.Spacing.large // 24pt
+DS.Spacing.xl    // 32pt
+
+// Web uses: space-1 through space-7
+// Recommend: Adopt iOS semantic naming on web
+```
+
+---
+
+## Part 2: iOS 17/18 Material Modernization
+
+### 2.1 Adopt containerBackground() for Navigation
+
+**Current Pattern:**
+```swift
+// ios-clean/DormWayDS/Sources/DWDesign/Foundations/Generated/DS+Material.swift
+NavigationStack {
+    content
+}
+.background(.ultraThinMaterial)
+```
+
+**Modern Pattern (iOS 17+):**
+```swift
+NavigationStack {
+    content
+}
+.containerBackground(for: .navigation) {
+    // System-optimized glass with automatic depth
+}
+
+// For tab bars
+TabView {
+    tabs
+}
+.containerBackground(for: .tabBar) {
+    // Proper depth hierarchy
+}
+```
+
+**Migration Strategy:**
+1. Create `DS.Material.navigation` semantic token
+2. Update `BottomNavigationBar` to use `containerBackground`
+3. Test depth rendering with content scrolling
+4. Validate dark mode appearance
+
+**Code Location:** `ios-clean/DormWayDS/Sources/DWDesign/Foundations/Generated/DS+Material.swift:26-52`
+
+---
+
+### 2.2 Enhanced Vibrancy Layers
+
+**Current Gap:** Single-layer glass effects lack depth perception
+
+**Modern Approach: Multi-Layer Vibrancy**
+
+```swift
+// New DS extension for layered glass
+extension DS.Material {
+    /// Multi-layer glass with depth
+    public struct LayeredGlass: ViewModifier {
+        let intensity: Double
+        let colorScheme: ColorScheme
+
+        func body(content: Content) -> some View {
+            content
+                .background {
+                    ZStack {
+                        // Layer 1: Base translucent fill
+                        RoundedRectangle(cornerRadius: DS.Radius.medium)
+                            .fill(.ultraThinMaterial)
+
+                        // Layer 2: Vibrancy for text
+                        RoundedRectangle(cornerRadius: DS.Radius.medium)
+                            .fill(.primary.opacity(0.02))
+                            .colorEffect(ShaderLibrary.vibrancy())
+
+                        // Layer 3: Edge luminance
+                        RoundedRectangle(cornerRadius: DS.Radius.medium)
+                            .stroke(
+                                LinearGradient(
+                                    colors: [
+                                        .white.opacity(colorScheme == .dark ? 0.15 : 0.25),
+                                        .clear
+                                    ],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                ),
+                                lineWidth: 1
+                            )
+
+                        // Layer 4: Depth shadow
+                        RoundedRectangle(cornerRadius: DS.Radius.medium)
+                            .fill(.black.opacity(0.05))
+                            .offset(y: 2)
+                            .blur(radius: 4)
+                    }
+                }
+        }
+    }
+
+    public static func layeredGlass(intensity: Double = 1.0) -> some ViewModifier {
+        LayeredGlass(intensity: intensity, colorScheme: .dark)
+    }
+}
+
+// Usage
+Card()
+    .modifier(DS.Material.layeredGlass(intensity: 0.8))
+```
+
+**Implementation Files:**
+- Add to: `ios-clean/DormWayDS/Sources/DWDesign/Foundations/DS+Material.swift`
+- Shader file: `ios-clean/DormWayDS/Sources/DWDesign/Shaders/Vibrancy.metal`
+
+---
+
+### 2.3 Shader-Based Blur Effects
+
+**Current Gap:** Using `.opacity(0)` color hack for blur
+
+**Modern Approach: Metal Shaders (iOS 17+)**
+
+```swift
+// Vibrancy.metal
+#include <metal_stdlib>
+using namespace metal;
+
+stitchable half4 vibrancy(
+    float2 position,
+    half4 color,
+    float intensity
+) {
+    // Pull background colors through
+    half4 background = color;
+    half luminance = dot(background.rgb, half3(0.299, 0.587, 0.114));
+
+    // Enhance vibrancy based on luminance
+    half3 vibrant = mix(
+        background.rgb,
+        half3(luminance),
+        half(1.0 - intensity)
+    );
+
+    return half4(vibrant, background.a);
+}
+
+stitchable half4 opaqueBlur(
+    float2 position,
+    SwiftUI::Layer layer,
+    float radius
+) {
+    // Sample surrounding pixels with Gaussian weights
+    half4 sum = half4(0.0);
+    float totalWeight = 0.0;
+
+    for (float y = -radius; y <= radius; y += 1.0) {
+        for (float x = -radius; x <= radius; x += 1.0) {
+            float2 offset = float2(x, y);
+            float dist = length(offset);
+
+            if (dist <= radius) {
+                float weight = exp(-dist * dist / (2.0 * radius * radius));
+                sum += layer.sample(position + offset) * weight;
+                totalWeight += weight;
+            }
+        }
+    }
+
+    return sum / totalWeight;
+}
+```
+
+**SwiftUI Integration:**
+```swift
+extension DS.Material {
+    /// Opaque blur using Metal shader
+    public static func opaqueBlur(radius: CGFloat = 24) -> some ViewModifier {
+        return AnyViewModifier { content in
+            content
+                .visualEffect { view, proxy in
+                    view.colorEffect(
+                        ShaderLibrary.opaqueBlur(
+                            .float(radius)
+                        )
+                    )
+                }
+        }
+    }
+}
+
+// Usage - replaces current .background(Color.clear.opacity(0))
+DashboardCard()
+    .modifier(DS.Material.opaqueBlur(radius: DS.Blur.large))
+```
+
+**Files to Create:**
+- `ios-clean/DormWayDS/Sources/DWDesign/Shaders/Vibrancy.metal`
+- Update: `ios-clean/DormWayDS/Sources/DWDesign/Foundations/DS+Material.swift`
+
+---
+
+### 2.4 Dynamic Color Scheme Variants
+
+**Current Gap:** Fixed glass colors regardless of mode
+
+**Modern Approach: Dynamic Material Variants**
+
+```swift
+extension DS.Material {
+    /// Material that adapts to color scheme
+    public static func adaptive(
+        lightOpacity: Double = 0.85,
+        darkOpacity: Double = 0.92,
+        blur: CGFloat = 24
+    ) -> some ShapeStyle {
+        return Material.adaptive { colorScheme in
+            switch colorScheme {
+            case .light:
+                return .regularMaterial.opacity(lightOpacity)
+            case .dark:
+                return .ultraThinMaterial.opacity(darkOpacity)
+            @unknown default:
+                return .regularMaterial
+            }
+        }
+    }
+}
+
+// Enhanced academic material with color scheme awareness
+extension DS.Material {
+    public static func academic(scheme: ColorScheme) -> MaterialConfiguration {
+        MaterialConfiguration(
+            blur: DS.Blur.large,
+            opacity: scheme == .dark ? 0.92 : 0.88,
+            tint: scheme == .dark
+                ? Color(hex: "3b82f6").opacity(0.15)  // Stronger in dark
+                : Color(hex: "3b82f6").opacity(0.08), // Subtle in light
+            border: BorderConfiguration(
+                color: scheme == .dark
+                    ? Color.white.opacity(0.12)
+                    : Color.black.opacity(0.08),
+                width: 1
+            ),
+            shadow: DS.Shadow.card
+        )
+    }
+}
+```
+
+**Update Locations:**
+- `ios-clean/DormWayDS/Sources/DWDesign/Foundations/Generated/DS+Material.swift:142-163`
+- All material configurations to add `colorScheme` parameter
+
+---
+
+## Part 3: Component-Level Implementation
+
+### 3.1 Navigation Bar Modernization
+
+**Target File:** `ios-clean/DormWay/Views/Components/BottomNavigationBar.swift`
+
+**Current Implementation:**
+```swift
+// Likely using .background(.ultraThinMaterial)
+```
+
+**Modern Implementation:**
+```swift
+struct BottomNavigationBar: View {
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        HStack(spacing: DS.Spacing.large) {
+            ForEach(tabs) { tab in
+                NavigationTabButton(tab: tab)
+            }
+        }
+        .padding(.horizontal, DS.Spacing.medium)
+        .frame(height: DS.Component.TabBar.height)
+        .containerBackground(for: .tabBar) {
+            // iOS 17+ automatic glass with depth
+            Color.clear
+        }
+        .overlay(alignment: .top) {
+            // Subtle edge luminance
+            Rectangle()
+                .fill(
+                    LinearGradient(
+                        colors: [
+                            .white.opacity(colorScheme == .dark ? 0.08 : 0.12),
+                            .clear
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                )
+                .frame(height: 1)
+        }
+    }
+}
+```
+
+---
+
+### 3.2 Card Component Enhancement
+
+**Target File:** `ios-clean/DormWay/Views/Components/Cards/*.swift`
+
+**Enhanced Glass Card:**
+```swift
+struct GlassCard<Content: View>: View {
+    let content: Content
+    let material: DS.Material.Configuration
+    let pressed: Bool
+
+    @Environment(\.colorScheme) private var colorScheme
+
+    init(
+        material: DS.Material.Configuration = .primary,
+        pressed: Bool = false,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.content = content()
+        self.material = material
+        self.pressed = pressed
+    }
+
+    var body: some View {
+        content
+            .background {
+                RoundedRectangle(cornerRadius: DS.Radius.medium)
+                    .fill(.ultraThinMaterial)
+                    .opacity(pressed ? material.pressedOpacity : material.opacity)
+            }
+            .overlay {
+                // Glass reflection layer
+                RoundedRectangle(cornerRadius: DS.Radius.medium)
+                    .fill(
+                        AngularGradient(
+                            colors: [
+                                .white.opacity(0.3),
+                                .clear,
+                                .white.opacity(0.15),
+                                .clear
+                            ],
+                            center: .topLeading,
+                            angle: .degrees(45)
+                        )
+                    )
+                    .blendMode(.overlay)
+                    .allowsHitTesting(false)
+            }
+            .overlay {
+                // Border with luminance
+                RoundedRectangle(cornerRadius: DS.Radius.medium)
+                    .strokeBorder(
+                        material.border.color,
+                        lineWidth: material.border.width
+                    )
+            }
+            .shadow(
+                color: material.shadow.color,
+                radius: material.shadow.radius,
+                x: material.shadow.x,
+                y: material.shadow.y
+            )
+            .visualEffect { content, geometryProxy in
+                content
+                    .blur(radius: pressed ? 2 : 0)
+                    .scaleEffect(pressed ? 0.98 : 1.0)
+            }
+            .animation(.spring(duration: 0.3), value: pressed)
+    }
+}
+
+// Usage
+GlassCard(material: .primary) {
+    DashboardWidget()
+}
+.onLongPressGesture(minimumDuration: 0, maximumDistance: 50) { pressing in
+    // Handle press state
+} perform: {
+    // Handle tap
+}
+```
+
+---
+
+### 3.3 Modal/Sheet Enhancements
+
+**Target File:** `ios-clean/DormWay/Views/Modals/*.swift`
+
+**Enhanced Glass Modal:**
+```swift
+struct GlassModalView<Content: View>: View {
+    @Binding var isPresented: Bool
+    let content: Content
+
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        ZStack {
+            // Backdrop blur
+            Color.black
+                .opacity(colorScheme == .dark ? 0.6 : 0.4)
+                .ignoresSafeArea()
+                .onTapGesture {
+                    withAnimation(.spring()) {
+                        isPresented = false
+                    }
+                }
+
+            // Glass sheet
+            VStack(spacing: 0) {
+                content
+            }
+            .frame(maxWidth: 400)
+            .padding(DS.Spacing.large)
+            .background {
+                RoundedRectangle(cornerRadius: DS.Radius.large)
+                    .fill(.ultraThinMaterial)
+                    .shadow(
+                        color: .black.opacity(0.3),
+                        radius: 40,
+                        x: 0,
+                        y: 20
+                    )
+            }
+            .overlay {
+                // Premium glow effect (like WidgetGlyphBadge pattern)
+                RoundedRectangle(cornerRadius: DS.Radius.large)
+                    .stroke(
+                        LinearGradient(
+                            colors: [
+                                DS.Color.Semantic.Primary.base.opacity(0.3),
+                                .clear,
+                                DS.Color.Semantic.Primary.base.opacity(0.15)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ),
+                        lineWidth: 1.5
+                    )
+            }
+        }
+        .transition(.asymmetric(
+            insertion: .scale(scale: 0.9).combined(with: .opacity),
+            removal: .scale(scale: 1.1).combined(with: .opacity)
+        ))
+    }
+}
+```
+
+---
+
+## Part 4: iOS 26 Liquid Glass Preparation
+
+### 4.1 Current Foundation Review
+
+**Existing File:** `ios-clean/DormWay/Views/Components/LiquidGlass/LiquidGlassMaterial.swift`
+
+**Current Implementation (287 lines):**
+- ✅ Three glass modes (light, dark, allClear)
+- ✅ Context adapters (campus, stress, academic priority)
+- ✅ Smooth transitions with spring animations
+- ✅ Accessibility support
+
+**Enhancement Opportunities:**
+
+```swift
+// Add depth perception modifier
+extension LiquidGlassMaterial {
+    /// Adds spatial depth based on Z-position
+    func withDepth(z: CGFloat) -> some View {
+        self
+            .modifier(SpatialDepthModifier(zPosition: z))
+    }
+}
+
+struct SpatialDepthModifier: ViewModifier {
+    let zPosition: CGFloat
+
+    @Environment(\.colorScheme) private var colorScheme
+
+    func body(content: Content) -> some View {
+        content
+            .background {
+                // Depth shadow scales with Z
+                RoundedRectangle(cornerRadius: DS.Radius.medium)
+                    .fill(.black.opacity(zPosition * 0.1))
+                    .offset(y: zPosition * 2)
+                    .blur(radius: zPosition * 4)
+            }
+    }
+}
+
+// Usage
+DashboardCard()
+    .liquidGlass(mode: .dark)
+    .withDepth(z: 3) // Floating at level 3
+```
+
+---
+
+### 4.2 visionOS Compatibility Layer
+
+**New File:** `ios-clean/DormWayDS/Sources/DWDesign/Platforms/DS+VisionOS.swift`
+
+```swift
+#if os(visionOS)
+import SwiftUI
+
+extension DS.Material {
+    /// visionOS-optimized glass materials
+    public enum VisionOS {
+        /// Window material for spatial contexts
+        public static var window: some ShapeStyle {
+            .thickMaterial
+                .opacity(0.75)
+        }
+
+        /// Ornament material for floating UI
+        public static var ornament: some ShapeStyle {
+            .regularMaterial
+                .opacity(0.85)
+        }
+
+        /// Volume material for 3D content
+        public static var volume: some ShapeStyle {
+            .ultraThinMaterial
+                .opacity(0.5)
+        }
+    }
+}
+
+// Automatic platform adaptation
+extension View {
+    public func platformAdaptiveGlass() -> some View {
+        #if os(visionOS)
+        self.modifier(DS.Material.VisionOS.window)
+        #else
+        self.background(.ultraThinMaterial)
+        #endif
+    }
+}
+#endif
+```
+
+---
+
+## Part 5: Migration Roadmap
+
+### Phase 1: Foundation (Week 1-2)
+**Goal:** Establish modern material infrastructure
+
+- [ ] **Decision: Resolve primary color** (#8B5CF6 vs #6366f1)
+- [ ] **Create shader files** (`Vibrancy.metal`, `OpaqueBlur.metal`)
+- [ ] **Extend DS.Material** with adaptive variants
+- [ ] **Add layered glass modifiers**
+- [ ] **Update token documentation**
+
+**Deliverables:**
+- Updated `DS+Material.swift` with iOS 17+ APIs
+- Shader library for vibrancy effects
+- Decision document on color alignment
+
+---
+
+### Phase 2: Component Migration (Week 3-4)
+**Goal:** Modernize high-visibility components
+
+- [ ] **Navigation bars** → `containerBackground(for: .tabBar)`
+- [ ] **Cards** → Layered glass with reflection
+- [ ] **Modals/sheets** → Enhanced blur backdrop
+- [ ] **Buttons** → Press state glass effects
+- [ ] **Badges** → Premium glow pattern
+
+**Deliverables:**
+- 5 core components using modern materials
+- Before/after visual comparison
+- Performance benchmarks
+
+---
+
+### Phase 3: Polish & Optimization (Week 5-6)
+**Goal:** Enhance visual fidelity and performance
+
+- [ ] **Add vibrancy layers** to all glass surfaces
+- [ ] **Implement shader-based blur** where applicable
+- [ ] **Optimize render performance** (instrument with Xcode)
+- [ ] **Dark mode refinement** (test all materials)
+- [ ] **Accessibility audit** (reduced transparency mode)
+
+**Deliverables:**
+- Performance report (FPS, GPU usage)
+- Accessibility test results
+- Design system documentation update
+
+---
+
+### Phase 4: Future-Proofing (Week 7-8)
+**Goal:** Prepare for iOS 26+ and visionOS
+
+- [ ] **Enhance LiquidGlassMaterial** with depth modifiers
+- [ ] **Create visionOS compatibility layer**
+- [ ] **Document migration path** for iOS 26 adoption
+- [ ] **Align with web team** on shared patterns
+- [ ] **Create Linear tickets** for cross-platform work
+
+**Deliverables:**
+- visionOS compatibility package
+- iOS 26 adoption guide
+- Cross-platform design token specification
+
+---
+
+## Part 6: Code Examples & Patterns
+
+### 6.1 Material Selection Decision Tree
+
+```
+Need glass effect?
+├─ Navigation/Tab Bar
+│  └─ Use: .containerBackground(for: .tabBar)
+│
+├─ Card/Panel (Primary content)
+│  └─ Use: DS.Material.primary
+│
+├─ Card/Panel (Academic content)
+│  └─ Use: DS.Material.academic(scheme: colorScheme)
+│
+├─ Button (Interactive)
+│  └─ Use: DS.Material.button(state: isPressed ? .pressed : .normal)
+│
+├─ Modal/Sheet
+│  └─ Use: DS.Material.Sheet.base
+│
+├─ Badge/Tag
+│  └─ Use: DS.Material.badge
+│
+├─ Premium/Hero
+│  └─ Use: DS.Material.premium (with glow shadow)
+│
+└─ iOS 26+ Context-Aware
+   └─ Use: LiquidGlassMaterial().stressAdaptive(level: stressLevel)
+```
+
+---
+
+### 6.2 Performance Optimization Checklist
+
+**Blur Optimization:**
+```swift
+// ✅ Good: Reuse material configurations
+let cardMaterial = DS.Material.primary
+CardView().background(cardMaterial)
+CardView().background(cardMaterial) // Reuses
+
+// ❌ Bad: Create new materials repeatedly
+CardView().background(.ultraThinMaterial.opacity(0.92))
+CardView().background(.ultraThinMaterial.opacity(0.92)) // Recreates
+```
+
+**Layer Complexity:**
+```swift
+// ✅ Good: Combine effects efficiently
+ZStack {
+    content
+}
+.background {
+    RoundedRectangle(cornerRadius: 12)
+        .fill(.ultraThinMaterial)
+        .overlay { borderGradient }
+        .shadow(radius: 8)
+}
+
+// ❌ Bad: Too many blur layers
+ZStack {
+    BlurLayer1() // blur
+    BlurLayer2() // blur
+    BlurLayer3() // blur
+    content
+} // 3 blur passes = performance hit
+```
+
+**Shader Caching:**
+```swift
+// ✅ Good: Cache compiled shaders
+static let vibrancyShader = ShaderLibrary.vibrancy()
+
+view.colorEffect(Self.vibrancyShader)
+
+// ❌ Bad: Compile on every render
+view.colorEffect(ShaderLibrary.vibrancy()) // Recompiles
+```
+
+---
+
+### 6.3 Accessibility Patterns
+
+```swift
+@Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+
+var glassMaterial: some ShapeStyle {
+    if reduceTransparency {
+        // Solid color fallback
+        return DS.Color.Surface.primary
+    } else {
+        // Glass effect
+        return DS.Material.primary
+    }
+}
+
+// Usage
+Card()
+    .background(glassMaterial)
+```
+
+**Reduced Motion:**
+```swift
+@Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+var glassTransition: AnyTransition {
+    if reduceMotion {
+        return .opacity // Simple fade
+    } else {
+        return .asymmetric(
+            insertion: .scale.combined(with: .opacity),
+            removal: .opacity
+        )
+    }
+}
+```
+
+---
+
+## Part 7: Testing & Validation
+
+### 7.1 Visual Regression Tests
+
+**Test Scenarios:**
+1. **Light mode vs Dark mode** - All materials render correctly
+2. **Reduced transparency mode** - Fallback to solid colors
+3. **Dynamic Type** - Glass boundaries scale with text
+4. **Landscape/Portrait** - Glass maintains appearance
+5. **iPad vs iPhone** - Material intensity appropriate
+
+**Validation Checklist:**
+- [ ] Screenshot comparisons (before/after migration)
+- [ ] Accessibility audit (VoiceOver, Dynamic Type)
+- [ ] Performance profiling (Xcode Instruments)
+- [ ] Color contrast ratios (WCAG AA compliance)
+- [ ] Dark mode color bleeding (verify borders visible)
+
+---
+
+### 7.2 Performance Benchmarks
+
+**Target Metrics:**
+- **60 FPS** sustained during scrolling with glass cards
+- **< 20ms** frame time for glass material rendering
+- **< 100MB** GPU memory for typical screen with 5-10 glass elements
+- **< 5%** battery drain increase from glass effects
+
+**Profiling Tools:**
+- Xcode Instruments (Graphics template)
+- Metal Frame Debugger
+- Energy Log (background blur impact)
+
+---
+
+## Part 8: Documentation & Handoff
+
+### 8.1 Design System Documentation
+
+**Update Required Files:**
+1. `ios-clean/DormWayDS/README.md` - Material usage guide
+2. `ios-clean/CLAUDE.md` - Reference this implementation plan
+3. Obsidian vault - Add visual examples and decision rationale
+
+**New Documentation:**
+- **Material Selection Guide** - When to use which material
+- **Migration Guide** - Converting old glass patterns to modern APIs
+- **Performance Guide** - Optimization best practices
+- **Accessibility Guide** - Reduced transparency patterns
+
+---
+
+### 8.2 Cross-Platform Alignment
+
+**Share with Web Team:**
+1. **iOS material hierarchy** - For web adoption consideration
+2. **Color decision** - Primary purple alignment (#8B5CF6 or #6366f1)
+3. **Typography tokens** - Full scale with weights/heights
+4. **Spacing naming** - Semantic names vs. numeric scale
+
+**Create Linear Issues:**
+- [ ] `DORM-XXX`: Align primary color across iOS and web
+- [ ] `DORM-XXX`: Extend web typography system to match iOS
+- [ ] `DORM-XXX`: Rename web spacing tokens for consistency
+- [ ] `DORM-XXX`: Document iOS glass patterns for web CSS
+
+---
+
+## Part 9: References & Resources
+
+### 9.1 Codebase References
+
+**Key Files:**
+- `ios-clean/DormWayDS/Sources/DWDesign/Foundations/Generated/DS+Material.swift` (26 materials)
+- `ios-clean/DormWayDS/Sources/DWDesign/Foundations/Generated/DS+Blur.swift` (9 blur levels)
+- `ios-clean/DormWayDS/Sources/DWDesign/Foundations/Generated/DS+Shadow.swift` (5 shadow tiers)
+- `ios-clean/DormWay/Views/Components/LiquidGlass/LiquidGlassMaterial.swift` (iOS 26 framework)
+- `ios-clean/DormWay/Views/Components/WidgetGlyphBadge.swift` (Premium glow pattern)
+
+**Token Locations:**
+- Colors: `DS.Color.Semantic.Primary.*`
+- Spacing: `DS.Spacing.*` (xs → xxl)
+- Typography: `DS.Typography.*` (heading1 → caption)
+- Radius: `DS.Radius.*` (small → large)
+
+---
+
+### 9.2 Related Documentation
+
+**Obsidian Vault:**
+- [DESIGN_SYSTEM_COMPARISON](/docs/product/design/designsystemcomparison) - iOS vs Web alignment analysis
+- [LockedIn-Dark-Theme-Color-Guide](/docs/product/design/lockedin-dark-theme-color-guide) - Web glass theme reference
+- DormWay Design System - iOS token overview
+- ios-clean CLAUDE.md - iOS architecture guide
+
+**External Resources:**
+- [SwiftUI Material Documentation](https://developer.apple.com/documentation/swiftui/material)
+- [Adopting Visual Effects in SwiftUI](https://developer.apple.com/videos/play/wwdc2021/10021/)
+- [Metal Shading Language Guide](https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf)
+
+---
+
+### 9.3 Design System Comparison Summary
+
+From the comprehensive design system analysis:
+
+**What's Aligned:**
+- ✅ Spacing scale (4px grid, 100% alignment)
+- ✅ Status colors (success, error, warning, info)
+- ✅ Semantic token organization
+- ✅ Accessibility consideration
+
+**Critical Gaps:**
+- ❌ Primary color mismatch (iOS `#8B5CF6` vs Web `#6366f1`)
+- ❌ Web typography incomplete (missing weights, line-heights)
+- ❌ Theme variety (iOS 2 themes vs Web 5 themes)
+- ❌ Token architecture divergence (iOS generated vs Web hand-maintained)
+
+**Quick Wins:**
+- Rename web spacing tokens (30 min)
+- Extend web typography system (4 hours)
+- Document naming conventions (1.5 hours)
+- Create component parity matrix (2 hours)
+
+---
+
+## Appendix A: Quick Reference
+
+### Material Quick Lookup
+
+| Use Case | Material Token | Blur | Opacity | Notes |
+|----------|---------------|------|---------|-------|
+| **Nav/Tab Bar** | `.containerBackground()` | System | System | iOS 17+ preferred |
+| **Primary Card** | `DS.Material.primary` | 24pt | 0.92 | General content |
+| **Academic Card** | `DS.Material.academic` | 24pt | 0.92 | Blue tint + border |
+| **Premium Hero** | `DS.Material.premium` | 32pt | 0.95 | Glow shadow |
+| **Button Normal** | `DS.Material.button(.normal)` | 16pt | 0.88 | Interactive |
+| **Button Pressed** | `DS.Material.button(.pressed)` | 16pt | 0.90 | Higher opacity |
+| **Modal/Sheet** | `DS.Material.Sheet.base` | 32pt | 0.98 | Strong separation |
+| **Overlay** | `DS.Material.overlay` | 40pt | 0.85 | Full-screen dimming |
+| **Badge/Tag** | `DS.Material.badge` | 12pt | 0.85 | Small UI elements |
+| **Reduced Transparency** | `DS.Material.Sheet.reducedTransparency` | 0pt | 1.0 | Solid fallback |
+
+---
+
+### Blur Spectrum Reference
+
+```
+DS.Blur.none       →  0pt   (No blur, solid surface)
+DS.Blur.subtle     →  4pt   (Barely perceptible)
+DS.Blur.xs         →  8pt   (Very light blur)
+DS.Blur.small      → 12pt   (Light blur, badges)
+DS.Blur.medium     → 16pt   (Standard blur, buttons)
+DS.Blur.large      → 24pt   (Strong blur, cards)
+DS.Blur.xl         → 32pt   (Very strong, sheets)
+DS.Blur.xxl        → 48pt   (Extreme blur, modals)
+DS.Blur.maximum    → 64pt   (Maximum, overlays)
+```
+
+---
+
+### Shadow Quick Reference
+
+```
+DS.Shadow.none           → No shadow
+DS.Shadow.subtle         → y: 2, blur: 4, opacity: 0.05
+DS.Shadow.card           → y: 4, blur: 8, opacity: 0.10
+DS.Shadow.elevated       → y: 8, blur: 16, opacity: 0.15
+DS.Shadow.modal          → y: 16, blur: 32, opacity: 0.20
+
+DS.Shadow.SpatialDepth.* → Glow effects for premium UI
+  - glowSubtle  → blur: 8, opacity: 0.20 (primary color)
+  - glow        → blur: 16, opacity: 0.30
+  - glowStrong  → blur: 24, opacity: 0.40
+```
+
+---
+
+## Conclusion
+
+This implementation plan provides a comprehensive roadmap for modernizing ios-clean's glassmorphic design system using Apple's latest APIs while addressing cross-platform alignment gaps. The 8-week migration path balances modernization with stability, ensuring the app leverages iOS 17/18 capabilities while preparing for iOS 26+ and visionOS.
+
+**Next Steps:**
+1. Review with design and engineering leads
+2. Make primary color decision (iOS purple vs web purple)
+3. Create Linear tickets for Phase 1 foundation work
+4. Schedule kick-off meeting with iOS and web teams
+
+**Success Criteria:**
+- All materials use iOS 17+ APIs
+- 60 FPS scrolling performance maintained
+- Cross-platform color alignment achieved
+- Documentation complete and accessible
+- Team trained on new patterns
+
+---
+
+**Document Version:** 1.0
+**Last Updated:** November 7, 2025
+**Author:** Claude Code
+**Review Status:** Ready for team review

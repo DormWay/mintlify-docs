@@ -1,0 +1,291 @@
+---
+title: "Canvas ICS Assignments Not Linked to Course Contexts"
+description: "Canvas ICS assignments need to follow the same pattern as these working implementations."
+---
+
+# Canvas ICS Assignments Not Linked to Course Contexts
+
+## Priority
+**Medium** - Affects data visibility on schedule and academic pages
+
+## Summary
+**Canvas ICS sync** is missing course context linkage for assignments, even though this works correctly for:
+- ✅ Canvas assignments synced via **personal access token** (direct Canvas API)
+- ✅ Assignments extracted from **syllabus documents**
+
+Canvas ICS assignments need to follow the same pattern as these working implementations.
+
+## Problem
+
+### Current Behavior (Canvas ICS ONLY)
+1. Canvas ICS sync creates course contexts in the `contexts` table
+2. Assignments are synced to `student_time_blocks` with course codes
+3. **Missing**: Assignments don't have `course_context_id` linking them to the course context
+4. Schedule page and academic page filter by `course_context_id`
+5. Result: Canvas ICS assignments are invisible on these pages
+
+### Working Implementations (for reference)
+1. **Canvas Personal Access Token sync** - Already links assignments to course contexts correctly
+2. **Syllabus-extracted assignments** - Already links to course contexts correctly
+
+### Expected Behavior
+1. Canvas ICS sync creates course contexts
+2. Assignments synced with `course_context_id` properly set
+3. Assignments visible on schedule page filtered by course
+4. Assignments visible on academic page grouped by course
+
+## Impact
+- **Schedule Page**: Students can't see Canvas assignments when filtering by course
+- **Academic Page**: Canvas assignments missing from course overview
+- **Data Integrity**: Assignments exist but are orphaned from their course context
+
+## Technical Details
+
+### Current Canvas ICS Sync Flow
+**File**: `services/engine/src/activities/canvasICS.activities.ts`
+
+1. **Parse ICS feed** → Extract course codes from event titles
+2. **Create course contexts** → Via `parseICSToCanvasFormat()`
+3. **Sync assignments** → Call `syncCanvasAssignments()`
+4. **Store in `student_time_blocks`** → But without `course_context_id`
+
+### What's Missing
+
+When storing assignments in `student_time_blocks`, the `course_context_id` field needs to be populated by:
+1. Looking up the course context by course code
+2. Matching assignment to course context
+3. Setting `metadata.course_context_id` or direct column
+
+### Working Implementation References
+
+**Look at these for the correct pattern:**
+
+1. **Canvas Personal Access Token Sync**: `services/engine/src/activities/canvas.activities.ts`
+   - Shows how to properly link assignments to course contexts
+   - Uses course_context_id from Canvas API response
+   - Pattern to copy for Canvas ICS
+
+2. **Syllabus Assignment Extraction**: `services/engine/src/activities/syllabus.activities.ts`
+   - Shows how to create/lookup course contexts by course code
+   - Links extracted assignments to course contexts
+   - Pattern to copy for Canvas ICS
+
+### Canvas ICS Code Locations (Needs Fixing)
+
+**Canvas ICS Activities**: `services/engine/src/activities/canvasICS.activities.ts`
+- Line 539-658: `parseICSToCanvasFormat()` - Creates course contexts
+- Needs to return course context mappings (course_code → context_id)
+- **Should follow syllabus pattern** for context creation/lookup
+
+**Canvas Activities**: `services/engine/src/activities/canvas.activities.ts`
+- Line 707-888: `syncCanvasAssignments()` - Stores assignments
+- Line 841-854: Creates deadline events but missing course_context_id linkage
+- Needs to accept and use course context mappings
+- **Check how Canvas PAT sync does this** (likely in same file)
+
+**Calendar Normalization**: `services/engine/src/services/calendarNormalization.service.ts`
+- Line 1017-1075: `normalizeCanvasAssignments()`
+- Line 1045: Sets `course_context_id` but may not have the value
+- Needs course context lookup by course code
+
+### Database Schema
+
+**student_time_blocks table** has:
+```sql
+metadata jsonb -- Contains course_context_id
+```
+
+**contexts table**:
+```sql
+id uuid PRIMARY KEY
+type text -- 'course'
+name text -- Course name
+metadata jsonb -- Contains course_code
+parent_id uuid -- Links to student context
+```
+
+## Proposed Solution
+
+**TL;DR**: Copy the pattern from Canvas PAT sync and syllabus extraction - they already do this correctly.
+
+### Step 1: Build Course Context Mapping During Parse
+
+In `parseICSToCanvasFormat()`:
+```typescript
+// After creating courses, build mapping
+const courseContextMap = new Map<string, string>(); // course_code → context_id
+
+for (const course of courses) {
+  const courseCode = course.course_code;
+  const contextId = await findOrCreateCourseContext(userId, courseCode, course);
+  courseContextMap.set(courseCode, contextId);
+}
+
+return {
+  courses,
+  assignmentsByCourse,
+  courseContextMap // NEW: Return this
+};
+```
+
+### Step 2: Pass Mapping to Sync Functions
+
+In Canvas ICS workflow:
+```typescript
+const { courses, assignmentsByCourse, courseContextMap } = await parseICSToCanvasFormat(...);
+
+// Pass mapping down
+await syncCanvasAssignments(canvasAccountId, canvasCourseId, assignments, userId, courseContextMap);
+```
+
+### Step 3: Use Mapping When Creating Assignments
+
+In `syncCanvasAssignments()`:
+```typescript
+export async function syncCanvasAssignments(
+  canvasAccountId: string,
+  canvasCourseId: string | null,
+  assignments: any[],
+  userId: string,
+  courseContextMap?: Map<string, string> // NEW parameter
+) {
+  // ...
+
+  if (assignment.due_at) {
+    const courseCode = assignment.course_code || fallbackCourseCode;
+    const courseContextId = courseContextMap?.get(courseCode); // NEW: Lookup
+
+    deadlineEvents.push({
+      id: assignment.id.toString(),
+      name: assignment.name || 'Canvas Assignment',
+      due_at: assignment.due_at,
+      course_code: courseCode,
+      course_context_id: courseContextId, // NEW: Include context ID
+      // ...
+    });
+  }
+}
+```
+
+### Step 4: Ensure Calendar Normalization Uses It
+
+In `normalizeCanvasAssignments()`:
+```typescript
+// Line 1045 - Ensure this has the value
+course_context_id: courseContext, // Should come from deadlineEvent
+```
+
+## Alternative Solution: Lookup at Normalization Time
+
+If passing context map is too invasive, could lookup during normalization:
+
+```typescript
+// In calendarNormalization.service.ts
+async normalizeCanvasAssignments(assignments, userId, timezone) {
+  for (const assignment of assignments) {
+    const courseCode = assignment.course_code;
+
+    // Lookup course context by code and user
+    const courseContext = await this.findCourseContextByCode(userId, courseCode);
+
+    // Use in normalized event
+    course_context_id: courseContext?.id
+  }
+}
+
+private async findCourseContextByCode(userId: string, courseCode: string): Promise<string | null> {
+  const query = `
+    SELECT c.id
+    FROM contexts c
+    WHERE c.type = 'course'
+      AND c.metadata->>'course_code' = $1
+      AND c.parent_id IN (
+        SELECT id FROM contexts
+        WHERE user_id = $2 AND type = 'student'
+      )
+    LIMIT 1
+  `;
+
+  const result = await pool.query(query, [courseCode, userId]);
+  return result.rows[0]?.id || null;
+}
+```
+
+## Testing Plan
+
+### Test Case 1: New Canvas ICS Sync
+1. User adds Canvas ICS feed
+2. Sync runs and creates course contexts
+3. Assignments synced with course_context_id populated
+4. Verify assignments appear on schedule page when filtering by course
+5. Verify assignments appear on academic page under course
+
+### Test Case 2: Existing User
+1. User already has Canvas ICS synced (old data without context IDs)
+2. Re-run sync or migration script
+3. Backfill course_context_id for existing assignments
+4. Verify old assignments now appear on schedule/academic pages
+
+### Test Case 3: Multiple Courses
+1. User has 3+ courses from Canvas ICS
+2. Each course has multiple assignments
+3. Verify each assignment linked to correct course context
+4. Verify no cross-contamination between courses
+
+## Migration Strategy
+
+For existing users with Canvas ICS assignments:
+
+```sql
+-- Backfill course_context_id for existing assignments
+UPDATE student_time_blocks stb
+SET metadata = jsonb_set(
+  metadata,
+  '{course_context_id}',
+  to_jsonb(c.id::text)
+)
+FROM contexts c
+WHERE stb.source = 'lms'
+  AND stb.metadata->>'course_code' = c.metadata->>'course_code'
+  AND c.type = 'course'
+  AND c.parent_id IN (
+    SELECT id FROM contexts
+    WHERE user_id = stb.user_id AND type = 'student'
+  );
+```
+
+## Related Issues
+- Depends on Canvas ICS course context creation (already implemented)
+- Related to schedule page filtering logic
+- Related to academic page course grouping
+- **Pattern already exists**: Canvas PAT sync and syllabus extraction both do this correctly
+- This is parity work to bring Canvas ICS up to the same standard
+
+## Affected Files
+- `services/engine/src/activities/canvasICS.activities.ts`
+- `services/engine/src/activities/canvas.activities.ts`
+- `services/engine/src/services/calendarNormalization.service.ts`
+- `services/engine/src/workflows/canvasICSSync.workflow.ts`
+
+## Acceptance Criteria
+- [ ] Canvas ICS assignments have `course_context_id` populated (parity with Canvas PAT sync)
+- [ ] Assignments visible on schedule page when filtering by course (parity with syllabus assignments)
+- [ ] Assignments visible on academic page grouped by course (parity with Canvas PAT sync)
+- [ ] Existing Canvas ICS assignments backfilled with course_context_id
+- [ ] No orphaned assignments (all linked to course or marked as unlinked)
+- [ ] Course code mapping is case-insensitive
+- [ ] Works for all supported LMS types (Canvas, Moodle, Blackboard, etc.)
+- [ ] Implementation matches pattern from Canvas PAT sync and syllabus extraction
+
+## Estimated Effort
+**3-4 hours** (reduced because pattern already exists to copy)
+- 1.5 hours: Copy pattern from Canvas PAT/syllabus sync to Canvas ICS
+- 0.5 hours: Write migration script for existing data
+- 1 hour: Test with real Canvas ICS feed
+- 1 hour: Verify on schedule and academic pages (should match existing implementations)
+
+## Tags
+#enhancement #canvas-ics #course-context #schedule-page #academic-page
+
+## Date
+2025-10-31

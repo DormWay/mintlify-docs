@@ -1,0 +1,37 @@
+---
+title: "term view refresh strategy"
+description: "1. When `processSemester` is triggered, collect baseline course data + *delta* fragments since the last run. 2. Feed deltas into the existing prompt payloads..."
+---
+
+# Term View Refresh Strategy
+
+## Why this matters
+- The initial semester run is syllabus-centric; as the quarter unfolds students add schedules, notes, assignments, and reflections that should shape recommendations.
+- Periodic reprocessing keeps Workload Intelligence / Cross-Course insights relevant and calls out gaps that cannot be inferred from the original PDFs.
+
+## Data intake roadmap
+- Capture every student artifact (uploads, custom assignments, time blocks, notes, chat highlights) into a unified "student knowledge" bucket with metadata (`courseContextId`, `term`, `type`, `confidence`, timestamps).
+- Track whether an artifact has already been consumed by a semester run (`appliedInRunId`) so incremental updates are easy.
+
+## Normalization jobs
+- Add lightweight workers/hooks that turn new artifacts into structured fragments: `customAssignments`, `manualScheduleAdjustments`, `riskSignals`, `studyLogs`, etc.
+- Store fragments beside the raw artifact so LLM prompts never need to parse PDFs/text every run.
+
+## Reprocessing flow
+1. When `processSemester` is triggered, collect baseline course data + *delta* fragments since the last run.
+2. Feed deltas into the existing prompt payloads (e.g. custom assignments → workload prompt, manual schedule rows → conflict prompt).
+3. Merge outputs: keep existing items unless superseded, append student-originated insights with badges, log a version delta.
+
+## Cadence & triggers
+- Allow manual refresh plus a scheduled weekly run (overnight) and auto-triggers when major data lands (new syllabus, >N study hours logged).
+- Rate-limit to avoid hammering LLM quotas (e.g. minimum 6 hrs between runs unless forced).
+
+## UI updates
+- Show "Last refreshed" + change summary ("Added 2 custom assignments, updated cross-course synergy").
+- In condensed view, badge student-sourced insights so changes stand out.
+- Surface a "missing data" callout if only PDF-sourced data is available (e.g. "No study logs yet – add one to refine workload predictions").
+
+## Next steps
+- Implement schedule/assignment sanitizers in preprocessing (in flight).
+- Add fragment generators for custom assignments + manual schedule edits.
+- Extend workflow inputs to accept `newArtifactsSince` markers; persist run journal for audits.

@@ -1,0 +1,473 @@
+---
+title: "Context API Endpoints Design"
+description: "Comprehensive REST API for accessing and traversing context data, providing coalesced views of context objects with their service_data, dependencies, and hie..."
+---
+
+# Context API Endpoints Design
+
+## Implementation Status
+**Last Updated:** August 6, 2025  
+**Status:** ✅ IMPLEMENTED (except WebSocket real-time)
+
+## Overview
+
+Comprehensive REST API for accessing and traversing context data, providing coalesced views of context objects with their service_data, dependencies, and hierarchical relationships.
+
+### Base URL
+- Development: `http://localhost:3001/contexts`
+- Production: `https://api.dormway.com/contexts`
+
+### Implementation Summary
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Core CRUD Operations | ✅ Implemented | GET, POST, PATCH, DELETE |
+| Dependency Management | ✅ Implemented | Including complex search |
+| Hierarchy Traversal | ✅ Implemented | Parents, children, recursive |
+| Bulk Operations | ✅ Implemented | Bulk fetch with options |
+| Search | ✅ Implemented | With filters and pagination |
+| Query Parameters | ✅ Implemented | include, depth, fields |
+| Service Data Coalescing | ✅ Implemented | From service_data table |
+| Caching | ⚠️ Partial | Redis foundation exists |
+| WebSocket Real-time | ❌ Not Implemented | Future work |
+| JSON:API Format | ❌ Not Implemented | Returns standard JSON |
+
+## Core Context Endpoint
+
+### GET /contexts/:type/:id
+
+Returns complete context object with all current data coalesced.
+
+**Parameters:**
+- `type`: Context type (city, campus, building, student, etc.)
+- `id`: Context UUID
+
+**Query Parameters:**
+- `include`: Comma-separated list of relations to include
+  - `service_data` - Include latest service_data
+  - `dependencies` - Include dependency contexts
+  - `parents` - Include parent contexts
+  - `children` - Include child contexts
+  - `all` - Include everything
+- `depth`: How many levels deep to traverse (default: 1, max: 3)
+- `fields`: Specific fields to include (sparse fieldsets)
+
+**Example Request:**
+```http
+GET /contexts/student/123e4567-e89b-12d3-a456-426614174000?include=service_data,parents&depth=2
+```
+
+**Example Response:**
+```json
+{
+  "data": {
+    "id": "123e4567-e89b-12d3-a456-426614174000",
+    "type": "student",
+    "attributes": {
+      "name": "John Doe",
+      "email": "jdoe@umich.edu",
+      "status": "active",
+      "created_at": "2025-08-01T10:00:00Z",
+      "updated_at": "2025-08-06T15:30:00Z"
+    },
+    "service_data": {
+      "latest": {
+        "academic": {
+          "gpa": 3.4,
+          "credits": 15,
+          "standing": "good",
+          "updated_at": "2025-08-06T12:00:00Z"
+        },
+        "health": {
+          "steps_today": 8500,
+          "sleep_hours": 7.2,
+          "stress_level": "moderate",
+          "updated_at": "2025-08-06T15:00:00Z"
+        },
+        "location": {
+          "current_building": "shapiro-library",
+          "campus_zone": "central",
+          "last_seen": "2025-08-06T15:28:00Z"
+        }
+      },
+      "aggregated": {
+        "weekly_average_sleep": 6.8,
+        "monthly_gpa_trend": "stable",
+        "campus_engagement_score": 0.75
+      }
+    },
+    "relationships": {
+      "parents": [
+        {
+          "id": "456e7890-a1b2-34c5-d678-901234567890",
+          "type": "building",
+          "name": "South Quad",
+          "attributes": {
+            "capacity": 1200,
+            "current_occupancy": 980
+          }
+        },
+        {
+          "id": "789a1234-b5c6-78d9-e012-345678901234",
+          "type": "campus",
+          "name": "University of Michigan",
+          "attributes": {
+            "total_students": 45000,
+            "semester": "Fall 2025"
+          }
+        }
+      ],
+      "dependencies": [
+        {
+          "id": "234b5678-c9d0-12e3-f456-567890123456",
+          "type": "course",
+          "name": "EECS 281",
+          "dependency_type": "enrolled",
+          "strength": 0.9
+        }
+      ]
+    },
+    "meta": {
+      "completeness": 0.85,
+      "last_sync": "2025-08-06T15:30:00Z",
+      "data_quality": "high",
+      "cache_ttl": 300
+    }
+  }
+}
+```
+
+## Dependency Endpoints
+
+### GET /contexts/:type/:id/dependencies
+
+Get all dependencies for a context.
+
+**Query Parameters:**
+- `dependency_type`: Filter by type (enrolled, assigned, located, etc.)
+- `min_strength`: Minimum dependency strength (0.0-1.0)
+- `include_inactive`: Include inactive dependencies (default: false)
+- `sort`: Sort order (strength, created_at, type)
+- `limit`: Number of results (default: 50)
+- `offset`: Pagination offset
+
+**Example Response:**
+```json
+{
+  "data": [
+    {
+      "id": "dep-001",
+      "source_id": "123e4567-e89b-12d3-a456-426614174000",
+      "target_id": "234b5678-c9d0-12e3-f456-567890123456",
+      "target_type": "course",
+      "dependency_type": "enrolled",
+      "strength": 0.9,
+      "attributes": {
+        "enrollment_date": "2025-08-25",
+        "grade": "A-",
+        "attendance_rate": 0.92
+      },
+      "target_context": {
+        "id": "234b5678-c9d0-12e3-f456-567890123456",
+        "name": "Data Structures",
+        "code": "EECS 281"
+      }
+    }
+  ],
+  "meta": {
+    "total": 15,
+    "offset": 0,
+    "limit": 50
+  }
+}
+```
+
+### POST /contexts/:type/:id/dependencies/search
+
+Search dependencies with complex queries.
+
+**Request Body:**
+```json
+{
+  "filters": {
+    "types": ["course", "building"],
+    "min_strength": 0.5,
+    "attributes": {
+      "grade": { "$gte": "B" }
+    }
+  },
+  "include": ["target_context", "service_data"],
+  "sort": [
+    { "field": "strength", "order": "desc" },
+    { "field": "created_at", "order": "asc" }
+  ]
+}
+```
+
+## Parent/Child Traversal Endpoints
+
+### GET /contexts/:type/:id/parents
+
+Get all parent contexts in the hierarchy.
+
+**Query Parameters:**
+- `recursive`: Traverse all levels up (default: false)
+- `type`: Filter by parent type
+- `include_service_data`: Include service_data for each parent
+
+**Example Response:**
+```json
+{
+  "data": [
+    {
+      "id": "456e7890-a1b2-34c5-d678-901234567890",
+      "type": "building",
+      "name": "South Quad",
+      "level": 1,
+      "relationship": "resident",
+      "parents": [
+        {
+          "id": "789a1234-b5c6-78d9-e012-345678901234",
+          "type": "campus",
+          "name": "University of Michigan",
+          "level": 2
+        }
+      ]
+    }
+  ]
+}
+```
+
+### GET /contexts/:type/:id/children
+
+Get all child contexts.
+
+**Query Parameters:**
+- `type`: Filter by child type
+- `recursive`: Include all descendants
+- `active_only`: Only active children
+- `limit`: Max children per type
+
+## Bulk Operations
+
+### POST /contexts/bulk
+
+Get multiple contexts in one request.
+
+**Request Body:**
+```json
+{
+  "contexts": [
+    { "type": "student", "id": "123e4567-e89b-12d3-a456-426614174000" },
+    { "type": "building", "id": "456e7890-a1b2-34c5-d678-901234567890" }
+  ],
+  "include": ["service_data", "dependencies"]
+}
+```
+
+## Search Endpoints
+
+### POST /contexts/search
+
+Search across all context types.
+
+**Request Body:**
+```json
+{
+  "query": "library study",
+  "types": ["building", "room"],
+  "filters": {
+    "campus_id": "789a1234-b5c6-78d9-e012-345678901234",
+    "attributes": {
+      "capacity": { "$gte": 20 },
+      "available": true
+    }
+  },
+  "location": {
+    "lat": 42.2808,
+    "lng": -83.7430,
+    "radius": 500
+  },
+  "sort": "relevance",
+  "limit": 20
+}
+```
+
+## Real-time Subscriptions
+
+### WebSocket: /contexts/subscribe (NOT IMPLEMENTED)
+
+Subscribe to real-time context updates.
+
+**Connection Message:**
+```json
+{
+  "action": "subscribe",
+  "contexts": [
+    { "type": "student", "id": "123e4567-e89b-12d3-a456-426614174000" }
+  ],
+  "events": ["update", "service_data_change", "dependency_change"]
+}
+```
+
+**Update Message:**
+```json
+{
+  "event": "service_data_change",
+  "context": {
+    "type": "student",
+    "id": "123e4567-e89b-12d3-a456-426614174000"
+  },
+  "changes": {
+    "location": {
+      "previous": "south-quad",
+      "current": "shapiro-library"
+    }
+  },
+  "timestamp": "2025-08-06T16:00:00Z"
+}
+```
+
+## Implementation Details
+
+### Database Queries
+
+```typescript
+// Coalesce context with service_data
+async function getContextWithData(type: string, id: string) {
+  const context = await db.query(`
+    SELECT 
+      c.*,
+      COALESCE(
+        json_agg(
+          json_build_object(
+            'service', sd.service_name,
+            'data', sd.data,
+            'updated_at', sd.updated_at
+          ) ORDER BY sd.updated_at DESC
+        ) FILTER (WHERE sd.id IS NOT NULL),
+        '[]'::json
+      ) as service_data
+    FROM contexts c
+    LEFT JOIN service_data sd ON sd.context_id = c.id
+    WHERE c.type = $1 AND c.id = $2
+    GROUP BY c.id
+  `, [type, id]);
+  
+  return context;
+}
+
+// Get dependencies with target contexts
+async function getContextDependencies(contextId: string) {
+  return await db.query(`
+    SELECT 
+      cd.*,
+      tc.id as target_id,
+      tc.type as target_type,
+      tc.data as target_data
+    FROM context_dependencies cd
+    JOIN contexts tc ON tc.id = cd.target_context_id
+    WHERE cd.source_context_id = $1
+      AND cd.active = true
+    ORDER BY cd.dependency_strength DESC
+  `, [contextId]);
+}
+```
+
+### Caching Strategy
+
+```typescript
+// Redis caching for frequently accessed contexts
+const CACHE_TTL = {
+  student: 300,      // 5 minutes
+  building: 3600,    // 1 hour
+  campus: 86400,     // 1 day
+  city: 604800       // 1 week
+};
+
+async function getCachedContext(type: string, id: string) {
+  const key = `context:${type}:${id}`;
+  const cached = await redis.get(key);
+  
+  if (cached) {
+    return JSON.parse(cached);
+  }
+  
+  const context = await getContextWithData(type, id);
+  await redis.setex(key, CACHE_TTL[type] || 300, JSON.stringify(context));
+  
+  return context;
+}
+```
+
+### API Router Implementation
+
+```typescript
+// Express route handlers
+router.get('/context/:type/:id', async (req, res) => {
+  const { type, id } = req.params;
+  const { include, depth } = req.query;
+  
+  try {
+    // Get base context
+    let context = await getCachedContext(type, id);
+    
+    // Include related data based on query params
+    if (include?.includes('dependencies')) {
+      context.dependencies = await getContextDependencies(id);
+    }
+    
+    if (include?.includes('parents')) {
+      context.parents = await getParentContexts(type, id, depth);
+    }
+    
+    if (include?.includes('children')) {
+      context.children = await getChildContexts(type, id);
+    }
+    
+    // Transform to JSON:API format
+    const response = transformToJsonApi(context);
+    
+    res.json(response);
+  } catch (error) {
+    handleError(res, error);
+  }
+});
+```
+
+## Performance Considerations
+
+1. **Caching**: Multi-layer caching with Redis and CDN
+2. **Query Optimization**: Indexed lookups on type, id, and dependency relationships
+3. **Pagination**: Required for large result sets
+4. **Field Filtering**: Sparse fieldsets to reduce payload size
+5. **Batch Operations**: Bulk endpoints to reduce round trips
+6. **Connection Pooling**: Efficient database connection management
+
+## Security
+
+1. **Authentication**: JWT-based auth required
+2. **Authorization**: Row-level security based on user context
+3. **Rate Limiting**: Per-user and per-endpoint limits
+4. **Data Filtering**: PII removal based on access level
+5. **Audit Logging**: All access logged for compliance
+
+## Testing
+
+A comprehensive test script is available at: `scripts/test-all-context-endpoints.sh`
+
+## Future Enhancements
+
+1. ✅ ~~Implement base context endpoint with coalescing~~ **DONE**
+2. ✅ ~~Add dependency search functionality~~ **DONE**
+3. ✅ ~~Create parent/child traversal logic~~ **DONE**
+4. ⏳ Complete Redis caching layer implementation
+5. ❌ Add WebSocket support for real-time updates
+6. ✅ ~~Create comprehensive test suite~~ **DONE**
+7. ⏳ Document OpenAPI specification
+8. ❌ Add JSON:API response format transformation
+9. ❌ Implement location-based radius search
+
+---
+*Created: August 6, 2025*  
+*Updated: August 6, 2025*  
+*Status: ✅ Implemented and Deployed*

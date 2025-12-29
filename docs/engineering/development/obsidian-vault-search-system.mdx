@@ -1,0 +1,342 @@
+---
+title: "Obsidian Vault Search System"
+description: "DormWay has a powerful local search engine built specifically for this Obsidian vault. It enables fast, intelligent searching of all project documentation, d..."
+---
+
+# Obsidian Vault Search System
+
+#tooling #documentation #search #obsidian
+
+## Overview
+
+DormWay has a powerful local search engine built specifically for this Obsidian vault. It enables fast, intelligent searching of all project documentation, design decisions, and technical notes using BM25 ranking and advanced retrieval techniques.
+
+**Location**: `scripts/obsidian/`
+
+## Quick Start
+
+### Search the Vault
+
+```bash
+# From dormway-platform directory
+cd /path/to/dormway-platform
+
+# Basic search (BM25 scoring)
+npm run obsidian:search -- "your query here"
+
+# Examples
+npm run obsidian:search -- "dashboard design"
+npm run obsidian:search -- "timezone bug"
+npm run obsidian:search -- "student context system"
+```
+
+### Build/Rebuild Index
+
+```bash
+# Build search index (required first time)
+npm run obsidian:index
+
+# Auto-rebuild on vault changes
+npm run obsidian:watch
+```
+
+## Features
+
+### 1. **Smart Search**
+- **BM25 Ranking**: Better than simple keyword matching
+- **Phrase Boosting**: Exact matches get higher scores
+- **Proximity Scoring**: Related terms scored higher
+- **MMR Diversity**: Reduces duplicate results
+
+### 2. **Powerful Filters**
+
+```bash
+# Filter by path
+node scripts/obsidian/retrieve.js --path "Architecture/*" "design pattern"
+
+# Filter by tag
+node scripts/obsidian/retrieve.js --tag "decision" "authentication"
+
+# Filter by date
+node scripts/obsidian/retrieve.js --since "2025-09-01" "recent changes"
+```
+
+### 3. **Multiple Export Formats**
+
+```bash
+# JSON (default)
+npm run obsidian:search -- "query" > results.json
+
+# Markdown summary
+npm run obsidian:search:md -- "query" > results.md
+
+# CSV for analysis
+npm run obsidian:search:csv -- "query" > results.csv
+```
+
+### 4. **VS Code Integration**
+
+**Install extension:**
+```bash
+cd scripts/obsidian/vscode-extension
+npm install && npm run compile
+npx vsce package
+code --install-extension obsidian-search-vscode-0.1.0.vsix
+```
+
+**Use in VS Code:**
+- Press `Cmd+K Cmd+O` (Mac) or `Ctrl+K Ctrl+O` (Windows/Linux)
+- Enter query → Select result → File opens with highlight
+
+### 5. **API Access**
+
+Search programmatically from backend:
+
+```bash
+curl -X POST http://localhost:3001/api/obsidian/search \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "dashboard design",
+    "scoring": "bm25",
+    "k": 10
+  }'
+```
+
+### 6. **Auto-Rebuild Watch Mode**
+
+```bash
+npm run obsidian:watch
+
+# Monitors vault and rebuilds index automatically
+# Detects changes to .md files
+# Ignores temp/hidden files
+```
+
+## Common Use Cases
+
+### Finding Design Decisions
+
+```bash
+npm run obsidian:search -- "why did we choose BFF pattern"
+npm run obsidian:search -- "dashboard architecture decision"
+```
+
+### Locating Bug Discussions
+
+```bash
+npm run obsidian:search -- "timezone bug schedule"
+npm run obsidian:search -- "real-time update issue"
+```
+
+### Architecture Lookups
+
+```bash
+npm run obsidian:search -- "student context system"
+npm run obsidian:search -- "temporal workflow pattern"
+```
+
+### Historical Context
+
+```bash
+node scripts/obsidian/retrieve.js --since "2025-09-01" "authentication"
+node scripts/obsidian/retrieve.js --path "Daily Notes/*" "meeting notes"
+```
+
+## Advanced Features
+
+### Two-Stage Retrieval
+
+1. **Recall Stage**: Get top candidates (default: k × 6)
+2. **Rerank Stage**: Apply phrase/proximity boosts
+3. **MMR Stage** (optional): Ensure diversity
+
+```bash
+node scripts/obsidian/retrieve.js \
+  --scoring bm25 \
+  --recall-k 30 \
+  --mmr \
+  --lambda 0.7 \
+  --k 10 \
+  "complex query"
+```
+
+### Smart Caching
+
+- **First search**: ~400ms
+- **Cached search**: ~50ms (8x faster!)
+- **TTL**: 5 minutes (configurable)
+
+Configure in `scripts/obsidian-tools/config.json`:
+```json
+{
+  "cache": {
+    "enabled": true,
+    "ttlMs": 300000
+  }
+}
+```
+
+## Configuration
+
+**File**: `scripts/obsidian-tools/config.json`
+
+```json
+{
+  "vault": {
+    "path": "obsidian-vault/DormWay",
+    "exportDir": "../.repos/dormway-platform/exported"
+  },
+  "retrieval": {
+    "defaultScoring": "bm25",
+    "defaultK": 10,
+    "defaultRerank": true,
+    "phraseBoost": 2.0,
+    "proximityBoost": 0.3
+  },
+  "cache": {
+    "enabled": true,
+    "ttlMs": 300000
+  }
+}
+```
+
+## Performance
+
+- **Index Size**: 7,140 chunks from 6.8MB vault
+- **Search Speed**: <100ms (p50), <250ms (p95)
+- **Index Build**: ~2-3 seconds
+- **Cache Hit**: ~50ms (8x improvement)
+
+## When to Use
+
+### ✅ Use This When:
+- Starting a new feature (check existing patterns)
+- Debugging (find past bug discussions)
+- Refactoring (review architectural decisions)
+- Code review (verify design adherence)
+- Onboarding (understand historical context)
+
+### Search Strategy:
+```bash
+# Start broad
+npm run obsidian:search -- "dashboard"
+
+# Then narrow down
+npm run obsidian:search -- "dashboard widget system"
+
+# Get specific
+npm run obsidian:search -- "dashboard widget real-time updates"
+```
+
+## Best Practices
+
+### 1. **Search Before Implementing**
+Always search the vault before building new features to avoid reinventing the wheel.
+
+### 2. **Document as You Build**
+- Add design decisions to vault
+- Document "why" not just "what"
+- Use wikilinks to connect concepts
+- Tag architectural decisions with `#decision`
+- Rebuild index: `npm run obsidian:index`
+
+### 3. **Keep Index Fresh**
+
+**Manual rebuild:**
+```bash
+npm run obsidian:index
+```
+
+**Auto-watch (recommended):**
+```bash
+npm run obsidian:watch
+```
+
+## Troubleshooting
+
+### Index Not Found
+```bash
+npm run obsidian:index
+```
+
+### Slow Searches
+Check caching is enabled in `scripts/obsidian-tools/config.json`:
+```json
+{ "cache": { "enabled": true } }
+```
+
+### VS Code Extension Not Working
+1. Check workspace has vault
+2. Verify `scripts/obsidian/retrieve.js` exists
+3. Rebuild index: `npm run obsidian:index`
+
+### Watch Mode Not Detecting Changes
+1. Check vault path in `config.json`
+2. Ensure modifying `.md` files (not temp files)
+3. Watch mode ignores hidden files
+
+## Documentation
+
+### Complete Guides
+- **Quick Start**: `scripts/obsidian/QUICK_START.md`
+- **Full Features**: `scripts/obsidian/IMPROVEMENTS.md`
+- **Technical Docs**: `scripts/obsidian/README.md`
+- **Doc Index**: `scripts/obsidian/DOCS_INDEX.md`
+
+### Main Project
+- **DormWay CLAUDE.md**: `dormway-platform/CLAUDE.md`
+- **Workspace CLAUDE.md**: Root `CLAUDE.md`
+
+## Integration Examples
+
+### From Backend Service
+
+```typescript
+const response = await fetch('http://localhost:3001/api/obsidian/search', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    query: 'authentication flow student context',
+    scoring: 'bm25',
+    k: 10,
+    path: 'Architecture/*'
+  })
+});
+
+const { results } = await response.json();
+// Use for context-aware AI, docs generation, etc.
+```
+
+### From Claude Code
+
+When working with Claude Code, use these search patterns:
+
+```bash
+# Before implementing a feature
+npm run obsidian:search -- "feature name existing implementation"
+
+# When debugging
+npm run obsidian:search -- "error message bug discussion"
+
+# For architecture review
+npm run obsidian:search -- "service name architecture pattern"
+```
+
+## Future Enhancements
+
+Planned improvements:
+- Incremental indexing (track file changes)
+- Semantic search with embeddings
+- Query expansion with synonyms
+- Golden query test suite
+
+---
+
+## Related Notes
+
+- [Current Work Stream](/docs/engineering/development/current-work-stream) - Active development tasks
+- [Temporal Prometheus Setup](/docs/engineering/development/temporal-prometheus-setup) - Infrastructure docs
+
+## Tags
+
+#tooling #documentation #search #obsidian #knowledge-base #retrieval #bm25

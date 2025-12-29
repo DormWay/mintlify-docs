@@ -1,0 +1,27 @@
+---
+title: "Update My Term Follow ups"
+---
+
+# Update My Term: Follow-up Tasks
+
+## 1. Overlay Fold / Compaction Workflow
+- **Objective**: keep raw overlays bounded while leaving the canonical `processed_syllabus_crew` blob immutable. Folding now marks overlays as `status: 'folded'` and updates the per-user snapshot (`processed_syllabus_overlay_applied`).
+- **Automation**:
+  - Schedule the admin orchestrator overlay fold task (Temporal cron or ops cron) hourly with `minAgeMinutes=60`, `limit=250`. The helper lives in `admin/sync-orchestrator.ts` (`getOverlayFoldCandidates` + `triggerOverlayFoldWorkflows`).
+  - Document a runbook step: after reprocessing a syllabus, POST `{ contextId }` to `/admin/syllabus/fold-overlays` to compact historical overlays on demand.
+- **Telemetry**:
+  - Add counters for `overlay.added` and `overlay.folded` (Analytics/EventTracker) to monitor churn and detect stalled jobs.
+
+## 2. API Contract Updates
+- `/api/syllabus/processed/:contextId` returns the canonical row plus `userOverlay` `{ mergedSyllabus, overlays, foldedOverlays, appliedOverlayIds, snapshotId }` when a user session is present.
+- `/api/student/courses` now includes `personalizedSyllabus` and `userOverlay` per course. Clients should prefer `personalizedSyllabus` when rendering assignments/policies.
+- `/api/braingains/documents/update-term` (POST+GET) returns the merged syllabus and overlay metadata alongside the overlay id and classifier echo.
+- **Action**: update the public API schema / internal docs to reflect the new fields so downstream consumers (mobile, analytics) can adopt them.
+
+## 3. File Upload Support for Update My Term
+- **Scope**: allow short PDF/image uploads in the modal, route them through OCR, and classify the resulting text.
+- **Ingress**: enable `multer` uploads (≤5MB), send to BrainGains OCR with `source: 'update-my-term-upload'`, store extracted text in `rawInput.document`.
+- **Classifier**: add filename/mime/snippet context; keep the heuristic fallback if OCR yields nothing.
+- **Frontend**: drag/drop area, spinner while OCR runs, attachment chip in update history.
+- **Security**: ClamAV scan, strip EXIF.
+- **Archival**: when overlays fold, annotate attachments as archived (keep S3 copy for audit, hide in UI).

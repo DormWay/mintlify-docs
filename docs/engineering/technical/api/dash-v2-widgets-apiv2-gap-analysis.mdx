@@ -1,0 +1,625 @@
+---
+title: "Dash v2 Widgets APIv2 Gap Analysis"
+description: "The dash-v2 dashboard uses **14 widgets** that currently fetch data through a **single BFF (Backend-for-Frontend) composite endpoint** (`/dashboard/v1/compos..."
+---
+
+# Dash-v2 Widgets: APIv2 Refactor Analysis
+
+> **Implementation Status:** ✅ All 6 missing endpoints have been implemented and merged as of 2025-12-15.
+>
+> **Linear Issue:** DORM-758 | **PR:** [#654](https://github.com/DormWay/dormway-platform/pull/654)
+
+## Executive Summary
+
+The dash-v2 dashboard uses **14 widgets** that currently fetch data through a **single BFF (Backend-for-Frontend) composite endpoint** (`/dashboard/v1/composite`). While this pattern is efficient for initial load, there are opportunities to leverage APIv2 endpoints for granular data access, detail views, and missing functionality.
+
+---
+
+## Implemented Widget Endpoints (DORM-758)
+
+All 6 previously missing endpoints are now available:
+
+| Endpoint | Widget | Status |
+|----------|--------|--------|
+| `/v2/students/me/tasks` | TasksWidget | **IMPLEMENTED** |
+| `/v2/students/me/attendance` | AttendanceWidget | **IMPLEMENTED** |
+| `/v2/students/me/deadlines` | DeadlinesWidget | **IMPLEMENTED** |
+| `/v2/students/me/policy-highlights` | PolicyHighlightsWidget | **IMPLEMENTED** |
+| `/v2/students/me/study-metrics` | StudyWidget | **IMPLEMENTED** |
+| `/v2/students/me/next-action` | ActionCTAWidget | **IMPLEMENTED** |
+
+---
+
+## Widget Endpoint API Reference
+
+### GET /v2/students/me/tasks
+
+Unified task inbox combining manual tasks, AI suggestions, and syllabus assignments.
+
+**Query Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `status` | enum | `all` | `pending`, `scheduled`, `completed`, `all` |
+| `source` | enum | `all` | `manual`, `canvas`, `ai_suggestion`, `all` |
+| `includeOverdue` | boolean | `false` | Include tasks from last 90 days |
+| `courseCode` | string | - | Filter by course code |
+| `dueBefore` | ISO8601 | - | Upper bound for due date |
+| `dueAfter` | ISO8601 | - | Lower bound for due date |
+| `limit` | int | 50 | Max results (1-100) |
+| `offset` | int | 0 | Pagination offset |
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "items": [
+      {
+        "id": "uuid",
+        "title": "Complete Reading",
+        "dueDate": "2025-12-20T23:59:00Z",
+        "courseCode": "CS101",
+        "priority": "high",
+        "status": "pending",
+        "source": "manual",
+        "estimatedMinutes": 60,
+        "metadata": {}
+      }
+    ],
+    "total": 15,
+    "hasMore": false,
+    "sources": { "manual": 5, "canvas": 8, "ai": 2 }
+  }
+}
+```
+
+**Data Sources:**
+- `tasks` table (manual + ai_suggestion)
+- Syllabus assignments via `processed_syllabus_crew`
+
+---
+
+### GET /v2/students/me/attendance
+
+Per-course absence tracking with risk levels for "Can I Skip?" feature.
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "policies": [
+      {
+        "courseCode": "MATH201",
+        "courseName": "Calculus II",
+        "allowedSkips": 3,
+        "usedSkips": 1,
+        "penalty": "5% per absence after limit",
+        "policyText": "Attendance is mandatory...",
+        "riskLevel": "safe"
+      }
+    ],
+    "totalRemaining": 8,
+    "hasRiskyCourse": false
+  }
+}
+```
+
+**Risk Levels:**
+- `safe`: 2+ absences remaining
+- `warning`: 1 absence remaining
+- `danger`: 0 absences remaining
+
+**Data Source:** Syllabus `attendance_policy` via `processed_syllabus_crew`
+
+---
+
+### GET /v2/students/me/deadlines
+
+Aggregated deadlines from all courses with urgency classification.
+
+**Query Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `startDate` | ISO8601 | today | Start of date range |
+| `endDate` | ISO8601 | +45 days | End of date range |
+| `type` | enum | `all` | `exam`, `assignment`, `project`, `quiz`, `all` |
+| `courseCode` | string | - | Filter by course |
+| `limit` | int | 50 | Max results (1-100) |
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "items": [
+      {
+        "id": "deadline-1",
+        "name": "Midterm Exam",
+        "dueDate": "2025-12-18T14:00:00Z",
+        "courseCode": "CS101",
+        "courseName": "Intro to CS",
+        "type": "exam",
+        "weight": 25,
+        "urgency": "this_week",
+        "source": "syllabus"
+      }
+    ],
+    "total": 12,
+    "hasMore": false,
+    "summary": {
+      "overdue": 0,
+      "dueToday": 1,
+      "dueThisWeek": 3
+    }
+  }
+}
+```
+
+**Urgency Values:**
+- `overdue`: Past due date
+- `today`: Due today
+- `tomorrow`: Due tomorrow
+- `this_week`: Due within 7 days
+- `future`: Due later
+
+**Data Sources:**
+- Syllabus `assignments` array
+- Syllabus `critical_dates` array
+
+---
+
+### GET /v2/students/me/policy-highlights
+
+Critical course policies aggregated across all enrolled courses.
+
+**Query Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `criticality` | enum | `all` | `high`, `medium`, `all` |
+| `category` | enum | `all` | `attendance`, `late_work`, `academic_integrity`, `grading`, `all` |
+| `courseCode` | string | - | Filter by course |
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "policies": [
+      {
+        "id": "policy-1",
+        "summary": "No late submissions accepted",
+        "courseCode": "PHYS201",
+        "courseName": "Physics II",
+        "category": "late_work",
+        "criticality": "high",
+        "consequences": "Zero grade for late work",
+        "actionRequired": "Submit all work before deadline"
+      }
+    ],
+    "totalCount": 8,
+    "highCriticalityCount": 3
+  }
+}
+```
+
+**Categories:**
+- `attendance`: Attendance policies
+- `late_work`: Late submission policies
+- `academic_integrity`: Plagiarism, cheating policies
+- `grading`: Grade calculation, curves
+- `other`: Miscellaneous policies
+
+**Data Sources:**
+- Syllabus `policies` array
+- Syllabus `gotchas` array (always high criticality)
+
+---
+
+### GET /v2/students/me/study-metrics
+
+Pre-computed study analytics from time blocks.
+
+**Query Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `period` | enum | `week` | `day`, `week`, `month`, `semester` |
+| `startDate` | ISO8601 | - | Custom start (overrides period) |
+| `endDate` | ISO8601 | - | Custom end (overrides period) |
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "period": {
+      "start": "2025-12-08T00:00:00Z",
+      "end": "2025-12-15T00:00:00Z"
+    },
+    "totalMinutes": 420,
+    "byDay": [
+      { "date": "2025-12-08", "minutes": 60, "sessions": 2 },
+      { "date": "2025-12-09", "minutes": 90, "sessions": 1 }
+    ],
+    "byCourse": [
+      { "courseCode": "CS101", "courseName": "Intro to CS", "minutes": 180, "sessions": 4, "percentage": 43 }
+    ],
+    "averageSessionLength": 42,
+    "longestStreak": 5,
+    "peakHours": [14, 20, 21]
+  }
+}
+```
+
+**Data Source:** `student_time_blocks` table where:
+- `type IN ('assignment', 'assessment')`
+- `category IN ('academic', 'assignment', 'assessment')`
+- `label ILIKE '%study%' OR label ILIKE '%homework%'`
+
+---
+
+### GET /v2/students/me/next-action
+
+AI-suggested next action based on context.
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "nextAction": {
+      "id": "action-1",
+      "title": "Head to Physics Lab",
+      "subtitle": "Lab starts in 25 minutes",
+      "actionTime": "2025-12-15T14:00:00Z",
+      "timeUntil": "25 minutes",
+      "type": "class",
+      "urgencyLevel": "urgent",
+      "action": {
+        "type": "navigate",
+        "target": "building:science-hall"
+      }
+    },
+    "generatedAt": "2025-12-15T13:35:00Z",
+    "context": {
+      "timeOfDay": "afternoon",
+      "currentLocation": "library",
+      "upcomingEvent": "PHYS201 Lab"
+    }
+  }
+}
+```
+
+**Action Types:** `class`, `assignment`, `study`, `break`, `meal`
+**Urgency Levels:** `critical`, `urgent`, `normal`
+
+**Data Source:** `StudentFactory.getIntelligence()` daily intelligence
+
+---
+
+## Current Architecture
+
+### Data Fetching Pattern
+```
+Dashboard Page
+    ↓
+useDashboardComposite() hook
+    ↓
+/dashboard/v1/composite (single request)
+    ↓
+All 14 widgets receive data via content prop
+    ↓
+Ably real-time signals → React Query invalidation
+```
+
+**Key characteristics:**
+- Single composite API call fetches ALL widget data
+- ETag caching reduces bandwidth
+- Real-time invalidation via Ably signals
+- NO individual widget-level API calls
+
+---
+
+## Widget-by-Widget Analysis
+
+### 1. CoursesWidget - APIv2 READY
+**Current:** `content?.data?.courses[]` from composite
+**APIv2 available:**
+- `/v2/students/me/courses` - course list
+- `/v2/courses/:id/assignments` - per-course assignments
+- `/v2/courses/:id/workload` - per-course workload
+
+**Recommendation:** Use APIv2 for course detail drill-down
+
+---
+
+### 2. ScheduleWidget - APIv2 READY
+**Current:** `content?.data?.timeline[]` from composite
+**APIv2 available:**
+- `/v2/students/me/time-blocks` - with date filtering
+- `/v2/students/me/time-blocks/sources` - filter by source
+
+**Recommendation:** Use APIv2 for time block management (CRUD)
+
+---
+
+### 3. DayPlanWidget - APIv2 READY
+**Current:** `content?.data` with timeline events
+**APIv2 available:**
+- `/v2/students/me/dayplan` - dedicated day plan endpoint
+
+**Recommendation:** Use APIv2 for standalone day plan refresh
+
+---
+
+### 4. TasksWidget - **IMPLEMENTED**
+**Current:** Combines `content?.data?.dueSoon[]` + `content?.data?.unscheduledTasks[]`
+**APIv2 available:**
+- `/v2/students/me/tasks` - unified task inbox
+
+**Features:**
+- Combines manual tasks + AI suggestions + syllabus assignments
+- Filter by status, source, course, date range
+- `includeOverdue=true` to show past-due items
+
+---
+
+### 5. AcademicWidget - APIv2 READY
+**Current:** `content?.data?.academic?.workload[]`
+**APIv2 available:**
+- `/v2/students/me/current-term/workload`
+- `/v2/students/me/current-term/analysis`
+
+**Recommendation:** Use APIv2 for detailed workload analysis
+
+---
+
+### 6. AttendanceWidget - **IMPLEMENTED**
+**Current:** Derives from syllabus data for "Can I Skip?" feature
+**APIv2 available:**
+- `/v2/students/me/attendance` - per-course absence tracking
+
+**Features:**
+- Remaining absences calculation
+- Risk level classification (safe/warning/danger)
+- Linked to syllabus attendance policies
+
+---
+
+### 7. SyllabusWidget - APIv2 READY
+**Current:** `content?.data?.syllabus` from composite
+**APIv2 available:**
+- `/v2/syllabi/:id?full=true` - full syllabus data
+- `/v2/courses/:id/syllabus` - per-course syllabus
+- `/v2/syllabi/:id/assignments` - extracted assignments
+- `/v2/syllabi/:id/policies` - extracted policies
+
+**Recommendation:** Use APIv2 for syllabus detail views
+
+---
+
+### 8. DeadlinesWidget - **IMPLEMENTED**
+**Current:** Aggregated from syllabi analysis
+**APIv2 available:**
+- `/v2/students/me/deadlines` - aggregated view
+
+**Features:**
+- All deadlines across all courses
+- Urgency classification
+- Filter by type (exam, assignment, project, quiz)
+- Summary counts (overdue, today, this week)
+
+---
+
+### 9. WorkloadWidget - APIv2 READY
+**Current:** Weekly intensity from composite
+**APIv2 available:**
+- `/v2/students/me/current-term/workload`
+- `/v2/students/me/current-term/trends`
+
+**Recommendation:** Direct APIv2 usage possible
+
+---
+
+### 10. PolicyHighlightsWidget - **IMPLEMENTED**
+**Current:** Critical policies from composite
+**APIv2 available:**
+- `/v2/students/me/policy-highlights` - aggregated view
+
+**Features:**
+- Critical policies across all courses
+- Filter by criticality and category
+- Includes syllabus "gotchas" as high-criticality
+
+---
+
+### 11. ContextStatusWidget - APIv2 READY
+**Current:** Location context from composite
+**APIv2 available:**
+- `/v2/students/me/context`
+- `/v2/students/me/context/prediction`
+
+**Recommendation:** Direct APIv2 usage possible
+
+---
+
+### 12. ActionCTAWidget - **IMPLEMENTED**
+**Current:** AI-suggested next action
+**APIv2 available:**
+- `/v2/students/me/next-action` - contextual action suggestions
+
+**Features:**
+- Single prioritized action with reasoning
+- Context-aware (time, location, upcoming events)
+- Action types: class, assignment, study, break, meal
+
+---
+
+### 13. QuickLinksWidget - APIv2 READY
+**Current:** Campus shortcuts from composite
+**APIv2 available:**
+- `/v2/campuses/:id` - campus info
+- `/v2/campuses/:id/logistics`
+
+**Recommendation:** Continue using composite (static data)
+
+---
+
+### 14. StudyWidget - **IMPLEMENTED**
+**Current:** Computed locally from time blocks
+**APIv2 available:**
+- `/v2/students/me/study-metrics` - pre-computed analytics
+
+**Features:**
+- Total study time by period
+- Breakdown by day and course
+- Streak tracking
+- Peak study hours
+
+---
+
+## Recommended Architecture: Hybrid Approach
+
+**Keep composite BFF as primary**, use APIv2 for:
+- Widget detail views (user clicks for more info)
+- Individual widget refresh buttons
+- Background data sync for specific widgets
+- CRUD operations (time blocks, tasks)
+
+**Benefits:**
+- Efficient initial load (single request)
+- Granular operations via APIv2
+- No architectural disruption
+
+---
+
+## Key File Locations
+
+### Dash-v2 Widgets
+```
+.repos/dormway-platform/services/dormway-lockedin/src/app/dashboard/home-v2/
+├── page.tsx                     # Main page, calls useDashboardComposite
+├── widgets/
+│   ├── registry.ts              # Widget metadata registry
+│   ├── CoursesWidget.tsx
+│   ├── ScheduleWidget.tsx
+│   ├── DayPlanWidget.tsx
+│   ├── TasksWidget.tsx
+│   ├── AcademicWidget.tsx
+│   ├── AttendanceWidget.tsx
+│   ├── SyllabusWidget.tsx
+│   ├── DeadlinesWidget.tsx
+│   ├── WorkloadWidget.tsx
+│   ├── PolicyHighlightsWidget.tsx
+│   ├── ContextStatusWidget.tsx
+│   ├── ActionCTAWidget.tsx
+│   ├── QuickLinksWidget.tsx
+│   └── StudyWidget.tsx
+```
+
+### APIv2 Routes
+```
+.repos/dormway-platform/services/api-router/src/routes/v2/
+├── students.routes.ts    # /v2/students/me/* (includes widget endpoints)
+├── courses.routes.ts     # /v2/courses/*
+├── syllabi.routes.ts     # /v2/syllabi/*
+├── terms.routes.ts       # /v2/terms/*
+├── campuses.routes.ts    # /v2/campuses/*
+└── cities.routes.ts      # /v2/cities/*
+```
+
+### Widget Data Service
+```
+.repos/dormway-platform/services/api-router/src/services/
+└── widget-data-service.ts    # Shared extraction logic for widget endpoints
+```
+
+### Data Fetching Infrastructure
+```
+.repos/dormway-platform/services/dormway-lockedin/src/
+├── hooks/home/useDashboardComposite.ts   # Main composite hook
+├── lib/authorizedFetch.ts                # Fetch wrapper with auth
+├── lib/queryClient.ts                    # React Query setup
+└── hooks/useRealtimeInvalidation.ts      # Ably signal handling
+```
+
+---
+
+## Implementation Notes
+
+### Syllabus Data Handling
+
+**180-Day Freshness Window:**
+Syllabus data is filtered to include records from the last 180 days (vs original 30 days) to ensure full semester coverage. Syllabus uploads typically happen at semester start.
+
+```sql
+-- In widget-data-service.ts
+LEFT JOIN service_data sd ON sd.context_id = c.id
+  AND sd.method = 'processed_syllabus_crew'
+  AND sd.fetched_at > NOW() - INTERVAL '180 days'
+```
+
+**Dual-Format Policy Handling:**
+Syllabus policies come in two formats depending on processing version:
+
+```typescript
+// Array format (newer syllabi)
+[{ summary: "...", category: "late_work", criticality: "high" }]
+
+// Object format (older syllabi)
+{ attendance: "...", lateWork: "...", other: ["..."] }
+```
+
+The `extractPolicyHighlights()` method handles both formats automatically.
+
+### WidgetDataService Architecture
+
+Located at `services/api-router/src/services/widget-data-service.ts`, this service provides:
+
+- `getCoursesWithSyllabus()` - Joins courses with processed syllabus data
+- `extractTasks()` - Aggregates tasks from multiple sources
+- `extractAttendancePolicies()` - Parses attendance rules from syllabi
+- `extractDeadlines()` - Combines assignments and critical dates
+- `extractPolicyHighlights()` - Handles dual-format policy extraction
+- `calculateStudyMetrics()` - Aggregates time block analytics
+- `getNextAction()` - Retrieves contextual action suggestion
+
+### Verified Test Results (admin@dormway.app)
+
+```json
+tasks: { total: 36 }
+attendance: { policies: 0 }
+deadlines: { total: 129, overdue: 129 }
+policy-highlights: { totalCount: 61, highCriticalityCount: 9 }
+study-metrics: { totalMinutes: 1140 }
+next-action: { context: { timeOfDay: "evening" } }
+```
+
+---
+
+## Next Steps
+
+The following tasks remain to fully integrate these endpoints into the LockedIn frontend:
+
+- [ ] **Add React Query hooks** in dormway-lockedin for new endpoints
+  - Create `useStudentTasks()`, `useStudentDeadlines()`, etc.
+  - Follow existing hook patterns in `src/hooks/`
+- [ ] **Update widgets to use APIv2 for detail views**
+  - Add "View All" functionality using new endpoints
+  - Enable individual widget refresh without full composite reload
+- [ ] **Add tests for new endpoints**
+  - Integration tests in api-router
+  - Hook tests in dormway-lockedin
+
+---
+
+## Related Documents
+
+- [Dashboard BFF Widget System - Complete Guide](/docs/engineering/technical/dashboard-bff-widget-system-complete-guide)
+- [APIv2 Design Principles](/docs/engineering/architecture/api-v2-design-resource-oriented-rest#design-principles)
+- [Time Blocks API](/docs/engineering/technical/api/time-blocks-api)
+- DORM-758

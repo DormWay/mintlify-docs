@@ -1,0 +1,44 @@
+---
+title: "Clerk Webhooks Auth"
+description: "Auth0 is deprecated, so API Router + engine now depend on Clerk webhooks to provision identities and wire JWT claims that downstream middleware (`authMiddlew..."
+---
+
+# Clerk Webhook Auth Flow Investigation
+
+## Why
+Auth0 is deprecated, so API Router + engine now depend on Clerk webhooks to provision identities and wire JWT claims that downstream middleware (`authMiddleware`) expects. This note documents how the webhook authenticates requests, maps Clerk users onto `accounts`, and keeps metadata in sync for runtime auth.
+
+## Webhook Verification
+- Endpoint lives at `/api/webhooks/clerk` (mounted in `services/api-router/src/routes/index.ts:61`).
+- Each POST must include the Svix headers `svix-id`, `svix-timestamp`, `svix-signature`; the handler builds a `Webhook` verifier with `CLERK_WEBHOOK_SECRET` and calls `verify(JSON.stringify(req.body), headers)` before touching payloads (`services/api-router/src/routes/webhooks/clerk-routes.ts:154-204`).
+- Missing secret or signature mismatch short-circuits with `500/400`, so only Clerk-originated events proceed.
+
+## user.created Handling
+1. Extracts core profile fields from the event (`id`, `email_addresses`, name, avatar) and ensures the primary email exists + notes whether Clerk already verified it (`services/api-router/src/routes/webhooks/clerk-routes.ts:205-232`).
+2. Generates a backend UUID via `SELECT gen_random_uuid()` and inserts/updates the `accounts` row keyed by `clerk_id`. Insert populates both personal data and public metadata (first/last names) plus default onboarding status and `primary_owner_user_id = id` (`services/api-router/src/routes/webhooks/clerk-routes.ts:238-282`).
+3. After persistence, it fetches the freshly created Clerk profile via `clerkClient.users.getUser(id)` and writes the backend UUID into both `publicMetadata.backend_user_id` and `privateMetadata.backend_user_id`, along with the user’s DormWay role. Any role supplied in Clerk metadata wins; otherwise defaults to `'authenticated'` (`services/api-router/src/routes/webhooks/clerk-routes.ts:266-312`).
+4. The webhook runs `autoAssignCampusAndOverride(backendUserId)` to pre-populate campus contexts and schedule overrides when heuristics find a match (`services/api-router/src/routes/webhooks/clerk-routes.ts:262-264`).
+5. Finally, it starts the `studentWatcherWorkflow` Temporal workflow, seeding notification prefs and timezone defaults so DayPlan + context processing can begin immediately (`services/api-router/src/routes/webhooks/clerk-routes.ts:315-355`). Failures there are logged but do not fail the webhook so the account still exists.
+
+## user.updated Handling
+- On profile updates, the handler re-fetches the Clerk user to capture any role changes stored in Clerk metadata (`services/api-router/src/routes/webhooks/clerk-routes.ts:363-369`).
+- It updates the `accounts` row (email/name/avatar, `public_data.firstName/lastName`, optional metadata.role) and logs the backend UUID that changed. Missing accounts return 404 so we can detect drift between Clerk + Aurora (`services/api-router/src/routes/webhooks/clerk-routes.ts:370-414`).
+
+## Runtime Auth Integration
+- `authMiddleware` first tries shared service tokens and Temporal/device headers; if those fail it treats `Authorization: Bearer <token>` as a Clerk session JWT and calls `clerkClient.verifyToken(token)` (`services/api-router/src/middleware/auth.ts:87-115`).
+- Webhook-provided metadata is critical: after verification, the middleware reads `payload.backend_user_id` (populated when the webhook updated Clerk metadata) and uses it as the canonical `req.user.id`. If the metadata is missing it falls back to `payload.sub` (Clerk ID), so maintaining that metadata linkage keeps API Router aligned with Aurora IDs.
+- When the Clerk token check fails, we still support legacy headers (API Gateway `X-User-*`) and lastly the old Supabase JWT path, but the goal is to fully rely on Clerk once clients migrate (`services/api-router/src/middleware/auth.ts:117-177`).
+
+## Related Clients
+- `services/dormway-lockedin/src/lib/proxy-auth.ts` retrieves Clerk session tokens in Next.js, ensures they’re real JWTs, and forwards them as `Authorization` headers to Zuplo/API Router. This flow relies on the webhook having stamped `backend_user_id` so engines can act on backend UUIDs without extra lookups.
+- `services/dormway-lockedin/src/lib/backendUser.ts` falls back to Clerk metadata (`publicMetadata.backend_user_id` or `unsafeMetadata.backend_user_id`) when a backend ID is needed client-side.
+
+## Gaps / Questions
+1. **Metadata consistency** – if webhook retries fail after Aurora insert but before `clerkClient.users.updateUserMetadata`, Clerk may hand out JWTs without `backend_user_id`. We should either retry metadata updates or detect missing IDs in the middleware and trigger a sync.
+2. **Role synchronization** – role is sourced from Clerk public metadata on both create + update. Admin tooling should treat Clerk as the source of truth; otherwise `metadata.role` in Aurora might drift if someone edits `accounts.metadata` directly.
+3. **Campus auto-assignment telemetry** – webhook logs the outcome from `autoAssignCampusAndOverride` but doesn’t surface failures externally. We may want to store the enrichment result in `service_data` for observability.
+
+## Next Steps
+- Add a health check that queries Clerk for users missing `backend_user_id` metadata and resyncs them automatically.
+- Consider wrapping the metadata update + StudentWatcher start in a small task queue so transient Clerk/Temporal errors don’t drop events.
+- Once all clients are on Clerk JWTs, remove the Supabase JWT fallback to reduce auth code paths.

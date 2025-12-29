@@ -1,0 +1,478 @@
+---
+title: "Canvas iOS Integration Guide"
+description: "┌─────────────────────────────────────────────────────────────┐ │                    iOS App                                  │ │  (DormWayFresh)..."
+---
+
+# Canvas iOS Integration Guide
+
+**Platform**: iOS (SwiftUI)  
+**Status**: ⏳ **PARTIAL IMPLEMENTATION**  
+**Last Updated**: 2025-10-03  
+
+---
+
+## 🎯 **Current Implementation Status**
+
+### **✅ What's Implemented**
+- **Basic Canvas Calendar Integration** - ICS feed URL input
+- **Canvas Integration View** - Settings UI for Canvas connection
+- **ICS Calendar Service** - Canvas calendar feed processing
+
+### **❌ What's Missing**
+- **Canvas API Integration** - No direct Canvas API calls
+- **Canvas Widgets** - No Canvas-specific widgets in widget system
+- **Canvas Authentication** - No OAuth2 flow in iOS
+- **Canvas Data Models** - No Canvas-specific data structures
+
+---
+
+## 🏗️ **Current Architecture**
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    iOS App                                  │
+│  (DormWayFresh)                                             │
+└─────────────────┬───────────────────────────┬───────────────┘
+                  │                           │
+         ICS Feed URL                    Canvas API
+                  │                           │
+                  ▼                           ▼
+┌─────────────────────────────────────────────────────────────┐
+│              DormWay Backend                                │
+│  (Canvas Sync Service + API Router)                         │
+└─────────────────┬───────────────────────────┬───────────────┘
+                  │                           │
+            ICS Processing              Canvas API Calls
+                  │                           │
+                  ▼                           ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    Canvas LMS                               │
+│  (Calendar Feed + REST API)                                 │
+└─────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 📱 **Current iOS Implementation**
+
+### **Canvas Integration View**
+```swift
+// ios-clean/App/Views/Integrations/CanvasIntegrationView.swift
+struct CanvasIntegrationView: View {
+    @State private var canvasURL = ""
+    @State private var isProcessing = false
+    
+    var body: some View {
+        NavigationView {
+            ScrollView {
+                VStack(spacing: DormWayDesignSystem.Spacing.lg) {
+                    instructionSection
+                    urlInputSection
+                    helpSection
+                    connectButton
+                }
+            }
+            .navigationTitle("Canvas Calendar")
+        }
+    }
+    
+    private func connectCanvas() {
+        guard let icsService = icsService else { return }
+        
+        Task {
+            do {
+                try await icsService.submitCanvasURL(canvasURL)
+                await MainActor.run {
+                    dismiss()
+                }
+            } catch {
+                // Handle error
+            }
+        }
+    }
+}
+```
+
+### **ICS Calendar Service**
+```swift
+// ios-clean/Packages/DWServices/Sources/DWServices/ICSCalendarService.swift
+@MainActor
+@Observable
+public final class ICSCalendarService {
+    public func submitCanvasURL(_ url: String) async throws {
+        // Validate URL format
+        guard url.hasPrefix("https://") && url.contains("canvas") else {
+            throw NSError(domain: "ICSCalendarService", code: -1, 
+                         userInfo: [NSLocalizedDescriptionKey: "Please enter a valid Canvas calendar URL"])
+        }
+        
+        // Submit to backend for processing
+        let endpoint = "/v1/mobile/calendar/canvas-url"
+        let body = ["url": url]
+        
+        let _: EmptyResponse = try await networkService.request(
+            endpoint: endpoint,
+            method: "POST",
+            body: body,
+            authType: .jwt
+        )
+    }
+}
+```
+
+---
+
+## 🚀 **Required Implementation**
+
+### **1. Canvas Service Protocol**
+```swift
+// ios-clean/Packages/DWServices/Sources/DWServices/CanvasService.swift
+@MainActor
+@Observable
+public final class CanvasService {
+    private let networkService: NetworkService
+    
+    public init(networkService: NetworkService) {
+        self.networkService = networkService
+    }
+    
+    // MARK: - OAuth2 Flow
+    public func initiateOAuth() async throws -> URL {
+        let endpoint = "/api/canvas/oauth/authorize"
+        let response: CanvasAuthResponse = try await networkService.request(
+            endpoint: endpoint,
+            method: "GET",
+            authType: .jwt
+        )
+        return response.authURL
+    }
+    
+    public func completeOAuth(code: String) async throws {
+        let endpoint = "/api/canvas/oauth/callback"
+        let body = ["code": code]
+        
+        let _: EmptyResponse = try await networkService.request(
+            endpoint: endpoint,
+            method: "POST",
+            body: body,
+            authType: .jwt
+        )
+    }
+    
+    // MARK: - Data Fetching
+    public func getCourses() async throws -> [CanvasCourse] {
+        let endpoint = "/api/canvas/courses"
+        let response: CanvasCoursesResponse = try await networkService.request(
+            endpoint: endpoint,
+            method: "GET",
+            authType: .jwt
+        )
+        return response.courses
+    }
+    
+    public func getUpcomingAssignments() async throws -> [CanvasAssignment] {
+        let endpoint = "/api/canvas/assignments/upcoming"
+        let response: CanvasAssignmentsResponse = try await networkService.request(
+            endpoint: endpoint,
+            method: "GET",
+            authType: .jwt
+        )
+        return response.assignments
+    }
+    
+    public func getRecentGrades() async throws -> [CanvasGrade] {
+        let endpoint = "/api/canvas/grades/recent"
+        let response: CanvasGradesResponse = try await networkService.request(
+            endpoint: endpoint,
+            method: "GET",
+            authType: .jwt
+        )
+        return response.grades
+    }
+}
+```
+
+### **2. Canvas Data Models**
+```swift
+// ios-clean/Packages/DWServices/Sources/DWServices/CanvasModels.swift
+public struct CanvasCourse: Codable, Identifiable {
+    public let id: String
+    public let name: String
+    public let courseCode: String
+    public let startDate: Date?
+    public let endDate: Date?
+    public let workflowState: String
+    public let totalPoints: Double?
+    public let currentGrade: String?
+}
+
+public struct CanvasAssignment: Codable, Identifiable {
+    public let id: String
+    public let name: String
+    public let description: String?
+    public let dueAt: Date?
+    public let pointsPossible: Double?
+    public let submissionTypes: [String]
+    public let courseId: String
+    public let courseName: String
+    public let isSubmitted: Bool
+    public let isGraded: Bool
+    public let grade: String?
+    public let score: Double?
+}
+
+public struct CanvasGrade: Codable, Identifiable {
+    public let id: String
+    public let assignmentName: String
+    public let courseName: String
+    public let grade: String
+    public let score: Double?
+    public let pointsPossible: Double?
+    public let gradedAt: Date
+    public let performance: GradePerformance
+}
+
+public enum GradePerformance: String, Codable {
+    case above = "above"
+    case at = "at"
+    case below = "below"
+}
+```
+
+### **3. Canvas Widgets**
+
+#### **Upcoming Assignments Widget**
+```swift
+// ios-clean/Packages/DWWidgets/Sources/DWWidgets/Widgets/CanvasUpcomingAssignmentsWidget.swift
+public struct CanvasUpcomingAssignmentsWidget: ComposableWidget {
+    public static let definition = WidgetDefinition(
+        metadata: WidgetMetadata(
+            id: "canvas_upcoming_assignments",
+            title: "Upcoming Assignments",
+            type: .canvas,
+            priority: .high,
+            icon: "calendar.badge.clock",
+            supportedContexts: [.academic, .temporal],
+            refreshInterval: 1800 // 30 minutes
+        ),
+        
+        dataSource: CanvasAssignmentsDataSource(),
+        
+        content: WidgetContentProvider(
+            flexibleView: { data, dimensions in
+                AnyView(
+                    CanvasAssignmentsView(
+                        assignments: data as? [CanvasAssignment] ?? [],
+                        dimensions: dimensions
+                    )
+                )
+            }
+        )
+    )
+}
+```
+
+#### **Recent Grades Widget**
+```swift
+// ios-clean/Packages/DWWidgets/Sources/DWWidgets/Widgets/CanvasRecentGradesWidget.swift
+public struct CanvasRecentGradesWidget: ComposableWidget {
+    public static let definition = WidgetDefinition(
+        metadata: WidgetMetadata(
+            id: "canvas_recent_grades",
+            title: "Recent Grades",
+            type: .canvas,
+            priority: .normal,
+            icon: "chart.line.uptrend.xyaxis",
+            supportedContexts: [.academic],
+            refreshInterval: 3600 // 1 hour
+        ),
+        
+        dataSource: CanvasGradesDataSource(),
+        
+        content: WidgetContentProvider(
+            flexibleView: { data, dimensions in
+                AnyView(
+                    CanvasGradesView(
+                        grades: data as? [CanvasGrade] ?? [],
+                        dimensions: dimensions
+                    )
+                )
+            }
+        )
+    )
+}
+```
+
+### **4. Canvas Authentication Flow**
+```swift
+// ios-clean/App/Views/Integrations/CanvasOAuthView.swift
+struct CanvasOAuthView: View {
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.diContainer) private var container
+    
+    @State private var isAuthenticating = false
+    @State private var showError = false
+    @State private var errorMessage = ""
+    
+    private var canvasService: CanvasService? {
+        container?.resolve(CanvasService.self)
+    }
+    
+    var body: some View {
+        NavigationView {
+            VStack(spacing: DS.Spacing.lg) {
+                // FERPA consent notice
+                FERPAConsentNotice()
+                
+                // OAuth button
+                Button("Connect Canvas Account") {
+                    authenticateWithCanvas()
+                }
+                .buttonStyle(PrimaryButtonStyle())
+                .disabled(isAuthenticating)
+                
+                if isAuthenticating {
+                    ProgressView("Connecting to Canvas...")
+                }
+            }
+            .padding()
+            .navigationTitle("Canvas Integration")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("Cancel") { dismiss() }
+                }
+            }
+        }
+        .alert("Error", isPresented: $showError) {
+            Button("OK") { }
+        } message: {
+            Text(errorMessage)
+        }
+    }
+    
+    private func authenticateWithCanvas() {
+        guard let canvasService = canvasService else { return }
+        
+        isAuthenticating = true
+        
+        Task {
+            do {
+                let authURL = try await canvasService.initiateOAuth()
+                
+                // Present OAuth web view
+                let result = await presentOAuthWebView(url: authURL)
+                
+                switch result {
+                case .success(let code):
+                    try await canvasService.completeOAuth(code: code)
+                    await MainActor.run {
+                        dismiss()
+                    }
+                case .failure(let error):
+                    await MainActor.run {
+                        errorMessage = error.localizedDescription
+                        showError = true
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    errorMessage = error.localizedDescription
+                    showError = true
+                }
+            }
+            
+            await MainActor.run {
+                isAuthenticating = false
+            }
+        }
+    }
+}
+```
+
+---
+
+## 📊 **Implementation Roadmap**
+
+### **Phase 1: Core Integration (2 weeks)**
+1. **Canvas Service Protocol** - API client implementation
+2. **Canvas Data Models** - Swift data structures
+3. **Canvas Authentication** - OAuth2 flow in iOS
+4. **Basic Canvas Widgets** - Upcoming assignments, recent grades
+
+### **Phase 2: Advanced Features (2 weeks)**
+1. **Canvas Calendar Integration** - Sync assignments to device calendar
+2. **Canvas Notifications** - Push notifications for grades/assignments
+3. **Canvas Analytics** - Performance tracking and insights
+4. **Canvas Study Groups** - Social features for course collaboration
+
+### **Phase 3: AI Integration (2 weeks)**
+1. **Academic Risk Detection** - AI-powered performance analysis
+2. **Smart Reminders** - Context-aware assignment notifications
+3. **Study Planning** - AI-optimized study schedules
+4. **Performance Insights** - Grade trend analysis and recommendations
+
+---
+
+## 🔗 **Integration Points**
+
+### **Dashboard BFF Integration**
+```swift
+// Add Canvas widgets to dashboard composite
+extension DashboardCompositeV1 {
+    var canvasWidgets: [WidgetEnvelope] {
+        [
+            CanvasUpcomingAssignmentsWidget.definition,
+            CanvasRecentGradesWidget.definition,
+            CanvasPerformanceWidget.definition
+        ]
+    }
+}
+```
+
+### **Real-time Updates**
+```swift
+// Listen to Canvas updates via Ably
+class CanvasUpdateListener {
+    func startListening() {
+        ably.channels.get("user:\(userId):canvas:updates")
+            .subscribe { message in
+                switch message.data.type {
+                case "grade_posted":
+                    handleGradePosted(message.data)
+                case "assignment_created":
+                    handleAssignmentCreated(message.data)
+                default:
+                    break
+                }
+            }
+    }
+}
+```
+
+---
+
+## 📋 **Required Backend Changes**
+
+### **Dashboard BFF Updates**
+- Add Canvas widgets to `/dashboard/v1/composite` endpoint
+- Implement Canvas data aggregation
+- Add Canvas performance analytics
+
+### **API Router Updates**
+- Add Canvas-specific endpoints
+- Implement Canvas data caching
+- Add Canvas error handling
+
+---
+
+## 🔗 **Related Documentation**
+
+- **[Canvas API Documentation - Complete Reference](/docs/engineering/technical/api/canvas/canvas-api-documentation-complete-reference)** - Full API reference
+- **[Canvas Sync Service Implementation](/docs/engineering/technical/api/canvas/canvas-sync-service-implementation)** - Backend service details
+- **Canvas Full Plan** - High-level integration strategy
+- **[Canvas FERPA Compliance Guide](/docs/engineering/technical/api/canvas/canvas-ferpa-compliance-guide)** - Privacy and compliance
+
+---
+
+*This guide outlines the complete iOS integration required to make Canvas a first-class citizen in the DormWay app.*

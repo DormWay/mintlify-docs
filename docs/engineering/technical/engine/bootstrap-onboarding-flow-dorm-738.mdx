@@ -1,0 +1,501 @@
+---
+title: "Bootstrap Onboarding Flow (DORM 738)"
+description: "This document describes the \"rapid bootstrap\" onboarding flow where new users can upload syllabi and a schedule screenshot **before registering**."
+---
+
+# Bootstrap Onboarding Flow (DORM-738)
+
+This document describes the "rapid bootstrap" onboarding flow where new users can upload syllabi and a schedule screenshot **before registering**.
+
+## Overview
+
+A prospective user lands on the homepage and can immediately upload:
+- **4 syllabi** (PDF/DOCX)
+- **1 schedule screenshot** (PNG/JPG) - e.g., from Wolverine Access, Student Center, etc.
+
+They provide their `.edu` email address. The system processes their content and sends them a personalized email with insights, encouraging them to create an account. When they register, their content is "claimed" and fully integrated into their account.
+
+---
+
+## Timeline: Unregistered User Upload
+
+### T+0: User uploads files on landing page
+
+**Frontend** (`BootstrapSection.tsx`):
+```
+User enters: student@umich.edu
+User uploads: 4 syllabi PDFs + 1 schedule screenshot
+User clicks "Submit"
+```
+
+**Validation**:
+- Email must be `.edu` domain (enforced in `useMultiFileUpload.ts`)
+- Files validated by type and size per category
+- Schedule category limited to 1 file
+
+### T+1s: Files uploaded to API Router
+
+**Endpoint**: `POST /api/proxy/upload/content`
+
+For each file, the API Router:
+1. Uploads file to S3 (`dormway-uploads` bucket)
+2. Creates `content_ingestions` row with:
+   - `email_address`: student@umich.edu
+   - `user_id`: NULL (not registered yet)
+   - `metadata.category_hint`: 'syllabus' | 'schedule'
+   - `s3_bucket`, `s3_key`: S3 location
+   - `status`: 'pending'
+3. Starts `processGenericContent` Temporal workflow
+
+### T+2s: Content classification
+
+**Workflow**: `processGenericContent`
+
+**Step 1: Download content from S3**
+```
+downloadContent() → Buffer with file data
+```
+
+**Step 2: Extract text/metadata**
+```
+extractTextAndMetadata()
+├─ PDF: pdf-parse library
+├─ DOCX: mammoth library
+├─ Images: tesseract.js OCR (basic text extraction)
+└─ ICS: raw text
+```
+
+**Step 3: Classify content**
+```
+classifyContent()
+├─ Uses Portkey prompt: content-classification.md
+├─ category_hint from frontend boosts confidence
+└─ Returns: contentType, confidence, suggestedHandlers
+```
+
+### T+3s: Handler execution (varies by content type)
+
+#### Path A: Syllabus Files
+
+**Handler**: `runSyllabusHandler()`
+
+1. Triggers `processSyllabus` workflow immediately
+2. Syllabus workflow executes (same for registered/unregistered):
+
+```
+processSyllabus workflow
+├─ Step 1: Detect campus from email domain (umich.edu → University of Michigan)
+├─ Step 2: Extract course info via Portkey prompts
+│   ├─ syllabus-extraction.md → course code, title, instructor
+│   ├─ Extract semester/term from syllabus content
+│   └─ Extract grading, assignments, policies
+├─ Step 3: Create/find course context in contexts table
+│   └─ external_id: "course:ECON-101" (for deduplication)
+├─ Step 4: Store syllabus data in service_data
+│   └─ user_id: NULL (syllabi are campus-wide resources)
+├─ Step 5: Index in Ragie for RAG search
+│   └─ partition: email-hash (email_umich.edu_abc123)
+├─ Step 5b: Push to enrolled students (DORM-738)
+│   └─ pushSyllabusToEnrolledStudents() - copies to each student's partition
+├─ Step 6: Student-course enrollment
+│   └─ SKIPPED for unregistered users (no userId)
+├─ Step 7: Notify enrolled students
+│   ├─ getCourseEnrollmentSnapshot() - find all enrolled students
+│   ├─ For each student:
+│   │   ├─ trackUserEvent('syllabus_updated') - telemetry
+│   │   ├─ sendDirectPushNotification() - push notification
+│   │   └─ notifyStudentWatcherContextUpdate() - update StudentWatcher
+│   └─ Uploader gets 'syllabus_added', others get 'syllabus_update'
+└─ Step 8: Send notification email to uploader
+    └─ "Your ECON 101 syllabus has been processed!"
+```
+
+**Key insight**: Syllabi are processed fully even for unregistered users because they're campus-wide resources. The only thing skipped is the student-course enrollment.
+
+#### Path B: Schedule Screenshot
+
+**Handler**: `runScheduleHandler()` (DORM-738 fix)
+
+**For unregistered users**:
+```
+runScheduleHandler()
+├─ Detects: no userId available
+├─ Stores S3 reference in extracted_data.pending_schedule_import:
+│   {
+│     s3Bucket: "dormway-uploads",
+│     s3Key: "uploads/schedules/abc123.png",
+│     mimeType: "image/png",
+│     filename: "schedule.png",
+│     storedAt: "2025-01-15T10:00:00Z"
+│   }
+└─ Returns: { status: 'success', storedForLater: true }
+```
+
+**Schedule is NOT parsed yet** - we need a userId to create course contexts and enrollments.
+
+### T+10s: User receives email
+
+The notification system sends an email:
+```
+Subject: Your DormWay analysis is ready!
+
+Hi student@umich.edu,
+
+We've processed your syllabi:
+- ECON 101: Introduction to Economics
+- PSYCH 200: Developmental Psychology
+- CS 280: Programming and Data Structures
+- MATH 215: Calculus III
+
+Your schedule screenshot is ready to be imported.
+
+Create your account to see your personalized dashboard →
+```
+
+---
+
+## Timeline: User Registers (Content Claiming)
+
+### T+0: User clicks "Sign Up" link
+
+User creates account with same email: `student@umich.edu`
+
+### T+1s: Clerk webhook fires
+
+**Webhook**: `POST /webhooks/clerk` (user.created event)
+
+**Step 1: Create backend account**
+```sql
+INSERT INTO accounts (id, email, clerk_id, ...)
+VALUES (uuid, 'student@umich.edu', 'clerk_abc', ...)
+```
+
+**Step 2: Claim pending content_ingestions**
+```sql
+UPDATE content_ingestions
+SET user_id = 'backend-user-id'
+WHERE LOWER(email_address) = LOWER('student@umich.edu')
+  AND user_id IS NULL
+RETURNING id
+```
+
+**Step 3: Start StudentWatcher workflow**
+```
+studentWatcherWorkflow started for user
+```
+
+### T+2s: Re-index syllabi to user's Ragie partition
+
+**Function**: `reindexSyllabiToUserPartition()` in clerk-routes.ts
+
+This function:
+1. Finds ALL courses the student is enrolled in (via `context_dependencies`)
+2. Collects syllabi for those courses (uploaded by classmates/instructors)
+3. Also includes syllabi the user directly uploaded
+4. Re-indexes (copies) all syllabi to the user's UUID partition
+
+```sql
+WITH enrolled_courses AS (
+  SELECT DISTINCT cd.child_context_id as course_id
+  FROM contexts student_ctx
+  JOIN context_dependencies cd ON cd.parent_context_id = student_ctx.id
+  JOIN contexts course_ctx ON course_ctx.id = cd.child_context_id AND course_ctx.type = 'course'
+  WHERE student_ctx.user_id = $1
+    AND student_ctx.type = 'student'
+    AND cd.dependency_type = 'enrolled_in'
+),
+course_syllabi AS (
+  SELECT DISTINCT bd.id, bd.filename, bd.extracted_text, ...
+  FROM braingains_documents bd
+  JOIN service_data sd ON sd.user_id = bd.user_id
+    AND sd.method = 'processed_syllabus_crew'
+    AND sd.data->'crew_metadata'->>'filename' ILIKE '%' || split_part(bd.filename, '.', 1) || '%'
+  JOIN enrolled_courses ec ON ec.course_id = sd.context_id
+  WHERE bd.document_type = 'syllabus'
+    AND bd.processing_status IN ('completed', 'indexed')
+)
+-- Plus user's own syllabi
+```
+
+### T+3s: Process pending schedule imports (DORM-738 fix)
+
+**Code in clerk-routes.ts**:
+
+```typescript
+// Query for pending schedules
+SELECT id, extracted_data->'pending_schedule_import' as schedule_data
+FROM content_ingestions
+WHERE user_id = $1
+  AND extracted_data ? 'pending_schedule_import'
+  AND schedule_workflow_triggered IS NOT TRUE
+```
+
+For each pending schedule:
+
+```
+1. Fetch image from S3 as base64
+2. Trigger scheduleImportWorkflow:
+   {
+     userId: "backend-user-id",
+     requestId: "claim-ingestion-123",
+     imageData: "base64...",
+     mode: "image",
+     mimeType: "image/png"
+   }
+3. Mark as triggered in extracted_data
+```
+
+### T+4s: Schedule import workflow executes
+
+**Workflow**: `scheduleImportWorkflow`
+
+```
+scheduleImportWorkflow
+├─ Step 1: Get student context (created by StudentWatcher)
+├─ Step 2: Get campus context (detected from email domain)
+├─ Step 3: Determine term from campus academic calendar
+│   └─ Current date → "Winter 2026" term
+├─ Step 4: Parse schedule with GPT-4o Vision
+│   └─ parseScheduleWithGPT5() - despite the name, uses gpt-4o model
+│   └─ Returns: courses[] with code, name, schedule, location
+├─ Step 5: Create course contexts
+│   └─ createCourseContexts() - creates contexts for each course
+├─ Step 6: Create student enrollments
+│   └─ createCourseEnrollments() - enrolled_in dependencies
+├─ Step 7: Create time_blocks
+│   └─ normalizeAndStoreCalendarData() - recurring events for semester
+├─ Step 8: Link syllabi to courses
+│   └─ Auto-match syllabus courses to schedule courses
+└─ Step 9: Send completion notification
+```
+
+### T+5s: User sees complete dashboard
+
+User logs in and sees:
+- **4 courses** from schedule (with time_blocks)
+- **4 syllabi** linked to courses
+- **Calendar** populated with class times
+- **Upcoming assignments** from syllabi
+- **Ace** can answer questions about their courses
+
+---
+
+## Ragie Partition Strategy
+
+### The Problem
+
+Syllabi are **campus-wide resources**. If Student A uploads ECON 101's syllabus:
+- The syllabus should be queryable by ALL students in ECON 101
+- But Ragie partitions are per-user (`user_<userId>`)
+
+### The Solution: Push to Enrolled Students
+
+**On syllabus processing** (`syllabusProcessor.workflow.ts`):
+```typescript
+// After storing in uploader's partition...
+await ragieActivities.pushSyllabusToEnrolledStudents({
+  courseContextId,
+  syllabusId,
+  title: `${courseCode} Syllabus`,
+  content: extractedText,
+  excludeUserId: resolvedUserId, // Uploader already has it
+});
+```
+
+**On user registration** (`clerk-routes.ts`):
+```typescript
+// Find syllabi for ALL enrolled courses and push to user's partition
+await reindexSyllabiToUserPartition(userId, email);
+```
+
+### Partition Keys
+
+| State | Partition Key | Purpose |
+|-------|---------------|---------|
+| Unregistered upload | `user_email_<sha256_hash>` | Temporary storage |
+| Registered user | `user_<userId>` | Permanent user partition |
+| After registration | Copy to `user_<userId>` | User can query via Ace |
+
+### Why This Works
+
+1. **Syllabus uploaded before any enrollments**: Stored in uploader's partition
+2. **Student enrolls in course**: `pushSyllabusToEnrolledStudents` copies to their partition
+3. **New student joins course later**: On registration, `reindexSyllabiToUserPartition` copies course syllabi
+4. **Result**: Every enrolled student can query the syllabus via Ace
+
+---
+
+## Key Implementation Files
+
+| Component | File | Purpose |
+|-----------|------|---------|
+| Landing page UI | `services/dormway-lockedin/src/components/landing/BootstrapSection.tsx` | Multi-file upload interface |
+| Upload hook | `services/dormway-lockedin/src/hooks/useMultiFileUpload.ts` | File validation, .edu enforcement |
+| Upload endpoint | `services/api-router/src/routes/content-upload-routes.ts` | S3 upload, workflow trigger |
+| Generic processor | `services/engine/src/workflows/genericContentProcessor.workflow.ts` | Orchestrates classification and handlers |
+| Content activities | `services/engine/src/activities/genericContent.activities.ts` | Handlers: syllabus, schedule, etc. |
+| Syllabus workflow | `services/engine/src/workflows/syllabusProcessor.workflow.ts` | Full syllabus extraction pipeline |
+| Schedule workflow | `services/engine/src/workflows/scheduleImport.workflow.ts` | GPT-4o parsing, course/enrollment creation |
+| Clerk webhook | `services/api-router/src/routes/webhooks/clerk-routes.ts` | Account creation, content claiming, Ragie re-indexing |
+| Ragie activities | `services/engine/src/activities/ragie.activities.ts` | `pushSyllabusToEnrolledStudents` |
+| GPT-4o parsing | `services/engine/src/activities/gpt5.activities.ts` | Vision API for schedule images |
+
+---
+
+## Notes
+
+### Why schedule processing is deferred for unregistered users
+
+Unlike syllabi (which are campus-wide resources), schedule data is user-specific:
+- Enrollments link a specific student to courses
+- Time blocks are per-user
+- We need a student context (created after registration)
+
+### Model naming
+
+`parseScheduleWithGPT5` is a legacy name - it actually uses `gpt-4o` model with Vision API for image parsing.
+
+### Clerk invitation for unregistered users
+
+- After processing content, `sendClerkInvitation()` is called in `sendNotifications()`
+- Checks if user already exists or has pending invitation
+- Creates invitation with redirect URL and metadata about the upload
+
+---
+
+## Flow 2: Registered User Bootstrap (IMMEDIATE)
+
+### Current State: FRAGMENTED
+
+**The key insight**: "DormWay really unlocks itself with a schedule and syllabi"
+
+Currently, a registered user who wants to bootstrap has a **fragmented** experience:
+
+### Onboarding Flow (`/onboarding/page.tsx`)
+
+Steps:
+1. **Welcome** - intro
+2. **Campus** - select campus (typeahead)
+3. **Housing** - dorm/apartment selection
+4. **Personality** - AI tone preferences
+5. **Complete** - finalize
+
+**🔴 GAP: No schedule or syllabus upload step!**
+
+The onboarding only collects preferences. User must discover upload features separately.
+
+### Existing Upload Components (Scattered)
+
+| Component | Location | Endpoint | Use Case |
+|-----------|----------|----------|----------|
+| `ScheduleUploadIntegration.tsx` | `/components/integrations/` | `/api/schedule/upload` | Schedule upload (PDF/ICS/image) |
+| `SyllabusModal.tsx` | `/components/courses/modals/` | `/api/proxy/upload/syllabus` | Per-course syllabus upload |
+| `GenericUploadModal.tsx` | `/components/` | `/upload/content` | Generic file/text upload |
+
+**Problems:**
+1. No unified "quick start" experience
+2. User must know where to find these features
+3. Syllabus upload requires existing course context
+4. No prominent CTA after onboarding completes
+
+### Immediate Processing for Registered Users
+
+When a registered user uploads via any of these components:
+
+**Schedule Upload** (`ScheduleUploadIntegration.tsx`):
+```
+POST /api/schedule/upload
+├─ Has userId from Clerk JWT
+├─ Triggers scheduleImportWorkflow IMMEDIATELY
+├─ No deferral needed (unlike unregistered flow)
+└─ Courses + enrollments + time_blocks created
+```
+
+**Syllabus Upload** (`SyllabusModal.tsx`):
+```
+POST /api/proxy/upload/syllabus
+├─ Has userId + courseContextId
+├─ Triggers processSyllabus workflow IMMEDIATELY
+├─ Syllabus linked to specific course
+├─ Indexed in user's Ragie partition
+└─ pushSyllabusToEnrolledStudents() runs for classmates
+```
+
+**Generic Upload** (`GenericUploadModal.tsx`):
+```
+POST /upload/content
+├─ Has userId from session
+├─ Triggers processGenericContent workflow
+├─ Content classified and routed to appropriate handler
+└─ Schedule/syllabus handlers execute immediately
+```
+
+### Recommended: Unified Bootstrap Experience
+
+To provide the same "magic" as the landing page, registered users need:
+
+#### Option A: Add Bootstrap Step to Onboarding
+
+After Campus selection, add a new step:
+```
+3. **Bootstrap** (NEW)
+   ├─ "Upload your schedule screenshot" (optional)
+   ├─ "Upload your syllabi" (optional, up to 4)
+   ├─ Same UI as BootstrapSection.tsx
+   └─ Immediate processing (has userId)
+```
+
+#### Option B: Post-Onboarding Wizard
+
+After onboarding completes, show modal:
+```
+"🎉 Account created! Now let's unlock DormWay's full potential"
+
+[ Upload Schedule ] - Screenshot from Wolverine Access, etc.
+[ Upload Syllabi ] - PDF files from your courses
+
+[ Skip for now ] (dismissible)
+```
+
+#### Option C: Dashboard Setup Widget
+
+Persistent widget on dashboard:
+```
+┌─────────────────────────────────────┐
+│ 🚀 Complete Your Setup              │
+│                                      │
+│ ☐ Upload schedule     [Upload]       │
+│ ☑ Campus set          University... │
+│ ☐ Add syllabus (0/4)  [Add]          │
+│                                      │
+│ Progress: 25% complete               │
+└─────────────────────────────────────┘
+```
+
+### Implementation Priority
+
+1. **Short-term**: Use existing `GenericUploadModal` with better discoverability
+2. **Medium-term**: Option C - Dashboard Setup Widget (least invasive)
+3. **Long-term**: Option A - Integrated onboarding step (best UX)
+
+---
+
+## Comparison: Unregistered vs Registered Flows
+
+| Aspect | Unregistered | Registered |
+|--------|--------------|------------|
+| **Upload location** | Landing page `BootstrapSection.tsx` | Scattered components |
+| **Unified experience** | ✅ Yes (multi-file upload) | ❌ No (separate modals) |
+| **Schedule processing** | Deferred (pending_schedule_import) | Immediate |
+| **Syllabus processing** | Immediate (campus-wide) | Immediate + course-linked |
+| **Ragie partition** | Email-hash → UUID (on register) | UUID directly |
+| **Discovery** | Primary CTA on homepage | User must find features |
+
+---
+
+## Related Docs
+
+- Journey 2 - Syllabus Upload
+- BrainGains Syllabus Processor - Implementation Guide
+- Onboarding Workflows
+- Student Processing DAG Flow

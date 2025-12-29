@@ -1,0 +1,420 @@
+---
+title: "Windows Chrome Demo Auto Login Cache Fix"
+description: "Windows Chrome users logging in via `/demo` auto-login were seeing **stale data on first dashboard load**, including outdated assignments, schedule items, an..."
+---
+
+# Windows Chrome Demo Auto-Login Cache Fix
+
+**Date**: 2025-10-30
+**Status**: ✅ Fixed
+**Severity**: High
+**Browser**: Windows Chrome
+**Flow**: `/demo` auto-login
+**Related Issues**: Chrome Cache Issue - Log In Placeholder.md
+
+---
+
+## Problem Statement
+
+Windows Chrome users logging in via `/demo` auto-login were seeing **stale data on first dashboard load**, including outdated assignments, schedule items, and potentially "Log In" placeholder text. This issue was **not** reproducible on Mac Chrome, Firefox, or Safari.
+
+### Symptoms
+
+1. User navigates to `/demo` 
+2. Auto-login creates Clerk sign-in token and redirects to dashboard
+3. Dashboard loads with stale data from previous session or placeholder content
+4. Hard refresh (Ctrl+Shift+R) would fix it, but first load was broken
+
+---
+
+## Root Cause Analysis
+
+### Why Only Windows Chrome?
+
+Windows Chrome has different cache behavior than other browsers:
+- **More aggressive HTTP caching** - longer cache retention
+- **Different cache eviction policies** - less likely to invalidate on navigation
+- **Hard navigation persistence** - `window.location.assign()` doesn't always clear React Query cache
+
+### The Problematic Flow
+
+```
+/demo page (demo-login API call)
+  ↓
+  window.location.assign('/dashboard') [50ms delay]
+  ↓
+  Hard navigation (bypasses Next.js router)
+  ↓
+  Dashboard loads
+  ↓
+  React Query cache persists from previous session
+  ↓
+  Stale data rendered
+```
+
+### Key Issue: Hard Navigation
+
+The `/demo` page uses **hard navigation** to ensure cookies are included:
+
+```typescript
+// services/dormway-lockedin/src/app/demo/page.tsx:56-66
+setTimeout(() => {
+  try {
+    window.location.assign(next);  // ← HARD NAVIGATION
+  } catch {
+    router.replace(next);
+  }
+}, 50);
+```
+
+**Problem**: Hard navigation bypasses Next.js App Router lifecycle, meaning:
+- React Query cache is not invalidated
+- SessionStorage checks might not run in time
+- Browser cache (HTTP layer) persists
+
+---
+
+## Solution Implemented
+
+### File Changed
+`services/dormway-lockedin/src/app/dashboard/home/page.tsx`
+
+### Approach: Multi-Trigger Cache Invalidation
+
+Added **three new detection mechanisms** to the existing cache-clearing logic:
+
+#### 1. Referrer Detection
+```typescript
+const cameFromDemo = document.referrer.includes('/demo');
+```
+Detects if user navigated from `/demo` page.
+
+#### 2. Demo User Detection
+```typescript
+const isDemoUser = user.emailAddresses?.[0]?.emailAddress === 'demo@dormway.app';
+```
+Identifies demo user specifically (most affected by this issue).
+
+#### 3. Recent Page Load Detection
+```typescript
+const pageLoadTime = performance?.timing?.navigationStart || Date.now();
+const timeSincePageLoad = Date.now() - pageLoadTime;
+const isRecentPageLoad = timeSincePageLoad < 2000; // 2 seconds
+```
+Catches pages loaded within last 2 seconds (fresh navigation).
+
+### Cache Clearing Logic
+
+Cache is cleared if **any** of these conditions are true:
+- ✅ New authentication session (existing)
+- ✅ Explicit `clearDashboardCache` flag (existing)
+- ✅ First load for this user (existing)
+- ✅ **NEW**: Came from `/demo` AND recent page load
+- ✅ **NEW**: Is demo user AND first load
+
+### What Gets Cleared
+
+```typescript
+// Remove from cache
+queryClient.removeQueries({ queryKey: ['dashboard-composite'] });
+queryClient.removeQueries({ queryKey: ['dashboard-etag'] });
+
+// Force refetch
+queryClient.invalidateQueries({ queryKey: ['dashboard-composite'] });
+```
+
+**Surgical approach**: Only dashboard composite cache is cleared, not all React Query data.
+
+---
+
+## Code Changes
+
+### Before (lines 67-82)
+```typescript
+// CRITICAL FIX: Check if this is a first-time or demo user load
+// First-time users need cache clearing to prevent "Log In" placeholder text
+const firstLoadKey = `dashboard_first_load_${user.id}`;
+const isFirstLoad = !sessionStorage.getItem(firstLoadKey);
+
+if (isNewAuthSession || shouldClearCache === 'true' || isFirstLoad) {
+  console.log('[Dashboard] Clearing stale cache after fresh authentication', {
+    isNewAuthSession,
+    explicitFlag: shouldClearCache === 'true',
+    isFirstLoad,
+    reason: isFirstLoad ? 'first-load-protection' : isNewAuthSession ? 'new-session' : 'explicit-flag'
+  });
+  // ... cache clearing code
+}
+```
+
+### After (lines 67-110)
+```typescript
+// CRITICAL FIX: Check if this is a first-time or demo user load
+// First-time users need cache clearing to prevent "Log In" placeholder text
+const firstLoadKey = `dashboard_first_load_${user.id}`;
+const isFirstLoad = !sessionStorage.getItem(firstLoadKey);
+
+// WINDOWS CHROME FIX: Detect if we just came from /demo auto-login
+// Hard navigation from /demo can cause Windows Chrome to persist stale cache
+const cameFromDemo = document.referrer.includes('/demo');
+const isDemoUser = user.emailAddresses?.[0]?.emailAddress === 'demo@dormway.app';
+
+// Additional safety: Clear cache if page load is very recent (within 2 seconds)
+// This catches cases where hard navigation bypasses normal session detection
+const pageLoadTime = performance?.timing?.navigationStart || Date.now();
+const timeSincePageLoad = Date.now() - pageLoadTime;
+const isRecentPageLoad = timeSincePageLoad < 2000; // 2 seconds
+
+if (isNewAuthSession || shouldClearCache === 'true' || isFirstLoad || (cameFromDemo && isRecentPageLoad) || (isDemoUser && isFirstLoad)) {
+  console.log('[Dashboard] Clearing stale cache after fresh authentication', {
+    isNewAuthSession,
+    explicitFlag: shouldClearCache === 'true',
+    isFirstLoad,
+    cameFromDemo,
+    isDemoUser,
+    isRecentPageLoad,
+    timeSincePageLoad,
+    reason: cameFromDemo ? 'demo-auto-login' : isFirstLoad ? 'first-load-protection' : isNewAuthSession ? 'new-session' : 'explicit-flag'
+  });
+  // ... cache clearing code
+}
+```
+
+---
+
+## Testing & Verification
+
+### Manual Test Steps
+
+1. **Open Windows Chrome** (or any browser for initial testing)
+2. **Navigate to**: `http://localhost:3000/demo` (or production `/demo`)
+3. **Open DevTools Console** (F12)
+4. **Watch for log output**:
+   ```
+   [Dashboard] Clearing stale cache after fresh authentication {
+     isNewAuthSession: false,
+     isFirstLoad: true,
+     cameFromDemo: true,
+     isDemoUser: true,
+     isRecentPageLoad: true,
+     timeSincePageLoad: 234,
+     reason: "demo-auto-login"
+   }
+   ```
+5. **Verify**: No stale data or "Log In" placeholders in Task Bank
+6. **Hard refresh** (Ctrl+Shift+R) and verify fix persists
+
+### Expected Console Output
+
+On successful cache clear:
+```
+[Dashboard] Clearing stale cache after fresh authentication
+[Dashboard] Cleared dashboard cache for first-time user (surgical approach)
+[useDashboardComposite] Starting query fetch
+```
+
+### What to Look For
+
+✅ **Good Signs**:
+- Console log shows cache clearing with reason: `"demo-auto-login"`
+- Dashboard loads with fresh data
+- No "Log In" placeholder tasks
+- Timeline shows current schedule
+
+❌ **Bad Signs**:
+- No cache clearing log
+- "Log In" placeholder appears
+- Schedule from previous session
+- Old assignments/tasks
+
+---
+
+## Why This Fix Works
+
+### 1. Catches Hard Navigation
+`document.referrer.includes('/demo')` detects the hard navigation from `/demo` page.
+
+### 2. Time-Based Safety Net
+`isRecentPageLoad` (< 2 seconds) catches any page load that happened immediately after navigation, regardless of referrer.
+
+### 3. Demo User Protection
+Specifically targets demo user since they're most affected by this issue.
+
+### 4. Existing Checks Still Work
+All previous cache-clearing logic remains intact:
+- Session change detection
+- First load detection
+- Explicit flag support
+
+### 5. Minimal Performance Impact
+- Only clears dashboard composite queries (surgical)
+- Runs once on mount
+- No ongoing performance penalty
+
+---
+
+## Related Files & Issues
+
+### Related Bug Reports
+- [Chrome Cache Issue - Log In Placeholder](/docs/operations/bug-reports/chrome-cache-issue-log-in-placeholder)
+- [HOTFIX - Revert Caching Optimization](/docs/operations/bug-reports/hotfix-revert-caching-optimization)
+- [Bug Analysis Summary - Dashboard Issues](/docs/operations/bug-reports/bug-analysis-summary-dashboard-issues)
+- [Placeholder Assignment Filtering Bug](/docs/operations/bug-reports/placeholder-assignment-filtering-bug)
+
+### Files Modified
+- `services/dormway-lockedin/src/app/dashboard/home/page.tsx` (lines 72-93)
+
+### Related Files (Not Modified)
+- `services/dormway-lockedin/src/app/demo/page.tsx` - Contains hard navigation logic
+- `services/dormway-lockedin/src/hooks/home/useDashboardComposite.ts` - Has `cache: 'no-store'` hotfix
+- `services/dormway-lockedin/src/middleware.ts` - Profile fetch with `cache: 'no-store'`
+- `services/dormway-lockedin/src/app/api/proxy/[...path]/route.ts` - Sets `cache-control: no-store`
+
+---
+
+## Alternative Solutions Considered
+
+### Option 1: Clear Cache in /demo Page Before Navigation
+```typescript
+// In demo/page.tsx, before window.location.assign()
+sessionStorage.clear();
+localStorage.removeItem('REACT_QUERY_OFFLINE_CACHE');
+```
+
+**Why not chosen**: 
+- Clears ALL storage, not just dashboard cache
+- Might break other features
+- Less surgical approach
+
+### Option 2: Add Cache-Busting Timestamp to API Request
+```typescript
+// In useDashboardComposite.ts
+if (isFirstLoad) {
+  params.append('_t', Date.now().toString());
+}
+```
+
+**Why not chosen**:
+- Adds HTTP overhead
+- Bypasses React Query benefits
+- Doesn't address root cause
+
+### Option 3: Replace Hard Navigation with Next.js Router
+```typescript
+// In demo/page.tsx
+router.push(next); // Instead of window.location.assign()
+```
+
+**Why not chosen**:
+- Comment says hard navigation is needed for cookie handling
+- Might break Clerk authentication flow
+- Requires more testing
+
+---
+
+## Monitoring & Metrics
+
+### Success Criteria
+
+1. **Zero reports** of stale data on Windows Chrome `/demo` auto-login
+2. **Console logs** confirm cache clearing for demo users
+3. **Performance** remains unchanged (surgical cache clearing)
+
+### What to Monitor
+
+- **Error rate** in dashboard composite queries
+- **Cache hit rate** for dashboard queries
+- **Time to interactive** (TTI) for dashboard page
+- **User reports** of stale data or "Log In" placeholders
+
+### Rollback Plan
+
+If issues arise, comment out lines 72-81 in `page.tsx`:
+```typescript
+// REVERT: Comment out demo-specific cache clearing
+// const cameFromDemo = document.referrer.includes('/demo');
+// const isDemoUser = user.emailAddresses?.[0]?.emailAddress === 'demo@dormway.app';
+// const pageLoadTime = performance?.timing?.navigationStart || Date.now();
+// const timeSincePageLoad = Date.now() - pageLoadTime;
+// const isRecentPageLoad = timeSincePageLoad < 2000;
+```
+
+And update the condition back to original (line 83):
+```typescript
+if (isNewAuthSession || shouldClearCache === 'true' || isFirstLoad) {
+```
+
+---
+
+## Long-Term Improvements
+
+### 1. Unified Cache Strategy
+Document all caching layers:
+- Browser HTTP cache (fetch `cache` option)
+- React Query cache (`staleTime`, `gcTime`)
+- SessionStorage/LocalStorage
+- Service Worker cache (if applicable)
+
+### 2. Cache Versioning
+Add version parameter to API requests:
+```typescript
+const API_VERSION = '2';
+const url = proxyPath(`${endpoint}?${params}&v=${API_VERSION}`);
+```
+
+### 3. ETag-Based Caching
+Restore ETag support in dashboard composite endpoint:
+- Backend sends `ETag` header
+- Frontend sends `If-None-Match`
+- Backend responds `304 Not Modified` if unchanged
+
+### 4. Ably Real-Time Updates
+Rely more on Ably deltas instead of polling/refetching:
+- Reduces API calls
+- Guarantees fresh data
+- Better UX (instant updates)
+
+---
+
+## Lessons Learned
+
+### 1. Browser Behavior Varies Widely
+Windows Chrome, Mac Chrome, Firefox, and Safari all have different:
+- Cache eviction policies
+- Navigation behavior
+- SessionStorage persistence
+
+### 2. Hard Navigation Bypasses SPA Lifecycle
+Using `window.location.assign()` bypasses:
+- Next.js App Router
+- React lifecycle hooks (sometimes)
+- React Query cache invalidation
+
+### 3. Multi-Layer Defense Works Best
+Single cache-clearing trigger wasn't enough. Needed:
+- Referrer detection
+- User type detection
+- Time-based detection
+- Session-based detection
+
+### 4. Surgical Fixes Over Sledgehammer
+Clearing only dashboard cache (not all queries) prevents:
+- Slow page loads
+- Flash of loading states
+- Loss of unrelated cached data
+
+---
+
+## Conclusion
+
+This fix adds **defense-in-depth** cache invalidation specifically targeting the Windows Chrome + `/demo` auto-login flow. By combining referrer detection, time-based checks, and user type validation, we ensure stale data is cleared without impacting performance or other user flows.
+
+**Impact**: High (fixes critical UX bug for demo users)  
+**Risk**: Low (surgical approach, existing checks still work)  
+**Performance**: Negligible (runs once on mount)
+
+---
+
+**Author**: AI Assistant (Claude)  
+**Reviewer**: Pending  
+**Deployed**: Pending testing

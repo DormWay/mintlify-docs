@@ -1,0 +1,318 @@
+---
+title: "Dashboard BFF Implementation"
+description: "The Dashboard Backend-for-Frontend (BFF) pattern has been implemented in the dormway-api-router and iOS app to optimize the dashboard experience. This implem..."
+---
+
+# Dashboard BFF Implementation
+
+## Overview
+
+The Dashboard Backend-for-Frontend (BFF) pattern has been implemented in the dormway-api-router and iOS app to optimize the dashboard experience. This implementation provides context-aware dashboard data through a composite endpoint, reducing network requests and simplifying client-side logic.
+
+**Latest Enhancement (May 25, 2025)**: Complete PLG "Holy Shit!" implementation with enhanced intelligence processing, temperature conversion, and rich campus data transformation to create compelling user experiences.
+
+This document covers the current implementation status of the Dashboard BFF, including key components, caching strategies, PLG enhancements, and iOS integration.
+
+## Implemented Components
+
+### API Router Components
+
+- **Composite API Endpoint**: `/dashboard/composite` that delivers context-aware dashboard data
+- **Enhanced BFF Transformer**: Rich intelligence processing with PLG optimization (May 25, 2025)
+- **Temperature Conversion**: Celsius to Fahrenheit conversion throughout weather data
+- **Enhanced Intelligence Processing**: Parking urgency detection, weather accessibility, campus news analysis
+- **Redis-based Caching**: Implemented with context-specific TTLs and cache keys
+- **Cache Invalidation Endpoint**: `/dashboard/invalidate-cache` for clearing cached data
+- **Raw Data Endpoint**: `/dashboard/raw-data/:dataType` for debugging and direct data access
+- **Health Check Endpoint**: `/dashboard/health` for monitoring the system
+
+### iOS Components
+
+- **ContextToBFFAdapter**: Transforms internal app context data into API-friendly formats
+- **ContextAwareDashboardProvider**: Maps BFF responses to DashboardUI model objects
+- **DashboardBFFService**: Manages network communication with the BFF API and client-side caching
+- **DashboardContextAdapter**: Bridges the app's context system to the DashboardUI interface
+
+## Key Features
+
+### PLG Intelligence Processing (May 25, 2025 Enhancement)
+
+The BFF transformer now includes enhanced intelligence processing designed to create "Holy Shit!" PLG moments:
+
+#### **Temperature Conversion**
+```typescript
+// Convert Celsius to Fahrenheit for display
+const tempF = Math.round((temperature * 9/5) + 32);
+const tempCondition = tempF > 75 ? 'perfect' : tempF > 60 ? 'pleasant' : tempF > 32 ? 'cool' : tempF < 32 ? 'freezing' : 'cold';
+```
+
+#### **Enhanced Parking Intelligence**
+```typescript
+// Handle processed parking data structure with urgency detection
+if (parkingData.compact_view) {
+  if (typeof parkingData.compact_view === 'string') {
+    parkingSubtitle = parkingData.compact_view;
+  } else if (parkingData.compact_view.text) {
+    parkingSubtitle = parkingData.compact_view.text;
+    if (parkingData.compact_view.urgency === 'high') {
+      urgencyBadge = 'Critical Alert';
+      badgeColor = '#EA4335';
+    }
+  }
+}
+```
+
+#### **Enhanced Weather Intelligence**
+- Activity condition scoring for walking, biking, driving
+- Accessibility percentages based on weather conditions
+- Comprehensive outfit recommendations
+- Real-time weather alerts and recommendations
+
+#### **Enhanced Campus News Processing**
+- "Why It Matters" intelligence extraction
+- Topic badge generation
+- Relevance scoring and prioritization
+- Actionable insight generation
+
+### Context Mapping
+
+The system maps specialized contexts to standard ones for consistent UI experiences:
+
+```typescript
+// Map non-standard contexts to standard ones
+const CONTEXT_MAPPING = {
+  'academicBreak': 'atHome',
+  'preFinalsWeek': 'studyTime',
+  'holiday': 'weekend',
+  'traveling': 'commuting'
+};
+```
+
+This mapping is mirrored in the iOS app:
+
+```swift
+private func mapAppContextToDashboardContext(_ appContextType: ContextType) -> DashboardUI.ContextType {
+    switch appContextType {
+    case .walkingToClass: return .walkingToClass
+    case .inClass: return .inClass
+    // Additional mappings including fallbacks:
+    case .academicBreak: return .atHome // Map to closest alternative
+    case .preFinalsWeek: return .studyTime // Map to closest alternative
+    case .holiday: return .weekend // Map to closest alternative
+    case .traveling: return .commuting // Map to closest alternative
+    }
+}
+```
+
+### Redis Caching with Context-Specific TTLs
+
+The implementation features a distributed Redis caching system with TTLs tailored to each context type:
+
+```typescript
+// Cache with context-specific TTL
+const TTL_MAPPING = {
+  'walkingToClass': 60,    // 1 minute
+  'inClass': 300,          // 5 minutes
+  'betweenClasses': 120,   // 2 minutes
+  'studyTime': 300,        // 5 minutes
+  'onCampus': 180,         // 3 minutes
+  'commuting': 90,         // 1.5 minutes
+  'atHome': 600,           // 10 minutes
+  'weekend': 900,          // 15 minutes
+  // Additional context types...
+};
+```
+
+### Context-Aware Data Assembly
+
+The BFF assembles dashboard data based on the user's current context:
+
+```typescript
+// Fetch real dashboard data for established users using our new service method
+const completeDashboardData = await DashboardService.getCompleteDashboardData(targetUserId, userContext);
+```
+
+The service prioritizes processed data but falls back to raw data when needed:
+
+```typescript
+// Use parallel requests for all data types with fallbacks to standard methods
+const [
+  bulletin,
+  parking,
+  weather,
+  news
+] = await Promise.all([
+  // Data fetching with fallbacks...
+]);
+```
+
+### New User Dashboard (0/0 State)
+
+Special handling for new users who don't yet have established contexts:
+
+```typescript
+// Check if user is in 0/0 state (new user)
+if (isNewUser(userProfile, contextData, userContext)) {
+  const onboardingDashboard = await handleNewUserDashboard(targetUserId);
+  
+  // Cache onboarding dashboard with shorter TTL
+  await redisCache.setDashboard(`${targetUserId}:${userContext}`, onboardingDashboard, 900); // 15 minutes TTL
+  res.json(onboardingDashboard);
+  return;
+}
+```
+
+The iOS side detects the 0/0 state and handles the response accordingly.
+
+## iOS Integration
+
+The iOS app integrates with the BFF through three main components:
+
+### DashboardBFFService
+
+Handles communication with the BFF API and client-side caching:
+
+```swift
+/// Fetch context-aware dashboard content from the BFF
+/// - Parameter context: The current combined context
+/// - Returns: Dashboard content tailored to the user's context
+func fetchDashboardContent(context: CombinedContext) async throws -> ContextToBFFAdapter.DashboardContextResponse {
+    // Generate a cache key based on user ID and context type
+    guard let userId = context.user.userId else {
+        throw NSError(domain: "DashboardBFFService", code: 401, userInfo: [NSLocalizedDescriptionKey: "User ID required"])
+    }
+
+    let contextType = context.user.currentContextType
+    let cacheKey = "\(userId)_\(contextType.rawValue)"
+
+    // Check if we have a valid cached response
+    if let cachedResponse = responseCache[cacheKey],
+       Date().timeIntervalSince(cachedResponse.timestamp) < cacheTimeout {
+        return cachedResponse.response
+    }
+    
+    // Prepare and send API request...
+}
+```
+
+### ContextToBFFAdapter
+
+Transforms internal context data into API-friendly payload:
+
+```swift
+/// Convert CombinedContext to a DashboardContextRequest
+/// - Parameter context: The CombinedContext to convert
+/// - Returns: A DashboardContextRequest for the BFF API
+static func convertToBFFPayload(context: CombinedContext) -> DashboardContextRequest? {
+    // Create location payload
+    let locationPayload = DashboardContextRequest.LocationPayload(
+        latitude: context.environment.latitude,
+        longitude: context.environment.longitude,
+        isOnCampus: context.environment.isOnCampus,
+        isInBuilding: context.environment.isInBuilding,
+        buildingId: context.environment.currentBuildingId,
+        campusId: context.environment.currentCampusId
+    )
+    
+    // Create environment payload...
+    // Create device info payload...
+    
+    // Create the final request payload...
+}
+```
+
+### ContextAwareDashboardProvider
+
+Supplies context-aware dashboard data to the UI:
+
+```swift
+/// Fetches dashboard items based on current context
+func fetchDashboardItems() async throws -> [DashboardItem] {
+    // Get the current context from the singleton
+    let context = currentContext
+    
+    // Fetch context-aware dashboard content from BFF
+    let bffResponse = try await bffService.fetchDashboardContent(context: context)
+    
+    // Convert BFF response to DashboardItems
+    let items = convertToDashboardItems(from: bffResponse)
+    
+    return items
+}
+```
+
+## Caching Strategy
+
+The implementation uses a multi-layered caching approach:
+
+1. **Server-side Redis Cache**:
+   - Context-specific cache keys: `${targetUserId}:${userContext}`
+   - TTLs tailored to each context type
+   - Cache invalidation endpoint for on-demand clearing
+
+2. **Client-side Memory Cache**:
+   - In-memory cache with context-specific keys
+   - 10-minute default TTL with context-specific overrides
+   - Automatic invalidation when context changes
+
+## Optimizations
+
+1. **Parallel Data Fetching**:
+   ```typescript
+   const [campus, city] = await Promise.all([
+     this.getUserCampus(userId),
+     this.getUserCity(userId)
+   ]);
+   ```
+
+2. **Context-Appropriate TTLs**:
+   ```typescript
+   // Cache with context-appropriate TTL
+   await redisCache.setDashboard(`${targetUserId}:${userContext}`, dashboardData);
+   ```
+
+3. **Fallback Mechanisms**:
+   ```typescript
+   // If no processed data, get raw parking data
+   const parkingLots = await this.getCampusParking(campusId);
+   return {
+     parking_lots: parkingLots,
+     last_updated: new Date().toISOString(),
+     is_raw_data: true
+   };
+   ```
+
+## PLG Integration with Engine (May 25, 2025)
+
+The BFF transformer now works in coordination with enhanced engine processing:
+
+### **Engine PLG Optimization Signals**
+```typescript
+// Engine campus activities now include PLG context
+inputs: {
+  parking_lots: JSON.stringify(parkingLots),
+  transit_data: JSON.stringify(transitData),
+  timestamp: new Date().toISOString(),
+  context_type: "plg_optimization" // Signal for PLG-focused output
+}
+```
+
+### **Enhanced Intelligence Chain**
+1. **Engine**: Generates compelling campus intelligence with PLG optimization context
+2. **BFF Transformer**: Processes complex data structures with temperature conversion and urgency detection
+3. **iOS Dashboard**: Displays in compelling PLG format with dramatic headlines and visual infographics
+
+## Future Enhancements
+
+While significant components of the Dashboard BFF system have been implemented with PLG enhancements, several enhancements are planned:
+
+1. **Extended PLG Scenarios**: Additional "Holy Shit!" moment detection and processing
+2. **Enhanced Analytics**: Track PLG engagement and conversion metrics
+3. **Improved Intelligence**: More sophisticated campus intelligence processing
+4. **Performance Monitoring**: PLG-specific performance metrics and logging
+5. **Advanced Personalization**: PLG moment personalization based on user behavior patterns
+
+## Related Documentation
+
+- 🔨 Dashboard BFF Implementation Plan
+- 🔨 New User Dashboard Implementation

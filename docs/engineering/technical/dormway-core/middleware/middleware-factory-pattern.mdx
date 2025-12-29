@@ -1,0 +1,282 @@
+---
+title: "Middleware Factory Pattern"
+description: "Traditional middleware often imports dependencies directly:"
+---
+
+# Middleware Factory Pattern
+
+## Overview
+
+**@dormway/core** provides Express middleware as **factory functions** rather than ready-to-use middleware instances. This pattern enables:
+
+- **Dependency injection** - No tight coupling to specific implementations
+- **Easy testing** - Mock dependencies without complex setup
+- **Reusability** - Same factory works across all services
+- **Flexibility** - Configure middleware behavior at runtime
+
+## Philosophy
+
+Traditional middleware often imports dependencies directly:
+
+```typescript
+// Traditional (tight coupling)
+import { logger } from './logger';
+import { cache } from './cache';
+
+export function rateLimiter(req, res, next) {
+  // Uses global logger and cache - hard to test, hard to configure
+}
+```
+
+Factory functions accept dependencies as parameters:
+
+```typescript
+// Factory pattern (loose coupling)
+export function createRateLimiter(options: {
+  logger?: Logger;
+  cache?: CacheAdapter;
+  windowSec: number;
+  max: number;
+}) {
+  return (req, res, next) => {
+    // Uses injected logger and cache - easy to test, easy to configure
+  };
+}
+```
+
+## Installation
+
+```bash
+npm install @dormway/core
+```
+
+## Available Factories
+
+### Quick Reference
+
+| Factory | Purpose | Key Dependencies |
+|---------|---------|-----------------|
+| `createErrorHandler` | Consistent error responses | Logger, environment |
+| `createRequestValidator` | Zod schema validation | Schema |
+| `createRateLimiter` | Rate limiting (Redis/memory) | CacheAdapter (optional) |
+| `createAuthMiddleware` | Multi-method authentication | ClerkClient, verifiers |
+| `createRoleCheckMiddleware` | Role-based access control | Logger, allowed roles |
+| `createGatewayAuthMiddleware` | API gateway validation | Gateway key, environment |
+| `createDemoReadOnlyGuard` | Block writes for demo users | Logger, allowed paths |
+
+## Usage Examples
+
+### Basic Setup
+
+```typescript
+import express from 'express';
+import {
+  createErrorHandler,
+  createAuthMiddleware,
+  createRateLimiter,
+} from '@dormway/core/middleware';
+import { logger } from './utils/logger';
+import { redisCache } from './services/redis-cache';
+import { clerkClient } from '@clerk/clerk-sdk-node';
+
+const app = express();
+
+// 1. Authentication
+app.use(createAuthMiddleware({
+  logger,
+  clerkClient,
+  temporalApiKey: process.env.TEMPORAL_API_KEY,
+  internalApiKey: process.env.API_KEY
+}));
+
+// 2. Rate limiting
+app.use('/api', createRateLimiter({
+  cache: redisCache,
+  windowSec: 60,
+  max: 100,
+  keyFn: (req) => req.user?.id || req.ip || 'anonymous'
+}));
+
+// Routes here...
+
+// 3. Error handler (must be last!)
+app.use(createErrorHandler({
+  logger,
+  environment: process.env.NODE_ENV,
+  includeSentryEventId: true
+}));
+```
+
+### Middleware Order
+
+The order of middleware matters! Recommended sequence:
+
+1. **Gateway authentication** - Validate API gateway key
+2. **User authentication** - Extract user from JWT/device key
+3. **Demo read-only guard** - Block writes for demo users
+4. **Rate limiting** - Prevent abuse
+5. **Routes** - Your application routes
+6. **Error handler** - Catch and format errors (always last)
+
+## Detailed Factory Documentation
+
+Each factory has its own detailed documentation:
+
+- [Error Handler](/docs/engineering/technical/dormway-core/middleware/error-handler) - Consistent error formatting
+- [Request Validator](/docs/engineering/technical/dormway-core/middleware/request-validator) - Zod schema validation
+- [Rate Limiter](/docs/engineering/technical/dormway-core/middleware/rate-limiter) - Redis/memory rate limiting
+- [Authentication Middleware](/docs/engineering/technical/dormway-core/middleware/authentication-middleware) - Multi-method auth
+- [Role Check Middleware](/docs/engineering/technical/dormway-core/middleware/role-check-middleware) - RBAC
+- [Gateway Auth Middleware](/docs/engineering/technical/dormway-core/middleware/gateway-auth-middleware) - API gateway validation
+- [Demo Read-Only Guard](/docs/engineering/technical/dormway-core/middleware/demo-read-only-guard) - Demo user restrictions
+
+## Adapter Interfaces
+
+Middleware factories accept adapters that implement specific interfaces:
+
+### Logger Interface
+
+```typescript
+interface Logger {
+  debug(message: string, context?: Record<string, unknown>): void;
+  info(message: string, context?: Record<string, unknown>): void;
+  warn(message: string, context?: Record<string, unknown>): void;
+  error(message: string, context?: Record<string, unknown>): void;
+}
+```
+
+Compatible with: `createStructuredLogger()` from @dormway/core/logger
+
+### Cache Adapter Interface
+
+```typescript
+interface CacheAdapter {
+  isRedisConnected(): boolean;
+  client: {
+    incr(key: string): Promise<number>;
+    expire(key: string, seconds: number): Promise<void>;
+  };
+}
+```
+
+Compatible with: Redis adapter from @dormway/core/adapters/cache
+
+### Clerk Client Interface
+
+```typescript
+interface ClerkClient {
+  verifyToken(token: string): Promise<{
+    sub: string;
+    backend_user_id?: string;
+    role?: string;
+    [key: string]: unknown;
+  }>;
+}
+```
+
+Compatible with: `@clerk/clerk-sdk-node`
+
+## Testing Middleware
+
+Factory pattern makes testing straightforward:
+
+```typescript
+import { createErrorHandler, AppError } from '@dormway/core/middleware';
+
+describe('Error Handler', () => {
+  it('handles operational errors', () => {
+    // Create mock dependencies
+    const mockLogger = {
+      debug: jest.fn(),
+      info: jest.fn(),
+      warn: jest.fn(),
+      error: jest.fn()
+    };
+
+    // Create middleware with mocks
+    const errorHandler = createErrorHandler({
+      logger: mockLogger,
+      environment: 'test'
+    });
+
+    // Create mock request/response
+    const mockReq = { method: 'GET', path: '/test' };
+    const mockRes = {
+      status: jest.fn().mockReturnThis(),
+      json: jest.fn()
+    };
+    const mockNext = jest.fn();
+
+    // Execute
+    const error = new AppError('Test error', 400);
+    errorHandler(error, mockReq as any, mockRes as any, mockNext);
+
+    // Assert
+    expect(mockRes.status).toHaveBeenCalledWith(400);
+    expect(mockLogger.warn).toHaveBeenCalled();
+  });
+});
+```
+
+## Migration from Direct Middleware
+
+If you have existing middleware that imports dependencies directly:
+
+### Before (Direct Dependencies)
+
+```typescript
+// middleware/auth.ts
+import { logger } from '../utils/logger';
+import { clerkClient } from '../services/clerk';
+
+export async function authMiddleware(req, res, next) {
+  // Uses imported logger and clerkClient
+  logger.info('Authenticating request');
+  const token = req.headers.authorization?.split(' ')[1];
+  // ...
+}
+
+// Usage
+import { authMiddleware } from './middleware/auth';
+app.use(authMiddleware);
+```
+
+### After (Factory Pattern)
+
+```typescript
+// Usage
+import { createAuthMiddleware } from '@dormway/core/middleware';
+import { logger } from './utils/logger';
+import { clerkClient } from '@clerk/clerk-sdk-node';
+
+app.use(createAuthMiddleware({
+  logger,
+  clerkClient,
+  temporalApiKey: process.env.TEMPORAL_API_KEY,
+  internalApiKey: process.env.API_KEY
+}));
+```
+
+## Benefits Summary
+
+| Benefit | Description |
+|---------|-------------|
+| **No tight coupling** | Dependencies injected, not imported |
+| **Easy testing** | Mock dependencies without module mocking |
+| **Reusable** | Use across api-router, engine, ably-relay |
+| **Type-safe** | Full TypeScript support |
+| **Maintainable** | Single source of truth in @dormway/core |
+| **Flexible** | Configure per-service or per-route |
+
+## Related Documentation
+
+- [DormWay Core Library (@dormway-core)](/docs/engineering/technical/dormway-core-library-dormway-core) - Main library overview
+- [Migration Guide](/docs/engineering/technical/dormway-core/migration-guide) - Refactoring to @dormway/core
+- [Structured Logger](/docs/engineering/technical/dormway-core/utilities/structured-logger) - Compatible logging utility
+- [Error Handling](/docs/engineering/technical/dormway-core/utilities/error-handling) - Error classes and patterns
+
+---
+
+**Last Updated**: 2025-11-26
+**Maintainer**: Platform Team
+**Source**: `services/shared/dormway-core/src/middleware/README.md`

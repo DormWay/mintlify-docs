@@ -1,0 +1,730 @@
+---
+title: "Task Management System   Phase 1 Completion Plan"
+description: "status: awaiting_approval created: 2025-10-12 last_reviewed: 2025-10-12 owner: engineering reviewer: ethan_kaplan implementation_status: proposed related_fea..."
+---
+
+# Task Management System - Phase 1 Completion Plan
+
+---
+status: awaiting_approval
+created: 2025-10-12
+last_reviewed: 2025-10-12
+owner: engineering
+reviewer: ethan_kaplan
+implementation_status: proposed
+related_features: task-bank, timeline, drag-drop
+decision_type: implementation
+parent_doc: "[Task Management System - Persistent Storage Architecture](/docs/engineering/architecture/task-management-system-persistent-storage-architecture)"
+---
+
+## Executive Summary
+
+This document proposes completing the **Phase 1 implementation** of the Task Management System architecture as designed in [Task Management System - Persistent Storage Architecture](/docs/engineering/architecture/task-management-system-persistent-storage-architecture) (approved 2025-10-09).
+
+**Current State**: Phase 1 is ~60% complete - the `tasks` table and API routes exist, but dashboard integration is incomplete, leaving the system in an inconsistent state with dual code paths.
+
+**Proposal**: Complete the remaining Phase 1 tasks to achieve the approved architecture benefits while maintaining backward compatibility.
+
+**Risk Level**: 🟢 **Low** - All changes are additive or consolidating; no breaking changes to existing functionality.
+
+**Time Estimate**: ~6 hours (1 day sprint)
+
+---
+
+## Background: Architectural Design from Obsidian Vault
+
+### The Approved Two-Table Design
+
+The parent architecture document explicitly defines a **two-table system** with clear separation of concerns:
+
+```
+┌─────────────────────────────────────────────────┐
+│ tasks table                                     │
+│ ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ │
+│ Purpose: Task LIFECYCLE management              │
+│ States:  pending → scheduled → completed        │
+│ Stores:  Unscheduled work + lifecycle metadata  │
+│                                                 │
+│ When pending:    Shows in Task Bank             │
+│ When scheduled:  Links via scheduled_block_id   │
+│ When completed:  Hidden, tracked for analytics  │
+└─────────────────────────────────────────────────┘
+                    ↓ FK: scheduled_block_id
+┌─────────────────────────────────────────────────┐
+│ student_time_blocks table                       │
+│ ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ │
+│ Purpose: ALL scheduled time on timeline         │
+│ Types:                                          │
+│  - Classes (source='schedule_import')           │
+│  - Events (source='calendar_sync')              │
+│  - Scheduled tasks (source='manual_planner')    │
+│  - Focus blocks (source='ai_suggestion')        │
+└─────────────────────────────────────────────────┘
+```
+
+### Why This Design? (From Architecture Doc)
+
+The parent document explicitly **rejected** putting tasks in `student_time_blocks`:
+
+> **Alternative 2: Extend student_time_blocks** ❌ REJECTED
+>
+> **Why Rejected**:
+> - ❌ Semantic mismatch: "time block" implies scheduled time
+> - ❌ Requires nullable `start_time` and `end_time` (breaks constraints)
+> - ❌ Mixes two distinct concepts (events vs tasks)
+> - ❌ Harder to query ("show unscheduled time blocks" is confusing)
+
+**Rationale**: Tasks and time blocks are **different concepts**:
+- **Tasks** = Work items with lifecycle states (can exist without a schedule)
+- **Time blocks** = Scheduled time on a calendar (always has start/end)
+
+Mixing them creates semantic confusion and breaks database constraints.
+
+---
+
+## Current Implementation Status
+
+### ✅ What's Complete (Phase 1)
+
+1. **Database Schema** ✅
+   - Migration: `20251009_add_tasks_table.sql` deployed
+   - Table: `tasks` with proper indexes, RLS policies, lifecycle states
+   - Foreign key: `scheduled_block_id → student_time_blocks(id)`
+
+2. **Backend API Routes** ✅
+   - File: `task-routes.ts` mounted at `/api/mobile/tasks`
+   - CRUD operations: Create, Read, Update, Delete (soft)
+   - Lifecycle operations: Schedule, Unschedule, Complete
+   - All endpoints implemented and functional
+
+3. **Frontend Hooks** ✅
+   - `useTasks()` - Query tasks by status
+   - `useScheduleTask()` - Schedule task to timeline
+   - `useUnscheduleTask()` - Move task back to Task Bank
+   - `useCompleteTask()` - Mark task complete
+   - Drag-and-drop detects UUID tasks vs ephemeral
+
+### ⚠️ What's Incomplete (Phase 1 Gaps)
+
+#### **Gap #1: Dashboard Composite Doesn't Query Tasks Table**
+
+**Location**: `services/api-router/src/routes/mobile-routes.ts:1707-1820`
+
+**Current Behavior**:
+```typescript
+// GET /api/mobile/planner/task-bank
+// Builds unscheduledTasks from:
+const dayplanTasks = /* service_data with method='dayplan' */;
+const canvasTasks = /* canvas_assignments table */;
+const captureTasks = /* service_data with method='quick_capture' */;
+
+return { tasks: [...dayplanTasks, ...canvasTasks, ...captureTasks] };
+// ❌ Missing: tasks table query
+```
+
+**Impact**:
+- Manual tasks created via `POST /mobile/tasks` don't appear in dashboard composite
+- Frontend compensates with client-side merging in `TaskBankList.tsx:135-161`
+- Backend and frontend have different views of task data
+- Violates single source of truth principle
+
+**Evidence of Workaround**:
+```typescript
+// TaskBankList.tsx - Client compensates for backend gap
+const { data: persistedTasks } = useTasks('pending'); // Separate query
+const compositeTasks = tasks || []; // From dashboard
+const allTasks = [...compositeTasks, ...persistedTasks]; // Manual merge
+```
+
+---
+
+#### **Gap #2: Planner Blocks Fallback Still Active**
+
+**Location**: `services/dormway-lockedin/src/components/home/DragDropContext.tsx:184-206`
+
+**Current Behavior**:
+```typescript
+// Dual code path based on task ID format
+if (isPersistentTask) {
+  // ✅ NEW: Use tasks API
+  scheduleTaskMutation.mutate({ taskId, startTime, endTime });
+} else {
+  // ❌ OLD: Legacy planner blocks API
+  createPlannerBlock.mutate({
+    taskId, title, startTime, endTime, courseCode
+  });
+}
+```
+
+**Why It Exists**: Backward compatibility shim for ephemeral tasks (dayplan, assignments) during migration.
+
+**Impact**:
+- Two parallel systems doing the same thing
+- Creates `student_time_blocks` entries without corresponding `tasks` records
+- Makes delete functionality ambiguous (which system owns the block?)
+- Increases code complexity and maintenance burden
+
+---
+
+#### **Gap #3: Timeline Event Type Confusion**
+
+**Location**: Timeline components check `event.type` to determine deletability
+
+**Current Logic**:
+```typescript
+// DayStripTimeline.tsx:387
+{onEventDelete && (event.type === 'task' || event.type === 'planner_block') && (
+  <button onClick={() => onEventDelete(event)}>×</button>
+)}
+```
+
+**Problem**: Type field is overloaded:
+- `type: 'class'` = Read-only schedule class
+- `type: 'event'` = Read-only calendar event
+- `type: 'task'` = Should be scheduled task from `tasks` table
+- `type: 'planner_block'` = Legacy manual block (may or may not have task record)
+
+**Better Approach**: Check `scheduled_block_id` or `source` field for deletability instead of type.
+
+---
+
+## Critical Problem: Incomplete Phase 1 Creates Technical Debt
+
+### Current State Diagram
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│ Frontend Task Bank                                               │
+│ ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ │
+│                                                                  │
+│ ┌─────────────────┐    ┌──────────────────┐                    │
+│ │ Dashboard Query │    │ Tasks Query      │                    │
+│ │ (missing tasks) │    │ (status=pending) │                    │
+│ └────────┬────────┘    └────────┬─────────┘                    │
+│          │                      │                               │
+│          └──────────┬───────────┘                               │
+│                     ↓                                            │
+│          Client-side merge (TaskBankList.tsx)                   │
+│                                                                  │
+│ Risk: Data inconsistency, duplicate rendering                   │
+└──────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────┐
+│ Drag-and-Drop Scheduling                                         │
+│ ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ │
+│                                                                  │
+│           Is UUID?                                               │
+│          ┌───┴────┐                                              │
+│         Yes       No                                             │
+│          ↓         ↓                                             │
+│   ┌──────────┐  ┌────────────────┐                             │
+│   │ Tasks API│  │ Planner Blocks │ ← Legacy fallback           │
+│   │ (new)    │  │ API (old)      │                             │
+│   └──────────┘  └────────────────┘                             │
+│                                                                  │
+│ Risk: Two systems, inconsistent data model                      │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### Why This Is Technical Debt
+
+1. **Violates Single Source of Truth**: Backend has incomplete data
+2. **Client Compensates for Backend**: Merging should happen server-side
+3. **Dual Code Paths**: Increases bug surface area
+4. **Future Migration Harder**: More legacy code to remove later
+5. **Confusion for Developers**: Which system should I use?
+
+---
+
+## Proposed Solution: Complete Phase 1
+
+### Goals
+
+1. ✅ Make `tasks` table the single source of truth for unscheduled work
+2. ✅ Eliminate client-side task merging (move to backend)
+3. ✅ Remove planner blocks fallback (convert ephemeral → persistent first)
+4. ✅ Simplify timeline event type logic
+5. ✅ Maintain 100% backward compatibility during rollout
+
+---
+
+## Implementation Plan
+
+### Change #1: Add Tasks to Dashboard Composite
+
+**File**: `services/api-router/src/routes/mobile-routes.ts`
+**Function**: `router.get('/planner/task-bank', ...)`
+**Lines**: ~1707-1820
+
+**Proposed Change**:
+```typescript
+// Get persistent tasks from tasks table
+const { data: persistentTasks } = await auroraClient.query(`
+  SELECT
+    id,
+    title,
+    estimated_duration_minutes as "estimatedMinutes",
+    priority,
+    course_code as "courseCode",
+    due_date as "dueDate",
+    source,
+    metadata
+  FROM tasks
+  WHERE user_id = $1
+    AND status = 'pending'
+  ORDER BY
+    CASE priority
+      WHEN 'urgent' THEN 1
+      WHEN 'high' THEN 2
+      WHEN 'medium' THEN 3
+      WHEN 'low' THEN 4
+    END,
+    due_date ASC NULLS LAST
+`, [userId]);
+
+// Map to consistent format
+const persistentTasksFormatted = (persistentTasks || []).map((t: any) => ({
+  id: t.id,
+  title: t.title,
+  type: 'task',
+  estimatedMinutes: t.estimatedMinutes,
+  priority: t.priority,
+  courseCode: t.courseCode,
+  due: t.dueDate,
+  source: t.source || 'manual',
+}));
+
+// Merge all task sources
+const allTasks = [
+  ...tasks,                    // Dayplan (Phase 3: will be deprecated)
+  ...canvasTasks,              // Assignments
+  ...captureTasks,             // Quick captures
+  ...persistentTasksFormatted, // ✅ ADD THIS
+];
+```
+
+**Testing**:
+```bash
+# Manual test
+1. Create task: POST /mobile/tasks { title: "Test Task" }
+2. Query dashboard: GET /dashboard/composite
+3. Verify: "Test Task" appears in unscheduledTasks array
+```
+
+**Impact**:
+- ✅ All tasks visible in dashboard composite
+- ✅ Frontend can remove separate `useTasks()` call
+- ✅ Single query replaces client-side merge
+- ✅ Backend becomes source of truth
+
+---
+
+### Change #2: Remove Planner Blocks Fallback
+
+**File**: `services/dormway-lockedin/src/components/home/DragDropContext.tsx`
+**Lines**: ~184-206
+
+**Proposed Change**:
+```typescript
+// Convert ephemeral tasks to persistent first
+let persistentTaskId = task.id;
+
+if (!isPersistentTask) {
+  // Create persistent task record
+  const response = await fetch(proxyPath('/mobile/tasks'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      title: task.title,
+      estimatedDuration: task.estimatedMinutes || 30,
+      priority: task.priority || 'medium',
+      courseCode: task.courseCode,
+      dueDate: task.due,
+      source: task.source || 'dayplan',
+      metadata: { originalId: task.id },
+    }),
+  });
+
+  const { task: newTask } = await response.json();
+  persistentTaskId = newTask.id;
+
+  console.log('[DragDrop] Converted ephemeral → persistent:', {
+    original: task.id,
+    persistent: persistentTaskId,
+  });
+}
+
+// Always use tasks API (single code path)
+scheduleTaskMutation.mutate({
+  taskId: persistentTaskId,
+  startTime: startTime.toISOString(),
+  endTime: endTime.toISOString(),
+});
+```
+
+**Why This Works**:
+- Ephemeral tasks (dayplan, assignments) become persistent before scheduling
+- All scheduled items have corresponding `tasks` records
+- Single code path eliminates confusion
+- Provenance tracked via `source` field
+
+**Testing**:
+```bash
+# Test ephemeral → persistent conversion
+1. Get dayplan task from dashboard (non-UUID ID)
+2. Drag to timeline
+3. Verify: New tasks record created with source='dayplan'
+4. Verify: student_time_blocks record links via scheduled_block_id
+5. Verify: Task no longer in Task Bank (status='scheduled')
+```
+
+---
+
+### Change #3: Simplify Timeline Event Type Logic
+
+**File**: `services/dormway-lockedin/src/components/home/timeline/DayStripTimeline.tsx`
+**Lines**: ~387
+
+**Proposed Change**:
+```typescript
+{onEventDelete && isEventDeletable(event) && (
+  <button onClick={(e) => {
+    e.stopPropagation();
+    onEventDelete(event);
+  }}>×</button>
+)}
+
+// Helper function
+function isEventDeletable(event: TimeBlock): boolean {
+  // Check source field instead of type
+  const deletableSources = ['manual_planner', 'manual'];
+  return deletableSources.includes(event.source || '');
+}
+```
+
+**Why Better**:
+- `source` field indicates provenance (who created it)
+- Classes: `source='schedule_import'` (not deletable)
+- Calendar events: `source='calendar_sync'` (not deletable)
+- User-created: `source='manual_planner'` (deletable)
+
+---
+
+### Change #4: Update Delete Handler
+
+**File**: `services/dormway-lockedin/src/components/home/columns/Column1Timeline.tsx`
+**Function**: `handleEventDelete`
+**Lines**: ~167-176
+
+**Proposed Change**:
+```typescript
+const handleEventDelete = async (event: TimeBlock) => {
+  if (!event.id) {
+    console.error('Cannot delete event without id:', event);
+    return;
+  }
+
+  // Check if this time block is linked to a task
+  const metadata = event.metadata || {};
+  const linkedTaskId = metadata.taskId;
+
+  if (linkedTaskId) {
+    // Scheduled task - unschedule (returns to Task Bank)
+    console.log('[Timeline] Unscheduling task:', linkedTaskId);
+    await unscheduleTaskMutation.mutateAsync(linkedTaskId);
+  } else {
+    // Standalone planner block - delete
+    console.log('[Timeline] Deleting planner block:', event.id);
+    await deletePlannerBlock.mutateAsync(event.id);
+  }
+};
+```
+
+**Why Better**:
+- Checks for task relationship before deleting
+- Scheduled tasks unschedule (preserve data + lifecycle)
+- Standalone planner blocks delete as before
+- Clear semantic distinction
+
+---
+
+## Frontend Cleanup (Post-Backend Changes)
+
+Once backend changes are deployed:
+
+**File**: `services/dormway-lockedin/src/components/home/taskbank/TaskBankList.tsx`
+
+**Remove Client-Side Merge**:
+```typescript
+// BEFORE (current)
+const { data: persistedTasks } = useTasks('pending'); // Separate query
+const compositeTasks = tasks || [];
+const allTasks = [...compositeTasks, ...persistedTasks.filter(/* dedupe */)];
+
+// AFTER (simplified)
+const compositeTasks = tasks || []; // Now includes all sources
+// No separate query needed - backend handles it
+```
+
+**Benefits**:
+- Simpler component code
+- One source of truth (dashboard composite)
+- No client-side deduplication logic
+- Better performance (one query vs two)
+
+---
+
+## Testing & Validation Plan
+
+### Unit Tests
+
+```typescript
+// Test task scheduling lifecycle
+describe('Task Scheduling', () => {
+  it('creates task and schedules to timeline', async () => {
+    const task = await createTask({ title: 'Study' });
+    await scheduleTask(task.id, startTime, endTime);
+
+    const dbTask = await getTask(task.id);
+    expect(dbTask.status).toBe('scheduled');
+    expect(dbTask.scheduled_block_id).not.toBeNull();
+
+    const block = await getTimeBlock(dbTask.scheduled_block_id);
+    expect(block.metadata.taskId).toBe(task.id);
+  });
+
+  it('converts ephemeral task to persistent before scheduling', async () => {
+    const ephemeralTask = { id: 'dayplan-123', title: 'Work on Assignment' };
+    const result = await dragToTimeline(ephemeralTask, startTime, endTime);
+
+    expect(result.persistentTaskId).toMatch(/^[0-9a-f]{8}-/); // UUID
+    expect(result.source).toBe('dayplan');
+  });
+});
+```
+
+### Integration Smoke Tests
+
+```bash
+#!/bin/bash
+echo "=== Phase 1 Completion Smoke Tests ==="
+
+# Test 1: Manual task creation and visibility
+TASK_ID=$(curl -X POST /mobile/tasks -d '{"title":"Test Task"}' | jq -r '.task.id')
+DASHBOARD=$(curl /dashboard/composite)
+echo "$DASHBOARD" | jq ".unscheduledTasks[] | select(.id==\"$TASK_ID\")"
+# Expected: Task appears in unscheduledTasks
+
+# Test 2: Schedule task
+curl -X POST /mobile/tasks/$TASK_ID/schedule \
+  -d '{"startTime":"2025-10-12T14:00:00Z","endTime":"2025-10-12T15:00:00Z"}'
+DASHBOARD=$(curl /dashboard/composite)
+echo "$DASHBOARD" | jq ".timeline.events[] | select(.metadata.taskId==\"$TASK_ID\")"
+# Expected: Task appears in timeline events
+
+# Test 3: Unschedule task
+curl -X POST /mobile/tasks/$TASK_ID/unschedule
+DASHBOARD=$(curl /dashboard/composite)
+echo "$DASHBOARD" | jq ".unscheduledTasks[] | select(.id==\"$TASK_ID\")"
+# Expected: Task back in unscheduledTasks
+```
+
+### User Acceptance Testing
+
+**Test Scenario 1: Manual Task Flow**
+1. Click "+ Add Task" in Task Bank
+2. Fill: "Study for Midterm", 90 min, High priority, EECS 281
+3. Task appears in Task Bank immediately
+4. Refresh page → Task persists
+5. Drag task to 2:00 PM on timeline
+6. Task disappears from Task Bank, appears on timeline
+7. Hover → Delete button visible
+8. Click delete → Task returns to Task Bank
+9. Mark complete → Task disappears
+
+**Test Scenario 2: Ephemeral Task Conversion**
+1. View dayplan tasks in Task Bank
+2. Drag dayplan task to timeline
+3. Backend converts to persistent (transparent to user)
+4. Task schedules successfully
+5. Refresh page → Task still scheduled (persistence verified)
+
+---
+
+## Risk Assessment
+
+### Implementation Risks
+
+| Risk | Severity | Mitigation |
+|------|----------|------------|
+| Dashboard query slows down | 🟡 Medium | Tasks table has indexes; query is simple SELECT |
+| Task conversion fails | 🟡 Medium | Wrap in try/catch, fallback to planner blocks |
+| Delete confusion | 🟢 Low | Use source field for clear logic |
+| Data migration needed | 🟢 Low | No migration - new behavior affects new tasks only |
+
+### Rollback Plan
+
+All changes are **additive** or **consolidating** - no data deletions.
+
+**Rollback Steps**:
+1. Revert `mobile-routes.ts` dashboard query addition
+2. Restore `DragDropContext.tsx` if/else dual path
+3. Revert timeline delete logic
+4. Tasks table remains (data preserved)
+5. Frontend falls back to client-side merge
+
+**Data Safety**: No data loss possible - worst case is reverting to current behavior.
+
+---
+
+## Performance Impact
+
+### Database Query Analysis
+
+**After** (proposed):
+```sql
+-- Dashboard composite (consolidated)
+SELECT * FROM service_data WHERE method='dayplan'; -- 1 row
+SELECT * FROM canvas_assignments WHERE ...; -- ~20 rows
+SELECT * FROM service_data WHERE method='quick_capture'; -- ~10 rows
+SELECT * FROM tasks WHERE status='pending'; -- ~10 rows (added)
+```
+
+**Performance**: Marginal increase (~5-10ms) for dashboard composite, but **eliminates separate frontend query**, resulting in net improvement.
+
+**Index Coverage**:
+```sql
+-- Existing index optimizes this query
+CREATE INDEX idx_tasks_user_pending
+  ON tasks(user_id)
+  WHERE status = 'pending';
+```
+
+### Estimated Load
+
+- **Active students**: 10,000
+- **Avg tasks per student**: 10
+- **Total rows**: 100,000
+- **Query time**: <5ms (indexed query)
+
+---
+
+## Success Metrics
+
+### Phase 1 Completion KPIs
+
+1. **Data Consistency**
+   - ✅ All unscheduled tasks visible in dashboard composite
+   - ✅ No duplicate tasks rendered in Task Bank
+   - ✅ Backend and frontend have identical task views
+
+2. **Code Quality**
+   - ✅ Client-side merge removed
+   - ✅ Dual planner blocks path removed
+   - ✅ Delete logic uses source field
+
+3. **Functional Correctness**
+   - ✅ Manual tasks persist across sessions
+   - ✅ Ephemeral tasks convert to persistent
+   - ✅ Schedule/unschedule works for all task types
+   - ✅ Delete returns scheduled tasks to Task Bank
+
+4. **Performance**
+   - ✅ Dashboard composite < 200ms (p95)
+   - ✅ Frontend queries reduced by 1
+   - ✅ No N+1 query issues
+
+---
+
+## Timeline & Resources
+
+### Implementation Estimate
+
+| Task | Time | Engineer |
+|------|------|----------|
+| 1. Add tasks to dashboard composite | 30 min | Backend |
+| 2. Remove planner blocks fallback | 1 hour | Frontend |
+| 3. Update delete logic | 30 min | Frontend |
+| 4. Write unit tests | 1 hour | Backend/Frontend |
+| 5. Manual smoke tests | 30 min | QA |
+| 6. Deploy to staging | 15 min | DevOps |
+| 7. Validation & monitoring | 2 hours | Team |
+
+**Total**: ~6 hours (1 day sprint)
+
+### Phased Rollout
+
+**Week 1**: Backend changes + staging deployment
+- Deploy dashboard composite changes
+- Monitor query performance
+- Validate task visibility
+
+**Week 2**: Frontend changes + production deployment
+- Deploy ephemeral → persistent conversion
+- Deploy delete logic updates
+- Monitor error rates and user feedback
+
+**Week 3**: Cleanup + documentation
+- Remove client-side merge code
+- Update API documentation
+- Write Phase 2 planning doc
+
+---
+
+## Future Work (Not in Scope)
+
+This proposal **only completes Phase 1**. Future phases remain:
+
+### Phase 2: Task Editing (Future Sprint)
+- Edit task details while in Task Bank
+- Reschedule by dragging timeline blocks
+- Bulk operations (complete multiple, delete multiple)
+
+### Phase 3: Temporal Integration (Future Quarter)
+- Migrate StudentWatcher workflow to write to `tasks` table
+- Deprecate dayplan widget's `blocks[]` array
+- Assignment sync creates tasks automatically
+- Remove `service_data` dependency entirely
+
+---
+
+## Recommendation
+
+**I recommend proceeding with Phase 1 completion** for the following reasons:
+
+1. ✅ **Aligns with Approved Architecture**: Follows [Task Management System - Persistent Storage Architecture](/docs/engineering/architecture/task-management-system-persistent-storage-architecture) design exactly
+2. ✅ **Low Risk**: All changes are additive; easy rollback path
+3. ✅ **High Value**: Fixes data consistency issues and simplifies codebase
+4. ✅ **Quick Win**: ~1 day of engineering time for significant quality improvement
+5. ✅ **Foundation for Future**: Unblocks Phase 2 and Phase 3 work
+
+**The alternative (keeping current state)** means:
+- ❌ Incomplete implementation remains indefinitely
+- ❌ Technical debt accumulates
+- ❌ Developer confusion continues
+- ❌ Future phases blocked by incomplete foundation
+
+---
+
+## Questions for Review
+
+1. **Approval**: Do you approve completing Phase 1 as proposed?
+2. **Timeline**: Is the 1-week timeline acceptable?
+3. **Concerns**: Any architectural concerns with the proposed changes?
+4. **Priority**: Should this be prioritized over other current work?
+5. **Rollout**: Comfortable with staging → production phased rollout?
+
+---
+
+## Related Documentation
+
+- [Task Management System - Persistent Storage Architecture](/docs/engineering/architecture/task-management-system-persistent-storage-architecture) - Parent architecture doc
+- Migration: `infrastructure/database/migrations/20251009_add_tasks_table.sql`
+- API Routes: `services/api-router/src/routes/task-routes.ts`
+- Frontend Hooks: `services/dormway-lockedin/src/hooks/home/useTasks.ts`
+
+---
+
+**Document Version**: 1.0
+**Last Updated**: 2025-10-12
+**Status**: Awaiting Technical Review by Ethan Kaplan

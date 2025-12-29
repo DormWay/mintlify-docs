@@ -1,0 +1,80 @@
+---
+title: "Plugin Manifest Specification"
+description: "Plugins must ship a `manifest.json` describing their identity, tasks, and dependencies. The bootloader ingests this manifest to seed/refresh the registry; th..."
+---
+
+Plugins must ship a `manifest.json` describing their identity, tasks, and dependencies. The bootloader ingests this manifest to seed/refresh the registry; the database only stores overrides (cadence adjustments, disabled flags, etc.).
+
+## File Location
+- Include `manifest.json` at the root of each plugin package (next to `package.json`).
+- The example test plugin lives at `/Users/ethankaplan/Development/GitHub/dw-campus-sdk/examples/test-plugin/manifest.json`.
+
+## Schema
+```jsonc
+{
+  "pluginId": "dw.example-plugin",
+  "pluginVersion": "0.1.0",
+  "displayName": "Example Plugin",
+  "description": "Short summary of what this plugin produces.",
+  "target": {
+    "type": "campus",
+    "campusId": "umich"
+    // OR for cities: { "type": "city", "cityId": "ann-arbor" }
+  },
+  "maintainer": {
+    "name": "DormWay SDK Team",
+    "email": "sdk@dormway.app",
+    "repository": "https://github.com/DormWay/dw-campus-sdk"
+  },
+  "runtime": {
+    "language": "typescript",
+    "entrypoint": "dist/index.js",
+    "nodeVersion": "20.x"
+  },
+  "tasks": [
+    {
+      "taskId": "dining-overview",
+      "description": "Emit dining occupancy and hours data.",
+      "modules": ["dining"],
+      "defaultCadence": "PT15M",
+      "timeout": "PT2M",
+      "enabled": true
+    }
+  ],
+  "requirements": {
+    "secrets": [],
+    "proxyScopes": [],
+    "fixtures": []
+  }
+}
+```
+
+### Field Notes
+- **pluginId**: globally unique slug (`org.namespace` style). Must match manifest payloads.
+- **pluginVersion**: semver string; bump on breaking behavior.
+- **target**: indicates campus or city scope. Additional target metadata can be nested under `overrides` as needed.
+- **runtime.entrypoint**: path relative to package root. The runner uses this for local execution.
+- **tasks**:
+  - `modules`: manifest modules emitted (`events`, `dining`, `alerts`, etc.).
+  - `defaultCadence`: ISO-8601 duration defining the plugin’s preferred execution interval.
+  - `timeout`: optional ISO-8601 maximum execution time before the runner aborts.
+  - `enabled`: default boolean; Ops can override per environment.
+- **requirements**:
+  - `secrets`: any secret identifiers required (e.g., `waitz_api_key`).
+  - `proxyScopes`: Zuplo SDK proxy scopes (e.g., `sdk.scrape`, `sdk.llm`).
+  - `fixtures`: optional fixture bundles (e.g., `dining/debug.json`).
+
+## Bootloader Workflow
+1. On deploy/upgrade, the runner reads `manifest.json`.
+2. If the plugin is new, it creates the registry entry using manifest defaults.
+3. For existing entries, it reconciles tasks:
+   - Adds new task ids.
+   - Warns on removed tasks.
+   - Updates descriptions/modules.
+4. Cadence/enablement overrides remain in the database; defaults come from the manifest.
+
+## Authoring Guidelines
+- Keep manifests under 200 lines; use comments only in documentation, not in shipped JSON.
+- Include meaningful descriptions for each task to aid Ops dashboards.
+- Update `pluginVersion` and manifest when tasks, modules, or requirements change.
+- If a plugin needs dynamic manifest data (e.g., environment-specific defaults), emit them via the registry overrides instead.

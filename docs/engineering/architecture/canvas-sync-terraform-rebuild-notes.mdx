@@ -1,0 +1,94 @@
+---
+title: "canvas sync terraform rebuild notes"
+description: "1. Terraform baseline now lives under `infrastructure/terraform-new/` with the imported prod state (zero-drift as of 2025-10-05). 2. Canvas sync module (`mod..."
+---
+
+# Canvas Sync Terraform Rebuild Notes
+
+## AWS Account Baseline
+- Account: `928154648534`
+- Default region: `us-east-1`
+- Active ECS clusters: `dormway-cluster` (prod), `dormway-dev`, `Gitpod-DW-gitpod-flex-runner`
+
+## Networking
+- VPC: `vpc-0d7dbfe25d30bd7de`
+- Public subnets: `subnet-06e6c2344ee340495` (10.0.1.0/24, us-east-1a), `subnet-04c4e76acd5e6a4b6` (10.0.2.0/24, us-east-1b)
+- Private subnets: `subnet-07380dfcbe2568a73` (10.0.10.0/24, us-east-1a), `subnet-034fbc92e2e2eacd3` (10.0.11.0/24, us-east-1b)
+- Security groups:
+  - `sg-07e5b12a2ad715b99` (alb) – inbound 80/443 from world, outbound all
+  - `sg-0f64205748476a294` (private services) – intra-SG full mesh, ports 3000 and 8000 from ALB SG, 8000 also from `sg-0111d3de97c3a2205`
+
+## Load Balancer
+- ALB: `dormway-alb` (`arn:.../loadbalancer/app/dormway-alb/528553edf90288e6`)
+- Listeners:
+  - HTTP 80 → default forward to `dormway-api-router-tg`
+  - HTTPS 443 (cert `arn:aws:acm:us-east-1:928154648534:certificate/c95dfae8-1b23-41e2-944c-2058bd03685a`)
+    - Priority 50: host `syllabus.dormway.app` → `dormway-syllabus-viewer-tg`
+    - Priority 51: host `www.syllabus.dormway.app` → redirect 301 to `syllabus.dormway.app`
+    - Priority 101: path `/syllabus/*` or `/viewer/*` → `dormway-syllabus-viewer-tg`
+    - Default: forward to `dormway-api-router-tg`
+- Target groups:
+  - `dormway-api-router-tg` HTTP:3001 ↔ ECS IP mode
+  - `dormway-syllabus-viewer-tg` HTTP:3000 ↔ ECS IP mode
+
+## ECS Services (cluster `dormway-cluster`)
+- `dormway-api-router-service`
+  - Task definition: `dormway-api-router-doppler:28`
+  - Desired tasks: 2
+  - Subnets: private pair (10.0.10.0/24, 10.0.11.0/24)
+  - SG: `sg-0f64205748476a294`
+  - Load balanced by ALB target group
+  - Task contains primary `api-router` container (Fargate 2 vCPU/4 GB) + `datadog-agent`
+  - Environment: direct env values for region, redis URL, etc.; SSM secrets under `/backend/production/*` for API keys and DB connection
+- `dormway-engine-service`
+  - Task definition: `dormway-engine-doppler:9`
+  - Desired tasks: 2 (auto scaling enabled via Application Auto Scaling)
+  - No ALB, same private subnets + SG
+- `dormway-crews-service`
+  - Task definition: `dormway-crews-doppler:10`
+  - Desired tasks: 1
+  - No ALB
+- `dormway-ably-relay-service`
+  - Task definition: `dormway-ably-relay:6`
+  - Desired tasks: 1
+  - No ALB
+- **Not present anymore:** `dormway-ics-uploader-service` (task definition removed; Terraform still contains disabled remnants)
+
+## Task Definition Highlights (abridged)
+- All tasks use execution role `arn:aws:iam::928154648534:role/dormway-ecs-execution-role` and task role `arn:aws:iam::928154648534:role/dormway-ecs-task-role`
+- Log configuration: `awslogs` with log groups `/ecs/dormway-api-router`, `/ecs/dormway-engine`, `/ecs/dormway-crews`, `/ecs/dormway-ably-relay`
+- Secrets source pattern: `/backend/production/*` for most application secrets, `/dormway/*` for shared infra values (Aurora, AWS creds)
+- Datadog sidecar is attached only to `api-router`
+
+## ECR Repositories (selected)
+- `dormway-api-router`
+- `dormway-engine`
+- `dormway-ably-relay`
+- `dormway-dormway-crews`
+- `dormway/syllabus-webviewer`
+- `dormway-dormway-lockedin`
+- `dormway-ics-uploader` (legacy)
+- Others: `dormway-worker`, `simple-docker-service-0edcdf0b85d7`
+
+## Observations
+- No Canvas-specific infrastructure exists yet (no ECR repo, ECS task/service, target group, or SSM parameters)
+- Terraform state/files still reference the older ICS uploader (ECR repo, target group, listener rule) even though the service is gone in AWS
+- Doppler-generated `.doppler.env` provides AWS creds but not Canvas secrets; new secrets must be created in Doppler and replicated to SSM before Terraform apply
+- All ECS services share the same private subnets and security group; Canvas sync should follow the same pattern unless we introduce dedicated networking
+
+## Next Steps
+1. Terraform baseline now lives under `infrastructure/terraform-new/` with the imported prod state (zero-drift as of 2025-10-05).
+2. Canvas sync module (`modules/canvas_sync`) provisions:
+   - `aws_ecr_repository.dormway-canvas-sync`
+   - CloudWatch log group `/ecs/dormway-canvas-sync`
+   - `aws_ssm_parameter` entries under `/canvas/*` for OAuth + encryption secrets (values supplied via Terraform variables or Doppler → tfvars pipeline)
+   - Fargate task definition + ECS service `dormway-canvas-sync-service`
+   - ALB target group `dormway-canvas-sync-tg` and listener rule mapping `/canvas/*`
+3. GitHub deploy workflow now recognises `canvas-sync` and maps to `dormway-canvas-sync-service` (ECR repo `dormway-canvas-sync`).
+4. Local Docker compose (`docker-compose.local-dev.yml`) includes the new service, wired to the local Postgres instance and configurable Canvas secrets.
+5. Outstanding: Replace placeholder secret values in Terraform/Doppler with production credentials before apply; sanity-check Zuplo/API routing for `/canvas/*`; add integration tests once the service is live.
+
+## Open Questions
+- Should Canvas sync be exposed via ALB (public callback) or routed internally (e.g., Zuplo/API router proxy)?
+- Do we co-host Canvas workflows in the existing task role or define a scoped IAM role (for Canvas-specific S3/Secrets access)?
+- Will Canvas sync require a Temporal worker component, or does it communicate with the existing engine service?

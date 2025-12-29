@@ -1,0 +1,388 @@
+---
+title: "Configuration"
+description: "import { validateConfig, validateConfigOrThrow, ServerConfigSchema, DatabaseConfigSchema, buildConfigFromEnv, } from '@dormway/core/utils/config';"
+---
+
+# Configuration
+
+## Overview
+
+**@dormway/core/config** provides TypeScript types and Zod schemas for runtime configuration validation across all DormWay services.
+
+**Purpose**: Validate environment variables and config objects at startup to catch misconfigurations early with clear error messages.
+
+**Location**: `@dormway/core/utils/config`
+
+---
+
+## Installation
+
+```typescript
+import {
+  validateConfig,
+  validateConfigOrThrow,
+  ServerConfigSchema,
+  DatabaseConfigSchema,
+  buildConfigFromEnv,
+} from '@dormway/core/utils/config';
+```
+
+---
+
+## Configuration Types
+
+### Server Configuration
+```typescript
+interface ServerConfig {
+  port: number;                    // Server port
+  host: string;                    // Bind host
+  env: 'development' | 'production' | 'test' | 'staging';
+  baseUrl?: string;                // Base URL
+  cors?: boolean;                  // Enable CORS
+}
+```
+
+### Database Configuration
+```typescript
+interface DatabaseConfig {
+  host: string;
+  port: number;
+  database: string;
+  user: string;
+  password: string;
+  poolSize?: number;
+  ssl?: boolean | { rejectUnauthorized?: boolean };
+  connectionTimeout?: number;
+}
+```
+
+### Other Config Types
+- `RedisConfig` - Redis connection
+- `AWSConfig` / `S3Config` - AWS services
+- `ClerkConfig` - Clerk authentication
+- `TemporalConfig` - Temporal workflows
+- `ObservabilityConfig` - Tracing & metrics
+- `LoggingConfig` - Log levels & formats
+- `EmailConfig` - SMTP configuration
+- `RateLimitConfig` - API rate limiting
+
+---
+
+## API Reference
+
+### validateConfig
+
+Validate configuration with detailed error messages.
+
+**Signature**:
+```typescript
+validateConfig<T>(
+  schema: z.ZodSchema<T>,
+  data: unknown,
+  name?: string
+): ConfigValidationResult<T>
+```
+
+**Example**:
+```typescript
+import { validateConfig, ServerConfigSchema } from '@dormway/core/utils/config';
+
+const serverConfig = {
+  port: process.env.PORT ? parseInt(process.env.PORT) : 3001,
+  host: process.env.HOST || '0.0.0.0',
+  env: process.env.NODE_ENV || 'development',
+};
+
+const result = validateConfig(ServerConfigSchema, serverConfig, 'Server Config');
+
+if (!result.success) {
+  console.error('❌ Invalid configuration:');
+  result.errors?.forEach(err => console.error(`  - ${err}`));
+  process.exit(1);
+}
+
+const config = result.data!; // Type-safe config
+```
+
+---
+
+### validateConfigOrThrow
+
+Validate configuration or throw error (simpler API).
+
+**Signature**:
+```typescript
+validateConfigOrThrow<T>(
+  schema: z.ZodSchema<T>,
+  data: unknown,
+  name?: string
+): T
+```
+
+**Example**:
+```typescript
+import { validateConfigOrThrow, DatabaseConfigSchema } from '@dormway/core/utils/config';
+
+try {
+  const dbConfig = validateConfigOrThrow(DatabaseConfigSchema, {
+    host: process.env.DB_HOST,
+    port: parseInt(process.env.DB_PORT || '5432'),
+    database: process.env.DB_NAME,
+    user: process.env.DB_USER,
+    password: process.env.DB_PASSWORD,
+  }, 'Database Config');
+
+  console.log('✅ Database config valid');
+} catch (error) {
+  console.error('❌ Invalid database config:', error.message);
+  process.exit(1);
+}
+```
+
+---
+
+### buildConfigFromEnv
+
+Build configuration from environment variables with type parsing.
+
+**Signature**:
+```typescript
+buildConfigFromEnv<T>(
+  envSchema: Record<keyof T, {
+    env: string;
+    type: 'string' | 'number' | 'boolean' | 'json';
+    default?: unknown;
+  }>
+): T
+```
+
+**Example**:
+```typescript
+import { buildConfigFromEnv } from '@dormway/core/utils/config';
+
+const config = buildConfigFromEnv({
+  port: { env: 'PORT', type: 'number', default: 3000 },
+  host: { env: 'HOST', type: 'string', default: '0.0.0.0' },
+  debug: { env: 'DEBUG', type: 'boolean', default: false },
+  features: { env: 'FEATURES', type: 'json', default: {} },
+});
+
+console.log(config.port);    // 3000 (number)
+console.log(config.debug);   // false (boolean)
+```
+
+---
+
+### parseEnvVar
+
+Parse environment variable to expected type.
+
+**Signature**:
+```typescript
+parseEnvVar(
+  value: string | undefined,
+  type: 'string' | 'number' | 'boolean' | 'json'
+): unknown
+```
+
+**Example**:
+```typescript
+import { parseEnvVar } from '@dormway/core/utils/config';
+
+const port = parseEnvVar(process.env.PORT, 'number');        // 3000
+const enabled = parseEnvVar(process.env.ENABLED, 'boolean'); // true
+const config = parseEnvVar(process.env.CONFIG, 'json');      // { key: 'value' }
+```
+
+---
+
+## Common Patterns
+
+### Pattern 1: Service Startup Validation
+
+```typescript
+import {
+  validateConfigOrThrow,
+  ServerConfigSchema,
+  DatabaseConfigSchema,
+  RedisConfigSchema,
+} from '@dormway/core/utils/config';
+
+async function initializeService() {
+  // Validate server config
+  const serverConfig = validateConfigOrThrow(ServerConfigSchema, {
+    port: parseInt(process.env.PORT || '3001'),
+    host: process.env.HOST || '0.0.0.0',
+    env: process.env.NODE_ENV as any || 'development',
+  }, 'Server');
+
+  // Validate database config
+  const dbConfig = validateConfigOrThrow(DatabaseConfigSchema, {
+    host: process.env.DB_HOST!,
+    port: parseInt(process.env.DB_PORT || '5432'),
+    database: process.env.DB_NAME!,
+    user: process.env.DB_USER!,
+    password: process.env.DB_PASSWORD!,
+  }, 'Database');
+
+  console.log('✅ All configs valid, starting server...');
+  // Start server with validated configs
+}
+
+initializeService().catch(error => {
+  console.error('❌ Failed to initialize:', error.message);
+  process.exit(1);
+});
+```
+
+### Pattern 2: Multiple Config Validation
+
+```typescript
+import { validateConfig } from '@dormway/core/utils/config';
+
+const configs = [
+  { name: 'Server', schema: ServerConfigSchema, data: serverData },
+  { name: 'Database', schema: DatabaseConfigSchema, data: dbData },
+  { name: 'Redis', schema: RedisConfigSchema, data: redisData },
+];
+
+const errors: string[] = [];
+
+for (const { name, schema, data } of configs) {
+  const result = validateConfig(schema, data, name);
+  if (!result.success) {
+    errors.push(...(result.errors || []));
+  }
+}
+
+if (errors.length > 0) {
+  console.error('❌ Configuration errors:');
+  errors.forEach(err => console.error(`  - ${err}`));
+  process.exit(1);
+}
+```
+
+### Pattern 3: Clerk Configuration
+
+```typescript
+import { validateConfigOrThrow, ClerkConfigSchema } from '@dormway/core/utils/config';
+
+const clerkConfig = validateConfigOrThrow(ClerkConfigSchema, {
+  publishableKey: process.env.CLERK_PUBLISHABLE_KEY,
+  secretKey: process.env.CLERK_SECRET_KEY,
+}, 'Clerk');
+
+// Keys are guaranteed to have correct format (pk_*, sk_*)
+```
+
+### Pattern 4: Temporal Configuration
+
+```typescript
+import { validateConfigOrThrow, TemporalConfigSchema } from '@dormway/core/utils/config';
+
+const temporalConfig = validateConfigOrThrow(TemporalConfigSchema, {
+  address: process.env.TEMPORAL_ADDRESS || 'localhost:7233',
+  namespace: process.env.TEMPORAL_NAMESPACE || 'default',
+  taskQueue: 'student-worker',
+}, 'Temporal');
+```
+
+---
+
+## Validation Error Messages
+
+Clear, actionable error messages:
+
+```typescript
+// Missing required field
+Server Config.port: Required
+
+// Invalid type
+Server Config.port: Expected number, received string
+
+// Invalid enum value
+Server Config.env: Invalid enum value. Expected 'development' | 'production' | 'test' | 'staging', received 'prod'
+
+// Custom validation
+JWT Config.secret: String must contain at least 32 character(s)
+
+// Format validation
+Clerk Config.publishableKey: Invalid Clerk publishable key format
+```
+
+---
+
+## Best Practices
+
+### ✅ Do
+
+- **Validate configs at startup** - Fail fast on misconfiguration
+- **Use Zod schemas** - Type-safe runtime validation
+- **Provide defaults** - Use `buildConfigFromEnv` with defaults
+- **Use descriptive names** - Clear error messages
+- **Parse env vars** - Convert strings to correct types
+- **Check Clerk key formats** - Use ClerkConfigSchema
+
+### ❌ Don't
+
+- **Don't skip validation** - Catch errors early
+- **Don't use string literals** - Use enum types
+- **Don't hardcode values** - Use environment variables
+- **Don't ignore errors** - Exit on validation failure
+- **Don't commit secrets** - Use Doppler
+
+---
+
+## Complete Example
+
+```typescript
+import {
+  validateConfigOrThrow,
+  buildConfigFromEnv,
+  ServerConfigSchema,
+  DatabaseConfigSchema,
+  ClerkConfigSchema,
+  TemporalConfigSchema,
+} from '@dormway/core/utils/config';
+
+// Build server config from env
+const serverConfig = validateConfigOrThrow(
+  ServerConfigSchema,
+  buildConfigFromEnv({
+    port: { env: 'PORT', type: 'number', default: 3001 },
+    host: { env: 'HOST', type: 'string', default: '0.0.0.0' },
+    env: { env: 'NODE_ENV', type: 'string', default: 'development' },
+  }),
+  'Server'
+);
+
+// Validate database config
+const dbConfig = validateConfigOrThrow(DatabaseConfigSchema, {
+  host: process.env.DATABASE_URL?.split('@')[1]?.split(':')[0],
+  port: 5432,
+  database: 'dormway',
+  user: process.env.DB_USER!,
+  password: process.env.DB_PASSWORD!,
+}, 'Database');
+
+// Validate Clerk config
+const clerkConfig = validateConfigOrThrow(ClerkConfigSchema, {
+  publishableKey: process.env.CLERK_PUBLISHABLE_KEY!,
+  secretKey: process.env.CLERK_SECRET_KEY!,
+}, 'Clerk');
+
+console.log('✅ All configurations valid');
+```
+
+---
+
+## Related Documentation
+
+- [DormWay Core Library (@dormway-core)](/docs/engineering/technical/dormway-core-library-dormway-core) - Main overview
+- [Error Handling](/docs/engineering/technical/dormway-core/utilities/error-handling) - Error classes
+- [Structured Logger](/docs/engineering/technical/dormway-core/utilities/structured-logger) - Logging configuration
+
+---
+
+**Last Updated**: 2025-11-23
+**Maintainer**: Platform Team

@@ -1,0 +1,1308 @@
+---
+title: "WIDGET_API_GUIDE"
+description: "This guide documents all widget-related APIs, authentication patterns, real-time integration, and data models in the DormWay backend. The system uses a BFF (..."
+---
+
+# DormWay Widget APIs - Complete Reference Guide
+
+## Overview
+
+This guide documents all widget-related APIs, authentication patterns, real-time integration, and data models in the DormWay backend. The system uses a BFF (Backend-for-Frontend) architecture where the API Router aggregates data and exposes it through the Dashboard endpoints.
+
+## Naming Map (Legacy WidgetTab vs UI Tabs)
+
+WidgetTab values are legacy. Map them to current UI tabs as follows:
+
+- `home` -> Home
+- `campus` -> Term/Courses
+- `me` -> Profile
+
+---
+
+## 1. Widget API Endpoints
+
+### 1.1 Dashboard Composite V1 (Main Widget Endpoint)
+
+**Endpoint**: `GET /dashboard/v1/composite`
+
+**Purpose**: Fetch complete dashboard with widgets, due items, and metadata
+
+**Authentication**:
+- **Clerk JWT** (for web apps): `Authorization: Bearer <jwt>`
+- **Device Key** (for mobile): `x-device-key: <key>`
+- **API Gateway** (production): `x-user-id`, `x-user-role` headers
+- **Temporal** (internal): `x-temporal-worker-auth: <key>`
+
+**Query Parameters**:
+```
+tab=home|campus|me          # Dashboard tab (default: 'home')
+context=<type>               # User context (see Context Types below)
+since=<iso-timestamp>        # For delta updates (experimental)
+refresh=true|false           # Force cache invalidation
+userId=<uuid>                # Override user (admin only)
+campusId=<uuid>              # Override campus (admin only)
+useCrew=true|false           # Enable CrewAI widgets
+emitV2Types=true|false       # Emit V2 schema types
+validateV2=true|false        # Validate V2 schema
+startDate=<iso>              # Filter start date
+endDate=<iso>                # Filter end date
+```
+
+**Response** (DashboardCompositeV1):
+```typescript
+{
+  version: '1.0',
+  server_time: '2025-11-06T15:30:00Z',  // ISO timestamp
+  request: {
+    tab: 'home',
+    context: 'weekend',
+    since?: '...',
+    generatedAt: '2025-11-06T15:30:00Z'
+  },
+  // Main widget array - flexible structure
+  widgets: [
+    {
+      id: 'widget:schedule',           // Unique identifier
+      type: 'schedule',                 // Widget type
+      title: 'Today\'s Schedule',
+      priority: 1,
+      content: {
+        displayType: 'timeline',
+        data: {
+          events: [...],
+          timezone: 'America/Detroit'
+        }
+      },
+      grid?: {                          // Optional grid layout
+        x: 0, y: 0, w: 6, h: 3,
+        minW: 3, minH: 2,
+        preferred: [{w: 6, h: 3}]
+      }
+    },
+    // Additional widgets...
+  ],
+  
+  // Due items (assignments, tasks, etc.)
+  dueSoon: [
+    {
+      id: 'hw-123',
+      title: 'Problem Set 5',
+      dueDate: '2025-11-08T23:59:59Z',
+      courseCode: 'MATH 201',
+      courseContextId: 'ctx-abc',
+      priority: 'high',
+      status: 'pending',
+      type: 'assignment',
+      source: 'canvas',
+      metadata: {
+        isActionable: true,
+        canvasAssignmentId: '456',
+        submissionStatus: 'submitted',
+        score: 92,
+        pointsPossible: 100
+      }
+    }
+  ],
+  
+  // Canvas courses
+  canvasCourses: [
+    {
+      id: 'course-123',
+      name: 'Calculus II',
+      courseCode: 'MATH 201',
+      courseContextId: 'ctx-abc',
+      enrollmentState: 'active',
+      totalStudents: 150
+    }
+  ],
+  
+  // Pending tasks (from tasks table)
+  pendingTasks?: [...],
+  
+  // Legacy shims for iOS normalization
+  weather?: {...},
+  schedule?: {...},
+  
+  // Data status indicators
+  status?: {
+    calendar_connected: true,
+    syllabus_count: 5,
+    last_ingest_at: '2025-11-06T14:00:00Z',
+    inferred: false
+  },
+  
+  // Response metadata
+  metadata: {
+    requestId: 'req-12345',
+    processingTimeMs: 145,
+    cache: {
+      hit: false,              // true if served from Redis
+      ttl: 300                 // Cache TTL in seconds
+    },
+    flags: {
+      dayplan: true,
+      syllabus: false
+    }
+  }
+}
+```
+
+**Caching**:
+- **ETag Support**: Response includes `ETag` header for 304 Not Modified
+- **Cache Key**: `dashboard:v1:{userId}:{tab}:{context}:{startDate}:{endDate}`
+- **TTL**: Context-dependent (60-3600 seconds)
+- **Invalidation**: `POST /dashboard/invalidate-cache?targetUserId={userId}`
+
+**Widget Types** (from layout.ts - updated 2025-11-25):
+```
+// Core 19 types (canonical)
+'academic', 'schedule', 'dining', 'weather', 'social', 'wellness',
+'transit', 'campus', 'personal', 'context', 'timeline', 'priority',
+'guidance', 'weekly', 'syllabus', 'assignments', 'mood', 'generic', 'unknown',
+
+// iOS additional types (14 types)
+'urgent_deadlines', 'perfect_timing', 'practical_context',
+'dayplan', 'action_cta', 'alert', 'preferences', 'suggestions',
+'events', 'parking', 'resources', 'goals', 'insights', 'quick_links',
+
+// Web-specific types (4 types)
+'tasks', 'courses', 'study', 'canvas'
+```
+
+**Total: 37 widget types** (19 core + 14 iOS + 4 web)
+
+**Wire Type Aliases**: The API accepts wire type aliases that are normalized to canonical types:
+- `context-status` → `context_status` → `context`
+- `next_up`, `nextup`, `next-action` → `action_cta`
+- `day_plan`, `day-plan`, `today_plan`, `today-plan` → `dayplan`
+- `course_outline`, `course-outline` → `syllabus`
+
+### 1.2 Layout Management APIs
+
+**Purpose**: Save and manage user widget layouts (positions, sizes, configuration) for dashboard tabs.
+
+**Base Endpoint**: `/api/v1/layouts`
+
+**Authentication**: Required (Clerk JWT, Device Key, or API Gateway)
+
+#### 1.2.1 Create Layout
+
+**Endpoint**: `POST /api/v1/layouts`
+
+**Request**:
+```typescript
+{
+  name: string;                    // Layout name (e.g., "My Home Layout")
+  tab: 'home' | 'campus' | 'me';  // Dashboard tab
+  layout_data: {
+    gridSpec: {
+      columns: number;             // Grid columns (e.g., 12)
+      maxRows: number;             // Max rows
+      rowHeight: number;           // Pixels per row
+    },
+    widgets: [
+      {
+        id: string;                // Unique widget ID
+        type: string;              // Widget type (must be valid)
+        title?: string;
+        priority?: number;
+        grid: {
+          x: number;               // Grid position
+          y: number;
+          w: number;               // Width
+          h: number;               // Height
+        },
+        content: {
+          displayType?: string;
+          data: Record<string, unknown>; // Configuration only (NO PII)
+        },
+        actions?: [...]
+      }
+    ]
+  },
+  is_public?: boolean;             // Default: false
+  tags?: string[];                // Optional tags
+}
+```
+
+**Response** (201 Created):
+```typescript
+{
+  layout: {
+    id: string;
+    user_id: string;
+    name: string;
+    tab: 'home' | 'campus' | 'me';
+    layout_data: LayoutData;
+    is_public: boolean;
+    tags: string[];
+    version: number;               // Starts at 1
+    created_at: string;            // ISO timestamp
+    updated_at: string;            // ISO timestamp
+  }
+}
+```
+
+#### 1.2.2 Update Layout (with Optimistic Locking)
+
+**Endpoint**: `PUT /api/v1/layouts/:id`
+
+**Request**:
+```typescript
+{
+  name?: string;
+  layout_data?: LayoutData;       // Partial update supported
+  is_public?: boolean;
+  tags?: string[];
+  version?: number;                // OPTIONAL: For optimistic locking
+}
+```
+
+**Optimistic Locking** (added 2025-11-25):
+- If `version` is provided, the update will fail if the current database version doesn't match
+- This prevents lost updates when multiple clients edit the same layout concurrently
+- The database auto-increments `version` whenever `layout_data` changes (via trigger)
+
+**Version Conflict Response** (409 Conflict):
+```typescript
+{
+  error: "Version conflict: expected version 5, but current version is 6. Another update may have occurred. Please refresh and try again.",
+  code: "VERSION_CONFLICT",
+  currentVersion: 6,
+  expectedVersion: 5
+}
+```
+
+**Client Pattern**:
+```typescript
+// 1. Fetch layout
+const layout = await fetch('/api/v1/layouts/123');
+// layout.version = 5
+
+// 2. User edits layout locally
+const updatedLayout = { ...layout, widgets: [...modifiedWidgets] };
+
+// 3. Save with version check
+try {
+  const result = await fetch('/api/v1/layouts/123', {
+    method: 'PUT',
+    body: JSON.stringify({
+      layout_data: updatedLayout.layout_data,
+      version: 5  // Include version from step 1
+    })
+  });
+} catch (error) {
+  if (error.code === 'VERSION_CONFLICT') {
+    // Another client updated the layout - refresh and retry
+    const freshLayout = await fetch('/api/v1/layouts/123');
+    // Merge changes and retry...
+  }
+}
+```
+
+**Response** (200 OK):
+```typescript
+{
+  layout: {
+    id: string;
+    version: number;               // Incremented if layout_data changed
+    // ... other fields
+  }
+}
+```
+
+#### 1.2.3 Get Layouts
+
+**Endpoint**: `GET /api/v1/layouts?tab=home&is_public=true`
+
+**Query Parameters**:
+- `tab`: Filter by tab (`home`, `campus`, `me`)
+- `is_public`: Filter public layouts (`true`, `false`)
+- `tags`: Filter by tags (comma-separated)
+
+**Response**:
+```typescript
+{
+  layouts: [
+    {
+      id: string;
+      name: string;
+      tab: string;
+      version: number;             // Included for optimistic locking
+      created_at: string;
+      updated_at: string;
+      // ... other fields
+    }
+  ],
+  count: number
+}
+```
+
+#### 1.2.4 Get Single Layout
+
+**Endpoint**: `GET /api/v1/layouts/:id`
+
+**Response**: Same as Create Layout response
+
+#### 1.2.5 Delete Layout
+
+**Endpoint**: `DELETE /api/v1/layouts/:id`
+
+**Response** (204 No Content)
+
+#### 1.2.6 Export/Import Layout
+
+**Export**: `POST /api/v1/layouts/:id/export`
+**Import**: `POST /api/v1/layouts/import`
+
+Used for sharing layouts between users or backing up configurations.
+
+### 1.3 Dashboard Activity Endpoint
+
+**Endpoint**: `GET /dashboard/activity`
+
+**Purpose**: Fetch recent user and school activity, service data history
+
+**Authentication**: Same as v1/composite
+
+**Response**:
+```typescript
+{
+  success: true,
+  since: '2025-11-06T15:30:00Z',
+  
+  // Recent user-specific service_data
+  user: [
+    {
+      id: '...',
+      user_id: '...',
+      context_id: '...',
+      method: 'dayplan|calendar|syllabus|...',
+      fetched_at: '2025-11-06T14:00:00Z',
+      data: {...}
+    }
+  ],
+  
+  // Recent school/campus service_data
+  school: [
+    {
+      id: '...',
+      context_id: '...',  // Campus context
+      method: '...',
+      fetched_at: '2025-11-06T14:00:00Z',
+      data: {...}
+    }
+  ],
+  
+  // Recent documents from braingains_documents
+  documents: [
+    {
+      id: '...',
+      document_type: 'syllabus|notes|...',
+      filename: 'MATH201_Syllabus.pdf',
+      page_count: 12,
+      created_at: '2025-11-06T12:00:00Z',
+      processing_status: 'completed'
+    }
+  ],
+  
+  // Unified display items
+  items: [
+    {
+      id: '...',
+      timestamp: '2025-11-06T14:00:00Z',
+      icon: 'event|description|insights|...',
+      title: 'DayPlan generated',
+      subtitle: '5 events • 3 actions',
+      source: 'user|school',
+      method: 'dayplan'
+    }
+  ],
+  
+  // User location if provided
+  userLocation?: {
+    latitude: 42.2808,
+    longitude: -83.7430,
+    accuracy: 10
+  },
+  
+  // Ably channel subscriptions
+  channels: {
+    dashboard: 'user:abc123:dashboard',
+    updates: 'user:abc123:updates',
+    school: 'campus:xyz789:broadcast',
+    system: 'system:broadcast'
+  }
+}
+```
+
+### 1.3 Raw Data Access (Admin)
+
+**Endpoint**: `GET /dashboard/raw-data/:dataType`
+
+**Purpose**: Debug endpoint for accessing raw context data
+
+**Query Parameters**:
+```
+targetUserId=<uuid>          # Override user (admin)
+contextId=<uuid>             # Query specific context
+contextType=<type>           # Query by context type
+limit=<n>                    # Result limit (default: 1)
+```
+
+**Supported Data Types**:
+- `dayplan`, `calendar`, `weather`, `assignments`, `grades`, `syllabus`, etc.
+
+---
+
+## 2. Authentication Patterns
+
+### 2.1 Authentication Middleware Chain
+
+The `authMiddleware` in `/middleware/auth.ts` checks credentials in order:
+
+```typescript
+export interface AuthUser {
+  id: string;                    // UUID or system ID
+  role: string;                  // 'user', 'admin', 'authenticated', 'demo', 'system'
+  source?: string;               // 'device', 'jwt-clerk', 'api-gateway', 'internal', 'temporal'
+  deviceId?: string;             // For device key auth
+  keyId?: string;                // For device keys
+  email?: string;                // For JWT auth
+  name?: string;                 // For JWT auth
+  [key: string]: any;
+}
+```
+
+### 2.2 Auth Methods (Priority Order)
+
+**1. Internal Service API Key**
+```
+Authorization: Bearer <API_KEY>
+// Sets: req.user = { id: 'internal-service', role: 'system', source: 'internal' }
+```
+
+**2. Temporal Worker Auth**
+```
+x-temporal-worker-auth: <TEMPORAL_API_KEY>
+// Sets: req.user = { id: 'temporal-worker', role: 'authenticated', source: 'temporal' }
+```
+
+**3. Device Key (Mobile Apps)**
+```
+x-device-key: <device-key>
+// Verified via Customer.io
+// Sets: req.user = { id: userId, role: role, deviceId, source: 'device' }
+```
+
+**4. Clerk JWT (Web Apps)**
+```
+Authorization: Bearer <clerk-jwt>
+// Verified via Clerk SDK: clerkClient.verifyToken()
+// Extracts: backend_user_id, sub (clerk ID), role from custom claims
+// Sets: req.user = { id: backend_user_id, clerk_id: sub, role, source: 'jwt-clerk' }
+```
+
+**5. API Gateway Lambda Authorizer**
+```
+x-user-id: <uuid>
+x-user-email: <email>
+x-user-name: <name>
+x-user-role: <role>
+// Sets: req.user from headers, source: 'api-gateway'
+```
+
+**6. Direct JWT (Legacy)**
+```
+Authorization: Bearer <jwt>
+// Verified with SUPABASE_JWT_SECRET
+// Extracts: https://dormway.app/user_id, sub, role
+```
+
+### 2.3 Role-Based Access Control
+
+```typescript
+export function roleCheckMiddleware(allowedRoles: string[]) {
+  // Admin always has access
+  if (req.user.role === 'admin') return next();
+  
+  // Treat 'demo' as 'authenticated'
+  const effectiveRole = req.user.role === 'demo' ? 'authenticated' : req.user.role;
+  
+  // Check if role is in allowed list
+  if (!allowedRoles.includes(effectiveRole)) {
+    return res.status(403).json({ error: 'Forbidden: Insufficient permissions' });
+  }
+}
+```
+
+**Common Role Checks**:
+- Admin endpoints: `roleCheckMiddleware(['admin'])`
+- Public API: `roleCheckMiddleware(['user', 'admin', 'authenticated'])`
+- Task endpoints: `[authMiddleware, roleCheckMiddleware(['user', 'admin', 'authenticated'])]`
+
+---
+
+## 3. Real-Time / Ably Integration
+
+### 3.1 Ably Token Generation
+
+**Endpoint**: `POST /api/v1/realtime/ably-auth`
+
+**Purpose**: Get Ably token for real-time subscriptions
+
+**Authentication**: Required (`authMiddleware`)
+
+**Restrictions**:
+- Device key auth (mobile without user login) is **blocked** (403)
+- Anonymous users are **blocked** (403)
+- Clerk JWT or API Gateway required
+
+**Response**:
+```typescript
+{
+  keyName: 'abc123.xyz',        // Client ID for Ably
+  nonce: '...',                  // One-time nonce
+  mac: '...',                    // HMAC signature
+  capability: {...},             // Channel capabilities
+  clientId: 'user-abc123',      // User ID (lowercase)
+  issuedAt: 1699272600000,
+  ttl: 3600000                  // 1 hour in milliseconds
+}
+```
+
+### 3.2 Channel Capabilities
+
+Users receive access to:
+
+```typescript
+// User-specific channels (full access: subscribe, publish, presence, history)
+`user:${userId}:*`
+
+// User updates (subscribe + presence)
+`user:${userId}:updates`
+
+// Canvas updates (subscribe)
+`user:${userId}:canvas:updates`
+
+// Dashboard deltas (subscribe)
+`user:${userId}:dashboard`
+
+// System channels (subscribe only)
+'system:broadcast'
+'campus:*:alerts'
+'campus:*:broadcast'
+'course:*:updates'
+'building:*:now'
+
+// Study groups (subscribe + presence)
+'study:*:presence'
+
+// Telemetry (publish + presence)
+'telemetry'
+'prod-telemetry'
+'dev-telemetry'
+
+// Voting (subscribe only)
+'roadmap:votes'
+```
+
+### 3.3 Real-Time Event Publishing
+
+**Dashboard Delta Publication**:
+```typescript
+export async function publishDashboardDelta(params: {
+  userId: string;
+  tab: string;
+  context: string;
+  baseEtag: string;
+  ops: Array<{ op: 'upsert' | 'remove'; id: string; value?: unknown }>;
+}): Promise<void>
+```
+
+**Ably Channel**: `user:{userId}:dashboard`
+
+**Message Format**:
+```typescript
+{
+  type: 'dashboard.delta',
+  version: '1.0',
+  baseEtag: '...',              // Previous response ETag
+  seq: 1,                        // Sequence number
+  ops: [                         // Widget operations
+    { op: 'upsert', id: 'widget:schedule', value: {...} },
+    { op: 'remove', id: 'widget:weather' }
+  ],
+  ts: '2025-11-06T15:30:00Z'
+}
+```
+
+**Coalescing**:
+- Window: 500ms
+- Rate limit: 2 messages/second per user
+- Duplicate ops merged (last write wins)
+
+**User Updates**:
+```typescript
+export async function publishUserUpdate(params: {
+  userId: string;
+  event: string;
+  data?: unknown;
+}): Promise<void>
+```
+
+**Ably Channel**: `user:{userId}:updates`
+
+**Canvas Updates**:
+```typescript
+export async function publishCanvasUpdate(event: {
+  type: 'grade_posted' | 'assignment_updated';
+  event_version: number;
+  event_id: string;
+  user_id: string;
+  assignment_id: string;
+  course_id: string;
+  [key: string]: any;
+}): Promise<void>
+```
+
+**Ably Channel**: `user:{userId}:canvas:updates`
+
+---
+
+## 4. Data Models
+
+### 4.1 Task / Assignment Model
+
+**Database Table**: `tasks`
+
+**Endpoint for CRUD**: `POST|GET|PUT|DELETE /api/mobile/tasks`
+
+**Create Task**:
+```typescript
+POST /api/mobile/tasks
+Authorization: Bearer <token>
+
+{
+  title: 'Read Chapter 5',                    // Required
+  estimatedDuration: 45,                     // Minutes, default: 30
+  priority: 'medium',                        // 'low' | 'medium' | 'high' | 'urgent'
+  courseCode: 'MATH 201',                    // Optional
+  dueDate: '2025-11-08T23:59:59Z',           // Optional ISO timestamp
+  metadata: {                                // Optional
+    source: 'quick_capture',
+    tags: ['homework'],
+    notes: 'Focus on proofs'
+  }
+}
+
+Response (201):
+{
+  success: true,
+  task: {
+    id: 'task-abc123',
+    title: 'Read Chapter 5',
+    estimatedDuration: 45,
+    priority: 'medium',
+    courseCode: 'MATH 201',
+    dueDate: '2025-11-08T23:59:59Z',
+    status: 'pending',
+    metadata: {...},
+    createdAt: '2025-11-06T15:30:00Z'
+  }
+}
+```
+
+**Quick Capture Endpoint**:
+```typescript
+POST /api/mobile/tasks/quick-capture
+{
+  title: 'Buy textbook',
+  type: 'task|reminder|note|idea',           // UI category
+  priority: 'medium',
+  estimatedDuration: 30,
+  courseCode?: 'MATH 201',
+  metadata?: {...}
+}
+```
+
+**List Tasks**:
+```typescript
+GET /api/mobile/tasks?status=pending&courseCode=MATH%20201
+Response: { tasks: [...], count: 5 }
+```
+
+**Update Task**:
+```typescript
+PUT /api/mobile/tasks/:taskId
+{
+  title?: 'New title',
+  priority?: 'high',
+  dueDate?: '2025-11-09T00:00:00Z',
+  metadata?: {...}
+}
+```
+
+**Complete Task**:
+```typescript
+POST /api/mobile/tasks/:taskId/complete
+Response: {
+  success: true,
+  task: { id, status: 'completed', completedAt: '...' },
+  prompt?: {                                 // Optional completion prompt
+    type: 'assignment_completion',
+    assignmentId: '...',
+    assignmentTitle: 'Problem Set 5',
+    message: 'All work sessions are complete. Did you submit this assignment?',
+    actions: [
+      { id: 'mark_complete', label: 'Yes, mark as complete' },
+      { id: 'not_yet', label: 'Not yet' }
+    ]
+  }
+}
+```
+
+**Schedule Task to Calendar**:
+```typescript
+POST /api/mobile/tasks/:taskId/schedule
+{
+  startTime: '2025-11-06T14:00:00Z',
+  endTime: '2025-11-06T14:45:00Z'
+}
+
+Response: {
+  success: true,
+  scheduledBlock: { id: '...', startTime, endTime },
+  task: { id, status: 'scheduled', scheduledBlockId: '...' }
+}
+```
+
+**Unschedule Task**:
+```typescript
+POST /api/mobile/tasks/:taskId/unschedule
+Response: {
+  success: true,
+  task: { id, status: 'pending', scheduledBlockId: null },
+  deletedBlockId: '...'
+}
+```
+
+### 4.2 Event Model (from service_data)
+
+**Database Table**: `service_data` (partitioned by month)
+
+**Key Fields**:
+```typescript
+{
+  id: uuid,
+  user_id: uuid,
+  context_id: uuid,              // Links to contexts table
+  method: string,                // 'calendar', 'syllabus', 'assignment', etc.
+  fetched_at: timestamp,         // Important for partition pruning!
+  data: jsonb,                   // Flexible event data
+  created_at: timestamp,
+  updated_at: timestamp
+}
+```
+
+**Calendar Event Data Structure**:
+```typescript
+{
+  summary: 'Calculus II Lecture',
+  description?: 'Chapter 5: Derivatives',
+  start: '2025-11-06T10:00:00Z',
+  end: '2025-11-06T11:15:00Z',
+  location?: 'Engineering Building 101',
+  eventType: 'class|exam|assignment|meeting|...',
+  courseCode?: 'MATH 201',
+  instructors?: ['Dr. Smith'],
+  attendees?: ['...'],
+  rrule?: 'FREQ=WEEKLY;BYDAY=MWF;UNTIL=...'
+}
+```
+
+**DayPlan Response**:
+```typescript
+{
+  date: '2025-11-06',
+  events: [
+    {
+      id: 'event-123',
+      title: 'Calculus Lecture',
+      start: '10:00',
+      end: '11:15',
+      location: 'Engineering 101',
+      status: 'upcoming|in_progress|completed'
+    }
+  ],
+  actions: [
+    {
+      id: 'action-456',
+      title: 'Review Chapter 5',
+      priority: 'high',
+      estimatedTime: 45
+    }
+  ]
+}
+```
+
+### 4.3 Context Model (Hierarchical)
+
+**Database Table**: `contexts`
+
+**Structure**:
+```typescript
+{
+  id: uuid,
+  parent_id?: uuid,              // Self-referencing FK
+  user_id?: uuid,                // For student contexts
+  type: 'city'|'campus'|'building'|'course'|'student',
+  name: string,
+  metadata: jsonb,
+  external_id?: string,
+  is_active: boolean,
+  next_sync_at?: timestamp,
+  sync_frequency_minutes?: integer,
+  sync_priority_score?: integer
+}
+```
+
+**Example Hierarchy**:
+```
+City (e.g., Ann Arbor)
+  └─ Campus (e.g., University of Michigan)
+      ├─ Building (e.g., Engineering Building)
+      │   └─ Room (if applicable)
+      └─ Course (e.g., MATH 201)
+          └─ Student (enrollment)
+```
+
+**Get User's Campus**:
+```sql
+SELECT campus_ctx.*
+FROM accounts a
+INNER JOIN contexts student_ctx 
+  ON student_ctx.user_id = a.id AND student_ctx.type = 'student'
+INNER JOIN contexts campus_ctx 
+  ON campus_ctx.id = student_ctx.parent_id AND campus_ctx.type = 'campus'
+WHERE a.id = $1;
+```
+
+### 4.4 Context Dependencies (Many-to-Many)
+
+**Database Table**: `context_dependencies`
+
+```typescript
+{
+  parent_context_id: uuid,       // Source context
+  child_context_id: uuid,        // Target context
+  dependency_type: string,       // 'prerequisite', 'corequisite', 'requires', etc.
+  metadata: jsonb                // Additional relationship data
+}
+```
+
+**Example Uses**:
+- Course prerequisites
+- Building service requirements
+- Custom business relationships
+
+---
+
+## 5. Context Types
+
+**Valid Context Strings**:
+```
+'walkingToClass', 'inClass', 'betweenClasses', 'studyTime',
+'onCampus', 'commuting', 'atHome', 'home', 'weekend',
+'academicBreak', 'preFinalsWeek', 'holiday', 'traveling',
+'mealTime', 'social', 'unknown', 'new_user'
+```
+
+**Context Mapping** (normalization):
+- `academicBreak` → `atHome`
+- `preFinalsWeek` → `studyTime`
+- `holiday` → `weekend`
+- `traveling` → `commuting`
+
+**Usage**: Affects which widgets and content are prioritized
+
+---
+
+## 6. Common Request/Response Patterns
+
+### 6.1 Error Handling
+
+**Standard Error Response**:
+```typescript
+{
+  error: 'Error message',
+  code?: 'error_code',
+  status: 400|401|403|404|500
+}
+```
+
+**Common Status Codes**:
+- 200: Success
+- 201: Created
+- 204: No Content
+- 304: Not Modified (cached)
+- 400: Bad Request
+- 401: Unauthorized (missing auth)
+- 403: Forbidden (insufficient permissions)
+- 404: Not Found
+- 503: Service Unavailable
+
+### 6.2 Pagination
+
+**Pattern** (if applicable):
+```typescript
+{
+  data: [...],
+  pagination: {
+    total: 100,
+    page: 1,
+    limit: 20,
+    hasNext: true,
+    hasPrev: false
+  }
+}
+```
+
+### 6.3 Timestamp Formats
+
+**Always ISO 8601**:
+```
+'2025-11-06T15:30:00Z'        // With Z (UTC)
+'2025-11-06T15:30:00-05:00'   // With timezone offset
+```
+
+---
+
+## 7. Performance & Caching
+
+### 7.1 ETag Caching
+
+**Response Headers**:
+```
+ETag: "W/\"abc123def456\""
+Cache-Control: private, no-cache
+Vary: Authorization
+```
+
+**Client Behavior**:
+```
+Request:
+  If-None-Match: "W/\"abc123def456\""
+
+Response (304 Not Modified):
+  Status: 304
+  ETag: "W/\"abc123def456\""
+  (body omitted, client uses cached response)
+```
+
+**ETag Computation** (includes adjuncts):
+- Widget count and IDs
+- Schedule summary (times, count)
+- Weather summary (temperature, condition)
+- DayPlan summary (event count)
+- Due soon summary (item count)
+
+### 7.2 Cache Invalidation
+
+**Automatic**:
+- Task creation/update/completion
+- DayPlan generation
+- Canvas grade/assignment updates
+
+**Manual**:
+```
+POST /dashboard/invalidate-cache?targetUserId={userId}
+Authorization: Bearer <admin-token>
+```
+
+### 7.3 Rate Limiting
+
+**Ably Delta Publishing**:
+- Max 2 messages/second per user
+- 500ms coalescing window
+- Duplicate ops merged
+
+---
+
+## 8. Example Workflows
+
+### 8.1 User Onboarding Flow
+
+```
+1. POST /api/mobile/onboarding/complete
+   {
+     campusId: 'uuid',
+     firstName: 'John',
+     lastName: 'Doe'
+   }
+
+2. System creates student context
+3. Temporal workflow triggered
+4. Dashboard cache invalidated
+5. Client fetches: GET /dashboard/v1/composite
+6. Receives initial widgets (onboarding emphasis)
+```
+
+### 8.2 Real-Time Update Flow
+
+```
+1. Backend detects data change (grade posted, assignment updated)
+2. Compute new dashboard state
+3. Compare with cached ETag
+4. If changed:
+   a. Compute delta ops
+   b. Publish via Ably: user:{userId}:dashboard
+   c. Include baseEtag and ops
+5. Client receives delta.dashboard event
+6. Merges ops into local state
+7. Optionally fetches fresh /v1/composite if needed
+```
+
+### 8.3 Task Management Flow
+
+```
+1. User creates task: POST /api/mobile/tasks/quick-capture
+2. Task inserted, dashboard cache invalidated
+3. Task appears in Task Bank widget or dueSoon array
+4. User schedules: POST /api/mobile/tasks/:id/schedule
+5. Time block created, task status → 'scheduled'
+6. Task moves from Task Bank to calendar widget
+7. User completes: POST /api/mobile/tasks/:id/complete
+8. Task status → 'completed'
+9. Optional assignment completion prompt shown
+10. Dashboard updates via delta + task disappears from lists
+```
+
+---
+
+## 9. Database Query Patterns
+
+### 9.1 Get User's Recent Service Data
+
+```sql
+SELECT id, user_id, context_id, method, fetched_at, data
+FROM service_data
+WHERE user_id = $1
+ORDER BY fetched_at DESC
+LIMIT 20;
+```
+
+### 9.2 Get Campus Service Data
+
+```sql
+SELECT id, context_id, method, fetched_at, data
+FROM service_data
+WHERE context_id = $1
+ORDER BY fetched_at DESC
+LIMIT 20;
+```
+
+### 9.3 Get Tasks by Status
+
+```sql
+SELECT *
+FROM tasks
+WHERE user_id = $1
+  AND status = 'pending'
+  AND status != 'deleted'
+ORDER BY
+  CASE priority
+    WHEN 'urgent' THEN 1
+    WHEN 'high' THEN 2
+    WHEN 'medium' THEN 3
+    WHEN 'low' THEN 4
+  END,
+  due_date ASC NULLS LAST;
+```
+
+### 9.4 Get User's Courses
+
+```sql
+SELECT *
+FROM contexts
+WHERE parent_id = (
+  SELECT id FROM contexts
+  WHERE user_id = $1 AND type = 'student'
+  LIMIT 1
+)
+AND type = 'course';
+```
+
+---
+
+## 10. Key Integration Points
+
+### 10.1 With Temporal Engine
+
+**Workflow Triggers**:
+- Student onboarding
+- DayPlan generation
+- Campus data sync
+- City processor
+
+**API Pattern**:
+```typescript
+import { getTemporalClient } from '../utils/temporal';
+const client = await getTemporalClient();
+
+await client.workflow.execute(workflowFunction, {
+  workflowId: `student-processor-${userId}`,
+  taskQueue: 'student-worker',
+  args: [userId, context]
+});
+```
+
+### 10.2 With CrewAI Agents
+
+**Endpoint**: `POST /api/v1/crew/execute`
+
+**Purpose**: AI-driven widget generation, context analysis
+
+### 10.3 With Canvas LMS
+
+**Service**: Canvas grade/assignment webhooks
+
+**Ably Notification**: Publishes to `user:{userId}:canvas:updates`
+
+**Affected Widgets**:
+- Assignments widget
+- Grades widget
+- DueSoon items
+
+### 10.4 With Customer.io
+
+**Mobile Authentication**: Device key verification
+
+**Push Notifications**: APNS delivery via Customer.io
+
+---
+
+## 11. Admin-Only Endpoints
+
+### 11.1 Dashboard Diagnostics
+
+```
+GET /dashboard/v1/diagnostics?userId={id}&tab=home&context=weekend
+
+Response:
+{
+  userId: '...',
+  tab: 'home',
+  context: 'weekend',
+  cacheKey: '...',
+  currentEtag: '...',
+  recomputedEtag: '...',
+  adjuncts: {
+    scheduleSummary: {...},
+    weatherSummary: {...},
+    dayPlanSummary: {...},
+    dueSoonSummary: {...}
+  },
+  seqCounter: 42,
+  hasBody: true,
+  generatedAt: '...'
+}
+```
+
+### 11.2 DayPlan Recompute & Publish
+
+```
+POST /dashboard/v1/notify/dayplan
+{
+  userId: '...',
+  tab: 'home',
+  context: 'weekend'
+}
+
+Response: { success: true, userId, tab, context, etag, opsCount }
+```
+
+### 11.3 Cache Status
+
+```
+GET /dashboard/v1/cache-status?userId={id}&tab=home&context=weekend
+
+Response:
+{
+  key: '...',
+  hasEntry: true,
+  etag: '...',
+  baseEtag: '...',
+  ttlRemaining: 250,
+  lockKey: '...',
+  lockHeld: false,
+  seqKey: '...',
+  currentSeq: 42
+}
+```
+
+### 11.4 Weather Management
+
+```
+GET /dashboard/campus-weather/{campusId}?processed=true
+POST /dashboard/admin/refresh-city-weather/{cityId}?lat={lat}&lon={lon}
+POST /dashboard/admin/refresh-campus-weather/{campusId}
+
+Response: { success: true, cityId, lat, lon, processed: {...} }
+```
+
+---
+
+## 12. Monitoring & Debugging
+
+### 12.1 Health Endpoints
+
+```
+GET /dashboard/health
+
+Response:
+{
+  redis: { connected: true, ping: true },
+  system: { timestamp: '...' }
+}
+```
+
+### 12.2 Metrics
+
+```
+GET /metrics
+
+Prometheus-format metrics:
+- dashboard_v1_requests_total (with route, outcome, cache labels)
+- dashboard_processing_time_ms
+- ably_publish_attempts_total
+```
+
+---
+
+## 13. Summary Table
+
+| Feature | Endpoint | Auth | Response |
+|---------|----------|------|----------|
+| Dashboard | `GET /dashboard/v1/composite` | Clerk/Device/API Gateway | DashboardCompositeV1 |
+| Activity | `GET /dashboard/activity` | Required | Activity list + channels |
+| Ably Token | `POST /api/v1/realtime/ably-auth` | No device keys | TokenRequest |
+| Create Task | `POST /api/mobile/tasks` | Required | Task object |
+| List Tasks | `GET /api/mobile/tasks` | Required | Task array |
+| Schedule Task | `POST /api/mobile/tasks/:id/schedule` | Required | Block + Task |
+| Complete Task | `POST /api/mobile/tasks/:id/complete` | Required | Completed task + prompt |
+| Quick Capture | `POST /api/mobile/tasks/quick-capture` | Required | Task object |
+
+---
+
+## Key Files Reference
+
+- **Auth**: `/services/api-router/src/middleware/auth.ts`
+- **Dashboard Routes**: `/services/api-router/src/routes/dashboard-routes.ts`
+- **Task Routes**: `/services/api-router/src/routes/task-routes.ts`
+- **Realtime Routes**: `/services/api-router/src/routes/realtime-routes.ts`
+- **Ably Service**: `/services/api-router/src/services/ably-service.ts`
+- **Dashboard Transformer**: `/services/api-router/src/services/dashboard-composite-transformer.ts`
+- **Layout Service**: `/services/api-router/src/services/layout-service.ts`
+- **Layout Types**: `/services/api-router/src/interfaces/layout.ts`
+- **Dashboard Types**: `/services/api-router/src/interfaces/dashboard.ts`

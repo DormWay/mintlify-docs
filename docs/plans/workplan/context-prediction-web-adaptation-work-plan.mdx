@@ -1,0 +1,98 @@
+---
+title: "Context Prediction Web Adaptation Work Plan"
+description: "1. **Web-first readiness**: Generate accurate context predictions and keep StudentWatcher informed using only web + backend data. 2. **Future mobile parity**..."
+---
+
+# Context Prediction Web Adaptation Work Plan
+
+> **Created**: September 27, 2025  
+> **Objective**: Adapt the context prediction + StudentWatcher system for a web-first release of DormWay Locked In while remaining compatible with the forthcoming native app.  
+> **Owners**: Platform Team (API Router, Engine, Ably Relay, Locked In Web)  
+> **Timeline**: 2–3 weeks of coordinated work (prior to mobile GA)
+
+---
+
+## 1. Current State Snapshot
+
+- **Telemetry Hooks (Web)** already mirror the mobile contract:
+  - Focus sessions → `screentime.focus_*`
+  - Schedule import → `calendar.sync/update`
+  - Preferences & School Mode → `user.settings_change`
+  - Inbox/actions → `user.action`
+  - All events publish to Ably channels (`dev-telemetry` / `prod-telemetry`) via `RealtimeProvider` + `formatTelemetryMessage`.
+- **Ably Relay (temporal-dispatcher.ts)** maps those events to the consolidated `context_update` signal used by the simplified StudentWatcher workflow, sampling context predictions and feeding history into Aurora.
+- **StudentWatcher Simplification Plan (Workplan reference)** keeps `continueAsNew` and reduces signals to `dailyPlan`, `contextUpdate`, `deviation`—but still expects regular context predictions + cadence data.
+- **Gap**: Without the iOS client online, nothing triggers `/ai/predict-context`, so dayplan/context history would wither unless we add a server-driven prediction loop.
+
+---
+
+## 2. Goals
+
+1. **Web-first readiness**: Generate accurate context predictions and keep StudentWatcher informed using only web + backend data.
+2. **Future mobile parity**: Ensure the upcoming native app can slot in without disrupting the web pipeline—mobile signals should enrich the same telemetry feed.
+3. **Dayplan quality**: Maintain wellness/context insights inside dayplan generation (morning run + deviations) so the UX stays helpful before sensors arrive.
+
+---
+
+## 3. Deliverables by Layer
+
+### 3.1 API Router
+- [x] Add `buildServerContextPayload(userId)` helper that assembles a `ContextPredictionRequest` from Aurora sources (schedule blocks, campus metadata, academic calendar, weather, dayplan state). Missing data falls back to “unknown”.
+- [x] Expose a protected endpoint or internal client so engine/StudentWatcher can invoke `/ai/predict-context` in "server mode".
+- [x] Tag predictions with `source: 'lockedin-web'` and reuse existing publish logic (`context_prediction_request/response`) so Ably Relay stays unaware of the caller.
+- [x] Scope calendar data to the student’s current day and enrich events with weekday/date/time metadata in campus timezone.
+- [x] Pull latest student location samples from `user_locations` when telemetry omits coordinates.
+
+### 3.2 Engine / StudentWatcher
+- [x] Extend the `dailyPlanSignal` handler to call the server-mode predictor before generating the morning plan; store the response via existing `dayplan_context_update` helpers and push to Ably for sampling.
+- [x] On `contextUpdateSignal`, decide if the latest telemetry warrants another prediction (e.g., schedule change, focus block finish). If so, reuse the helper and update context state.
+- [x] Continue writing predictions into `context_prediction_history` (via `ContextPredictionSampler`) to preserve historical patterns.
+- [x] Trigger predictions even before a DayPlan exists; throttle high-signal events to 30 s and persist `lastServerPredictionAt` in workflow state.
+- [x] Log classification decisions and prediction outcomes for troubleshooting.
+
+### 3.3 Ably Relay
+- [x] Allow telemetry with `deviceId = 'web-*'` and/or metadata `source: 'web'`; ensure sampler logs maintain the source for analytics.
+- [x] Confirm signal mapping continues to route lifecycle/location/context events into StudentWatcher.
+
+### 3.4 Locked In Web
+- [x] Keep emitting focus, calendar, preference, and user actions via the existing telemetry helpers.
+- [x] Add optional browser geolocation collection (with consent) to improve prediction accuracy. If denied, fall back to campus centroid + schedule context.
+- [x] Surface “Current Context” in the dashboard (primary state + reasoning) and pair with Ace insights (now returned from `/api/syllabus/random`).
+- [x] Provide a feedback control (“Does this feel right?”) that posts a `user.action` correction for StudentWatcher learning.
+- [x] Emit lifecycle telemetry (`app.foreground` / `app.background`) to drive server-mode predictions.
+
+### 3.5 Observability & QA
+- [ ] Dashboards/metrics for: predictions per user/day, source breakdown (web vs mobile), average confidence, sampling coverage.
+- [x] Add logging around server-mode predictions for initial validation (input assembly + prompt variables) and track missing data fallbacks.
+- [x] Manual testing script: simulate a schedule import, start/pause/finish focus sessions, tweak School Mode, verify StudentWatcher receives `context_update` and daily plan reflects the new state.
+
+### 3.6 BFF / Admin Interfaces
+- [ ] Surface `lockedin-web` predictions inside `bff-dashboard-v1` (current admin predictions view shows the underlying data but lacks UX polish for web vs mobile sources).
+- [ ] Add filtering/annotations in the admin predictions table for `metadata.source` to distinguish web, mobile, and future channels.
+
+---
+
+## 4. Execution Timeline
+
+| Week   | Focus                                                                     | Notes                                                                    |
+| ------ | ------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| Sat    | API Router helper + StudentWatcher integration prototype                  | Verify predictions land in `service_data` with `source: 'lockedin-web'`. |
+| Sun    | Web UI surface (current context, feedback), telemetry QA, instrumentation | Confirm Ably relay receives server predictions; check dayplan prompts.   |
+| Monday | Polish, monitoring, prep for mobile alignment                             | Finalize metrics dashboards, ensure mobile contract unaffected.          |
+
+---
+
+## 5. Post-Launch (Mobile in ~4 Weeks)
+
+- Native app can continue publishing motion/location/health telemetry; relay will merge signals naturally with the web feed.
+- Mobile can use `publishTelemetry` with `deviceId = 'ios-*'` and the same event types—no schema changes required.
+- Server-mode prediction remains active; when both clients run, we can prefer the freshest telemetry (mobile location wins when available).
+
+---
+
+## 6. Acceptance Criteria
+
+- StudentWatcher receives at least two context predictions per active hour while only web is live.
+- Dayplan morning run highlights the predicted context and wellness cues (no empty state fallback).
+- Locked In dashboard shows “Now” context plus Ace highlights derived from the prediction/daily intelligence.
+- Metrics confirm telemetry events flow from web to Ably to StudentWatcher without regression when mobile comes online.

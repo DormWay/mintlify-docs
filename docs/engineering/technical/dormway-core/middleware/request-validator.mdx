@@ -1,0 +1,172 @@
+---
+title: "Request Validator"
+description: "Creates a validation middleware using Zod schemas to validate request body, params, and query."
+---
+
+# Request Validator Middleware
+
+## Overview
+
+Creates a validation middleware using Zod schemas to validate request body, params, and query.
+
+## Factory Signature
+
+```typescript
+createRequestValidator(options: {
+  schema: ZodSchema;
+}): RequestHandler
+```
+
+## Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `schema` | `ZodSchema` | Yes | Zod schema for validation |
+
+## Usage
+
+### Basic Validation
+
+```typescript
+import { z } from 'zod';
+import { createRequestValidator } from '@dormway/core/middleware';
+
+const loginSchema = z.object({
+  body: z.object({
+    email: z.string().email(),
+    password: z.string().min(8)
+  })
+});
+
+app.post('/login',
+  createRequestValidator({ schema: loginSchema }),
+  (req, res) => {
+    // req.body is validated and type-safe
+    const { email, password } = req.body;
+    // ...
+  }
+);
+```
+
+### Full Request Validation
+
+```typescript
+const updateUserSchema = z.object({
+  params: z.object({
+    id: z.string().uuid()
+  }),
+  query: z.object({
+    includeProfile: z.coerce.boolean().optional()
+  }),
+  body: z.object({
+    name: z.string().min(2).max(100),
+    email: z.string().email()
+  })
+});
+
+app.put('/users/:id',
+  createRequestValidator({ schema: updateUserSchema }),
+  (req, res) => {
+    const { id } = req.params;           // Validated UUID
+    const { includeProfile } = req.query; // Validated boolean
+    const { name, email } = req.body;     // Validated strings
+    // ...
+  }
+);
+```
+
+### Common Patterns
+
+#### Optional Fields
+
+```typescript
+const schema = z.object({
+  body: z.object({
+    name: z.string(),
+    bio: z.string().optional(),         // Can be undefined
+    age: z.number().nullable()          // Can be null
+  })
+});
+```
+
+#### Arrays and Objects
+
+```typescript
+const schema = z.object({
+  body: z.object({
+    tags: z.array(z.string()),
+    preferences: z.record(z.boolean()),
+    address: z.object({
+      street: z.string(),
+      city: z.string(),
+      zip: z.string().regex(/^\d{5}$/)
+    })
+  })
+});
+```
+
+#### Coercion for Query Params
+
+```typescript
+const schema = z.object({
+  query: z.object({
+    page: z.coerce.number().int().positive().default(1),
+    limit: z.coerce.number().int().min(1).max(100).default(20),
+    active: z.coerce.boolean().optional()
+  })
+});
+```
+
+## Error Response
+
+When validation fails:
+
+```json
+{
+  "error": "Validation failed",
+  "statusCode": 400,
+  "details": [
+    {
+      "path": ["body", "email"],
+      "message": "Invalid email format"
+    },
+    {
+      "path": ["body", "password"],
+      "message": "String must contain at least 8 character(s)"
+    }
+  ]
+}
+```
+
+## Type Safety
+
+The validator provides type inference:
+
+```typescript
+const userSchema = z.object({
+  body: z.object({
+    name: z.string(),
+    age: z.number()
+  })
+});
+
+type UserInput = z.infer<typeof userSchema>['body'];
+// { name: string; age: number }
+
+app.post('/users',
+  createRequestValidator({ schema: userSchema }),
+  (req: Request<unknown, unknown, UserInput>, res) => {
+    // req.body is typed as { name: string; age: number }
+    console.log(req.body.name); // TypeScript knows this is string
+  }
+);
+```
+
+## Related
+
+- [Middleware Factory Pattern](/docs/engineering/technical/dormway-core/middleware/middleware-factory-pattern) - Overview of factory pattern
+- [Zod Documentation](https://zod.dev) - Schema library docs
+
+---
+
+**Last Updated**: 2025-11-26

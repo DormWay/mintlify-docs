@@ -1,0 +1,598 @@
+---
+title: "Cache Adapter"
+description: "import { getCacheAdapter } from '@dormway/core/adapters/cache';"
+---
+
+# Cache Adapter
+
+## Overview
+
+**CacheAdapter** provides a centralized Redis caching layer with TTL support, pattern-based deletion, and automatic JSON serialization.
+
+**Purpose**: Singleton Redis client for fast, consistent caching across all services.
+
+**Location**: `@dormway/core/adapters/cache`
+
+---
+
+## Installation
+
+```typescript
+import { getCacheAdapter } from '@dormway/core/adapters/cache';
+
+const cache = getCacheAdapter();
+```
+
+---
+
+## API Reference
+
+### get
+
+Retrieve a value from cache.
+
+**Signature**:
+```typescript
+get<T>(key: string): Promise<T | null>
+```
+
+**Example**:
+```typescript
+const cache = getCacheAdapter();
+
+const user = await cache.get<User>('user:123');
+
+if (user) {
+  console.log('Cache hit:', user.email);
+} else {
+  console.log('Cache miss');
+}
+```
+
+---
+
+### set
+
+Store a value in cache with optional TTL.
+
+**Signature**:
+```typescript
+set<T>(key: string, value: T, options?: CacheOptions): Promise<void>
+```
+
+**Options**:
+```typescript
+interface CacheOptions {
+  ttl?: number;  // Time-to-live in seconds
+}
+```
+
+**Examples**:
+
+**Simple set**:
+```typescript
+await cache.set('user:123', user);
+```
+
+**Set with TTL (expires after 1 hour)**:
+```typescript
+await cache.set('user:123', user, { ttl: 3600 });
+```
+
+**Set with short TTL (expires after 5 minutes)**:
+```typescript
+await cache.set('dashboard:user:123', dashboardData, { ttl: 300 });
+```
+
+---
+
+### delete
+
+Remove a single key from cache.
+
+**Signature**:
+```typescript
+delete(key: string): Promise<void>
+```
+
+**Example**:
+```typescript
+await cache.delete('user:123');
+```
+
+---
+
+### deletePattern
+
+Delete all keys matching a pattern.
+
+**Signature**:
+```typescript
+deletePattern(pattern: string): Promise<number>
+```
+
+**Pattern Syntax** (Redis SCAN):
+- `*` - matches any characters
+- `?` - matches single character
+- `[abc]` - matches a, b, or c
+- `[a-z]` - matches range
+
+**Examples**:
+
+**Delete all user caches**:
+```typescript
+const count = await cache.deletePattern('user:*');
+console.log(`Deleted ${count} user cache keys`);
+```
+
+**Delete all dashboard caches for user**:
+```typescript
+await cache.deletePattern('dashboard:user:123:*');
+```
+
+**Delete all temporary caches**:
+```typescript
+await cache.deletePattern('temp:*');
+```
+
+---
+
+### clear
+
+Clear all keys in Redis (⚠️ use with caution!).
+
+**Signature**:
+```typescript
+clear(): Promise<void>
+```
+
+**Example**:
+```typescript
+// ⚠️ WARNING: Deletes ALL keys in Redis
+await cache.clear();
+```
+
+**Use Case**: Only use in tests or development. Never in production!
+
+---
+
+## Common Patterns
+
+### Pattern 1: Cache-Aside (Lazy Loading)
+
+```typescript
+import { getCacheAdapter } from '@dormway/core/adapters/cache';
+import { getConnectionPool } from '@dormway/core/database';
+
+async function getUser(userId: string): Promise<User> {
+  const cache = getCacheAdapter();
+  const cacheKey = `user:${userId}`;
+
+  // Try cache first
+  const cached = await cache.get<User>(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
+  // Cache miss - fetch from database
+  const pool = getConnectionPool();
+  const result = await pool.query('SELECT * FROM accounts WHERE id = $1', [userId]);
+  const user = result.rows[0];
+
+  if (user) {
+    // Store in cache (1 hour TTL)
+    await cache.set(cacheKey, user, { ttl: 3600 });
+  }
+
+  return user;
+}
+```
+
+### Pattern 2: Write-Through Cache
+
+```typescript
+async function updateUser(userId: string, updates: Partial<User>): Promise<User> {
+  const pool = getConnectionPool();
+  const cache = getCacheAdapter();
+  const cacheKey = `user:${userId}`;
+
+  // Update database
+  const result = await pool.query(
+    'UPDATE accounts SET email = $1, name = $2 WHERE id = $3 RETURNING *',
+    [updates.email, updates.name, userId]
+  );
+
+  const user = result.rows[0];
+
+  // Update cache
+  await cache.set(cacheKey, user, { ttl: 3600 });
+
+  return user;
+}
+```
+
+### Pattern 3: Cache Invalidation on Update
+
+```typescript
+async function updateUserProfile(userId: string, profile: UserProfile): Promise<void> {
+  const pool = getConnectionPool();
+  const cache = getCacheAdapter();
+
+  // Update database
+  await pool.query('UPDATE user_profiles SET data = $1 WHERE user_id = $2', [profile, userId]);
+
+  // Invalidate related caches
+  await cache.delete(`user:${userId}`);
+  await cache.delete(`profile:${userId}`);
+  await cache.deletePattern(`dashboard:user:${userId}:*`);
+}
+```
+
+### Pattern 4: Memoization (Function Result Caching)
+
+```typescript
+async function getExpensiveData(param: string): Promise<Data> {
+  const cache = getCacheAdapter();
+  const cacheKey = `expensive:${param}`;
+
+  // Check cache
+  const cached = await cache.get<Data>(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
+  // Expensive computation
+  const data = await performExpensiveComputation(param);
+
+  // Cache result (30 minutes)
+  await cache.set(cacheKey, data, { ttl: 1800 });
+
+  return data;
+}
+```
+
+### Pattern 5: Rate Limiting
+
+```typescript
+async function checkRateLimit(userId: string, limit: number, window: number): Promise<boolean> {
+  const cache = getCacheAdapter();
+  const key = `ratelimit:${userId}`;
+
+  const count = await cache.get<number>(key);
+
+  if (count === null) {
+    // First request in window
+    await cache.set(key, 1, { ttl: window });
+    return true;
+  }
+
+  if (count >= limit) {
+    // Rate limit exceeded
+    return false;
+  }
+
+  // Increment counter
+  await cache.set(key, count + 1, { ttl: window });
+  return true;
+}
+
+// Usage
+const allowed = await checkRateLimit('user-123', 100, 60);  // 100 requests per minute
+if (!allowed) {
+  throw new RateLimitError('Rate limit exceeded');
+}
+```
+
+### Pattern 6: Session Store
+
+```typescript
+async function createSession(userId: string, sessionData: Session): Promise<string> {
+  const cache = getCacheAdapter();
+  const sessionId = generateSessionId();
+  const key = `session:${sessionId}`;
+
+  // Store session (24 hours)
+  await cache.set(key, sessionData, { ttl: 86400 });
+
+  return sessionId;
+}
+
+async function getSession(sessionId: string): Promise<Session | null> {
+  const cache = getCacheAdapter();
+  const key = `session:${sessionId}`;
+
+  return await cache.get<Session>(key);
+}
+
+async function deleteSession(sessionId: string): Promise<void> {
+  const cache = getCacheAdapter();
+  await cache.delete(`session:${sessionId}`);
+}
+```
+
+---
+
+## Cache Key Naming Conventions
+
+Use consistent key naming patterns:
+
+```typescript
+// ✅ Good - structured, predictable
+'user:123'                       // User entity
+'user:123:profile'               // User sub-resource
+'dashboard:user:123'             // Dashboard cache
+'session:abc-def-456'            // Session
+'ratelimit:user:123:endpoint'    // Rate limit counter
+'temp:workflow:456'              // Temporary data
+
+// ❌ Bad - inconsistent
+'user_123'                       // Use colons, not underscores
+'User:123'                       // Lowercase prefixes
+'123'                            // Missing context
+'cache_user_profile_123'         // Too verbose
+```
+
+**Recommended Prefixes**:
+- `user:` - User data
+- `session:` - Sessions
+- `dashboard:` - Dashboard caches
+- `temp:` - Temporary data (short TTL)
+- `ratelimit:` - Rate limiting counters
+- `lock:` - Distributed locks
+- `queue:` - Job queues
+
+---
+
+## TTL Guidelines
+
+| Data Type | TTL | Reason |
+|-----------|-----|--------|
+| **User profile** | 1 hour (3600s) | Changes infrequently |
+| **Dashboard data** | 5-10 min (300-600s) | Updates regularly |
+| **Session** | 24 hours (86400s) | Active session duration |
+| **Rate limit** | 1-60 min (60-3600s) | Rate limit window |
+| **Temporary data** | 5 min (300s) | Short-lived computation |
+| **Static data** | 1 day (86400s) | Rarely changes |
+| **Real-time data** | 30 sec (30s) | Frequent updates |
+
+---
+
+## Performance Considerations
+
+### Avoid Large Values
+
+```typescript
+// ❌ Bad - huge object (slow serialization)
+await cache.set('user:123', {
+  ...user,
+  allCourses: [...],  // 1000+ courses
+  allEvents: [...],   // 5000+ events
+  history: [...],     // 10000+ history items
+});
+
+// ✅ Good - only cache what you need
+await cache.set('user:123', {
+  id: user.id,
+  email: user.email,
+  name: user.name,
+});
+
+// Cache large collections separately
+await cache.set('user:123:courses', user.courses, { ttl: 300 });
+await cache.set('user:123:events', user.events, { ttl: 60 });
+```
+
+### Batch Operations
+
+```typescript
+// ❌ Bad - multiple round trips
+for (const userId of userIds) {
+  const user = await cache.get(`user:${userId}`);
+}
+
+// ✅ Better - use mget (if available) or parallel
+const users = await Promise.all(
+  userIds.map(id => cache.get(`user:${id}`))
+);
+```
+
+### Use Appropriate TTLs
+
+```typescript
+// ❌ Bad - no TTL (never expires, fills memory)
+await cache.set('user:123', user);
+
+// ❌ Bad - TTL too long (stale data)
+await cache.set('dashboard:user:123', data, { ttl: 86400 });
+
+// ✅ Good - reasonable TTL
+await cache.set('user:123', user, { ttl: 3600 });
+await cache.set('dashboard:user:123', data, { ttl: 300 });
+```
+
+---
+
+## Cache Stampede Prevention
+
+**Problem**: Multiple requests fetch same data simultaneously when cache expires.
+
+**Solution**: Use locking or stale-while-revalidate pattern.
+
+```typescript
+async function getCachedDataWithLock(key: string): Promise<Data> {
+  const cache = getCacheAdapter();
+
+  // Check cache
+  const cached = await cache.get<Data>(key);
+  if (cached) {
+    return cached;
+  }
+
+  const lockKey = `lock:${key}`;
+
+  // Try to acquire lock
+  const acquired = await cache.get(lockKey);
+
+  if (acquired) {
+    // Another request is fetching, wait and retry
+    await sleep(100);
+    return getCachedDataWithLock(key);
+  }
+
+  // Acquire lock (30 second TTL)
+  await cache.set(lockKey, true, { ttl: 30 });
+
+  try {
+    // Fetch fresh data
+    const data = await fetchFreshData();
+
+    // Cache result
+    await cache.set(key, data, { ttl: 600 });
+
+    return data;
+  } finally {
+    // Release lock
+    await cache.delete(lockKey);
+  }
+}
+```
+
+---
+
+## Debugging
+
+### Check if Key Exists
+
+```typescript
+const cache = getCacheAdapter();
+const value = await cache.get('user:123');
+
+if (value === null) {
+  console.log('Key not in cache');
+} else {
+  console.log('Key found:', value);
+}
+```
+
+### Log Cache Hits/Misses
+
+```typescript
+import { createStructuredLogger } from '@dormway/core/logger';
+
+const logger = createStructuredLogger({ service: 'api-router' });
+const cache = getCacheAdapter();
+
+const user = await cache.get<User>(`user:${userId}`);
+
+if (user) {
+  logger.info('cache.hit', 'Cache hit', { metadata: { key: `user:${userId}` } });
+} else {
+  logger.info('cache.miss', 'Cache miss', { metadata: { key: `user:${userId}` } });
+}
+```
+
+### Monitor Cache Performance
+
+```typescript
+async function getCachedWithMetrics<T>(
+  key: string,
+  fetcher: () => Promise<T>,
+  ttl: number
+): Promise<T> {
+  const cache = getCacheAdapter();
+  const startTime = Date.now();
+
+  const cached = await cache.get<T>(key);
+
+  if (cached) {
+    const duration = Date.now() - startTime;
+    logger.info('cache.hit', 'Cache hit', {
+      metadata: { key, durationMs: duration },
+    });
+    return cached;
+  }
+
+  logger.info('cache.miss', 'Cache miss', { metadata: { key } });
+
+  const data = await fetcher();
+  await cache.set(key, data, { ttl });
+
+  return data;
+}
+```
+
+---
+
+## Best Practices
+
+### ✅ Do
+
+- **Use consistent key naming** (`prefix:id`)
+- **Set appropriate TTLs** (don't cache forever)
+- **Invalidate on updates** (write-through or invalidate)
+- **Cache expensive operations** (DB queries, API calls)
+- **Use pattern deletion** for related keys
+- **Monitor cache hit rates** (log hits/misses)
+
+### ❌ Don't
+
+- **Don't cache sensitive data** (passwords, tokens)
+- **Don't cache without TTL** (fills memory)
+- **Don't cache huge objects** (> 1MB)
+- **Don't use cache as primary storage** (Redis can lose data)
+- **Don't forget to invalidate** (stale data is worse than no cache)
+
+---
+
+## Testing
+
+### Mock Cache in Tests
+
+```typescript
+// __tests__/user.service.test.ts
+import { getCacheAdapter } from '@dormway/core/adapters/cache';
+
+jest.mock('@dormway/core/adapters/cache');
+
+describe('UserService', () => {
+  let mockCache: jest.Mocked<ReturnType<typeof getCacheAdapter>>;
+
+  beforeEach(() => {
+    mockCache = {
+      get: jest.fn(),
+      set: jest.fn(),
+      delete: jest.fn(),
+      deletePattern: jest.fn(),
+      clear: jest.fn(),
+    } as any;
+
+    (getCacheAdapter as jest.Mock).mockReturnValue(mockCache);
+  });
+
+  it('should use cache', async () => {
+    mockCache.get.mockResolvedValue(null);  // Cache miss
+
+    const user = await getUser('user-123');
+
+    expect(mockCache.get).toHaveBeenCalledWith('user:user-123');
+    expect(mockCache.set).toHaveBeenCalledWith(
+      'user:user-123',
+      user,
+      { ttl: 3600 }
+    );
+  });
+});
+```
+
+---
+
+## Related Documentation
+
+- [DormWay Core Library (@dormway-core)](/docs/engineering/technical/dormway-core-library-dormway-core) - Main overview
+- [ContextsService](/docs/engineering/technical/dormway-core/domain-services/contextsservice) - Uses caching for context graph
+- [Temporal Adapter](/docs/engineering/technical/dormway-core/adapters/temporal-adapter) - Singleton pattern similar to cache
+
+---
+
+**Last Updated**: 2025-11-23
+**Maintainer**: Platform Team

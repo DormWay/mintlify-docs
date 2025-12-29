@@ -1,0 +1,23 @@
+---
+title: "DORM 159 geolocation campus detection"
+---
+
+# DORM-159 – Campus Auto-Detect via Geolocation (2025-10-12)
+
+## Implementation summary
+
+- Added a “Use my location” flow on the onboarding campus step. When a user (including admins) taps the CTA we request browser geolocation, call `/api/proxy/mobile/detect-campus`, and surface the result(s) in the UI instead of auto-advancing.
+- Campus detection now relies on `campus_configs` exclusively. We order potential matches by `enrollment_total` (largest schools first) and then by proximity, returning up to five candidates. Each suggestion shows name, city/state, distance, and enrollment when known.
+- If the PostGIS function cannot resolve a boundary match, we fall back to the ranked suggestions and require manual confirmation—the campus step will not auto-skip even when a candidate is pre-filled.
+- Temporal auto-onboarding triggers only when the worker client is available; otherwise we log and continue so local admin tests don’t crash.
+
+## Notes / gotchas
+
+- **Do not use `campus_registry` for detection.** It is a one-time import table and may be truncated; `campus_configs` is the canonical, continuously updated source for enrollment, location, and state metadata.
+- Admin “simulate claim” flows intentionally seed fake syllabi/context rows so onboarding can show an auto-detected campus. This is expected in dev/staging and is isolated from real users.
+- The UI exposes multiple nearby campuses; dismissing a suggestion removes it from the list, clicking “Use this campus” applies it, fetches dorm metadata, and leaves the user on the campus step for confirmation.
+
+## Follow-ups
+
+- Consider logging more granular analytics (e.g., which suggestion was chosen) once we have real user traffic.
+- Evaluate whether we need a long-term cache for repeated geolocation lookups to reduce load on PostGIS.

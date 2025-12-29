@@ -1,0 +1,43 @@
+---
+title: "iOS API Drift 2025 12"
+description: "Summary of where the iOS app (ios-clean) is calling APIs that no longer match the backend (dormway-platform) routes or response shapes."
+---
+
+# iOS API Drift (Dec 2025)
+
+Summary of where the iOS app (ios-clean) is calling APIs that no longer match the backend (dormway-platform) routes or response shapes.
+
+## Hard 404s / Missing Routes
+- Contexts: `/v1/mobile/users/{id}/contexts` (appAuth) and `PATCH /v1/mobile/contexts/{contextId}` are not implemented. Only `POST /api/mobile/contexts/building` exists.
+- Context prediction: iOS calls `/v1/ai/predict-context`; backend exposes `/api/ai/predict-context` (no `/v1` alias).
+- Temporal: iOS uses `/v1/temporal/workflow/*`; backend is `/api/temporal/*` only.
+- Widgets: iOS calls `GET /v1/mobile/widgets`; no such route exists.
+- Canvas URL submit: iOS calls `POST /v1/mobile/calendar/canvas-url`; no such route exists.
+- WidgetKit: `/v1/ace/study-command/{userId}` and `/v1/context/next-action/{userId}` are not present.
+
+## Response / Payload Shape Mismatches
+- Preferences:
+  - iOS hits `/v1/mobile/preferences` with its own schema. Web uses `/api/proxy/mobile/preferences` and deep-merge PUT of fields including `schoolMode`, `dayplan` toggles, `calendar` timezone flags, `courseColors`, notification channels/briefings/dailyCap, and AI helpfulness (`minimal|standard|high`). iOS will drop or send unsupported fields.
+- ICS status:
+  - Backend `POST /api/mobile/check-ics-status` returns `{ hasIcsFile: boolean }`.
+  - iOS expects `{ has_uploaded, last_upload_time, ics_url }`.
+- ICS upload:
+  - Backend `POST /api/mobile/calendar/upload-ics` expects JSON `{ icsText, semesterDates? }`.
+  - iOS uploads multipart file data to the same path.
+- Majors:
+  - iOS hardcodes `/v1/mobile/app-conf/majors/umich`; backend exposes `/api/mobile/app-conf/majors` and `/api/mobile/app-conf/majors/:campusId` (general).
+
+## Endpoints That Currently Match
+- Calendar preferences (`GET/POST/BULK/DELETE /api/mobile/calendar/preferences`), profile (`GET /api/mobile/profile`, `PATCH /api/mobile/profile/:userId/update`), ICS claim/check (except shape noted above), and telemetry (`POST /api/mobile/telemetry/background`) are aligned on path/method.
+
+## Suggested Fix Plan
+1) Switch iOS base paths to match backend: `/api/mobile/*`, `/api/ai/predict-context`, `/api/temporal/*`, and remove `/v1` prefixes unless the gateway rewrites. Verify Zuplo/proxy mappings.
+2) Remove or re-target dead routes: contexts listing/updating, widget fetch, canvas-url submit, and WidgetKit study/next-action calls—either add backend support or update app to current supported endpoints.
+3) Harmonize preferences: use the same proxy path as web, adopt deep-merge semantics, and align schema (schoolMode, dayplan, calendar, courseColors, notification channels/briefings/dailyCap, AI helpfulness values).
+4) Fix ICS shapes: map `hasIcsFile` → `has_uploaded`, and add optional `last_upload_time`/`ics_url` handling if needed; align upload payload to `icsText` JSON or add a file upload route server-side.
+5) Update majors endpoint to the general `/api/mobile/app-conf/majors` (with campus param if needed).
+6) Add contract tests in iOS (mock server) to catch path/shape drift against current backend routes.
+
+Sources:
+- iOS calls: `.repos/ios-clean/Core/Services/*`, `Packages/DWServices/*`, `Packages/DWContext/*`, `Packages/DWDataCollection/*`, `Packages/DWWidgetKit/*`.
+- Backend routes: `.repos/dormway-platform/services/api-router/src/routes/index.ts` and subroutes (`mobile-routes.ts`, `realtime-routes.ts`, `temporal-routes.ts`, `context-intelligence-routes.ts`).

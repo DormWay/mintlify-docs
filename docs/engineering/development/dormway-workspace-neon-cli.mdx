@@ -1,0 +1,56 @@
+---
+title: "DormWay Workspace Neon CLI"
+description: "Local Postgres branches now live in Neon instead of Aurora snapshots. The workspace root automates branch resets during `make sync`, so every engineer starts..."
+---
+
+# DormWay Workspace – Neon CLI Integration
+
+## Why we added Neon to the workspace
+Local Postgres branches now live in Neon instead of Aurora snapshots. The workspace root automates branch resets during `make sync`, so every engineer starts from a clean parent branch before launching `make dev`. This doc tracks the CLI requirements, branch naming conventions, and how the automation works.
+
+## Installation & authentication
+```bash
+brew install neonctl
+neon auth
+neon set-context --project-id misty-queen-56829089 --org-id org-plain-lab-10303443
+```
+- The tracked `.neon` file in the workspace root pins the default context to the DormWay project/org above. Do not change it unless infra rotates IDs.
+- If the CLI prompts for analytics, you can safely opt out.
+
+## Recording your dev branch
+Each engineer owns a Neon branch named `dev_<yourname>`. Store that name so scripts can find it:
+```bash
+echo dev_alex > .workspace/neon-branch
+# or set it per-shell
+export NEON_DEV_BRANCH=dev_alex
+```
+The branch file wins over the env var if both are present. Keep the file in gitignored `.workspace/`.
+
+## What `make sync` now does
+`scripts/sync.sh` replaces the old git-only sync:
+1. Runs `./scripts/repo.sh pull` to update every repo under `.repos/`.
+2. Reads `$NEON_DEV_BRANCH` or `.workspace/neon-branch`.
+3. Executes `neon branches reset <branch> --parent`, which rewinds your branch to its parent (usually `development`).
+4. Emits guidance if the CLI is missing or the branch is undefined.
+
+This means `make sync` (or `./scripts/sync.sh`) must succeed before starting services. If you need to keep data, create a temporary branch in the Neon console instead of skipping the reset.
+
+## Getting a connection string
+Use the helper script (available via `make neon-connection`) to print a ready-to-paste URL:
+
+```bash
+make neon-connection
+# overrides:
+NEON_ROLE_NAME=dw_readonly NEON_CONNECTION_POOLED=1 make neon-connection
+```
+
+The script:
+- Reads `NEON_DEV_BRANCH` or `.workspace/neon-branch`
+- Defaults to role `neondb_owner` and database `dormway`
+- Supports flags: `NEON_ROLE_NAME`, `NEON_DATABASE_NAME`, `NEON_CONNECTION_POOLED=1`, `NEON_CONNECTION_PRISMA=1`, and `NEON_CONNECTION_EXTENDED=1`
+
+## Troubleshooting
+- **CLI missing**: rerun `brew install neonctl`; confirm `which neon` resolves under `/opt/homebrew/bin`.
+- **Auth errors**: `neon auth --logout && neon auth`, then re-run `neon set-context ...`.
+- **Unknown branch**: list available names with `neon branches list --project-id misty-queen-56829089` and recreate yours if it was pruned.
+Keep this doc in sync with `README.md`, `AGENTS.md`, and `scripts/sync.sh` whenever the workflow changes.

@@ -1,0 +1,45 @@
+---
+title: "Temporal Sync Schedules"
+description: "1. Deploy engine changes (branch `feature/DORM-177-temporal-schedules`). 2. Populate Doppler secrets listed above; leave `SYNC_SCHEDULES_ENABLED=false` initi..."
+---
+
+# Temporal Schedules for Sync Orchestration (DORM-177)
+
+## Overview
+- Engine provisions three Temporal schedules to drive the existing `/cron/sync/orchestrate` endpoint in `api-router`, reusing all prioritisation and cascade logic already in production.
+- A lightweight workflow (`runScheduledSyncWorkflow`) wraps the cron call so Temporal handles retries/visibility while OTEL spans capture duration and results in Dash0.
+- Schedules target the `sync-scheduler` task queue and respect overlap rules, preventing backlogged runs from stacking.
+
+## Schedule Matrix
+| Schedule ID | Cadence | Query Params | Purpose |
+|-------------|---------|--------------|---------|
+| `sync-hourly-smart` | Every hour | `mode=auto&limit=10` | Rolling smart sync of highest-priority contexts |
+| `sync-city-4h` | Every 4 hours | `mode=cities_only&limit=20` | Focused refresh for city cascades |
+| `sync-daily-force` | Daily at 04:00 | `mode=auto&force=true&limit=5` | Force small backlog of critical contexts |
+
+## Configuration & Secrets
+- Set `SYNC_SCHEDULES_ENABLED=true` in Doppler to allow the worker to provision schedules during boot.
+- Ensure the following values exist before enabling:
+  - `API_ROUTER` → base URL for api-router service (e.g., `https://api.dormway.com`).
+  - `API_KEY` → shared system key consumed by `cronAuthMiddleware` (`services/api-router/src/middleware/cron-auth.ts`).
+  - Optional overrides: `SYNC_SCHEDULER_TASK_QUEUE` (defaults to `sync-scheduler`), OTEL exporter envs (already consumed by `services/engine/src/instrumentation.ts`).
+- Engine will skip provisioning if the toggle is false; existing schedules can be paused/resumed via Temporal UI.
+
+## Deployment Checklist
+1. Deploy engine changes (branch `feature/DORM-177-temporal-schedules`).
+2. Populate Doppler secrets listed above; leave `SYNC_SCHEDULES_ENABLED=false` initially.
+3. Flip the toggle in staging, restart engine workers, verify schedules appear under Temporal UI → *Schedules* with green status.
+4. Confirm OTEL spans in Dash0 (`triggerSyncOrchestration` span name) and check `/api/admin/sync/status` for activity.
+5. Repeat for production once staging is healthy.
+
+## Operations Tips
+- **Provision**: DormWay Admin → *Sync Automation* → “Provision Schedules” calls `/api/admin/sync/schedules/provision`, which recreates/updates the three schedules using the same logic as engine boot.
+- **Manual run**: The same page exposes preset triggers (auto/city/force) via `/api/admin/sync/manual`. CLI fallback: `curl -H "Authorization: Bearer $API_KEY" "$API_ROUTER/cron/sync/orchestrate?mode=auto&limit=10"`.
+- **Pause**: Use Temporal UI to pause individually; the admin console offers pause/resume toggles as well.
+- **Updating cadence**: Edit `services/engine/src/schedules/syncOrchestratorSchedules.ts` and redeploy; `ensureSyncSchedules` (or the provision button) updates specs idempotently.
+- **Disabling automation**: Set `SYNC_SCHEDULES_ENABLED=false` and restart; consider pausing schedules in Temporal to prevent residual runs.
+
+## Troubleshooting
+- 401 responses → validate `API_KEY` alignment between engine and api-router.
+- Missing schedules → check engine logs for `Ensuring Temporal sync schedules are configured`; ensure toggle is true.
+- No traces → confirm OTLP endpoint reachability and environment variables for Dash0 exporter.

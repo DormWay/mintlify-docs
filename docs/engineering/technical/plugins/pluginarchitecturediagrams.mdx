@@ -1,0 +1,122 @@
+---
+title: "Plugin_Architecture_Diagrams"
+description: "The following Mermaid diagrams expand on the architecture described in DORM-332, showing plugin execution, result handling, and DormWay ingestion."
+---
+
+# Plugin Architecture Diagrams
+
+The following Mermaid diagrams expand on the architecture described in DORM-332, showing plugin execution, result handling, and DormWay ingestion.
+
+## 1. High-level Data Flow
+
+```mermaid
+flowchart TD
+  A[Campus or City Sync Workflow] --> B(Plugin Bootloader)
+  B --> C{Plugin SDK}
+  C --> D[Fetch Campus Data]
+  D --> E[Build JSON Result]
+  E --> F{Result Storage}
+  F -->|Dev: Local File| G[Local Ingestion Trigger]
+  F -->|Prod: S3 + SQS| H[Ingestion Trigger]
+  G --> I[Ingestion Workflow]
+  H --> I
+  I --> J[Validate Schema]
+  I --> K[Transform & Upsert]
+  K --> L[(DormWay Canonical Stores)]
+  I --> M[Emit Logs & Metrics]
+```
+
+## 2. Plugin Execution Sequence
+
+```mermaid
+sequenceDiagram
+  participant Sync as Sync Workflow
+  participant Boot as Plugin Bootloader
+  participant SDK as Plugin SDK
+  participant Remote as Campus APIs
+  participant Store as Result Storage
+
+  Sync->>Boot: runPlugin(pluginId, campusId)
+  Boot->>SDK: initialise(context)
+  SDK->>Remote: fetch data
+  Remote-->>SDK: response payload
+  SDK-->>Boot: JSON payload
+  Boot->>Store: write result.json
+  Note over Boot,Store: Plugin has no direct database access
+```
+
+## 3. Ingestion Workflow Logic
+
+```mermaid
+flowchart TB
+  A[Watch for new result documents] --> B[Load manifest & payload]
+  B --> C{Validate schema?}
+  C -->|No| D[Emit error & alert]
+  C -->|Yes| E{Instructions mode}
+  E -->|replace| F[Remove previous records]
+  E -->|merge| G[Upsert entries]
+  E -->|diff| H[Apply add/remove patches]
+  F --> I[Write service_data & time_blocks]
+  G --> I
+  H --> I
+  I --> J[Record ingestion audit]
+  I --> K[Emit metrics/logs]
+```
+
+## 4. Component Deployment Diagram
+
+```mermaid
+graph TD
+  subgraph TemporalWorker
+    A[Campus Processor Workflow]
+    B[Plugin Bootloader Activity]
+    C[Plugin Specific Activities]
+    D[Result Ingestion Workflow]
+  end
+
+  subgraph ResultStorage
+    E[(S3 Bucket)]
+    F[(Local File System)]
+  end
+
+  subgraph MonitoringStack
+    G[Datadog Metrics]
+    H[Slack Alerts]
+  end
+
+  A --> B --> C --> E
+  E --> D --> G
+  D --> H
+  A --> D
+  F --> D
+```
+
+## 5. Local Development Workflow
+
+```mermaid
+sequenceDiagram
+  participant Dev as Developer
+  participant CLI as dw-plugin CLI
+  participant FS as Plugin Output Folder
+  participant Validator as Schema Validator
+  participant Ingest as Local Ingestion Workflow
+  participant DB as Local DormWay Services
+
+  Dev->>CLI: dw-plugin run umich
+  CLI->>FS: write result JSON
+  Dev->>CLI: dw-plugin validate
+  CLI->>Validator: schema check
+  Validator-->>CLI: success / failure
+  Dev->>Ingest: start ingestion
+  Ingest->>FS: read JSON
+  Ingest->>DB: apply via helpers
+  Ingest-->>Dev: ingestion summary logs
+```
+
+- In production, JSON artifacts live in S3; ingestion is triggered by SQS/EventBridge.
+- Local dev uses file-system watchers or manual triggers.
+
+## Next Steps
+- Align diagrams with final schema fields (if we add new payload types).
+- Add diagram showing versioned plugin rollout and rollback.
+- Document how ingestion audit records link back to plugin run IDs.

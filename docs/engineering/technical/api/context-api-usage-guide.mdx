@@ -1,0 +1,243 @@
+---
+title: "Context API Usage Guide"
+description: "The Context API provides a comprehensive way to access and traverse hierarchical context data in the DormWay system."
+---
+
+# Context API Usage Guide
+
+## Quick Start
+
+The Context API provides a comprehensive way to access and traverse hierarchical context data in the DormWay system.
+
+### Base URL
+- Development: `http://localhost:3001/contexts`
+- Production: `https://api.dormway.com/contexts`
+
+## Common Use Cases
+
+### 1. Get a Student's Full Context
+```bash
+# Get student with their campus and dorm information
+curl -X GET "http://localhost:3001/contexts/student/{student-id}?include_service_data=true"
+```
+
+### 2. Find a Student's Parent Contexts (Campus, Building)
+```bash
+# Get immediate parent (usually their dorm building)
+curl -X GET "http://localhost:3001/contexts/student/{student-id}/parents"
+
+# Get all parents up the hierarchy (building → campus → city)
+curl -X GET "http://localhost:3001/contexts/student/{student-id}/parents?recursive=true"
+```
+
+### 3. Search for Students
+```bash
+# Search for all active students
+curl -X POST "http://localhost:3001/contexts/search" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "type": "student",
+    "is_active": true,
+    "limit": 10
+  }'
+
+# Search for students in a specific organization
+curl -X POST "http://localhost:3001/contexts/search" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "type": "student",
+    "organization_id": "University of Michigan",
+    "limit": 10
+  }'
+```
+
+### 4. Get Multiple Contexts at Once (Bulk)
+```bash
+# Get student and their campus in one request
+curl -X POST "http://localhost:3001/contexts/bulk" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "context_ids": ["student-uuid", "campus-uuid"],
+    "options": {
+      "include_service_data": true
+    }
+  }'
+```
+
+### 5. Navigate Context Hierarchy
+```bash
+# Get all students in a campus (traverse down)
+curl -X GET "http://localhost:3001/contexts/campus/{campus-id}/hierarchy?direction=down&max_depth=2"
+
+# Get all contexts above a student (traverse up)
+curl -X GET "http://localhost:3001/contexts/student/{student-id}/hierarchy?direction=up"
+```
+
+## Endpoint Reference
+
+### Core Operations
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/contexts/:type/:id` | Get single context |
+| POST | `/contexts` | Create new context |
+| PATCH | `/contexts/:type/:id` | Update context |
+| DELETE | `/contexts/:type/:id` | Delete context |
+
+### Relationship Operations
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/contexts/:type/:id/parents` | Get parent contexts |
+| GET | `/contexts/:type/:id/children` | Get child contexts |
+| GET | `/contexts/:type/:id/dependencies` | Get dependencies |
+| POST | `/contexts/:type/:id/dependencies/search` | Search dependencies |
+| GET | `/contexts/:type/:id/hierarchy` | Traverse hierarchy |
+
+### Search & Bulk Operations
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/contexts/search` | Search contexts |
+| POST | `/contexts/bulk` | Get multiple contexts |
+
+### Utility Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/contexts/types` | List available context types |
+| GET | `/contexts/health` | Health check |
+
+## Context Types
+
+- `student` - Individual student contexts
+- `campus` - University campus (e.g., University of Michigan)
+- `building` - Dorm buildings and academic buildings
+- `city` - City contexts
+- `course` - Course contexts
+- `organization` - Organization contexts
+- `room` - Individual room contexts
+- `event` - Event contexts
+
+## Query Parameters
+
+### Common Parameters
+
+| Parameter | Type | Description | Example |
+|-----------|------|-------------|---------|
+| `include_service_data` | boolean | Include service data | `?include_service_data=true` |
+| `include_dependencies` | boolean | Include dependencies | `?include_dependencies=true` |
+| `include_children` | boolean | Include child contexts | `?include_children=true` |
+| `limit` | number | Limit results | `?limit=10` |
+| `offset` | number | Pagination offset | `?offset=20` |
+
+### Hierarchy Parameters
+
+| Parameter | Type | Description | Example |
+|-----------|------|-------------|---------|
+| `recursive` | boolean | Traverse all levels | `?recursive=true` |
+| `direction` | string | Traversal direction (up/down) | `?direction=up` |
+| `max_depth` | number | Maximum traversal depth | `?max_depth=3` |
+
+## Response Format
+
+### Successful Response
+```json
+{
+  "data": {
+    "id": "uuid",
+    "type": "student",
+    "metadata": {},
+    "created_at": "2025-08-06T10:00:00Z",
+    "updated_at": "2025-08-06T15:30:00Z"
+  },
+  "meta": {
+    "cached": false
+  }
+}
+```
+
+### Error Response
+```json
+{
+  "error": "Context not found",
+  "type": "student",
+  "id": "invalid-id"
+}
+```
+
+### Paginated Response
+```json
+{
+  "data": [...],
+  "meta": {
+    "total": 100,
+    "page": 1,
+    "per_page": 10,
+    "total_pages": 10
+  }
+}
+```
+
+## Authentication
+
+Currently, the Context API does not require authentication in development. In production, JWT authentication will be required:
+
+```bash
+curl -X GET "https://api.dormway.com/contexts/student/{id}" \
+  -H "Authorization: Bearer {jwt-token}"
+```
+
+## Rate Limiting
+
+- Development: No rate limiting
+- Production: 1000 requests per hour per IP
+
+## Examples
+
+### Complete Example: Student Dashboard Data
+```bash
+# Get all data needed for a student dashboard
+curl -X POST "http://localhost:3001/contexts/bulk" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "context_ids": ["student-uuid"],
+    "options": {
+      "include_service_data": true,
+      "include_dependencies": true,
+      "include_children": false
+    }
+  }'
+```
+
+### Complete Example: Campus Overview
+```bash
+# Get campus with all students
+curl -X GET "http://localhost:3001/contexts/campus/8e6db902-0450-412d-8f74-59f3700d1632/children"
+
+# Or search for all students in a campus
+curl -X POST "http://localhost:3001/contexts/search" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "type": "student",
+    "parent_id": "8e6db902-0450-412d-8f74-59f3700d1632",
+    "is_active": true,
+    "limit": 100
+  }'
+```
+
+## Testing
+
+Run the comprehensive test suite:
+```bash
+cd /path/to/dormway-api-router
+./scripts/test-all-context-endpoints.sh
+```
+
+## Related Documentation
+- [Context API Endpoints Design](/docs/engineering/technical/api/context-api-endpoints-design) - Full design specification
+- DormWay API Router - Main API router documentation
+
+---
+*Created: August 6, 2025*  
+*Status: ✅ Active Documentation*

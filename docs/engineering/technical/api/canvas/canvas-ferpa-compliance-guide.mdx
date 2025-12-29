@@ -1,0 +1,425 @@
+---
+title: "Canvas FERPA Compliance Guide"
+description: "FERPA protects the privacy of student educational records. For Canvas integration, this means:"
+---
+
+# Canvas FERPA Compliance Guide
+
+**Regulation**: Family Educational Rights and Privacy Act (FERPA)  
+**Status**: ✅ **IMPLEMENTED**  
+**Last Updated**: 2025-10-03  
+
+---
+
+## 🎯 **FERPA Overview**
+
+FERPA protects the privacy of student educational records. For Canvas integration, this means:
+
+- **Educational Records** are protected (grades, assignments, submissions)
+- **Directory Information** can be disclosed (name, major, enrollment dates)
+- **Student Consent** is required for data access
+- **Data Retention** policies must be enforced
+- **Cross-Student Disclosure** is prohibited
+
+---
+
+## 🔐 **FERPA Compliance Implementation**
+
+### **1. OAuth2 Consent Notice**
+
+```typescript
+export const FERPA_CONSENT_NOTICE = `
+By connecting your Canvas account to DormWay, you authorize us to:
+
+✓ View your course list and enrollment information
+✓ Access assignment due dates and descriptions
+✓ View your grades and submission status
+✓ Read your academic calendar events
+
+DormWay respects your privacy under FERPA:
+• We ONLY access YOUR data (never other students')
+• We NEVER modify your Canvas account
+• Data is encrypted and stored securely
+• You can disconnect anytime (data deleted within 24 hours)
+
+[View Privacy Policy] [View Data Use Agreement]
+
+[Authorize Canvas Access]  [Cancel]
+`;
+```
+
+### **2. Minimal Required Scopes**
+
+```typescript
+const FERPA_COMPLIANT_SCOPES = [
+  // Read-only access to academic data
+  'url:GET|/api/v1/courses',
+  'url:GET|/api/v1/users/:user_id/courses',
+  'url:GET|/api/v1/courses/:course_id/assignments',
+  'url:GET|/api/v1/courses/:course_id/assignments/:assignment_id/submissions',
+  'url:GET|/api/v1/calendar_events',
+  'url:GET|/api/v1/users/self/upcoming_events',
+  'url:GET|/api/v1/users/self/todo'
+];
+
+// Scopes to AVOID (write access - FERPA risk)
+const PROHIBITED_SCOPES = [
+  'url:POST|/api/v1/courses/:course_id/assignments',  // Creating assignments
+  'url:PUT|/api/v1/courses/:course_id/assignments/:id',  // Updating assignments
+  'url:POST|/api/v1/courses/:course_id/assignments/:assignment_id/submissions',  // Submitting work
+  'url:DELETE|/api/v1/courses/:course_id/enrollments/:id'  // Removing enrollments
+];
+```
+
+---
+
+## 🛡️ **Data Access Controls**
+
+### **Student Data Isolation Middleware**
+
+```typescript
+export async function enforceStudentDataIsolation(req, res, next) {
+  const requestedUserId = req.params.user_id;
+  const authenticatedUserId = req.user.id;
+
+  // FERPA Rule: Students can ONLY access their own educational records
+  if (requestedUserId !== authenticatedUserId) {
+    // Check if user has explicit admin/instructor role
+    const hasPermission = await checkInstructorAccess(
+      authenticatedUserId,
+      requestedUserId
+    );
+
+    if (!hasPermission) {
+      return res.status(403).json({
+        error: 'FERPA_VIOLATION',
+        message: 'You do not have permission to access another student\'s educational records'
+      });
+    }
+  }
+
+  next();
+}
+
+// Apply to ALL Canvas data endpoints
+router.get('/api/canvas/users/:user_id/grades',
+  enforceStudentDataIsolation,
+  getCanvasGrades
+);
+```
+
+### **Admin Access Controls**
+
+```typescript
+async function checkInstructorAccess(authenticatedUserId: string, requestedUserId: string): Promise<boolean> {
+  // Check if authenticated user is instructor for the requested user's courses
+  const instructorCourses = await db.canvas_courses.findMany({
+    where: {
+      canvas_instance_id: { in: await getUserCanvasInstances(authenticatedUserId) },
+      enrollments: {
+        some: {
+          user_id: authenticatedUserId,
+          type: 'TeacherEnrollment'
+        }
+      }
+    }
+  });
+
+  const studentCourses = await db.canvas_courses.findMany({
+    where: {
+      canvas_instance_id: { in: await getUserCanvasInstances(requestedUserId) },
+      enrollments: {
+        some: {
+          user_id: requestedUserId,
+          type: 'StudentEnrollment'
+        }
+      }
+    }
+  });
+
+  // Check if instructor teaches any of the student's courses
+  const instructorCourseIds = instructorCourses.map(c => c.canvas_course_id);
+  const studentCourseIds = studentCourses.map(c => c.canvas_course_id);
+  
+  return instructorCourseIds.some(id => studentCourseIds.includes(id));
+}
+```
+
+---
+
+## 🗄️ **Data Retention Policies**
+
+### **24-Hour Deletion Policy**
+
+```typescript
+export async function canvasDataRetentionWorkflow(userId: string) {
+  // Check if Canvas account is still connected
+  const account = await db.canvas_accounts.findOne({ user_id: userId });
+
+  if (!account || account.disconnected_at) {
+    // FERPA: Delete educational records within 24 hours of disconnect
+    await sleep.for('24 hours');
+
+    await db.transaction(async (tx) => {
+      // Delete all Canvas educational records
+      await tx.canvas_submissions.deleteMany({ user_id: userId });
+      await tx.canvas_assignments.deleteMany({
+        course_context_id: { in: await getUserCourseIds(userId) }
+      });
+      await tx.canvas_courses.deleteMany({
+        context_id: { in: await getUserCourseIds(userId) }
+      });
+      await tx.canvas_quizzes.deleteMany({
+        course_context_id: { in: await getUserCourseIds(userId) }
+      });
+      await tx.canvas_discussions.deleteMany({ user_id: userId });
+      await tx.canvas_student_analytics.deleteMany({ user_id: userId });
+      await tx.canvas_accounts.delete({ user_id: userId });
+    });
+
+    logger.info({ userId }, 'Canvas educational records deleted per FERPA');
+  }
+}
+```
+
+### **Automatic Cleanup Triggers**
+
+```sql
+-- Trigger cleanup when Canvas account is disconnected
+CREATE OR REPLACE FUNCTION trigger_canvas_data_cleanup()
+RETURNS TRIGGER AS $$
+BEGIN
+  -- Schedule cleanup workflow if account is disconnected
+  IF OLD.disconnected_at IS NULL AND NEW.disconnected_at IS NOT NULL THEN
+    PERFORM temporal.start_workflow(
+      'canvasDataRetentionWorkflow',
+      NEW.user_id::text
+    );
+  END IF;
+  
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER canvas_account_disconnect_trigger
+  AFTER UPDATE ON canvas_accounts
+  FOR EACH ROW
+  EXECUTE FUNCTION trigger_canvas_data_cleanup();
+```
+
+---
+
+## 🔒 **Data Encryption & Security**
+
+### **Token Encryption**
+
+```typescript
+export class TokenEncryption {
+  private static readonly algorithm = 'aes-256-gcm';
+  private static readonly key = process.env.TOKEN_ENCRYPTION_KEY;
+
+  static encrypt(text: string): string {
+    const iv = crypto.randomBytes(16);
+    const cipher = crypto.createCipher(this.algorithm, this.key);
+    cipher.setAAD(Buffer.from('canvas-tokens'));
+    
+    let encrypted = cipher.update(text, 'utf8', 'hex');
+    encrypted += cipher.final('hex');
+    
+    const authTag = cipher.getAuthTag();
+    
+    return `${iv.toString('hex')}:${authTag.toString('hex')}:${encrypted}`;
+  }
+
+  static decrypt(encryptedText: string): string {
+    const [ivHex, authTagHex, encrypted] = encryptedText.split(':');
+    
+    const iv = Buffer.from(ivHex, 'hex');
+    const authTag = Buffer.from(authTagHex, 'hex');
+    
+    const decipher = crypto.createDecipher(this.algorithm, this.key);
+    decipher.setAAD(Buffer.from('canvas-tokens'));
+    decipher.setAuthTag(authTag);
+    
+    let decrypted = decipher.update(encrypted, 'hex', 'utf8');
+    decrypted += decipher.final('utf8');
+    
+    return decrypted;
+  }
+}
+```
+
+### **Database Security**
+
+```sql
+-- Row Level Security for Canvas data
+ALTER TABLE canvas_submissions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE canvas_assignments ENABLE ROW LEVEL SECURITY;
+ALTER TABLE canvas_courses ENABLE ROW LEVEL SECURITY;
+
+-- Policy: Users can only access their own data
+CREATE POLICY canvas_submissions_user_policy ON canvas_submissions
+  FOR ALL TO authenticated_users
+  USING (user_id = auth.uid());
+
+CREATE POLICY canvas_assignments_user_policy ON canvas_assignments
+  FOR ALL TO authenticated_users
+  USING (
+    course_context_id IN (
+      SELECT context_id FROM canvas_courses 
+      WHERE canvas_instance_id IN (
+        SELECT canvas_instance_id FROM canvas_accounts 
+        WHERE user_id = auth.uid()
+      )
+    )
+  );
+```
+
+---
+
+## 📊 **Audit Logging**
+
+### **FERPA Audit Trail**
+
+```typescript
+export class FERPAAuditLogger {
+  static async logDataAccess(userId: string, action: string, resource: string, details?: any) {
+    await db.ferpa_audit_log.create({
+      data: {
+        user_id: userId,
+        action,
+        resource,
+        details: details ? JSON.stringify(details) : null,
+        timestamp: new Date(),
+        ip_address: req.ip,
+        user_agent: req.get('User-Agent')
+      }
+    });
+  }
+
+  static async logDataDeletion(userId: string, resource: string, recordCount: number) {
+    await this.logDataAccess(userId, 'DELETE', resource, { recordCount });
+  }
+
+  static async logDataExport(userId: string, resource: string, recordCount: number) {
+    await this.logDataAccess(userId, 'EXPORT', resource, { recordCount });
+  }
+}
+```
+
+### **Audit Log Schema**
+
+```sql
+CREATE TABLE ferpa_audit_log (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id UUID NOT NULL REFERENCES accounts(id),
+  action VARCHAR(50) NOT NULL,  -- 'ACCESS', 'EXPORT', 'DELETE', 'MODIFY'
+  resource VARCHAR(100) NOT NULL,  -- 'canvas_submissions', 'canvas_grades', etc.
+  details JSONB,
+  timestamp TIMESTAMPTZ DEFAULT NOW(),
+  ip_address INET,
+  user_agent TEXT
+);
+
+-- Index for audit queries
+CREATE INDEX idx_ferpa_audit_user_timestamp ON ferpa_audit_log(user_id, timestamp DESC);
+CREATE INDEX idx_ferpa_audit_action ON ferpa_audit_log(action, timestamp DESC);
+```
+
+---
+
+## 🚨 **FERPA Violation Prevention**
+
+### **Data Validation**
+
+```typescript
+export class FERPAValidator {
+  static validateCanvasData(data: any): { isValid: boolean; errors: string[] } {
+    const errors: string[] = [];
+
+    // Check for cross-student data exposure
+    if (data.user_id && data.other_user_id && data.user_id !== data.other_user_id) {
+      errors.push('FERPA_VIOLATION: Cross-student data access detected');
+    }
+
+    // Check for write operations on educational records
+    if (data.operation && ['CREATE', 'UPDATE', 'DELETE'].includes(data.operation)) {
+      if (data.resource && ['grades', 'submissions', 'assignments'].includes(data.resource)) {
+        errors.push('FERPA_VIOLATION: Write operation on protected educational record');
+      }
+    }
+
+    // Check for excessive data access
+    if (data.record_count && data.record_count > 1000) {
+      errors.push('FERPA_WARNING: Excessive data access detected');
+    }
+
+    return {
+      isValid: errors.length === 0,
+      errors
+    };
+  }
+}
+```
+
+### **Rate Limiting**
+
+```typescript
+export class FERPARateLimiter {
+  private static readonly limits = {
+    'canvas_submissions': { requests: 100, window: 3600000 }, // 100 requests per hour
+    'canvas_grades': { requests: 50, window: 3600000 },        // 50 requests per hour
+    'canvas_courses': { requests: 200, window: 3600000 }       // 200 requests per hour
+  };
+
+  static async checkLimit(userId: string, resource: string): Promise<boolean> {
+    const limit = this.limits[resource];
+    if (!limit) return true;
+
+    const key = `ferpa_rate_limit:${userId}:${resource}`;
+    const current = await redis.get(key);
+    
+    if (current && parseInt(current) >= limit.requests) {
+      return false;
+    }
+
+    await redis.incr(key);
+    await redis.expire(key, limit.window / 1000);
+    
+    return true;
+  }
+}
+```
+
+---
+
+## 📋 **FERPA Compliance Checklist**
+
+### **✅ Implemented Features**
+- [x] **OAuth2 Consent Notice** - Clear FERPA-compliant authorization
+- [x] **Minimal Scopes** - Read-only access to educational records
+- [x] **Student Data Isolation** - Middleware prevents cross-student access
+- [x] **24-Hour Deletion** - Automatic cleanup on disconnect
+- [x] **Token Encryption** - AES-256 encryption for OAuth tokens
+- [x] **Audit Logging** - Complete audit trail for data access
+- [x] **Rate Limiting** - Prevents excessive data access
+- [x] **Database Security** - Row Level Security policies
+
+### **🔍 Compliance Monitoring**
+- [x] **Data Access Logs** - Track all Canvas data access
+- [x] **Deletion Logs** - Monitor data retention compliance
+- [x] **Error Monitoring** - Alert on FERPA violations
+- [x] **Performance Metrics** - Monitor API usage patterns
+
+---
+
+## 🔗 **Related Documentation**
+
+- **[Canvas API Documentation - Complete Reference](/docs/engineering/technical/api/canvas/canvas-api-documentation-complete-reference)** - Full API reference
+- **[Canvas Sync Service Implementation](/docs/engineering/technical/api/canvas/canvas-sync-service-implementation)** - Backend service details
+- **[Canvas iOS Integration Guide](/docs/engineering/technical/api/canvas/canvas-ios-integration-guide)** - Mobile implementation
+- **Canvas Full Plan** - High-level integration strategy
+
+---
+
+*This implementation ensures full FERPA compliance for Canvas integration while maintaining functionality and user experience.*

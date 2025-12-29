@@ -1,0 +1,162 @@
+---
+title: "Role Check Middleware"
+description: "Creates role-based access control middleware. Must be used after authentication middleware."
+---
+
+# Role Check Middleware
+
+## Overview
+
+Creates role-based access control middleware. Must be used after authentication middleware.
+
+## Factory Signature
+
+```typescript
+createRoleCheckMiddleware(options: {
+  logger: Logger;
+  allowedRoles: string[];
+}): RequestHandler
+```
+
+## Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `logger` | `Logger` | Yes | Logger instance |
+| `allowedRoles` | `string[]` | Yes | Roles allowed to access the route |
+
+## Usage
+
+```typescript
+import { createRoleCheckMiddleware } from '@dormway/core/middleware';
+import { logger } from './utils/logger';
+
+// Admin-only endpoint
+app.get('/admin/users',
+  authMiddleware,
+  createRoleCheckMiddleware({ logger, allowedRoles: ['admin'] }),
+  (req, res) => {
+    // Only admins reach here
+  }
+);
+
+// Any authenticated user (including demo)
+app.get('/api/profile',
+  authMiddleware,
+  createRoleCheckMiddleware({ logger, allowedRoles: ['authenticated'] }),
+  (req, res) => {
+    // All authenticated users reach here
+  }
+);
+
+// Multiple roles
+app.get('/api/reports',
+  authMiddleware,
+  createRoleCheckMiddleware({ logger, allowedRoles: ['admin', 'manager'] }),
+  (req, res) => {
+    // Admins and managers reach here
+  }
+);
+```
+
+## Role Hierarchy
+
+| Role | Description | Access Level |
+|------|-------------|--------------|
+| `admin` | Administrator | Full access to all endpoints |
+| `system` | Internal service | Service-to-service calls |
+| `authenticated` | Standard user | Normal user access |
+| `demo` | Demo account | Read-only access (treated as authenticated) |
+
+### Special Behaviors
+
+1. **Admin role**: Always passes any role check
+2. **Demo role**: Treated as `authenticated` for read operations
+3. **System role**: Used for internal service calls
+
+## Error Response
+
+When role check fails:
+
+```json
+{
+  "error": "Forbidden",
+  "statusCode": 403,
+  "message": "Insufficient permissions"
+}
+```
+
+## Common Patterns
+
+### Admin Routes
+
+```typescript
+const adminOnly = createRoleCheckMiddleware({
+  logger,
+  allowedRoles: ['admin']
+});
+
+app.use('/admin', authMiddleware, adminOnly);
+```
+
+### Protected API Routes
+
+```typescript
+const authenticatedOnly = createRoleCheckMiddleware({
+  logger,
+  allowedRoles: ['authenticated']
+});
+
+app.use('/api', authMiddleware, authenticatedOnly);
+```
+
+### System and Admin Access
+
+```typescript
+const systemOrAdmin = createRoleCheckMiddleware({
+  logger,
+  allowedRoles: ['system', 'admin']
+});
+
+app.post('/internal/sync', authMiddleware, systemOrAdmin, syncHandler);
+```
+
+## Combining with Other Middleware
+
+```typescript
+import express from 'express';
+import {
+  createAuthMiddleware,
+  createRoleCheckMiddleware,
+  createDemoReadOnlyGuard
+} from '@dormway/core/middleware';
+
+const app = express();
+
+// 1. Authenticate
+app.use(createAuthMiddleware({ logger, clerkClient }));
+
+// 2. Block demo writes
+app.use(createDemoReadOnlyGuard({ logger }));
+
+// 3. Role-specific routes
+app.get('/api/data',
+  createRoleCheckMiddleware({ logger, allowedRoles: ['authenticated'] }),
+  dataHandler
+);
+
+app.post('/admin/users',
+  createRoleCheckMiddleware({ logger, allowedRoles: ['admin'] }),
+  createUserHandler
+);
+```
+
+## Related
+
+- [Middleware Factory Pattern](/docs/engineering/technical/dormway-core/middleware/middleware-factory-pattern) - Overview of factory pattern
+- [Authentication Middleware](/docs/engineering/technical/dormway-core/middleware/authentication-middleware) - User authentication
+- [Demo Read-Only Guard](/docs/engineering/technical/dormway-core/middleware/demo-read-only-guard) - Demo user restrictions
+
+---
+
+**Last Updated**: 2025-11-26

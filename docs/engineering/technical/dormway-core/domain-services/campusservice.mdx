@@ -1,0 +1,430 @@
+---
+title: "CampusService"
+description: "import { CampusService } from '@dormway/core'; import { getConnectionPool } from '@dormway/core/database'; import { createStructuredLogger } from '@dormway/c..."
+---
+
+# CampusService
+
+## Overview
+
+**CampusService** manages campus and city configurations, including metadata, sync schedules, weather data, and housing information.
+
+**Purpose**: Provide centralized access to campus and city configs stored in `campus_configs` and `city_configs` tables, plus weather/housing data from `service_data`.
+
+**Location**: `@dormway/core/domains/campus`
+
+---
+
+## Installation
+
+```typescript
+import { CampusService } from '@dormway/core';
+import { getConnectionPool } from '@dormway/core/database';
+import { createStructuredLogger } from '@dormway/core/logger';
+
+const pool = getConnectionPool();
+const logger = createStructuredLogger({ service: 'api-router' });
+
+const service = new CampusService({ pool, logger });
+```
+
+---
+
+## Methods
+
+### getCampusConfig
+
+Get campus configuration by campus ID.
+
+**Signature**:
+```typescript
+getCampusConfig(campusId: string): Promise<ServiceResult<CampusConfig | null>>
+```
+
+**Returns**:
+```typescript
+interface CampusConfig {
+  id: number;
+  campus_id: string;           // UUID from contexts table
+  campus_name: string;
+  email_domain: string;        // e.g., "umich.edu"
+  email_patterns: string[];    // Additional email patterns
+  city: string;
+  state: string;
+  latitude: number;
+  longitude: number;
+  timezone: string;
+  enrollment_total: number;
+  parent_city_id: string;      // UUID of city context
+
+  // Sync configuration
+  sync_frequency_hours: number;
+  next_sync_at: Date;
+  consecutive_failures: number;
+  last_sync_status: Record<string, unknown>;
+
+  // Data sources
+  data_sources: {
+    canvas?: { enabled: boolean; api_url?: string };
+    banner?: { enabled: boolean };
+    // ... other data sources
+  };
+
+  // Feature flags
+  feature_flags: {
+    dayplan_enabled?: boolean;
+    weather_enabled?: boolean;
+    // ... other flags
+  };
+
+  // Processing rules
+  processing_rules: Record<string, unknown>;
+
+  is_active: boolean;
+  priority: number;
+  configuration_status: string;
+  created_at: Date;
+  updated_at: Date;
+}
+```
+
+**Example**:
+```typescript
+const result = await service.getCampusConfig('a7729dde-587f-4c39-845e-e6136f3d738c');
+
+if (result.success && result.data) {
+  const campus = result.data;
+  console.log(`Campus: ${campus.campus_name}`);
+  console.log(`Location: ${campus.city}, ${campus.state}`);
+  console.log(`Timezone: ${campus.timezone}`);
+  console.log(`Next sync: ${campus.next_sync_at}`);
+  console.log(`Enrollment: ${campus.enrollment_total}`);
+}
+```
+
+---
+
+### getCityConfig
+
+Get city configuration by city ID.
+
+**Signature**:
+```typescript
+getCityConfig(cityId: string): Promise<ServiceResult<CityConfig | null>>
+```
+
+**Returns**:
+```typescript
+interface CityConfig {
+  id: string;
+  city_id: string;             // UUID from contexts table
+  city_name: string;
+  state: string;
+  country: string;
+  timezone: string;
+  population: number;
+
+  // Campus associations
+  campus_ids: string[];        // Array of campus UUIDs
+  campus_count: number;
+
+  // Sync configuration
+  sync_frequency_hours: number;
+  next_sync_at: Date;
+  consecutive_failures: number;
+
+  // Cascade settings (propagate city data to campuses)
+  cascade_enabled: boolean;
+  cascade_threshold_hours: number;
+  cascade_campus_list: string[];
+
+  // Data sources
+  data_sources: {
+    weather?: { enabled: boolean; provider?: string };
+    events?: { enabled: boolean };
+    transit?: { enabled: boolean };
+  };
+
+  city_metadata: Record<string, unknown>;
+  is_active: boolean;
+  processing_priority: number;
+  configuration_status: string;
+  created_at: Date;
+  updated_at: Date;
+}
+```
+
+**Example**:
+```typescript
+const result = await service.getCityConfig('6c6cfcab-391f-4168-aed9-9ebe25293a46');
+
+if (result.success && result.data) {
+  const city = result.data;
+  console.log(`City: ${city.city_name}, ${city.state}`);
+  console.log(`Campuses: ${city.campus_count}`);
+  console.log(`Weather sync: ${city.data_sources.weather?.enabled ? 'enabled' : 'disabled'}`);
+
+  if (city.cascade_enabled) {
+    console.log(`Cascade enabled for ${city.cascade_campus_list.length} campuses`);
+  }
+}
+```
+
+---
+
+### updateCampusConfig
+
+Update campus configuration fields.
+
+**Signature**:
+```typescript
+updateCampusConfig(
+  campusId: string,
+  updates: Partial<CampusConfig>
+): Promise<ServiceResult<CampusConfig>>
+```
+
+**Example**:
+```typescript
+// Update sync schedule
+const result = await service.updateCampusConfig(campusId, {
+  sync_frequency_hours: 12,
+  next_sync_at: new Date(Date.now() + 12 * 60 * 60 * 1000),
+});
+
+if (result.success) {
+  console.log('Campus config updated');
+}
+
+// Enable feature flag
+await service.updateCampusConfig(campusId, {
+  feature_flags: {
+    ...existingFlags,
+    dayplan_enabled: true,
+  },
+});
+
+// Update data source
+await service.updateCampusConfig(campusId, {
+  data_sources: {
+    ...existingDataSources,
+    canvas: { enabled: true, api_url: 'https://canvas.university.edu' },
+  },
+});
+```
+
+**Critical Notes**:
+- JSONB fields (`data_sources`, `feature_flags`, etc.) must be updated as complete objects
+- Automatically sets `updated_at` to NOW()
+- Returns updated config if successful
+- Returns error if campus not found
+
+---
+
+### updateCityConfig
+
+Update city configuration fields.
+
+**Signature**:
+```typescript
+updateCityConfig(
+  cityId: string,
+  updates: Partial<CityConfig>
+): Promise<ServiceResult<CityConfig>>
+```
+
+**Example**:
+```typescript
+// Enable cascade to campuses
+const result = await service.updateCityConfig(cityId, {
+  cascade_enabled: true,
+  cascade_threshold_hours: 2,
+  cascade_campus_list: ['campus-1-uuid', 'campus-2-uuid'],
+});
+
+// Update weather sync
+await service.updateCityConfig(cityId, {
+  data_sources: {
+    ...existingDataSources,
+    weather: { enabled: true, provider: 'openweathermap' },
+  },
+});
+```
+
+---
+
+### getCampusWeather
+
+**🔴 CRITICAL**: Get weather for a **campus's CITY**, not the campus itself!
+
+**Signature**:
+```typescript
+getCampusWeather(campusId: string): Promise<ServiceResult<Record<string, unknown> | null>>
+```
+
+**Returns**: Raw weather data object (structure varies by method)
+
+**SQL Query**:
+```sql
+SELECT data
+FROM service_data
+WHERE context_id = $1  -- Should be cityId, but this method uses campusId for backward compatibility
+  AND method IN (
+    'processed_city_weather_context',
+    'fetch_weather',
+    'fetch_forecast'
+  )
+ORDER BY
+  CASE method
+    WHEN 'processed_city_weather_context' THEN 1
+    WHEN 'fetch_weather' THEN 2
+    WHEN 'fetch_forecast' THEN 3
+  END,
+  fetched_at DESC
+LIMIT 1
+```
+
+**Example**:
+```typescript
+const result = await service.getCampusWeather(campusId);
+
+if (result.success && result.data) {
+  const weather = result.data;
+  console.log('Weather data:', weather);
+
+  // Structure varies by method!
+  if ('temperature' in weather) {
+    console.log(`Temperature: ${weather.temperature}°F`);
+  }
+}
+```
+
+**Critical Notes**:
+- Weather is stored for **cities**, not campuses
+- For new code, use `DayPlanDataService.getWeatherForStudent()` which correctly queries cityId
+- This method exists for backward compatibility but should query the campus's parent city
+- Prioritizes `processed_city_weather_context` (most processed)
+
+---
+
+### getCampusHousing
+
+Get housing data for a campus.
+
+**Signature**:
+```typescript
+getCampusHousing(campusId: string): Promise<ServiceResult<Record<string, unknown> | null>>
+```
+
+**Returns**: Raw housing data object from service_data
+
+**Example**:
+```typescript
+const result = await service.getCampusHousing(campusId);
+
+if (result.success && result.data) {
+  const housing = result.data;
+  console.log('Housing data:', housing);
+
+  // Process housing information
+  if (housing.dorms && Array.isArray(housing.dorms)) {
+    housing.dorms.forEach(dorm => {
+      console.log(`- ${dorm.name}: ${dorm.available_spaces} spaces`);
+    });
+  }
+}
+```
+
+---
+
+### healthCheck
+
+Check if the service can connect to the database.
+
+**Signature**:
+```typescript
+healthCheck(): Promise<boolean>
+```
+
+**Example**:
+```typescript
+const isHealthy = await service.healthCheck();
+console.log(`CampusService health: ${isHealthy ? 'OK' : 'ERROR'}`);
+```
+
+---
+
+## Common Patterns
+
+### Pattern 1: Get Campus with City Context
+
+```typescript
+// Get both campus and city configs
+const [campusResult, cityResult] = await Promise.all([
+  service.getCampusConfig(campusId),
+  service.getCityConfig(cityId),
+]);
+
+if (campusResult.success && cityResult.success) {
+  const campus = campusResult.data!;
+  const city = cityResult.data!;
+
+  console.log(`${campus.campus_name} in ${city.city_name}`);
+  console.log(`Timezone: ${city.timezone}`);
+}
+```
+
+### Pattern 2: Check Feature Flag
+
+```typescript
+const result = await service.getCampusConfig(campusId);
+
+if (result.success && result.data) {
+  const isDayPlanEnabled = result.data.feature_flags?.dayplan_enabled === true;
+
+  if (!isDayPlanEnabled) {
+    logger.warn('dayplan.disabled', 'DayPlan feature disabled for campus', {
+      metadata: { campusId, campusName: result.data.campus_name },
+    });
+    return;
+  }
+}
+```
+
+### Pattern 3: Update Sync Status
+
+```typescript
+// After successful sync
+await service.updateCampusConfig(campusId, {
+  next_sync_at: new Date(Date.now() + syncFrequencyHours * 60 * 60 * 1000),
+  consecutive_failures: 0,
+  last_sync_status: {
+    timestamp: new Date().toISOString(),
+    status: 'success',
+    records_processed: recordCount,
+  },
+});
+
+// After failed sync
+await service.updateCampusConfig(campusId, {
+  consecutive_failures: currentFailures + 1,
+  last_sync_status: {
+    timestamp: new Date().toISOString(),
+    status: 'failed',
+    error: errorMessage,
+  },
+});
+```
+
+---
+
+## Related Documentation
+
+- [DormWay Core Library (@dormway-core)](/docs/engineering/technical/dormway-core-library-dormway-core) - Main overview
+- [DayPlanDataService](/docs/engineering/technical/dormway-core/domain-services/dayplandataservice) - Uses CampusService for weather/housing
+- [ContextsService](/docs/engineering/technical/dormway-core/domain-services/contextsservice) - Context hierarchy operations
+
+---
+
+**Last Updated**: 2025-11-23
+**Maintainer**: Platform Team

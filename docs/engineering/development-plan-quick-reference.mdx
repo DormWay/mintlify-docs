@@ -1,0 +1,632 @@
+---
+title: "Development Plan Quick Reference"
+description: "1. Canvas Assignments & Grades (16h) 2. Assignment Completion Tracking (8h) 3. Notes Sync (10h)"
+---
+
+# Development Plan: Quick Reference
+**Project:** iOS Feature Parity - P0 Features
+**Timeline:** 4 days development + 3 days testing
+**Status:** Ready to Start
+
+---
+
+## Sprint Overview
+
+**Goal:** Implement 3 P0 features to achieve iOS/Web parity
+
+**Scope:**
+1. Canvas Assignments & Grades (16h)
+2. Assignment Completion Tracking (8h)
+3. Notes Sync (10h)
+
+**Total Effort:** 34 hours (4.25 days @ 8h/day)
+
+---
+
+## Daily Breakdown
+
+### Day 1: Canvas Service Layer (8 hours)
+
+**Morning (4h):**
+```bash
+# 1. Create service file
+touch Packages/DWServices/Sources/DWServices/CanvasService.swift
+
+# 2. Implement data models
+- Assignment (with Submission nested)
+- CanvasCourse
+- CanvasStatus
+- CanvasError enum
+
+# 3. Implement API methods (part 1)
+- connect(canvasUrl:accessToken:)
+- disconnect()
+- fetchStatus()
+```
+
+**Afternoon (4h):**
+```bash
+# 4. Implement API methods (part 2)
+- fetchCourses()
+- fetchAssignments(courseId:)
+- fetchUpcoming()
+- sync()
+
+# 5. Add protocol + adapter
+# Core/DependencyInjection/ServiceProtocols.swift
+- CanvasServiceProtocol
+
+# Core/DependencyInjection/ServiceAdapters.swift
+- CanvasServiceAdapter
+
+# 6. Register in Container
+# Core/DependencyInjection/Container.swift
+- registerSingleton(CanvasServiceProtocol.self, ...)
+```
+
+**Tests:**
+```bash
+# Verify service compiles
+# Test protocol injection in preview
+# Mock network calls work
+```
+
+---
+
+### Day 2: Canvas UI Layer (8 hours)
+
+**Morning (4h):**
+```bash
+# 1. Create connection view
+touch Core/Views/Settings/CanvasConnectionView.swift
+
+# Implement:
+- Canvas URL input
+- PAT token input (SecureField)
+- Token help sheet
+- Connect button with loading state
+- Error alerts
+
+# 2. Add to settings navigation
+# Update SettingsView.swift with Canvas row
+```
+
+**Afternoon (4h):**
+```bash
+# 3. Create gradebook views
+touch Core/Views/Academic/GradebookView.swift
+touch Core/Views/Academic/AssignmentGradeCard.swift
+
+# GradebookView:
+- Connection status banner
+- Assignment list (LazyVStack)
+- Sync button
+- Loading states
+
+# AssignmentGradeCard:
+- Assignment name, due date
+- GradeLabel (color-coded: A=green, B=blue, etc.)
+- Missing/late indicators
+- Tap → Assignment details
+
+# 4. Integrate Ably updates
+- Subscribe to "canvas_sync_complete"
+- Auto-refresh assignments
+```
+
+**Tests:**
+```bash
+# Connect with real Canvas PAT
+# Fetch assignments
+# Verify grades display correctly
+# Test sync button
+```
+
+---
+
+### Day 3: Assignment Completion (8 hours)
+
+**Morning (4h):**
+```bash
+# 1. Create completion service
+touch Packages/DWServices/Sources/DWServices/AssignmentCompletionService.swift
+
+# Implement:
+- Data models: CompletionRecord, FocusSession
+- start(assignmentId:) → returns FocusSession
+- complete(assignmentId:)
+- undoComplete(assignmentId:)
+- dismiss(assignmentId:)
+- fetchStatuses(assignmentIds:)
+- bulkComplete(assignmentIds:)
+- In-memory cache: completionCache
+
+# 2. Protocol + adapter
+- AssignmentCompletionServiceProtocol
+- AssignmentCompletionServiceAdapter
+- Register in Container
+```
+
+**Afternoon (4h):**
+```bash
+# 3. Update AssignmentGradeCard
+# Add completion actions section
+
+touch Core/Views/Academic/CompletionActionsView.swift
+touch Core/Views/Academic/CompletionStatusView.swift
+
+# CompletionActionsView:
+- "Start" button (play icon)
+- "Complete" button (checkmark icon)
+- "Dismiss" button (x icon)
+- Loading states
+
+# CompletionStatusView:
+- "In Progress" (blue)
+- "Completed" (green)
+- "Dismissed" (gray)
+
+# 4. Focus session integration
+- Trigger 60-min timer on "Start"
+- Local notification at completion
+```
+
+**Tests:**
+```bash
+# Start assignment → Verify focus session created
+# Complete assignment → Verify status updates
+# Dismiss assignment → Verify removed from cache
+# Bulk complete → Test onboarding flow
+```
+
+---
+
+### Day 4: Notes Sync Service (8 hours)
+
+**Morning (4h):**
+```bash
+# 1. Create notes service
+touch Packages/DWServices/Sources/DWServices/NotesSyncService.swift
+
+# Implement data models:
+- Note (@Observable class)
+  - id, content, contentHash (SHA-256)
+  - metadata (courseId, tags, title)
+  - revision, timestamps
+  - needsSync flag
+- NoteMetadata
+- SyncConflict
+
+# 2. Implement CRUD
+- create(content:metadata:) → Mark needsSync
+- update(noteId:content:) → Mark needsSync
+- delete(noteId:) → Soft delete, mark needsSync
+```
+
+**Afternoon (4h):**
+```bash
+# 3. Implement sync logic
+- sync() → POST /api/notes/sync
+  - Filter notes where needsSync = true
+  - Handle server response (synced, conflicts)
+  - Update local state
+- fetchRecent(limit:courseId:)
+- fetch(noteId:)
+- resolveConflict(conflictIndex:useServer:)
+
+# 4. Protocol + adapter
+- NotesSyncServiceProtocol
+- NotesSyncServiceAdapter
+- Register in Container
+```
+
+**Tests:**
+```bash
+# Create note → Verify needsSync = true
+# Sync → Verify needsSync = false
+# Create conflict scenario → Verify conflict resolution
+# Offline create → Verify queues for sync
+```
+
+---
+
+### Day 5: Notes UI (6 hours)
+
+**Morning (3h):**
+```bash
+# 1. Create notes list view
+touch Core/Views/Notes/NotesListView.swift
+touch Core/Views/Notes/NoteCard.swift
+
+# NotesListView:
+- LazyVStack of notes
+- Sync status banner (if syncing)
+- Conflicts alert (if conflicts exist)
+- Sync button (toolbar)
+- New note button (toolbar)
+- Filter by course (optional)
+
+# NoteCard:
+- Title or content preview (first 100 chars)
+- Last updated (relative time)
+- Sync indicator (if needsSync)
+- Tags (first 3)
+- Tap → Navigate to editor
+```
+
+**Afternoon (3h):**
+```bash
+# 2. Create note editor view
+touch Core/Views/Notes/NoteEditorView.swift
+
+# NoteEditorView:
+- Title field (optional)
+- TextEditor for content
+- Tag support (future enhancement - keep simple)
+- Save button (toolbar)
+- Auto-sync on save
+
+# 3. Conflict resolution UI
+touch Core/Views/Notes/ConflictResolutionView.swift
+
+# Show local vs server versions
+# "Use Local" / "Use Server" buttons
+# Preview both versions
+```
+
+**Tests:**
+```bash
+# Create note → Verify appears in list
+# Edit note → Verify syncs
+# Delete note → Verify removed
+# Conflict → Verify resolution UI works
+```
+
+---
+
+### Day 6: Integration Testing & Polish (4 hours)
+
+**Morning (2h):**
+```bash
+# 1. End-to-end integration tests
+Test Flow:
+1. Connect Canvas with PAT
+2. Fetch assignments → Verify in gradebook
+3. Mark assignment as Started → Verify focus session
+4. Create note about assignment
+5. Sync note → Verify on server
+6. Complete assignment → Verify status
+7. Check all data persisted
+
+# 2. Error handling refinement
+- Add toast messages for errors
+- Add retry logic (exponential backoff)
+- Add offline queue for operations
+```
+
+**Afternoon (2h):**
+```bash
+# 3. Performance testing
+- Canvas sync latency < 3s?
+- Notes sync latency < 2s?
+- App launch time (no regression)?
+
+# 4. UI polish
+- Loading states smooth?
+- Error messages clear?
+- Color coding consistent?
+- Accessibility labels?
+
+# 5. Code review prep
+- Clean up console logs
+- Remove dead code
+- Add inline documentation
+- Format code (SwiftFormat)
+```
+
+**Ship Criteria:**
+```bash
+✅ All features working end-to-end
+✅ No crashes in manual testing
+✅ Performance targets met
+✅ Code reviewed by 2+ engineers
+✅ Unit tests passing
+✅ Ready for internal testing
+```
+
+---
+
+## Implementation Checklist
+
+### Canvas Integration
+- [ ] `CanvasService.swift` created with all models
+- [ ] All 7 API methods implemented
+- [ ] Protocol + adapter created
+- [ ] Registered in DI container
+- [ ] `CanvasConnectionView.swift` with PAT flow
+- [ ] Token help screen with instructions
+- [ ] `GradebookView.swift` with assignment list
+- [ ] `AssignmentGradeCard.swift` with color-coded grades
+- [ ] `GradeLabel.swift` for grade display
+- [ ] Missing/late indicators implemented
+- [ ] Ably integration for sync updates
+- [ ] Error handling for all API calls
+- [ ] Loading states on all buttons
+- [ ] Manual sync button working
+- [ ] "Last synced" timestamp displayed
+
+### Assignment Completion
+- [ ] `AssignmentCompletionService.swift` created
+- [ ] All 6 API methods implemented
+- [ ] In-memory cache for statuses
+- [ ] Protocol + adapter created
+- [ ] Registered in DI container
+- [ ] `CompletionActionsView.swift` with 3 buttons
+- [ ] `CompletionStatusView.swift` with status indicators
+- [ ] Focus session integration (60-min timer)
+- [ ] Local notification at timer end
+- [ ] Ably integration for completion events
+- [ ] Bulk complete API for onboarding
+- [ ] Error handling for all actions
+- [ ] Optimistic UI updates
+- [ ] Retry logic for failed operations
+
+### Notes Sync
+- [ ] `NotesSyncService.swift` created
+- [ ] Note model with @Observable
+- [ ] SHA-256 hash calculation
+- [ ] CRUD operations (create, update, delete)
+- [ ] Sync logic with conflict detection
+- [ ] Protocol + adapter created
+- [ ] Registered in DI container
+- [ ] `NotesListView.swift` with lazy loading
+- [ ] `NoteCard.swift` with preview
+- [ ] `NoteEditorView.swift` with TextEditor
+- [ ] `ConflictResolutionView.swift` for conflicts
+- [ ] Sync status indicators (needsSync flag)
+- [ ] Auto-sync on app background
+- [ ] Manual sync button
+- [ ] Offline queue for operations
+- [ ] Error handling for sync failures
+- [ ] Tag support (optional, keep simple)
+- [ ] Course filtering (optional)
+
+---
+
+## Testing Checklist
+
+### Unit Tests
+```swift
+// Canvas Service
+@Test func testFetchAssignments()
+@Test func testConnectCanvas()
+@Test func testSyncAssignments()
+
+// Assignment Completion
+@Test func testStartAssignment()
+@Test func testCompleteAssignment()
+@Test func testBulkComplete()
+
+// Notes Sync
+@Test func testCreateNote()
+@Test func testSyncNotes()
+@Test func testConflictResolution()
+```
+
+### Integration Tests
+```swift
+// End-to-End Flows
+1. Canvas connection → Fetch → Display
+2. Start assignment → Focus → Complete
+3. Create note → Sync → Fetch on another device
+4. Offline create → Sync when online
+5. Concurrent edit → Conflict → Resolution
+```
+
+### Manual Testing
+```bash
+# Happy Paths
+✅ Connect Canvas successfully
+✅ View all assignments with grades
+✅ Mark assignment started
+✅ Complete assignment
+✅ Create and sync note
+✅ Edit note on multiple devices
+
+# Error Cases
+✅ Invalid Canvas credentials
+✅ Network timeout during sync
+✅ Offline mode (queue operations)
+✅ Note conflict (edit on 2 devices)
+✅ Canvas API rate limit
+
+# Edge Cases
+✅ No assignments in Canvas
+✅ Assignment with no grade yet
+✅ Late assignment
+✅ Missing assignment
+✅ Empty note
+✅ Very long note (>10k chars)
+```
+
+---
+
+## Code Style Guidelines
+
+### Swift Conventions
+```swift
+// MARK: - Section Headers
+@MainActor
+public final class ServiceName {
+    // Observable properties
+    @Published public private(set) var state: State
+
+    // Dependencies
+    private let networkService: NetworkService
+    private let logger = Logger(subsystem: "com.dormway", category: "ServiceName")
+
+    // Initializer
+    public init(networkService: NetworkService) {
+        self.networkService = networkService
+    }
+
+    // Public API
+    public func performAction() async throws {
+        // Implementation
+    }
+
+    // Private helpers
+    private func helperMethod() {
+        // Implementation
+    }
+}
+```
+
+### Design System Usage
+```swift
+// Typography
+Text("Title").dsTypography(DS.Typography.Heading.h3)
+Text("Body").dsTypography(DS.Typography.Body.default)
+
+// Colors
+.foregroundColor(DS.Color.Semantic.Text.primary)
+.background(DS.Color.Semantic.Background.surfacePrimary)
+
+// Spacing
+.padding(DS.Spacing.md)
+
+// Radius
+.cornerRadius(DS.Radius.md)
+```
+
+### Error Handling
+```swift
+// Custom errors
+public enum ServiceError: LocalizedError {
+    case actionFailed(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .actionFailed(let msg):
+            return "Failed to perform action: \(msg)"
+        }
+    }
+}
+
+// Usage
+do {
+    try await service.performAction()
+} catch let error as ServiceError {
+    showAlert(error.localizedDescription)
+} catch {
+    showAlert("An unexpected error occurred")
+}
+```
+
+---
+
+## Performance Targets
+
+### Latency
+- Canvas sync: < 3s (p95)
+- Notes sync: < 2s (p95)
+- Assignment completion: < 1s (p95)
+
+### Memory
+- Canvas service: < 10MB heap
+- Notes service: < 5MB heap
+- No memory leaks (Instruments verification)
+
+### Battery
+- Background sync: < 1% battery per hour
+- No significant impact on battery life
+
+### Network
+- Batch requests where possible
+- Cache aggressively (2-hour default)
+- Exponential backoff on failures
+
+---
+
+## Deployment Checklist
+
+### Before Internal Testing
+- [ ] All features implemented
+- [ ] Code reviewed and approved
+- [ ] Unit tests passing (>80% coverage)
+- [ ] Manual testing complete
+- [ ] No critical bugs
+- [ ] Performance targets met
+- [ ] Feature flags configured
+- [ ] Monitoring dashboards ready
+
+### Before Beta
+- [ ] Internal testing complete (zero critical bugs)
+- [ ] QA regression testing passed
+- [ ] Backend APIs load tested
+- [ ] Feature flags tested (enable/disable)
+- [ ] Support docs written
+- [ ] Beta cohort selected (50-100 users)
+
+### Before Public Release
+- [ ] Beta feedback reviewed
+- [ ] Top 5 issues fixed
+- [ ] Crash-free rate > 99.5%
+- [ ] User rating > 4.0/5.0
+- [ ] Marketing assets ready
+- [ ] App Store metadata updated
+- [ ] Customer support trained
+
+---
+
+## Support Resources
+
+### Backend APIs
+- Canvas: `/canvas/*`
+- Assignment Completion: `/api/academic/assignments/*`
+- Notes: `/api/notes/*`
+
+**API Docs:** See `Phase-3-iOS-API-Integration-Audit.md`, Section 7.3
+
+### Data Models
+- Canvas: See `Phase-4-iOS-Implementation-Specs.md`, Section 2.2
+- Completion: See `Phase-4-iOS-Implementation-Specs.md`, Section 3.2
+- Notes: See `Phase-4-iOS-Implementation-Specs.md`, Section 4.2
+
+### Architecture Reference
+- iOS DI patterns: `ios-clean/CLAUDE.md`
+- Design system: `DWDesign` package docs
+- Backend routes: `dormway-platform/services/api-router/src/routes/`
+
+### Questions/Blockers
+- **Slack:** #dormway-dev
+- **Backend support:** Tag backend engineer
+- **Product questions:** Tag product owner
+- **QA questions:** Tag QA lead
+
+---
+
+## Daily Standup Template
+
+```
+Yesterday:
+- Completed: [List completed tasks]
+- Merged: [PR links]
+
+Today:
+- Plan: [Tasks for today]
+- Blockers: [Any blockers]
+
+Metrics:
+- Tests passing: X/Y
+- Code coverage: Z%
+- Features complete: X/3
+```
+
+---
+
+**Document Status:** ✅ READY FOR DEVELOPMENT
+**Last Updated:** 2025-11-09
+**Quick Start:** Read Day 1 section, start coding!
+
+**Good luck! 🚀**

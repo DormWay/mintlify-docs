@@ -1,0 +1,225 @@
+---
+title: "Zuplo Gateway Migration"
+description: "We've migrated from **LocalStack API Gateway** to **Zuplo** for local development. This provides a simpler, more consistent development experience with the s..."
+---
+
+# Zuplo Gateway Migration Guide
+
+## Overview
+
+We've migrated from **LocalStack API Gateway** to **Zuplo** for local development. This provides a simpler, more consistent development experience with the same gateway configuration used in production.
+
+## Repository Structure
+
+In this workspace, the repos live under `.repos/`:
+
+```
+dormway-beta-workspace/
+└── .repos/
+    ├── dormway-platform/      # Backend services (api-router, engine, shared core)
+    └── dormway-api-2/         # Zuplo gateway (policies, enrichment, routing)
+```
+
+### First-Time Setup
+
+If you haven't cloned the repos yet, use the workspace bootstrap:
+
+```bash
+make bootstrap
+make dev
+```
+
+## What Changed
+
+### Before (LocalStack)
+- LocalStack Pro emulated AWS API Gateway v2 on port 4566
+- Lambda Authorizer validated Auth0 JWTs (historical)
+- Complex setup with Docker-in-Docker for Lambda execution
+- Different configuration than production
+- Test harness pointed to `http://{api-id}.execute-api.localhost.localstack.cloud:4566`
+
+### After (Zuplo)
+- Zuplo runs locally on port 9000
+- **Clerk JWT validation** via Zuplo policy (`clerk-jwt-auth-inbound`) and header enrichment (`clerk-enrichment`)
+- Simple Docker container, no Lambda needed
+- **Same configuration as production** (consistency!)
+- Test harness points to `http://localhost:9000`
+
+## Quick Start
+
+### 1. Start Zuplo Gateway
+
+```bash
+# Start Zuplo along with other services
+make dev
+
+# Or start just Zuplo
+make zuplo
+```
+
+Zuplo will be available at **http://localhost:9000**
+
+### 2. Verify It's Working
+
+```bash
+# Check health endpoint (no auth required)
+curl http://localhost:9000/health
+
+# Test with a Clerk token (from LockedIn or iOS)
+TOKEN="your-clerk-jwt-here"
+curl -H "Authorization: Bearer $TOKEN" http://localhost:9000/mobile/ping
+```
+
+### 3. Use Test Harness
+
+The test harness now defaults to Zuplo:
+- Navigate to http://localhost:3003
+- Default API endpoint is already set to `http://localhost:9000`
+- Select endpoint from dropdown: **Zuplo (default)**
+
+## Available Makefile Commands
+
+```bash
+make zuplo           # Start Zuplo gateway
+make zuplo-stop      # Stop Zuplo
+make zuplo-logs      # View Zuplo logs
+make zuplo-restart   # Restart Zuplo
+make zuplo-build     # Rebuild and start Zuplo
+```
+
+## Environment Variables
+
+Zuplo uses these environment variables (already configured in `docker-compose.zuplo.yml`):
+
+```bash
+API_GATEWAY=http://api-router:3001      # Backend to forward to
+GATEWAY_KEY=local-dev-gateway-key       # Gateway auth key
+CLERK_FRONTEND_API_URL=...              # Used by ClerkJwtInboundPolicy
+ALLOWED_ORIGINS=http://localhost:3000,http://localhost:3003,...
+```
+
+## Request Flow
+
+```
+Browser/Client (localhost:3003)
+    ↓
+Zuplo Gateway (localhost:9000)
+    ↓ [Clerk JWT validation]
+    ↓ [Token enrichment - adds x-user-* headers + gateway-api-key]
+    ↓ [CORS handling]
+    ↓
+API Router (localhost:3001)
+    ↓
+Backend Services (Engine, Crews, etc.)
+```
+
+## Headers Added by Zuplo
+
+Zuplo enriches requests with the following headers (see `.repos/dormway-api-2/modules/clerk-enrichment.ts`):
+
+- `x-user-id` - Backend user ID
+- `x-user-email` - User email
+- `x-user-name` - User display name
+- `x-user-role` - Derived role (admin/authenticated)
+- `x-user-roles-json` - Serialized roles array
+- `x-user-permissions-json` - Serialized permissions
+- `x-auth-provider` - `"clerk"` or `"clerk-dev"`
+- `x-clerk-id` - Clerk subject claim
+- `gateway-api-key` - Gateway auth key for backend
+
+## Dev Mode Bypass
+
+For local testing without real tokens, Zuplo supports a dev bypass mode in `clerk-enrichment` (only when not production).
+
+## Configuration Files
+
+Zuplo configuration lives in the `dormway-api-2` repository:
+
+```
+dormway-api-2/
+├── config/
+│   ├── routes.oas.json      # API routes (OpenAPI spec)
+│   └── policies.json        # Auth and enrichment policies
+├── modules/
+│   ├── clerk-enrichment.ts  # Token enrichment logic (current)
+│   └── auth0-enrichment.ts  # Historical/legacy
+└── .env                     # Local environment variables
+```
+
+## Troubleshooting
+
+### Zuplo Won't Start
+
+```bash
+# Check if port 9000 is already in use
+lsof -i :9000
+
+# View Zuplo logs
+make zuplo-logs
+
+# Rebuild Zuplo
+make zuplo-build
+```
+
+### API Router Not Responding
+
+Ensure API router is running and healthy:
+
+```bash
+# Check API router health
+curl http://localhost:3001/health
+
+# View API router logs
+make logs s=api-router
+```
+
+### Auth Issues
+
+If requests 401:
+
+- Check Zuplo logs: `make zuplo-logs`
+- Confirm your `Authorization: Bearer ...` token is a valid Clerk JWT for your environment
+- Confirm `gateway-api-key` is being attached (policy `set-headers-inbound-gatewaykey` in `.repos/dormway-api-2/config/policies.json`)
+
+### CORS Errors
+
+If you see CORS errors in the browser:
+
+1. Check that your origin is in Zuplo's `ALLOWED_ORIGINS`
+2. Check that api-router CORS includes `http://localhost:9000`
+3. Restart Zuplo after config changes: `make zuplo-restart`
+
+## LocalStack (Deprecated)
+
+LocalStack is still available but deprecated:
+
+```bash
+# Start LocalStack (deprecated - not recommended)
+make localstack-simple
+
+# Stop LocalStack
+make localstack-stop
+```
+
+**Note:** LocalStack will be removed in a future version. Please migrate to Zuplo.
+
+## Benefits of Zuplo
+
+✅ **Consistency** - Same config as staging/production
+✅ **Simpler** - No LocalStack Pro license, no Lambda
+✅ **Type Safety** - TypeScript policies instead of Lambda JavaScript
+✅ **Better DX** - Faster startup, better logging
+✅ **Cost Savings** - No LocalStack Pro subscription needed
+
+## Next Steps
+
+1. Test your workflows with Zuplo
+2. Report any issues in #dev-platform Slack channel
+3. Remove LocalStack-specific code from your local scripts
+
+## Need Help?
+
+- Check Zuplo logs: `make zuplo-logs`
+- Check API router logs: `make logs s=api-router`
+- Ask in #dev-platform Slack channel
+- See [Zuplo Documentation](https://zuplo.com/docs)

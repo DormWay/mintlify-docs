@@ -1,0 +1,95 @@
+---
+title: "Auth0 Production Deployment Requirements"
+description: "1. **SYSTEM_API_KEY**"
+---
+
+# Auth0 Production Deployment Requirements
+
+## Environment Variables Required
+
+### New Variables Added
+1. **SYSTEM_API_KEY**
+   - Purpose: Authentication key for Auth0 Actions to call DormWay API
+   - Current (Dev): `O2RJ7GBrSglUnlPM63mR4W5JBAtfG5kK6B7RS5WZrqH` (in Doppler)
+   - Production: Needs to be generated and stored in AWS Secrets Manager
+   - Used by: API Router system-auth middleware
+
+### Auth0 Action Secrets (Configure in Auth0 Dashboard)
+1. **API_GATEWAY_URL**
+   - Dev/Test: `http://localhost:4566/restapis/{API_ID}/$default/_user_request_` (LocalStack)
+   - Production: `https://bp67gdk1c5.execute-api.us-east-1.amazonaws.com`
+   
+2. **SYSTEM_API_KEY**
+   - Must match the value in API Router environment
+   - Configure in both post-registration and post-login actions
+
+3. **CUSTOMER_IO_SITE_ID** (Already in Doppler)
+   - Current: `67ac1d0a54f2fee955c2`
+
+4. **CUSTOMER_IO_API_KEY** (Already in Doppler)
+   - Current: `4f97b608e79f54f71437118078eaa391`
+
+## Database Requirements
+
+### Aurora Production Database
+- Migration file: `migrations/add_auth0_columns_to_accounts.sql`
+- Must be run before enabling Auth0 Actions
+- Adds columns: auth0_id, given_name, family_name, email_verified, onboarding_status, last_login_at, login_count, last_login_ip, last_login_user_agent, metadata
+
+## API Gateway Configuration
+
+### Routes to Verify
+The following routes should NOT require Lambda authorization:
+- `POST /users/create`
+- `GET /users/{userId}/context`
+- `PUT /users/{userId}/last-login`
+
+These routes use system authentication (Bearer token) instead of user JWT.
+
+## Testing Checklist Before Production
+
+1. **Local Testing** ✅
+   - Auth0 endpoints working with LocalStack
+   - Database migration applied
+   - System authentication working
+
+2. **Auth0 Dashboard Testing** (Next)
+   - Post-registration action configured
+   - Post-login action configured
+   - Test with test harness
+
+3. **Production Readiness**
+   - [ ] Generate production SYSTEM_API_KEY
+   - [ ] Store in AWS Secrets Manager
+   - [ ] Update ECS task definition with new env var
+   - [ ] Run database migration on Aurora
+   - [ ] Configure Auth0 Actions with production URLs
+   - [ ] Test with staging environment first
+
+## Rollback Plan
+
+If issues occur:
+1. Disable Auth0 Actions in dashboard (immediate)
+2. iOS app can fall back to Supabase temporarily
+3. Database changes are backward compatible (only adds columns)
+
+## Monitoring
+
+After deployment, monitor:
+1. CloudWatch logs for auth0-routes errors
+2. Auth0 Action logs in dashboard
+3. Customer.io for user creation events
+4. Database for new user records with auth0_id
+
+## Security Considerations
+
+1. **SYSTEM_API_KEY** must be:
+   - Cryptographically secure (min 32 characters)
+   - Different in each environment
+   - Rotated periodically
+   - Never committed to code
+
+2. **API Gateway** should:
+   - Log all system auth attempts
+   - Rate limit Auth0 system endpoints
+   - Monitor for unusual patterns

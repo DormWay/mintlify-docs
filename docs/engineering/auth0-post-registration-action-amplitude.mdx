@@ -1,0 +1,209 @@
+---
+title: "Auth0 Post Registration Action Amplitude"
+description: "This is the updated Auth0 Post-Registration Action that integrates with Amplitude instead of directly with Customer.io. Amplitude will automatically sync use..."
+---
+
+# Auth0 Post-Registration Action - Amplitude Integration
+
+## Overview
+
+This is the updated Auth0 Post-Registration Action that integrates with Amplitude instead of directly with Customer.io. Amplitude will automatically sync user data and events to Customer.io through their native integration.
+
+## Key Changes
+
+1. **Replaced Customer.io API calls with Amplitude HTTP API**
+2. **No server or database changes required** - uses existing `/users/create` endpoint
+3. **Uses Auth0 user ID** as the initial identifier (backend UUID created later)
+4. **Maintains all existing user creation flow**
+
+## Required Auth0 Secrets
+
+- `API_GATEWAY_URL` - Your API Gateway endpoint
+- `SYSTEM_API_KEY` - System authentication key  
+- `AMPLITUDE_API_KEY` - Your Amplitude project API key (replaces Customer.io keys)
+
+## Updated Post-Registration Action Code
+
+```javascript
+/**
+ * Handler that will be called during the execution of a PostUserRegistration flow.
+ *
+ * @param {Event} event - Details about the context and user that has registered.
+ * @param {PostUserRegistrationAPI} api - Methods and utilities to help change the behavior after a signup.
+ */
+exports.onExecutePostUserRegistration = async (event, api) => {
+  const { user } = event;
+  
+  try {
+    // 1. Create user profile in DormWay database (no changes to this part)
+    const userProfileResponse = await fetch(`${event.secrets.API_GATEWAY_URL}/users/create`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${event.secrets.SYSTEM_API_KEY}`,
+        'X-Auth0-Action': 'post-registration'
+      },
+      body: JSON.stringify({
+        auth0_id: user.user_id,
+        email: user.email,
+        email_verified: user.email_verified || false,
+        full_name: user.name || user.nickname || '',
+        given_name: user.given_name || '',
+        family_name: user.family_name || '',
+        picture: user.picture || '',
+        created_at: new Date().toISOString(),
+        onboarding_status: 'pending',
+        metadata: {
+          signup_source: event.connection.name,
+          signup_ip: event.request.ip,
+          signup_user_agent: event.request.userAgent
+        }
+      })
+    });
+
+    if (!userProfileResponse.ok) {
+      console.error('Failed to create user profile:', await userProfileResponse.text());
+      // Don't throw - allow registration to continue
+    }
+
+    // 2. Identify user in Amplitude (which syncs to Customer.io)
+    const amplitudeIdentifyResponse = await fetch(
+      'https://api2.amplitude.com/identify',
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
+        body: JSON.stringify({
+          api_key: event.secrets.AMPLITUDE_API_KEY,
+          identification: [{
+            user_id: user.user_id, // Use Auth0 ID initially (backend UUID will be set on first login)
+            user_properties: {
+              email: user.email,
+              first_name: user.given_name || '',
+              last_name: user.family_name || '',
+              full_name: user.name || user.nickname || '',
+              auth0_id: user.user_id,
+              signup_source: event.connection.name,
+              onboarding_status: 'pending',
+              platform: 'auth0',
+              created_at: new Date().toISOString(),
+              email_verified: user.email_verified || false
+            }
+          }]
+        })
+      }
+    );
+
+    if (!amplitudeIdentifyResponse.ok) {
+      console.error('Failed to identify user in Amplitude:', await amplitudeIdentifyResponse.text());
+      // Don't throw - allow registration to continue
+    }
+
+    // 3. Track registration event in Amplitude (which syncs to Customer.io)
+    const amplitudeEventResponse = await fetch(
+      'https://api2.amplitude.com/2/httpapi',
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
+        body: JSON.stringify({
+          api_key: event.secrets.AMPLITUDE_API_KEY,
+          events: [{
+            user_id: user.user_id, // Use Auth0 ID (backend UUID will be linked on first login)
+            event_type: 'user_registered',
+            time: Date.now(),
+            event_properties: {
+              signup_method: event.connection.name,
+              ip_address: event.request.ip,
+              user_agent: event.request.userAgent,
+              source: 'auth0_action'
+            },
+            user_properties: {
+              email: user.email,
+              first_name: user.given_name || '',
+              last_name: user.family_name || '',
+              full_name: user.name || user.nickname || ''
+            }
+          }]
+        })
+      }
+    );
+
+    if (!amplitudeEventResponse.ok) {
+      console.error('Failed to track registration event in Amplitude:', await amplitudeEventResponse.text());
+      // Don't throw - allow registration to continue
+    }
+
+  } catch (error) {
+    console.error('Post-registration action error:', error);
+    // Don't throw - allow registration to continue even if actions fail
+  }
+};
+```
+
+## What This Does
+
+### Step 1: Create User Profile (Unchanged)
+- Calls existing `/users/create` endpoint  
+- Creates user in DormWay database with Auth0 ID
+- No changes required to server code
+
+### Step 2: Identify User in Amplitude
+- Creates user profile in Amplitude with Auth0 ID
+- Sets all user properties (email, name, etc.)
+- Amplitude automatically syncs to Customer.io
+
+### Step 3: Track Registration Event
+- Sends `user_registered` event to Amplitude
+- Includes signup method, IP, and user agent
+- Event flows to Customer.io via integration
+
+## User ID Strategy
+
+1. **At Registration**: Use Auth0 ID as identifier in Amplitude
+2. **At First Login**: Backend UUID is created and linked
+3. **Future Events**: Use backend UUID as primary identifier
+
+This approach ensures:
+- No server changes needed
+- Smooth transition from Auth0 ID to backend UUID
+- Consistent user tracking across the journey
+
+## Deployment Instructions
+
+1. **Copy the code** from this document
+2. **Navigate to Auth0 Dashboard** → Actions → Flows → Post User Registration
+3. **Edit your Post-Registration Action**
+4. **Replace the existing code** with the updated version
+5. **Update Secrets**:
+   - Remove: `CUSTOMERIO_SITE_ID`, `CUSTOMERIO_API_KEY`
+   - Add: `AMPLITUDE_API_KEY`
+6. **Deploy** the action
+7. **Test** with a new user registration
+
+## Testing Checklist
+
+- [ ] User created in database via `/users/create`
+- [ ] User identified in Amplitude
+- [ ] `user_registered` event tracked in Amplitude
+- [ ] Data synced to Customer.io via integration
+- [ ] Registration flow completes successfully
+
+## Benefits
+
+1. **No Server Changes**: Uses existing `/users/create` endpoint
+2. **Unified Analytics**: All events through Amplitude
+3. **Automatic Sync**: Customer.io receives data via integration
+4. **Simplified Config**: Only one analytics API key
+5. **Future Ready**: Easy to add more analytics destinations
+
+## Notes
+
+- The action is resilient - tracking failures don't block registration
+- Auth0 ID is used initially, backend UUID linked on first login
+- All existing database operations remain unchanged
+- Customer.io still receives all data via Amplitude sync

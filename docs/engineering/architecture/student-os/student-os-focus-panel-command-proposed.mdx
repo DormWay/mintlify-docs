@@ -1,0 +1,158 @@
+---
+title: "Student OS Focus Panel & Command (Proposed)"
+description: "Future-state interaction contract. Not current production truth."
+---
+
+# Student OS Focus Panel & Command (Proposed)
+
+Future-state interaction contract. Not current production truth.
+
+Canonical future-state contract: SoT - Command Search & Focus Panel.
+
+---
+
+## 1. Definitions
+
+- **Global Command/Search**: a universal overlay for "jump + act" (keyboard + UI entry points).
+- **Focus Panel**: a universal detail surface (Inspector) that renders an entity template and actions.
+- **Pin Dock**: a bounded, optional area holding up to N pinned entities (N=3).
+
+---
+
+## 2. Supported entity types (v1)
+
+The system must support opening these entities in the Focus Panel:
+
+- `task` (personal task)
+- `assignment` (LMS task)
+- `event` (calendar/time block)
+- `course`
+- `document` (uploaded file / LMS file / syllabus)
+- `note`
+- `headsup_card` (alert card)
+- `system_health` (sync/freshness issues)
+
+Each entity must have:
+- stable ID
+- title
+- primary action
+- provenance (source, last updated)
+- deep link URL
+
+---
+
+## 3. Focus Panel contract
+
+### 3.1 Layout (desktop)
+- Panel lives on the **right side**.
+- Panel does **not** reflow the main layout; it overlays or reserves space consistently.
+- Open state is reflected in the URL (see 3.4).
+
+### 3.2 Layout (mobile)
+- Panel becomes a **bottom sheet**.
+- Sheet supports "peek" and "expanded" states.
+- Close by swipe down or close button.
+
+### 3.3 Behavior
+- Open on click from anywhere (widgets, lists, command results).
+- Close on:
+  - `Esc` (desktop)
+  - close button
+  - swipe down (mobile)
+
+### 3.4 URL state
+- Focus Panel open state MUST be representable in a URL.
+- Required query param format:
+  - `?focus=task:{id}`
+  - `?focus=event:{id}`
+  - `?focus=course:{id}`
+- Pinned items can be represented optionally:
+  - `?pins=task:1,course:99`
+
+### 3.5 Pin Dock rules
+- Max pinned items: 3
+- Pin/unpin available for all entity types except ephemeral cards (optional).
+- Pin Dock is a power-user feature; it must not block baseline workflows.
+
+### 3.6 "View all" inside Focus Panel
+When a widget is capped ("showing 5 of 20"):
+- "View all" opens a list view inside the panel (not a new page).
+- List view supports:
+  - sorting
+  - quick filters
+  - open item -> detail template
+
+### 3.7 Provenance + freshness chips
+Every entity template shows:
+- Source chip (Canvas, Calendar, manual, upload)
+- Freshness / last updated
+- Optional "why shown" explanation (required for HeadsUp cards)
+
+---
+
+## 4. Global Command/Search contract
+
+### 4.1 Invocation
+- Desktop:
+  - `Cmd+K` / `Ctrl+K` opens the overlay.
+  - `/` may optionally focus it when not inside a text field.
+- Mobile:
+  - dedicated search icon in top bar (or within Ace bubble).
+
+### 4.2 One overlay only
+There must be exactly **one** "Cmd+K" behavior across the product.
+If Ace also needs shortcuts, it must not collide with Cmd+K.
+
+### 4.3 Query + results
+The command overlay supports:
+- search queries (free text)
+- commands (verbs)
+
+Results are grouped:
+- Actions (commands)
+- Tasks
+- Schedule
+- Courses
+- Library (docs/notes)
+
+Selecting a result:
+- opens Focus Panel
+- does not navigate away unless user clicks "Open full view"
+
+### 4.4 Commands (v1)
+Required commands:
+- Add task
+- Add schedule block
+- Plan time for task
+- Upload doc
+- New note
+- Connect Canvas / Connect Calendar (if disconnected)
+
+### 4.5 Data sources
+- Tasks/events/courses: canonical APIs (V2).
+- Docs/notes: BrainGains/RAG search (if available) OR local index fallback.
+
+### 4.6 Ranking + grouping rules (v1)
+- Group results by entity type in this order: Actions, Tasks, Schedule, Courses, Library.
+- Rank within a group by a simple relevance score, then by recency.
+- If a query matches a command exactly, the command appears first.
+
+### 4.7 Permissions and scoping
+- Results must be filtered by the authenticated user context.
+- Course-scoped queries may include the user scope as fallback when allowed.
+- Admin-only results must not appear in user scope.
+
+### 4.8 Latency budget (v1)
+- p50 < 150ms, p95 < 400ms for cached or indexed sources.
+- If any source exceeds the budget, return partial results with a non-blocking banner.
+
+---
+
+## 5. Accessibility requirements
+- Full keyboard navigation in overlay and panel.
+- Screen reader announces:
+  - overlay open/close
+  - focus panel title changes
+- Focus management:
+  - opening panel focuses panel container
+  - closing restores focus to triggering element when possible

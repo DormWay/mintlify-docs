@@ -1,0 +1,307 @@
+---
+title: "INVESTIGATE_COURSE_NAMES"
+description: "Courses are displaying as \"N/A\" across the application instead of showing proper course names (e.g., \"COMM 202\", \"Business Models\", etc.). This affects:"
+---
+
+# 🔍 Investigation Prompt: Fix Course Names Showing as "N/A"
+
+## Problem Statement
+
+Courses are displaying as "N/A" across the application instead of showing proper course names (e.g., "COMM 202", "Business Models", etc.). This affects:
+
+- Notes hub course selector dropdown
+- Course grouping in notes sidebar
+- Calendar view course names
+- Any UI that displays enrolled courses
+
+## Current Behavior
+
+**API Endpoint**: `GET /api/student/courses`
+
+**Response Structure**:
+```json
+{
+  "courses": [
+    {
+      "contextId": "uuid",
+      "courseCode": "N/A",           // ❌ Should be "COMM 202"
+      "courseName": "N/A",           // ❌ Should be "Business Models"
+      "professor": "",
+      "semester": "",
+      "status": "current"
+    }
+  ]
+}
+```
+
+**Frontend Usage**:
+```typescript
+// src/lib/useCourses.ts
+const mapped: Course[] = list.map((c: any) => ({
+  id: c.contextId,
+  name: c.courseName || c.courseCode || 'Course',  // Falls back to "N/A"
+  code: c.courseCode || undefined,
+}));
+```
+
+## Root Cause Analysis Needed
+
+### 1. Database Schema Investigation
+
+**Check**: `contexts` table for course data
+
+```sql
+-- What does the course context actually contain?
+SELECT
+  id,
+  type,
+  name,
+  external_id,
+  metadata,
+  parent_id
+FROM contexts
+WHERE type = 'course'
+LIMIT 5;
+
+-- Sample expected metadata structure:
+{
+  "courseCode": "COMM 202",
+  "courseName": "Business Models and Ecosystems",
+  "instructor": "Prof. Smith",
+  "credits": 3,
+  "semester": "Fall 2024"
+}
+```
+
+**Questions**:
+- Is `metadata->>'courseCode'` actually "N/A" in the database?
+- Is `metadata->>'courseName'` null or "N/A"?
+- Is `contexts.name` populated for courses?
+- Where does course data originally come from? (Syllabus upload? Manual entry? External API?)
+
+### 2. Data Pipeline Investigation
+
+**Backend Route**: `services/api-router/src/routes/student-courses-routes.ts`
+
+```typescript
+// Line 111-116: How courseCode and courseName are extracted
+const courseCode = courseMetadata.courseCode
+  || courseContext?.external_id?.replace('course:', '')
+  || '';
+
+const nameFallback = courseMetadata.courseName
+  || courseMetadata.name
+  || courseMetadata.title
+  || courseContext?.name
+  || '';
+
+const item: any = {
+  contextId: courseContext?.id,
+  courseCode,
+  courseName: nameFallback || courseCode,  // Falls back to courseCode
+```
+
+**Questions**:
+- What is `courseContext.external_id` for actual courses?
+- Is `courseContext.name` populated?
+- When/where is `metadata.courseCode` set to "N/A"?
+
+### 3. Data Entry Points
+
+**Potential sources** where course data gets created:
+
+1. **Syllabus Processing**:
+   - `services/dormway-crews` (AI syllabus parser)
+   - `services/api-router/src/routes/syllabus-routes.ts`
+   - Does syllabus upload extract course name/code?
+
+2. **Manual Course Creation**:
+   - Admin dashboard
+   - Student onboarding
+   - Where is the default "N/A" coming from?
+
+3. **External Integrations**:
+   - Canvas LMS sync?
+   - Google Classroom?
+   - ICS calendar import?
+
+## Investigation Steps
+
+### Step 1: Check Database State
+
+```bash
+cd services/api-router
+doppler run --project dormway --config dev_ethan -- bash -c '
+  psql $DATABASE_URL -c "
+    SELECT
+      c.id,
+      c.name as context_name,
+      c.metadata->>'\''courseCode'\'' as course_code,
+      c.metadata->>'\''courseName'\'' as course_name,
+      c.metadata->>'\''title'\'' as title,
+      c.external_id
+    FROM contexts c
+    WHERE c.type = '\''course'\''
+    LIMIT 10;
+  "
+'
+```
+
+**Expected**: Should show what's actually in the database
+
+### Step 2: Trace Data Creation
+
+1. Find where courses are created
+2. Check what sets `metadata.courseCode` and `metadata.courseName`
+3. Identify why "N/A" is the default
+
+**Files to check**:
+- `services/api-router/src/routes/syllabus-routes.ts`
+- `services/dormway-crews/` (Python syllabus parser)
+- Any course creation endpoints
+- Migration scripts
+
+### Step 3: Search Codebase for "N/A"
+
+```bash
+# Find where "N/A" is hardcoded
+grep -r '"N/A"' services/api-router/src --include="*.ts"
+grep -r "'N/A'" services/api-router/src --include="*.ts"
+
+# Check Python crews
+grep -r '"N/A"' services/dormway-crews --include="*.py"
+```
+
+### Step 4: Check Syllabus Processing
+
+**Question**: When a student uploads a syllabus, does it extract:
+- Course code (COMM 202)?
+- Course name (Business Models)?
+
+**Check**:
+```bash
+# Look at syllabus processing output
+psql $DATABASE_URL -c "
+  SELECT
+    context_id,
+    data
+  FROM service_data
+  WHERE method = 'processed_syllabus_crew'
+  LIMIT 1;
+"
+```
+
+## Expected Fixes
+
+### Fix 1: Backfill Existing Courses
+
+If courses exist but have "N/A" in metadata, backfill from:
+- Syllabus data (`service_data` table)
+- External ID parsing
+- Context name field
+
+```sql
+-- Example backfill script
+UPDATE contexts
+SET metadata = jsonb_set(
+  metadata,
+  '{courseCode}',
+  to_jsonb(external_id)
+)
+WHERE type = 'course'
+  AND metadata->>'courseCode' = 'N/A'
+  AND external_id IS NOT NULL;
+```
+
+### Fix 2: Update Course Creation Logic
+
+Ensure future courses get proper names:
+
+```typescript
+// When creating course context
+const courseMetadata = {
+  courseCode: extractedCode || external_id || 'Unknown',  // Not "N/A"
+  courseName: extractedName || 'Untitled Course',         // Not "N/A"
+  // ...
+};
+```
+
+### Fix 3: Improve Syllabus Parser
+
+If AI parser isn't extracting course name/code:
+- Update prompt to explicitly extract
+- Add validation to require course name
+- Fallback to filename parsing
+
+## Success Criteria
+
+1. **Database**: All courses have proper `courseCode` and `courseName` in metadata
+2. **API**: `GET /api/student/courses` returns actual course names
+3. **UI**: Course selector shows "COMM 202" instead of "N/A"
+4. **Calendar**: Events show proper course names
+5. **Notes**: Course grouping uses real course names
+
+## Files to Review
+
+### Backend
+- `services/api-router/src/routes/student-courses-routes.ts` (line 111-116)
+- `services/api-router/src/routes/syllabus-routes.ts`
+- `services/dormway-crews/` (syllabus parser)
+- Database migrations in `infrastructure/database/migrations/`
+
+### Frontend
+- `services/dormway-lockedin/src/lib/useCourses.ts`
+- Anywhere courses are displayed
+
+## Related Issues
+
+- **Notes hub**: Course grouping doesn't work because all courses show as "N/A"
+- **Calendar**: Course names in schedule view
+- **Dashboard**: Course list in Academic tab
+
+## Obsidian Context
+
+Search the vault for related design decisions:
+
+```bash
+npm run obsidian:search -- "course metadata courseCode courseName"
+npm run obsidian:search -- "syllabus processing extraction"
+npm run obsidian:search -- "contexts table course type"
+```
+
+## Questions for Investigation
+
+1. **Where is "N/A" set as the default?**
+   - Is it in course creation code?
+   - Is it in the syllabus parser?
+   - Is it a database constraint/default?
+
+2. **What's the correct data source?**
+   - Syllabus PDF parsing?
+   - Manual user input?
+   - External API (Canvas, etc.)?
+
+3. **Are there valid courses in production?**
+   - Check production database
+   - If some work, why do others not?
+
+4. **Migration strategy?**
+   - Can we backfill from existing syllabus data?
+   - Do we need to re-process syllabi?
+   - Should we prompt users to update course info?
+
+## Deliverables
+
+1. **Root cause identified** - Where/why "N/A" is being set
+2. **Database fix** - Backfill script for existing courses
+3. **Code fix** - Update course creation to use proper names
+4. **Validation** - Ensure syllabus parser extracts course info
+5. **Testing** - Verify courses display correctly across all UIs
+
+---
+
+**Priority**: High - Affects multiple user-facing features
+
+**Complexity**: Medium - Requires database + backend + possibly AI parser changes
+
+**Impact**: High - Improves UX across notes, calendar, course selector, etc.

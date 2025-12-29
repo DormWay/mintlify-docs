@@ -1,0 +1,377 @@
+---
+title: "Customer.io Platform Configuration Guide"
+description: "This guide details the configuration required in the Customer.io platform to support DormWay's unified communication system including transactional messages,..."
+---
+
+# Customer.io Platform Configuration Guide
+
+**Last Updated:** June 20, 2025  
+**Owner:** Engineering Team  
+**Platform:** Customer.io
+
+## Overview
+
+This guide details the configuration required in the Customer.io platform to support DormWay's unified communication system including transactional messages, campaigns, and segments.
+
+## Initial Setup
+
+### 1. Workspace Configuration
+
+1. **Region Selection**: US Data Center (for compliance and latency)
+2. **Timezone**: America/New_York (EST/EDT)
+3. **Default From Email**: noreply@dormway.app
+4. **Reply-To Email**: support@dormway.app
+
+### 2. API Credentials
+
+Navigate to **Settings > API & Webhook** to obtain:
+- **Site ID**: Used for tracking API
+- **API Key**: Used for tracking API  
+- **App API Key**: Used for transactional messaging
+
+Store these in Doppler for each environment.
+
+## Transactional Messages
+
+### Push Notification Templates
+
+#### 1. transactional-push
+**Type:** Push Notification  
+**Message ID:** `transactional-push`
+
+**Configuration:**
+```json
+{
+  "title": "{{ title }}",
+  "body": "{{ body }}",
+  "sound": "default",
+  "badge": 1,
+  "custom_data": {
+    "type": "{{ type }}",
+    "data": "{{ data }}"
+  }
+}
+```
+
+**Settings:**
+- Delivery: Immediate
+- Priority: High
+- Time to Live: 4 hours
+
+#### 2. silent-push
+**Type:** Push Notification (Silent)  
+**Message ID:** `silent-push`
+
+**Configuration:**
+```json
+{
+  "content-available": 1,
+  "custom_data": {
+    "type": "{{ type }}",
+    "data": "{{ data }}"
+  }
+}
+```
+
+**Settings:**
+- Delivery: Immediate
+- Priority: Normal
+- Time to Live: 24 hours
+
+### Email Templates
+
+#### 1. welcome-email
+**Type:** Email  
+**Message ID:** `welcome-email`  
+**Subject:** Welcome to DormWay, {{ firstName }}! 🎓
+
+**HTML Template:**
+```html
+<!DOCTYPE html>
+<html>
+<head>
+  <style>
+    body { font-family: -apple-system, sans-serif; }
+    .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+    .header { text-align: center; padding: 30px 0; }
+    .button { 
+      display: inline-block; 
+      padding: 12px 24px; 
+      background: #007AFF; 
+      color: white; 
+      text-decoration: none; 
+      border-radius: 8px; 
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>Welcome to DormWay!</h1>
+    </div>
+    
+    <p>Hi {{ firstName }},</p>
+    
+    <p>Welcome to DormWay - your AI-powered academic companion at {{ campusName }}!</p>
+    
+    <p>Here's how to get started:</p>
+    <ol>
+      <li>Upload your syllabus to get your personalized schedule</li>
+      <li>Connect your calendar for seamless integration</li>
+      <li>Explore AI-powered insights about your courses</li>
+    </ol>
+    
+    <div style="text-align: center; margin: 30px 0;">
+      <a href="{{ app_link }}" class="button">Open DormWay</a>
+    </div>
+    
+    <p>Need help? Reply to this email or visit our help center.</p>
+    
+    <p>Best,<br>The DormWay Team</p>
+  </div>
+</body>
+</html>
+```
+
+#### 2. syllabus-processed
+**Type:** Email  
+**Message ID:** `syllabus-processed`  
+**Subject:** Your schedule is ready! 📚
+
+**Variables:**
+- `courseCount`: Number of courses found
+- `totalCredits`: Total credit hours
+- `conflicts`: Array of scheduling conflicts
+- `recommendations`: AI-generated insights
+
+#### 3. password-reset
+**Type:** Email  
+**Message ID:** `password-reset`  
+**Subject:** Reset your DormWay password
+
+**Variables:**
+- `resetLink`: Password reset URL
+- `expirationTime`: Link expiration (e.g., "2 hours")
+
+## Event-Triggered Campaigns
+
+### 1. Onboarding Campaign
+**Trigger:** `user_registered` event  
+**Goal:** Drive first syllabus upload
+
+**Workflow:**
+1. **Immediate**: Welcome push notification
+2. **Day 1**: "Upload your syllabus" push (if no upload)
+3. **Day 3**: Email with video tutorial (if no upload)
+4. **Day 7**: Final reminder with peer success story
+
+**Exit Conditions:**
+- User uploads syllabus (`syllabus_uploaded` event)
+- User unsubscribes
+
+### 2. Syllabus Processing Campaign
+**Trigger:** `syllabus_processing_started` event  
+**Goal:** Keep user engaged during processing
+
+**Workflow:**
+1. **Immediate**: "Processing..." push notification
+2. **On completion**: Success push with course count
+3. **5 minutes later**: Detailed email with insights
+
+### 3. Re-engagement Campaign
+**Trigger:** 7 days since last `app_opened` event  
+**Goal:** Bring inactive users back
+
+**Workflow:**
+1. **Day 7**: "Your classmates are getting ahead" email
+2. **Day 10**: Push with new feature highlight
+3. **Day 14**: Email with campus-specific stats
+
+**Exit Conditions:**
+- User opens app
+- User unsubscribes
+
+## Segments
+
+### 1. By Campus
+Create dynamic segments for each campus:
+- **Harvard Students**: `campus = "harvard"`
+- **MIT Students**: `campus = "mit"`
+- **Boston University**: `campus = "bu"`
+
+### 2. By User Type
+- **Students**: `userType = "student"`
+- **Faculty**: `userType = "faculty"`
+- **Alumni**: `userType = "alumni"`
+
+### 3. By Engagement Level
+- **Active Users**: Last seen < 7 days
+- **At Risk**: Last seen 7-14 days  
+- **Dormant**: Last seen > 14 days
+
+### 4. By Feature Adoption
+- **Power Users**: Has used 3+ features
+- **Syllabus Uploaded**: Has `syllabus_uploaded` event
+- **Calendar Connected**: Has `calendar_synced` event
+
+## Data & Privacy
+
+### User Attributes Schema
+
+```typescript
+{
+  // Required
+  id: string;              // UUID
+  email: string;           // Email address
+  
+  // Profile
+  firstName?: string;      // First name
+  lastName?: string;       // Last name
+  campus?: string;         // Campus ID
+  userType?: string;       // student|faculty|alumni
+  
+  // App State
+  onboardingComplete?: boolean;
+  lastSeen?: string;       // ISO timestamp
+  appVersion?: string;     // iOS app version
+  
+  // Device
+  deviceToken?: string;    // APNS token
+  platform?: string;       // ios|android|web
+  
+  // Preferences
+  pushEnabled?: boolean;
+  emailEnabled?: boolean;
+  
+  // Academic
+  enrollmentYear?: number;
+  major?: string;
+  coursesCount?: number;
+}
+```
+
+### GDPR Compliance
+
+1. **Data Retention**: 24 months of inactivity
+2. **User Deletion**: API endpoint for full deletion
+3. **Data Export**: Available via Customer.io UI
+4. **Consent Tracking**: Via `emailEnabled` attribute
+
+## Webhooks
+
+### Outbound Webhooks (Customer.io → DormWay)
+
+Configure in **Settings > Webhooks**:
+
+1. **Email Events**
+   - URL: `https://api.dormway.app/webhooks/customerio/email`
+   - Events: Opened, Clicked, Unsubscribed, Bounced
+   
+2. **Push Events**  
+   - URL: `https://api.dormway.app/webhooks/customerio/push`
+   - Events: Delivered, Failed, Opened
+
+3. **User Events**
+   - URL: `https://api.dormway.app/webhooks/customerio/user`
+   - Events: Unsubscribed
+
+**Webhook Security:**
+- HMAC-SHA256 signature verification
+- IP allowlist for Customer.io servers
+
+## A/B Testing
+
+### Push Notification Tests
+
+1. **Timing Test**: Morning vs Evening delivery
+2. **Copy Test**: Formal vs Casual tone
+3. **Emoji Test**: With vs Without emojis
+
+### Email Tests
+
+1. **Subject Line**: Question vs Statement
+2. **CTA Button**: Color variations
+3. **Content Length**: Brief vs Detailed
+
+## Analytics & Reporting
+
+### Key Metrics Dashboard
+
+Create custom dashboard tracking:
+- **Delivery Rate**: >95% target
+- **Open Rate**: Push >20%, Email >25%
+- **Click Rate**: Email >5%
+- **Unsubscribe Rate**: <0.5%
+
+### Weekly Reports
+
+Schedule weekly email to team with:
+- Total messages sent
+- Engagement by campus
+- Top performing campaigns
+- Failed message analysis
+
+## Integration Testing
+
+### Test Checklist
+
+1. **User Creation**
+   ```bash
+   # Verify user appears in Customer.io
+   curl -X POST /api/auth/register
+   # Check Customer.io > People > Search
+   ```
+
+2. **Push Delivery**
+   ```bash
+   # Send test push
+   curl -X POST /api/push/send -d '{"userId": "test", "title": "Test"}'
+   # Verify delivery on device
+   ```
+
+3. **Event Tracking**
+   ```bash
+   # Track test event
+   curl -X POST /api/events/track -d '{"event": "test_event"}'
+   # Check Customer.io > Activity Log
+   ```
+
+## Troubleshooting
+
+### Common Issues
+
+1. **Push Not Delivering**
+   - Verify device token is registered
+   - Check push certificate configuration
+   - Review Customer.io delivery logs
+
+2. **Events Not Tracking**
+   - Confirm API credentials
+   - Check rate limits (100/second)
+   - Verify user exists before tracking
+
+3. **Email Bouncing**
+   - Verify SPF/DKIM records
+   - Check from domain configuration
+   - Review bounce reasons in UI
+
+## Support Resources
+
+- [Customer.io Documentation](https://customer.io/docs)
+- [API Reference](https://customer.io/docs/api)
+- [Status Page](https://status.customer.io)
+- Support: support@customer.io
+
+## Next Steps
+
+1. Configure all transactional messages
+2. Set up initial campaigns
+3. Create team access controls
+4. Configure analytics dashboards
+5. Test end-to-end flows
+
+## Related Documentation
+
+- Customer.io Integration Guide
+- Email Architecture
+- Push Migration Plan

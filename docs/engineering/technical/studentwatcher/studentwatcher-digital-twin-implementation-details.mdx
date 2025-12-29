@@ -1,0 +1,650 @@
+---
+title: "StudentWatcher Digital Twin   Implementation Details"
+description: "Start with the **orchestration layer (Temporal) and data models**, then expand both upward (to API/clients) and downward (to ML/storage). This ensures:"
+---
+
+# StudentWatcher Digital Twin - Detailed Implementation Guide
+
+## Implementation Roadmap
+
+### Build Strategy: Middle-Out Development
+
+Start with the **orchestration layer (Temporal) and data models**, then expand both upward (to API/clients) and downward (to ML/storage). This ensures:
+
+1. **Core workflow logic is solid** before adding complexity
+2. **Data flows are well-defined** for ML training
+3. **Zero-state experience works** from day one
+4. **Progressive enhancement** as ML models come online
+
+### Implementation Phases
+
+#### Phase 1: Foundation (Week 1)
+- Strip down existing StudentWatcher to core state management
+- Create Temporal StudentWatcher workflow skeleton
+- Implement PostgreSQL data models (DayPlan, events, patterns)
+- Set up basic morning planning workflow (5am scheduler)
+- Build zero-state DayPlan generation
+
+#### Phase 2: ML Infrastructure (Week 2)
+- Deploy Mistral 7B or Llama 2 7B base model
+- Implement LoRA adapter system for personalization
+- Set up Redis caching for active adapters
+- Configure S3 storage for model weights
+- Build data pipeline from telemetry to training data
+
+#### Phase 3: Intelligence Layer (Week 3)
+- Implement timeline builder with confidence scoring
+- Add context prediction integration
+- Build pattern recognition from historical data
+- Implement state-aware signal handling
+- Create training pipeline for nightly updates
+
+#### Phase 4: Integration (Week 4)
+- Connect API Router endpoints
+- Set up Ably real-time updates
+- Integrate iOS client
+- Update Widget system
+- End-to-end testing
+
+## Refactoring Current StudentWatcher
+
+### What to Strip Out
+
+1. **Remove All Notification Child Workflows**
+   - `morningNotificationWorkflow`, `middayNotificationWorkflow`, `eveningNotificationWorkflow`
+   - The entire `scheduleNotificationWorkflow()` helper function
+   - Keep only preference storage/retrieval
+
+2. **Strip Out Event Signal Handlers**
+   - Keep only: `refreshIfStaleSignal`, `customSignal`
+   - Remove: calendar, health, screentime, focus, location, app state signals
+
+3. **Remove ProcessSingleStudent Dependencies**
+   - Remove `triggerProcessSingleStudent()` helper and all calls
+   - Replace with new `morningPlanningWorkflow` trigger
+
+4. **Simplify Activity Proxies**
+   - Keep: `studentActivities`, `ablyActivities`
+   - Remove: `silentPushActivities`, `visiblePushActivities`, `calendarActivities`
+
+5. **Remove Inline Event Processing**
+   - Calendar sync processing
+   - Health data crew processing
+   - Location change handling
+   - Contextual notification spawning
+
+### Clean Foundation Structure
+
+```typescript
+// Clean StudentWatcher Foundation
+export async function studentWatcherWorkflow(studentId: string): Promise<void> {
+  // State
+  let currentDayPlan: DayPlan | null = null;
+  let planVersion = 0;
+  let lastPlanningTime: string | null = null;
+  
+  // Status query
+  setHandler(getStatusQuery, () => ({
+    studentId,
+    hasDayPlan: !!currentDayPlan,
+    planVersion,
+    lastPlanningTime,
+    isActive: true
+  }));
+  
+  // Morning planning signal (triggered by orchestrator)
+  setHandler(triggerMorningPlanningSignal, async () => {
+    const dayPlan = await executeChild('morningPlanningWorkflow', {
+      workflowId: `morning-planning-${studentId}-${Date.now()}`,
+      taskQueue: 'planning',
+      args: [studentId]
+    });
+    
+    currentDayPlan = dayPlan;
+    planVersion++;
+    lastPlanningTime = new Date().toISOString();
+    
+    await ablyActivities.publishDayPlan(studentId, dayPlan);
+  });
+  
+  // Context update signal (real-time updates)
+  setHandler(contextUpdateSignal, async (context) => {
+    if (currentDayPlan) {
+      currentDayPlan = await updateDayPlanWithContext(currentDayPlan, context);
+      
+      await ablyActivities.publishDayPlanUpdate(studentId, {
+        type: 'context_update',
+        context,
+        affectedEvents: currentDayPlan.events
+      });
+    }
+  });
+  
+  // Main loop - simple health checks
+  while (true) {
+    await sleep('1h'); // Wake hourly to process signals
+  }
+}
+```
+
+## ML Microservice Architecture
+
+### Model Selection
+
+For the ML behavior learning microservice, we use **Mistral 7B** or **Llama 2 7B** with LoRA adapters:
+
+- **Why not BERT**: BERT is for understanding, not generation. We need causal language models.
+- **Why not GPT/Claude API**: No LoRA support, too expensive at scale, can't store student data
+- **Why Mistral/Llama**: Open source, proven performance, native LoRA support, runs on single GPU
+
+### Foundation Model Implementation
+
+```python
+# ml_service/models/foundation.py
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from peft import LoraConfig, get_peft_model, PeftModel
+import torch
+
+class StudentBehaviorFoundation:
+    """
+    Shared foundation model using Mistral 7B with LoRA support
+    """
+    def __init__(self):
+        # Load base model (cached in Docker image for speed)
+        self.model = AutoModelForCausalLM.from_pretrained(
+            "mistralai/Mistral-7B-v0.1",
+            torch_dtype=torch.bfloat16,
+            device_map="auto"
+        )
+        
+        # Freeze base model weights (only train LoRA)
+        for param in self.model.parameters():
+            param.requires_grad = False
+            
+        # LoRA configuration for student adaptation
+        self.lora_config = LoraConfig(
+            r=8,  # Rank - determines adapter size (~2MB)
+            lora_alpha=16,  # Scaling factor
+            target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+            lora_dropout=0.05,
+            bias="none"
+        )
+        
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            "mistralai/Mistral-7B-v0.1"
+        )
+```
+
+### LoRA Adapter Architecture
+
+Each student has a lightweight (~2MB) adapter that personalizes predictions:
+
+```python
+# ml_service/models/personal_adapter.py
+class PersonalAdapter:
+    """
+    Manages per-student LoRA adapters for personalization
+    """
+    def __init__(self, student_id: str, base_model):
+        self.student_id = student_id
+        self.base_model = base_model
+        self.redis_client = redis.StrictRedis(decode_responses=False)
+        self.s3_client = boto3.client('s3')
+        
+    def load_adapter(self) -> Optional[Dict]:
+        """
+        Load student's LoRA adapter from cache or S3
+        Storage format:
+        {
+            "version": 2,
+            "student_id": "student_123",
+            "created_at": "2024-01-15T05:00:00Z",
+            "config": {
+                "r": 8,
+                "alpha": 16,
+                "target_modules": ["q_proj", "v_proj", "k_proj", "o_proj"]
+            },
+            "state_dict": {
+                # 32 layers × 4 modules × 2 matrices (A,B) × rank 8
+                "model.layers.0.self_attn.q_proj.lora_A": tensor([8, 4096]),
+                "model.layers.0.self_attn.q_proj.lora_B": tensor([4096, 8]),
+                # ... ~256 small matrices total
+            },
+            "metadata": {
+                "training_samples": 15000,
+                "last_loss": 2.34
+            }
+        }
+        """
+        # Check Redis cache first (hot adapters)
+        adapter_key = f"lora:active:{self.student_id}"
+        adapter_bytes = self.redis_client.get(adapter_key)
+        
+        if adapter_bytes:
+            state_dict = torch.load(io.BytesIO(adapter_bytes))
+            return self.apply_adapter(state_dict)
+        
+        # Fall back to S3 for cold storage
+        try:
+            response = self.s3_client.get_object(
+                Bucket='dormway-ml-models',
+                Key=f'lora-adapters/{self.student_id}.pt'
+            )
+            state_dict = torch.load(io.BytesIO(response['Body'].read()))
+            
+            # Cache in Redis with 1 hour TTL
+            self.redis_client.setex(adapter_key, 3600, response['Body'].read())
+            
+            return state_dict
+        except:
+            return None  # New student, will use base model
+```
+
+## Data Pipeline: Telemetry to Training
+
+### Step 1: Event Tokenization
+
+Convert raw telemetry into token sequences the model can understand:
+
+```python
+# ml_service/data_pipeline.py
+class StudentEventTokenizer:
+    """Converts student events into token sequences"""
+    
+    def __init__(self):
+        # Campus-specific vocabulary (small, focused)
+        self.vocab = {
+            # Special tokens
+            "[PAD]": 0, "[CLS]": 1, "[SEP]": 2, "[MASK]": 3,
+            "[TIME]": 4, "[LOC]": 5, "[ACT]": 6,
+            
+            # Time buckets (2-hour windows)
+            "morning_early": 10,    # 5-7am
+            "morning": 11,           # 7-9am
+            "morning_late": 12,      # 9-11am
+            "noon": 13,              # 11am-1pm
+            "afternoon_early": 14,   # 1-3pm
+            "afternoon": 15,         # 3-5pm
+            "evening": 17,           # 7-9pm
+            "night": 19,             # 11pm-1am
+            
+            # Locations (campus-specific)
+            "dorm": 30,
+            "library": 31,
+            "dining_hall": 32,
+            "classroom": 33,
+            "gym": 34,
+            "student_union": 35,
+            "off_campus": 36,
+            
+            # Activities
+            "sleeping": 50,
+            "studying": 51,
+            "in_class": 52,
+            "eating": 53,
+            "exercising": 54,
+            "socializing": 55,
+            "transit": 56
+        }
+    
+    def telemetry_to_sequence(self, telemetry: Dict) -> List[int]:
+        """
+        Convert raw telemetry to token sequence
+        
+        Input telemetry:
+        {
+            "calendar_events": [
+                {"start": "09:00", "end": "10:30", "title": "ECON 401"}
+            ],
+            "location_pings": [
+                {"timestamp": "08:45", "lat": 42.2780, "lon": -83.7382}
+            ],
+            "screen_time": {
+                "focus_sessions": [{"start": "14:00", "end": "16:00"}]
+            }
+        }
+        
+        Output tokens:
+        [1, 4, 11, 6, 56, 5, 33, 2, ...]  # [CLS] [TIME] morning [ACT] transit [LOC] campus [SEP] ...
+        """
+        events = self.parse_telemetry(telemetry)
+        tokens = [self.vocab["[CLS]"]]
+        
+        for event in sorted(events, key=lambda x: x['timestamp']):
+            # Add time marker
+            time_bucket = self._get_time_bucket(event['timestamp'])
+            tokens.append(self.vocab["[TIME]"])
+            tokens.append(self.vocab[time_bucket])
+            
+            # Add location
+            if 'location' in event:
+                tokens.append(self.vocab["[LOC]"])
+                tokens.append(self.vocab.get(event['location'], 36))
+            
+            # Add activity
+            if 'activity' in event:
+                tokens.append(self.vocab["[ACT]"])
+                tokens.append(self.vocab.get(event['activity'], 51))
+            
+            tokens.append(self.vocab["[SEP]"])
+        
+        return tokens
+```
+
+### Step 2: Training Data Creation
+
+Create sequences for next-event prediction:
+
+```python
+class SequenceDataset:
+    """Creates training data for next-event prediction"""
+    
+    def prepare_training_data(self, student_id: str, days_of_events: List[List[Dict]]):
+        """
+        Convert multiple days of events into training sequences
+        
+        Training objective: Predict next event given context
+        Input: [Last 8 events] → Output: [Next event]
+        
+        This teaches the model patterns like:
+        - "After morning class, student usually goes to library"
+        - "After gym, student typically gets dinner"
+        - "Late night studying is followed by return to dorm"
+        """
+        training_examples = []
+        
+        for day_events in days_of_events:
+            tokens = self.tokenizer.events_to_sequence(day_events)
+            
+            # Create sliding windows
+            window_size = 8  # Look at last 8 events
+            
+            for i in range(window_size, len(tokens) - 1):
+                input_sequence = tokens[i-window_size:i]
+                target = tokens[i]
+                
+                training_examples.append({
+                    'input_ids': input_sequence,
+                    'labels': target,
+                    'student_id': student_id
+                })
+        
+        return training_examples
+```
+
+### Step 3: LoRA Training Pipeline
+
+Train student-specific adapters nightly:
+
+```python
+class LoRATrainer:
+    """Trains student-specific LoRA adapters"""
+    
+    async def nightly_update(self, student_id: str, telemetry: Dict):
+        """Called at 2am to update student model with yesterday's data"""
+        
+        # 1. Parse telemetry into events
+        events = self.parse_telemetry(telemetry)
+        """
+        Example parsed events:
+        [
+            {"time": "09:00", "activity": "in_class", "location": "classroom"},
+            {"time": "10:35", "activity": "studying", "location": "library"},
+            {"time": "12:15", "activity": "eating", "location": "dining_hall"}
+        ]
+        """
+        
+        # 2. Create training sequences
+        training_data = self.prepare_sequences(events)
+        
+        # 3. Load or create LoRA adapter
+        if self.adapter_exists(student_id):
+            peft_model = self.load_adapter(student_id)
+        else:
+            # New student - create fresh adapter
+            config = LoraConfig(r=8, lora_alpha=16, target_modules=["q_proj", "v_proj"])
+            peft_model = get_peft_model(self.base_model, config)
+        
+        # 4. Fine-tune (very lightweight - 3 epochs, ~30 seconds)
+        optimizer = torch.optim.AdamW(peft_model.parameters(), lr=1e-4)
+        
+        for epoch in range(3):
+            for batch in DataLoader(training_data, batch_size=4):
+                outputs = peft_model(
+                    input_ids=batch['input_ids'],
+                    labels=batch['labels']
+                )
+                
+                loss = outputs.loss
+                loss.backward()
+                optimizer.step()
+                optimizer.zero_grad()
+        
+        # 5. Save updated adapter
+        self.save_adapter(student_id, peft_model)
+        
+        # 6. Generate predictions for tomorrow
+        predictions = await self.predict_tomorrow(student_id)
+        
+        return predictions
+```
+
+## Microservice API
+
+### FastAPI Service Implementation
+
+```python
+# ml_service/app.py
+from fastapi import FastAPI
+from pydantic import BaseModel
+import redis
+import torch
+
+app = FastAPI()
+foundation_model = StudentBehaviorFoundation()
+redis_client = redis.StrictRedis()
+
+class PredictionRequest(BaseModel):
+    student_id: str
+    current_context: Dict
+    time_window: str  # "morning", "afternoon", "evening"
+
+@app.post("/predict")
+async def predict_behavior(request: PredictionRequest):
+    """Main prediction endpoint"""
+    
+    # Load student's LoRA adapter
+    adapter = PersonalAdapter(request.student_id, foundation_model)
+    
+    if adapter.exists():
+        # Apply student-specific weights
+        model = adapter.apply_to_base()
+        confidence_boost = 1.2  # Higher confidence with personalization
+    else:
+        # New student - use base model
+        model = foundation_model
+        confidence_boost = 0.8  # Lower confidence without history
+    
+    # Generate prediction
+    prompt = format_prediction_prompt(request.current_context, request.time_window)
+    prediction = model.predict(prompt)
+    
+    return {
+        "predictions": prediction.activities,
+        "confidence": prediction.confidence * confidence_boost,
+        "adapter_version": adapter.version if adapter.exists() else 0,
+        "reasoning": prediction.reasoning
+    }
+
+@app.post("/train/{student_id}")
+async def update_student_model(student_id: str, events: List[Dict]):
+    """Fine-tune student's LoRA adapter with new events"""
+    
+    trainer = LoRATrainer(foundation_model)
+    result = await trainer.nightly_update(student_id, events)
+    
+    return {
+        "status": "updated",
+        "version": result.version,
+        "metrics": result.training_metrics
+    }
+```
+
+## Infrastructure and Deployment
+
+### Docker Setup
+
+```dockerfile
+# ml_service/Dockerfile
+FROM nvidia/cuda:11.8.0-runtime-ubuntu22.04
+
+# Install Python and ML libraries
+RUN apt-get update && apt-get install -y python3.10 python3-pip
+RUN pip install torch transformers peft accelerate \
+                fastapi uvicorn redis boto3
+
+# Download and cache base model (13GB)
+RUN python3 -c "from transformers import AutoModelForCausalLM; \
+                 AutoModelForCausalLM.from_pretrained('mistralai/Mistral-7B-v0.1')"
+
+# Copy application
+COPY . /app
+WORKDIR /app
+
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080"]
+```
+
+### Storage Architecture
+
+```yaml
+# S3 Bucket Structure
+s3://dormway-ml-models/
+  foundation/
+    mistral-7b-base.bin        # 13GB - base model weights
+    campus-finetuned-v1.pt     # 50MB - campus-specific patterns
+    
+  lora-adapters/
+    student_123.pt             # 2MB - personal adapter
+    student_456.pt             # 2MB - personal adapter
+    # ... one per student
+    
+  training-data/
+    2024-01-15/
+      batch_001.json           # Daily training batches
+      
+  embeddings/
+    daily/
+      2024-01-15/
+        student_123.npy        # 4KB - daily context embedding
+```
+
+### Cost Analysis
+
+```yaml
+# Infrastructure Costs (AWS)
+compute:
+  inference_server: 
+    instance: "g5.xlarge"      # 1 GPU
+    cost: "$1.006/hour"
+    capacity: "200 req/s"
+    
+  training_server:
+    instance: "g5.2xlarge"     # 1 GPU, more memory
+    cost: "$1.212/hour"
+    runtime: "4 hours/night"   # Batch training
+    
+storage:
+  s3_costs:
+    base_model: "$0.30/month"  # 13GB
+    adapters: "$2.30/month"    # 10,000 × 2MB
+    total: "$2.60/month"
+    
+  redis_cache:
+    instance: "cache.t3.medium"
+    cost: "$57.20/month"
+    capacity: "1000 hot adapters"
+    
+# Total Monthly Cost (10,000 students)
+inference: $730    # 24/7 inference server
+training: $145     # Nightly batch updates  
+storage: $60       # S3 + Redis
+total: ~$935/month # Less than $0.10 per student!
+```
+
+## Integration with Temporal
+
+### Morning Planning Workflow
+
+```typescript
+// In morningPlanningWorkflow.ts
+export async function morningPlanningWorkflow(studentId: string) {
+  // 1. Get yesterday's events for training
+  const yesterdayEvents = await studentActivities.getYesterdayEvents(studentId);
+  
+  // 2. Update ML model (async, non-blocking)
+  mlActivities.updateStudentModel(studentId, yesterdayEvents);
+  
+  // 3. Get predictions for today
+  const predictions = await mlActivities.predictToday(studentId, {
+    dayOfWeek: new Date().getDay(),
+    weather: await getWeatherForecast(),
+    scheduledEvents: await getCalendarEvents(studentId)
+  });
+  
+  // 4. Build DayPlan combining predictions with known events
+  const dayPlan = await buildDayPlan(studentId, predictions);
+  
+  return dayPlan;
+}
+```
+
+### Broadcasting Morning Planning
+
+```typescript
+// morningPlanningOrchestrator.workflow.ts
+export async function morningPlanningOrchestratorWorkflow(): Promise<void> {
+  // Get all active students
+  const students = await studentActivities.getAllActiveStudentIds();
+  
+  // Process in batches
+  const BATCH_SIZE = 50;
+  for (let i = 0; i < students.length; i += BATCH_SIZE) {
+    const batch = students.slice(i, i + BATCH_SIZE);
+    
+    // Signal each StudentWatcher in parallel
+    await Promise.all(
+      batch.map(studentId => 
+        studentActivities.signalStudentWatcher(
+          studentId, 
+          'triggerMorningPlanning'
+        )
+      )
+    );
+    
+    await sleep('1s'); // Prevent overload
+  }
+}
+```
+
+## Key Implementation Decisions
+
+1. **Model Choice**: Mistral 7B - best balance of size/performance/cost
+2. **LoRA Rank**: r=8 for 2MB adapters (r=16 for better accuracy at 4MB)
+3. **Training Frequency**: Nightly batch updates, not real-time
+4. **Caching Strategy**: Redis for hot adapters, S3 for cold storage
+5. **Inference Batching**: Group predictions by student for efficiency
+6. **Data Format**: Token sequences, not natural language prompts
+7. **Hosting**: Single GPU instance handles 10,000 students easily
+
+## Timeline
+
+- **Week 1**: Foundation & Data Models
+- **Week 2**: ML Service & LoRA Implementation
+- **Week 3**: Training Pipeline & Integration
+- **Week 4**: Testing & Optimization
+
+---
+
+*Document created: January 7, 2025*
+*Purpose: Detailed implementation guide for StudentWatcher Digital Twin ML components*
+*Status: Ready for implementation*

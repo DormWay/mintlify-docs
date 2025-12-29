@@ -1,0 +1,132 @@
+---
+title: "Amplitude Context Prediction Events Plan"
+description: "Improve Amplitude coverage for context prediction features so that:"
+---
+
+# Amplitude Context Prediction Events — Implementation Plan
+
+**Date:** 2025-10-04  
+**Owner:** (Pending assignment)  
+**Status:** Planning draft (awaiting approval)
+
+---
+
+## 1. Objective
+
+Improve Amplitude coverage for context prediction features so that:
+
+1. We capture user-triggered context prediction requests and outcomes (success/failure, latency, confidence) across web/API and engine workflows.
+2. Event names + properties align with the standardized schema and typed definitions (`StandardEventProperties`, `UserContextProperties`).
+3. Product analytics and Customer.io integrations gain visibility into prediction quality, adoption, and downstream effects.
+
+This plan focuses on **web + backend** instrumentation. Mobile/iOS tracking remains out of scope for this iteration.
+
+---
+
+## 2. Current State
+
+- Engine’s `studentProcessor` workflow emits a single `context_predicted` server-side event with limited properties.
+- The `/api/proxy/.../predict-context` route (Context Intelligence) logs LLM usage but does **not** send Amplitude events.
+- Typed event definitions (`services/dormway-lockedin/src/types/amplitude-events.ts` & `services/engine/src/types/amplitude-events.ts`) lack explicit context prediction events, so front-end developers can’t easily track them.
+- `AMPLITUDE_GAP_ANALYSIS.md` flags `context_predicted` as “⚠️ rename” with missing standard properties.
+
+Pain points:
+
+1. No visibility into the **request → response** lifecycle for user-triggered predictions (e.g., location input, weather context).
+2. Lacking metrics on error rates, latency buckets, or confidence distribution.
+3. Customer-facing toasts/UX rely on background tasks (e.g., StudentWatcher), but we cannot correlate amplitude events with those updates.
+
+---
+
+## 3. Proposed Event Model
+
+Introduce three standardized **server-side** events (no client/web instrumentation — everything fires from API Router or Engine so mobile calls are covered):
+
+1. `context_prediction_requested`
+   - Properties: `prediction_source` (api_route|engine|mobile_batch), `request_id`, `weather_available`, `location_available`, `campus_id`, `surface` (context_api|student_watcher), optional `debug_mode`.
+   - Emitted immediately when a prediction workflow starts inside the API router (for web/mobile requests) or engine (for background runs).
+
+2. `context_prediction_completed`
+   - Properties: `request_id`, `prediction`, `confidence`, `latency_ms`, `data_sources` (array: weather|calendar|distance|lms|manual), `success` (true/false), `error_code` (if any).
+   - Fired after completion from the **same server process** that emitted the request event.
+
+3. `context_prediction_background`
+   - Represents scheduled/crew-generated predictions (StudentWatcher). Extends `context_predicted` but aligns with schema (`platform: 'server'`, `surface: 'student_watcher'`, etc.).
+   - Properties: `prediction`, `confidence`, `sources_used`, `has_dashboard_refresh`, `trigger` (interval|event-driven).
+
+Renaming note: the existing `context_predicted` engine event will be migrated to the new `context_prediction_background` name while keeping backward compatibility data (dual-publish during rollout).
+
+### Property Standards
+
+- Leverage `StandardEventProperties` + `UserContextProperties` everywhere.
+- Derived fields:
+  - `latency_ms` calculated in API router (end-start) and engine workflows.
+  - `data_sources` (string[]) derived from variables/flags (weather, calendar, lms, location).
+  - `prediction_confidence_bucket` (optional) for analytics segmentation (e.g., 0-0.25, 0.25-0.5, etc.).
+
+---
+
+## 4. Implementation Tasks
+
+### 4.1 Schema & Types
+
+1. Update `AMPLITUDE_EVENT_SCHEMA.md` with the three events + properties.
+2. Extend `services/engine/src/types/amplitude-events.ts` and `services/dormway-lockedin/src/types/amplitude-events.ts` with typed interfaces for the new events.
+3. Regenerate/augment any shared enums (`Platform`, `Surface`, `PredictionSource`).
+
+### 4.2 Backend (API Router)
+
+1. Instrument `/api/context/predict` (Context Intelligence route):
+   - Emit `context_prediction_requested` at the start.
+   - After Portkey returns, emit `context_prediction_completed` with success/failure metadata.
+   - Ensure standard properties are added via helper (platform, timestamp, user id, session id).
+2. Capture latency via `performance.now()` or `Date.now()` difference.
+3. For failures, populate `error_code` (timeout|portkey_error|validation_error).
+
+### 4.3 Backend (Engine / StudentWatcher)
+
+1. Update `studentProcessor.workflow.ts` to emit the new `context_prediction_background` event (dual-publish `context_predicted` during migration, gated by env flag).
+2. Add data sources (calendar/lms/distance) from existing workflow variables.
+3. Include `latency_ms` (crew execution duration) when available.
+
+### 4.4 Front-End
+
+- **No direct client-side tracking** for this effort. Web/mobile clients will continue calling the existing API; all Amplitude emission happens server-side so both platforms share the same event stream.
+
+### 4.5 Shared Utilities
+
+1. Provide a `buildContextPredictionEvent(props)` helper (shared util) to centralize property population.
+2. Synchronize `StandardEventProperties` population for server-side calls (e.g., `eventTracker.ts`) — possibly add a `withStandardProps(platform, overrides)` helper.
+
+### 4.6 Observability & QA
+
+1. Write unit tests for the new helper(s) ensuring proper property shapes.
+2. Exercise API route locally with mocked Portkey responses (success + failure) and assert Amplitude payload via test double (e.g., stub `track` function).
+3. Validate engine workflow instrumentation by running the student processor in dev with sample data (Temporal test harness).
+4. Update analytics dashboards (Amplitude) to confirm event ingestion and funnels.
+
+---
+
+## 5. Dependencies & Risks
+
+- **Portkey metadata** availability: ensure request IDs and source flags are accessible where we emit events.
+- **Amplitude rate limits**: new events increase volume; coordinate with analytics to confirm allowance.
+- **Temporal workflow latency measurement**: may need to capture timestamps before/after crew execution.
+- **Backward compatibility**: maintain current `context_predicted` event until dashboards migrate (dual-publish for one release cycle).
+
+---
+
+## 6. Open Questions
+
+1. Should we track user attribute updates (e.g., `last_context_prediction_at`) alongside events via Amplitude Identify?
+2. Do we need to include weather payload hashes or is boolean `weather_available` sufficient?
+3. Should `data_sources` be a first-class typed enum across codebases?
+4. Do we need separate events for *exploratory* vs *actionable* predictions (e.g., manual user request vs autop-run)?
+
+---
+
+## 7. Next Steps
+
+1. Review + approve this plan with analytics + product.
+2. Prioritize tasks for sprint: schema/types → API router instrumentation → engine updates → front-end helpers.
+3. After approval, implement with feature flag gating (if desired) and roll out with monitoring.

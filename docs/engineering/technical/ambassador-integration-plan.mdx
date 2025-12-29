@@ -1,0 +1,47 @@
+---
+title: "Ambassador Integration Plan"
+description: "1) Add Ambassador client module (config, retries, typed helpers) in `dormway-platform`. 2) Schema/storage: store `ambassador_uid`, `memorable_url`, `campaign..."
+---
+
+# Ambassador Integration Plan (Ambassador.com API)
+
+## Context
+- Goal: use Ambassador for referral tracking for campus ambassadors across web and iOS.
+- Waitlist gating: the app uses Clerk allowlist/waitlist (see `services/dormway-lockedin/CLERK_WAITLIST_SETUP.md`). Clerk emits `session.denied` for non-allowed emails; we should capture those with referral/UTM params. Legacy GetWaitlist endpoints still exist for marketing/landing, but primary gating for the app is Clerk.
+- Onboarding already accepts `source` and `referrer`; no Ambassador integration or IDs are stored.
+- Docs scraped: base URL `https://api.getambassador.com/api/v2/{username}/{token}/json/...`; primary endpoint `/ambassador/get/` (GET, supports `auto_create=1`, metadata, groups); events via `/event/multi_record/`.
+
+## Proposed architecture
+- Server-only client in `dormway-platform` (api-router/shared service):
+  - Credentials from Doppler: `AMBASSADOR_USERNAME`, `AMBASSADOR_TOKEN`.
+  - Helpers: `getOrCreateAmbassador(email, opts)` wraps `/ambassador/get/`; `recordEvents(batch)` wraps `/event/multi_record/`.
+  - Retry with backoff + logging; mark sandbox requests when testing (`sandbox=1`).
+- Data flow:
+  - When a user is marked as a campus ambassador, call `getOrCreateAmbassador` with `auto_create=1`, name, campus metadata in custom fields, and optional `add_to_group_id`.
+  - Persist returned IDs/link: `ambassador_uid`, `memorable_url`, `campaign_links` on the user/ambassador profile for dashboards and share links.
+  - Referral attribution on inbound:
+    - Web: read `amb_uid`/`campaign_uid` params from referral links; store in first-party cookie/localStorage; forward in waitlist/signup requests via existing `referrer`/`source` fields.
+    - iOS: capture params via universal link; persist locally; send on signup/onboarding API calls.
+    - Clerk waitlist: add webhook for `session.denied` (and `user.created`) to record waitlist attempts with ambassador/UTM params; optionally post to `/ambassador/get/` with `auto_create=0` and `status=prospect` to seed leads.
+  - Conversions: enqueue jobs to `/event/multi_record/` on milestones (signup, first schedule import, first paid action) including referred user identifiers + referring ambassador IDs and revenue/points metadata.
+  - Webhooks: add verified endpoint for reward/commission updates → update internal rewards ledger, notify ambassador, expose status in dashboard.
+- Fraud controls: cap rewards per device/IP/email domain, allow sandbox ambassadors for QA, and optionally manual review before payout.
+
+## API reference (needed fields)
+- Auth: path params `{username}/{token}`.
+- `/ambassador/get/` (GET): query params include `email` (required), `auto_create`, `first_name`, `last_name`, `status` (`enrolled|prospect|banned|unsubscribed`), `notify` (`none|new_ambassador|campaign_access`), `add_to_group_id` / `set_groups`, address/phone, `custom1–10`, `email_new_ambassador` (default 1), `sandbox` (default 0), `deactivate_new_ambassador` (default 0).
+- `/event/multi_record/`: batch events/conversions (use for signup and revenue milestones).
+
+## Work breakdown
+1) Add Ambassador client module (config, retries, typed helpers) in `dormway-platform`.
+2) Schema/storage: store `ambassador_uid`, `memorable_url`, `campaign_uid` on ambassador users; add referral metadata fields to onboarding record if needed.
+3) Attribution capture: front-end (marketing site/waitlist) + mobile deep link handling to pass ambassador params into existing API payloads; Clerk webhook for `session.denied` to persist waitlist attempts with referral data.
+4) Event pipeline: queue + worker to post `/event/multi_record/` on milestones; ensure idempotency.
+5) Webhook ingestion: verify signature, map to rewards ledger, send notifications.
+6) Admin/dashboard surface: show share link, conversion counts, reward status for ambassadors.
+7) QA with `sandbox=1`, then production rollout with Doppler secrets + monitoring.
+
+## Open questions
+- Precise referral link param schema (`amb_uid`, `campaign_uid`, others?) and whether to keep legacy `referrer` usage as-is.
+- Which milestones count for payout (signup vs first paid action vs N actions).
+- Grouping strategy in Ambassador (`add_to_group_id` for campuses?).

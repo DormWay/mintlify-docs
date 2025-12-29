@@ -1,0 +1,877 @@
+---
+title: "ContextsService"
+description: "import { ContextsService } from '@dormway/core'; import { getConnectionPool } from '@dormway/core/database'; import { createStructuredLogger } from '@dormway..."
+---
+
+# ContextsService
+
+## Overview
+
+**ContextsService** manages the hierarchical context system that models the entire DormWay platform structure: cities, campuses, buildings, courses, and students.
+
+**Purpose**: Provide consistent access to the context graph, including tree traversal (parent/child), dependency relationships (many-to-many), and caching.
+
+**Location**: `@dormway/core/domains/contexts`
+
+---
+
+## Table of Contents
+
+- [Installation](#installation)
+- [Context Hierarchy](#context-hierarchy)
+- [Methods](#methods)
+  - [getContext](#getcontext)
+  - [searchContexts](#searchcontexts)
+  - [createContext](#createcontext)
+  - [updateContext](#updatecontext)
+  - [deleteContext](#deletecontext)
+  - [getAncestors](#getancestors)
+  - [getDescendants](#getdescendants)
+  - [getPath](#getpath)
+  - [getDependencies](#getdependencies)
+  - [createDependency](#createdependency)
+  - [deleteDependency](#deletedependency)
+- [Common Patterns](#common-patterns)
+- [Caching](#caching)
+- [Troubleshooting](#troubleshooting)
+
+---
+
+## Installation
+
+```typescript
+import { ContextsService } from '@dormway/core';
+import { getConnectionPool } from '@dormway/core/database';
+import { createStructuredLogger } from '@dormway/core/logger';
+import { getCacheAdapter } from '@dormway/core/adapters/cache';
+
+const pool = getConnectionPool();
+const logger = createStructuredLogger({ service: 'engine' });
+const cache = getCacheAdapter();
+
+const service = new ContextsService({
+  pool,
+  logger,
+  cacheAdapter: cache,  // Optional: enables caching
+  cacheTtl: 600,        // Optional: cache for 10 minutes
+});
+```
+
+---
+
+## Context Hierarchy
+
+### Tree Structure (parent_id)
+
+```
+City (type='city')
+  └─ Campus (type='campus', parent_id=city_id)
+      ├─ Building (type='building', parent_id=campus_id)
+      │   └─ Room (type='room', parent_id=building_id)
+      └─ Student (type='student', parent_id=campus_id, user_id=account.id)
+          └─ Course (type='course', parent_id=student_id)
+              └─ Assignment (type='assignment', parent_id=course_id)
+```
+
+### Many-to-Many Relationships (context_dependencies)
+
+```
+Student → enrolled_in → Course
+Course → prerequisite → Course
+Building → requires → Service
+Campus → participates_in → Program
+```
+
+**Key Difference**:
+- **parent_id**: Single hierarchical relationship (one-to-many)
+- **context_dependencies**: Multiple relationships (many-to-many)
+
+---
+
+## Methods
+
+### getContext
+
+Get a single context by ID with optional caching.
+
+**Signature**:
+```typescript
+getContext(contextId: string): Promise<ServiceResult<ContextNode>>
+```
+
+**Returns**:
+```typescript
+interface ContextNode {
+  id: string;                          // UUID
+  parent_id: string | null;            // Parent in tree
+  type: ContextType;                   // 'city' | 'campus' | 'building' | 'student' | 'course' | etc.
+  name: string | null;
+  slug: string | null;
+  description: string | null;
+  external_id: string | null;          // External system ID (Canvas, etc.)
+  user_id: string | null;              // For student contexts
+  account_id: string | null;           // Deprecated, use user_id
+  organization_id: string | null;
+  metadata: Record<string, unknown>;
+  is_active: boolean;
+  next_sync_at: Date | null;
+  sync_frequency_minutes: number | null;
+  sync_priority_score: number | null;
+  created_at: Date;
+  updated_at: Date;
+}
+```
+
+**Example**:
+```typescript
+const result = await service.getContext('context-uuid');
+
+if (result.success && result.data) {
+  const context = result.data;
+  console.log(`Context: ${context.name} (${context.type})`);
+  console.log(`Parent: ${context.parent_id}`);
+  console.log(`Metadata:`, context.metadata);
+}
+```
+
+---
+
+### searchContexts
+
+Search contexts with flexible filtering.
+
+**Signature**:
+```typescript
+searchContexts(options: SearchContextsOptions): Promise<ServiceResult<ContextNode[]>>
+```
+
+**Options**:
+```typescript
+interface SearchContextsOptions {
+  type?: ContextType;           // Filter by type
+  parentId?: string;            // Filter by parent
+  accountId?: string;           // Filter by account (deprecated)
+  externalId?: string;          // Filter by external ID
+  organizationId?: string;      // Filter by organization
+  name?: string;                // Partial name match (ILIKE)
+  activeOnly?: boolean;         // Only active contexts
+  limit?: number;               // Max results
+  offset?: number;              // Pagination offset
+}
+```
+
+**Examples**:
+
+**Get all campuses**:
+```typescript
+const result = await service.searchContexts({
+  type: 'campus',
+  activeOnly: true,
+  limit: 100,
+});
+
+if (result.success) {
+  const campuses = result.data!;
+  campuses.forEach(campus => {
+    console.log(`- ${campus.name} (${campus.metadata.city})`);
+  });
+}
+```
+
+**Get student's courses**:
+```typescript
+const result = await service.searchContexts({
+  type: 'course',
+  parentId: studentContextId,
+  activeOnly: true,
+});
+
+const courses = result.data || [];
+```
+
+**Find context by Canvas ID**:
+```typescript
+const result = await service.searchContexts({
+  type: 'course',
+  externalId: 'canvas-course-12345',
+});
+
+if (result.success && result.data!.length > 0) {
+  const course = result.data![0];
+  console.log(`Found course: ${course.name}`);
+}
+```
+
+**Search by name**:
+```typescript
+const result = await service.searchContexts({
+  type: 'campus',
+  name: 'Michigan',  // Matches "University of Michigan", "Michigan State", etc.
+});
+```
+
+---
+
+### createContext
+
+Create a new context node.
+
+**Signature**:
+```typescript
+createContext(options: CreateContextOptions): Promise<ServiceResult<ContextNode>>
+```
+
+**Options**:
+```typescript
+interface CreateContextOptions {
+  type: ContextType;               // Required
+  name?: string;
+  slug?: string;
+  description?: string;
+  parentId?: string;               // Parent in tree
+  externalId?: string;             // External system ID
+  userId?: string;                 // For student contexts
+  organizationId?: string;
+  metadata?: Record<string, unknown>;
+}
+```
+
+**Examples**:
+
+**Create campus**:
+```typescript
+const result = await service.createContext({
+  type: 'campus',
+  name: 'University of Michigan',
+  parentId: annArborCityId,
+  metadata: {
+    email_domain: 'umich.edu',
+    enrollment: 47000,
+    timezone: 'America/Detroit',
+  },
+});
+
+if (result.success) {
+  const campus = result.data!;
+  console.log(`Created campus: ${campus.id}`);
+}
+```
+
+**Create student context**:
+```typescript
+const result = await service.createContext({
+  type: 'student',
+  name: 'John Doe',
+  parentId: campusId,
+  userId: accountId,  // Links to accounts table
+  metadata: {
+    major: 'Computer Science',
+    graduation_year: 2026,
+  },
+});
+```
+
+**Create course for student**:
+```typescript
+const result = await service.createContext({
+  type: 'course',
+  name: 'Introduction to Computer Science',
+  parentId: studentContextId,
+  externalId: 'canvas-course-12345',
+  metadata: {
+    course_code: 'CS-101',
+    canvas_course_id: '12345',
+    semester: 'Fall 2025',
+  },
+});
+```
+
+---
+
+### updateContext
+
+Update context fields (supports metadata merging).
+
+**Signature**:
+```typescript
+updateContext(options: UpdateContextOptions): Promise<ServiceResult<ContextNode>>
+```
+
+**Options**:
+```typescript
+interface UpdateContextOptions {
+  contextId: string;
+  updates: Partial<ContextNode>;
+  mergeMetadata?: boolean;  // Default: true
+}
+```
+
+**Examples**:
+
+**Update name**:
+```typescript
+await service.updateContext({
+  contextId: 'context-uuid',
+  updates: {
+    name: 'New Context Name',
+    is_active: true,
+  },
+});
+```
+
+**Update metadata (merge)**:
+```typescript
+// Existing metadata: { foo: 'bar', baz: 123 }
+
+await service.updateContext({
+  contextId: 'context-uuid',
+  updates: {
+    metadata: { foo: 'updated', qux: 'new' },
+  },
+  mergeMetadata: true,  // Default
+});
+
+// Result metadata: { foo: 'updated', baz: 123, qux: 'new' }
+```
+
+**Update metadata (replace)**:
+```typescript
+await service.updateContext({
+  contextId: 'context-uuid',
+  updates: {
+    metadata: { foo: 'bar' },
+  },
+  mergeMetadata: false,
+});
+
+// Result metadata: { foo: 'bar' } (all other fields removed)
+```
+
+---
+
+### deleteContext
+
+Soft-delete a context (sets `is_active = false`).
+
+**Signature**:
+```typescript
+deleteContext(contextId: string): Promise<ServiceResult<void>>
+```
+
+**Example**:
+```typescript
+const result = await service.deleteContext(contextId);
+
+if (result.success) {
+  console.log('Context soft-deleted');
+}
+
+// Context still exists in database but is_active = false
+```
+
+**Critical Notes**:
+- This is a **soft delete** - context remains in database
+- Sets `is_active = false`
+- Descendants are NOT automatically deleted
+- To hard-delete, use direct SQL (not recommended)
+
+---
+
+### getAncestors
+
+Get all parent contexts up the tree.
+
+**Signature**:
+```typescript
+getAncestors(options: GetAncestorsOptions): Promise<ServiceResult<ContextNode[]>>
+```
+
+**Options**:
+```typescript
+interface GetAncestorsOptions {
+  contextId: string;
+  types?: ContextType[];      // Filter by types
+  maxDepth?: number;          // Max levels up
+  includeSelf?: boolean;      // Include starting context
+}
+```
+
+**Examples**:
+
+**Get full hierarchy (student → campus → city)**:
+```typescript
+const result = await service.getAncestors({
+  contextId: studentContextId,
+});
+
+if (result.success) {
+  const ancestors = result.data!;
+  // Returns: [campus, city] (ordered by distance)
+
+  ancestors.forEach(ctx => {
+    console.log(`- ${ctx.name} (${ctx.type})`);
+  });
+}
+```
+
+**Get only campus ancestor**:
+```typescript
+const result = await service.getAncestors({
+  contextId: studentContextId,
+  types: ['campus'],
+});
+
+const campus = result.data![0];
+```
+
+**Include self in result**:
+```typescript
+const result = await service.getAncestors({
+  contextId: studentContextId,
+  includeSelf: true,
+});
+
+// Returns: [student, campus, city]
+```
+
+---
+
+### getDescendants
+
+Get all child contexts down the tree.
+
+**Signature**:
+```typescript
+getDescendants(options: GetDescendantsOptions): Promise<ServiceResult<ContextNode[]>>
+```
+
+**Options**:
+```typescript
+interface GetDescendantsOptions {
+  contextId: string;
+  types?: ContextType[];      // Filter by types
+  maxDepth?: number;          // Max levels down
+  includeSelf?: boolean;      // Include starting context
+}
+```
+
+**Examples**:
+
+**Get all students in a campus**:
+```typescript
+const result = await service.getDescendants({
+  contextId: campusId,
+  types: ['student'],
+});
+
+if (result.success) {
+  const students = result.data!;
+  console.log(`Campus has ${students.length} students`);
+}
+```
+
+**Get all courses for a student**:
+```typescript
+const result = await service.getDescendants({
+  contextId: studentContextId,
+  types: ['course'],
+});
+
+const courses = result.data || [];
+```
+
+**Get everything under a campus (unlimited depth)**:
+```typescript
+const result = await service.getDescendants({
+  contextId: campusId,
+});
+
+// Returns: [students, courses, buildings, rooms, assignments, etc.]
+```
+
+**Limit depth**:
+```typescript
+const result = await service.getDescendants({
+  contextId: campusId,
+  maxDepth: 1,  // Only direct children
+});
+
+// Returns: [students, buildings] (but NOT courses, rooms, assignments)
+```
+
+---
+
+### getPath
+
+Find path between two contexts in the tree.
+
+**Signature**:
+```typescript
+getPath(options: GetPathOptions): Promise<ServiceResult<GraphPath | null>>
+```
+
+**Options**:
+```typescript
+interface GetPathOptions {
+  fromContextId: string;
+  toContextId: string;
+  useDirectedGraph?: boolean;  // Use context_dependencies (default: false)
+}
+```
+
+**Returns**:
+```typescript
+interface GraphPath {
+  path: ContextNode[];  // Ordered list of contexts
+  distance: number;     // Number of hops
+}
+```
+
+**Examples**:
+
+**Find path from student to city**:
+```typescript
+const result = await service.getPath({
+  fromContextId: studentContextId,
+  toContextId: cityId,
+});
+
+if (result.success && result.data) {
+  const path = result.data;
+  console.log(`Distance: ${path.distance} hops`);
+  console.log('Path:', path.path.map(c => c.name).join(' → '));
+  // Output: "John Doe → University of Michigan → Ann Arbor"
+}
+```
+
+---
+
+### getDependencies
+
+Get many-to-many relationships via `context_dependencies` table.
+
+**Signature**:
+```typescript
+getDependencies(contextId: string): Promise<ServiceResult<ContextDependency[]>>
+```
+
+**Returns**:
+```typescript
+interface ContextDependency {
+  parent_context_id: string;
+  child_context_id: string;
+  dependency_type: DependencyType;  // 'enrolled_in', 'prerequisite', 'requires', etc.
+  metadata: Record<string, unknown>;
+  created_at: Date;
+}
+```
+
+**Example**:
+
+**Get student's course enrollments**:
+```typescript
+const result = await service.getDependencies(studentContextId);
+
+if (result.success) {
+  const deps = result.data!;
+
+  const enrollments = deps.filter(d => d.dependency_type === 'enrolled_in');
+
+  console.log(`Student enrolled in ${enrollments.length} courses`);
+
+  enrollments.forEach(dep => {
+    console.log(`- Course ID: ${dep.child_context_id}`);
+    console.log(`  Metadata:`, dep.metadata);
+  });
+}
+```
+
+---
+
+### createDependency
+
+Create a many-to-many relationship.
+
+**Signature**:
+```typescript
+createDependency(
+  parentContextId: string,
+  childContextId: string,
+  dependencyType: DependencyType,
+  metadata?: Record<string, unknown>
+): Promise<ServiceResult<ContextDependency>>
+```
+
+**Example**:
+
+**Enroll student in course**:
+```typescript
+const result = await service.createDependency(
+  studentContextId,
+  courseContextId,
+  'enrolled_in',
+  {
+    enrollment_date: new Date().toISOString(),
+    enrollment_type: 'student',
+    enrollment_status: 'active',
+  }
+);
+
+if (result.success) {
+  console.log('Student enrolled in course');
+}
+```
+
+**Create course prerequisite**:
+```typescript
+await service.createDependency(
+  advancedCourseId,
+  introCourseid,
+  'prerequisite',
+  {
+    required: true,
+    minimum_grade: 'C',
+  }
+);
+```
+
+---
+
+### deleteDependency
+
+Remove a many-to-many relationship.
+
+**Signature**:
+```typescript
+deleteDependency(
+  parentContextId: string,
+  childContextId: string
+): Promise<ServiceResult<void>>
+```
+
+**Example**:
+```typescript
+const result = await service.deleteDependency(
+  studentContextId,
+  courseContextId
+);
+
+if (result.success) {
+  console.log('Student unenrolled from course');
+}
+```
+
+---
+
+## Common Patterns
+
+### Pattern 1: Get Student's Campus and City
+
+```typescript
+const ancestors = await service.getAncestors({
+  contextId: studentContextId,
+  types: ['campus', 'city'],
+});
+
+if (ancestors.success) {
+  const [campus, city] = ancestors.data!;
+  console.log(`Campus: ${campus.name}`);
+  console.log(`City: ${city.name}`);
+  console.log(`Timezone: ${city.metadata.timezone}`);
+}
+```
+
+### Pattern 2: Get All Courses for Student (Two Methods)
+
+**Method 1: Tree hierarchy (parent_id)**:
+```typescript
+const result = await service.getDescendants({
+  contextId: studentContextId,
+  types: ['course'],
+});
+
+const courses = result.data || [];
+```
+
+**Method 2: Dependencies (context_dependencies)**:
+```typescript
+const depsResult = await service.getDependencies(studentContextId);
+
+const enrollments = depsResult.data!.filter(d => d.dependency_type === 'enrolled_in');
+
+const courseIds = enrollments.map(e => e.child_context_id);
+
+// Fetch course details
+const courses = await Promise.all(
+  courseIds.map(id => service.getContext(id))
+);
+```
+
+**When to use each**:
+- **Tree hierarchy**: When courses are children of student context
+- **Dependencies**: When using many-to-many enrollment relationships
+
+### Pattern 3: Find or Create Context
+
+```typescript
+async function findOrCreateCampus(
+  name: string,
+  cityId: string
+): Promise<ContextNode> {
+  // Search for existing
+  const searchResult = await service.searchContexts({
+    type: 'campus',
+    name,
+    parentId: cityId,
+  });
+
+  if (searchResult.success && searchResult.data!.length > 0) {
+    return searchResult.data![0];  // Found existing
+  }
+
+  // Create new
+  const createResult = await service.createContext({
+    type: 'campus',
+    name,
+    parentId: cityId,
+  });
+
+  if (!createResult.success) {
+    throw new Error('Failed to create campus');
+  }
+
+  return createResult.data!;
+}
+```
+
+### Pattern 4: Bulk Context Operations
+
+```typescript
+// Get multiple contexts in parallel
+const contextIds = ['id1', 'id2', 'id3'];
+
+const results = await Promise.all(
+  contextIds.map(id => service.getContext(id))
+);
+
+const contexts = results
+  .filter(r => r.success && r.data)
+  .map(r => r.data!);
+```
+
+---
+
+## Caching
+
+### Enable Caching
+
+```typescript
+import { getCacheAdapter } from '@dormway/core/adapters/cache';
+
+const cache = getCacheAdapter();
+
+const service = new ContextsService({
+  pool,
+  logger,
+  cacheAdapter: cache,
+  cacheTtl: 600,  // Cache for 10 minutes
+});
+```
+
+### Automatic Cache Keys
+
+```typescript
+// getContext() caches as: "context:{contextId}"
+await service.getContext('context-123');  // Cached
+await service.getContext('context-123');  // Cache hit
+
+// searchContexts() caches as: "contexts:search:{hash}"
+await service.searchContexts({ type: 'campus' });  // Cached
+
+// getAncestors() caches as: "context:{contextId}:ancestors"
+await service.getAncestors({ contextId: 'student-123' });  // Cached
+```
+
+### Manual Cache Invalidation
+
+```typescript
+// Invalidate specific context
+await service.invalidateCache('context-123');
+
+// Or manually via cache adapter
+const cache = getCacheAdapter();
+await cache.delete('context:context-123');
+await cache.deletePattern('context:context-123:*');
+```
+
+### When Cache is Invalidated Automatically
+
+- **updateContext**: Invalidates context and ancestors
+- **deleteContext**: Invalidates context and descendants
+- **createDependency**: Invalidates both parent and child
+- **deleteDependency**: Invalidates both parent and child
+
+---
+
+## Troubleshooting
+
+### Problem: getAncestors returns empty array
+
+**Cause**: Context has no parent_id set.
+
+**Solution**: Verify parent relationships:
+```sql
+SELECT id, name, type, parent_id
+FROM contexts
+WHERE id = 'context-uuid';
+```
+
+### Problem: getDependencies returns empty array
+
+**Cause**: Using tree hierarchy instead of context_dependencies.
+
+**Solution**: Check if relationships are in context_dependencies:
+```sql
+SELECT * FROM context_dependencies
+WHERE parent_context_id = 'student-uuid'
+  AND dependency_type = 'enrolled_in';
+```
+
+### Problem: searchContexts returns no results
+
+**Cause**: Inactive contexts or wrong filters.
+
+**Solution**:
+```typescript
+// Check if contexts are inactive
+const result = await service.searchContexts({
+  type: 'campus',
+  activeOnly: false,  // Include inactive
+});
+
+// Check database
+// SELECT * FROM contexts WHERE type = 'campus' AND is_active = false;
+```
+
+### Problem: Cache not updating after changes
+
+**Cause**: Cache not invalidated after update.
+
+**Solution**: Manually invalidate:
+```typescript
+await service.updateContext({ contextId, updates });
+await service.invalidateCache(contextId);
+```
+
+---
+
+## Related Documentation
+
+- [DormWay Core Library (@dormway-core)](/docs/engineering/technical/dormway-core-library-dormway-core) - Main overview
+- [DayPlanDataService](/docs/engineering/technical/dormway-core/domain-services/dayplandataservice) - Uses ContextsService for hierarchy
+- [CampusService](/docs/engineering/technical/dormway-core/domain-services/campusservice) - Campus context operations
+
+---
+
+**Last Updated**: 2025-11-23
+**Maintainer**: Platform Team

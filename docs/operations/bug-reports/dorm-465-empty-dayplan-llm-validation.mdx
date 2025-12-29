@@ -1,0 +1,102 @@
+---
+title: "DORM 465 empty dayplan llm validation"
+description: "Users with Canvas ICS-only sync received completely empty dayplans (0 events, 0 actions) instead of placeholder events when they had a free day or when assig..."
+---
+
+# DORM-465: Empty Dayplan Generation - LLM Validation Fix
+
+**Date**: 2025-10-31
+**Linear**: [DORM-465](https://linear.app/dormwayllc/issue/DORM-465)
+**Priority**: Urgent
+**Status**: Fixed - In Review
+
+## Problem Summary
+
+Users with Canvas ICS-only sync received completely empty dayplans (0 events, 0 actions) instead of placeholder events when they had a free day or when assignments fell on different dates.
+
+### Affected Users
+- User: `bpdoles@umich.edu` (User ID: `a8f8ac77-93cb-4221-a97d-1d39f70c0432`)
+- Campus: University of Michigan
+- Sync: Canvas ICS only
+- Date: October 31, 2025
+
+## Root Cause
+
+When the baseline LLM path was used for dayplan generation:
+
+1. LLM received empty schedule/calendar data
+2. LLM correctly followed anti-hallucination rules and returned `{}`
+3. **Bug**: Code accepted empty response and created plan with 0 events
+4. Empty plan was saved and returned immediately
+5. Never fell back to `createColdStartDayPlan()` which would generate placeholder events
+
+## The Fix
+
+### Primary Fix: Empty LLM Response Validation
+
+**File**: `services/engine/src/activities/dayplan.activities.ts:1039-1049`
+
+Added validation after LLM response parsing:
+
+```typescript
+const planData = JSON.parse(typeof messageContent === 'string' ? messageContent : '{}');
+
+// NEW: Validate LLM returned useful content
+if (!planData.events || planData.events.length === 0) {
+  logger.warn('[DAYPLAN] LLM returned empty plan, forcing fallback to cold-start', {
+    studentId: input.studentId,
+    profile,
+    hadSchedule: dataQuality.hasSchedule,
+    hadCalendar: dataQuality.hasCalendar,
+    planData: JSON.stringify(planData)
+  });
+  throw new Error('LLM returned empty plan - no events generated');
+}
+```
+
+**How it works:**
+1. Validates that `events` array exists and has length > 0
+2. If empty, throws error triggering catch block at line 1075
+3. Falls through to `createColdStartDayPlan()` which generates placeholder events
+4. User receives dayplan with at least 5 default events instead of 0
+
+### Secondary Fix: Better Timezone Resolution
+
+**File**: `services/engine/src/activities/dayplan.activities.ts:3713`
+
+Updated `createFallbackDayPlan` to use `getStudentTimezoneWithFallback` which:
+- Checks user timezone preference from `user_preferences.calendar.displayTimezone`
+- Falls back to campus timezone from contexts hierarchy
+- Falls back to legacy timezone from `accounts.public_data`
+- Final fallback to `America/New_York`
+
+**Note**: Timezone was not the root cause (America/New_York and America/Detroit are both Eastern Time).
+
+## Testing
+
+### Expected Behavior
+- ✅ Dayplan generated with placeholder events (not 0 events)
+- ✅ Logs show: `[DAYPLAN] LLM returned empty plan, forcing fallback to cold-start`
+- ✅ Cold-start plan includes minimum 5 events
+- ✅ Email sent successfully with dayplan content
+
+### Test Scenario
+Trigger dayplan generation for users with:
+- No calendar events for the day
+- Canvas ICS sync only
+- Empty schedule data
+
+## Related Files
+- `services/engine/src/activities/dayplan.activities.ts` (lines 1037-1049, 3713)
+- `services/engine/src/activities/timezone-helpers.ts` (getStudentTimezoneWithFallback)
+
+## Implementation Time
+**Actual**: 1.5 hours (implementation + testing + documentation)
+
+## Tags
+#bug #dayplan #llm #validation #engine #temporal
+
+## See Also
+- DayPlan Generation Architecture
+- LLM Anti-Hallucination Patterns
+- Temporal Workflow Error Handling

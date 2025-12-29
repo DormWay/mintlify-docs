@@ -1,0 +1,114 @@
+---
+title: "Generic Transactional Email Helper"
+description: "This guide explains how to trigger the Customer.io “generic email” template from engine code, and clarifies when to pass overrides for CTAs, preview text, or..."
+---
+
+# Generic Transactional Email Helper
+
+This guide explains how to trigger the Customer.io “generic email” template from engine code, and clarifies when to pass overrides for CTAs, preview text, or template id.
+
+---
+
+## When to use
+
+Reach for the helper whenever you want to send a one-off notification email (e.g. “syllabus processing failed”) that:
+
+- Uses our shared Customer.io template (`generic_email`)
+- Needs simple HTML + text rendering (an optional CTA button, paragraph copy, preview text)
+- Can be driven from Temporal workflows or any activities layer
+
+If you require a bespoke template, continue to build a custom transactional message id and call `sendCustomerIOTransactionalMessage` directly.
+
+---
+
+## Entry points
+
+There are two ways to enqueue the email:
+
+1. **Temporal workflows** – use the high-level notifier already wired into `processSyllabus` (or create a new notifier via `createSyllabusFailureNotifier`).
+2. **Activities / services** – call the activity wrapper `sendGenericTransactionalEmail`, which uses the shared service helper under the hood.
+
+The helpers live in `services/engine/src/services/customerio.ts` and `services/engine/src/activities/customerio.ts`.
+
+---
+
+## Basic activity usage
+
+```ts
+import { sendGenericTransactionalEmail } from '../activities/customerio';
+
+await sendGenericTransactionalEmail({
+  userId: studentId,                // optional; falls back to email
+  email: 'student@example.edu',
+  subject: 'We hit a snag processing your syllabus',
+  textBody: `Hi there,
+
+We hit a snag while processing your syllabus. Our team will re-run it automatically and follow up once it finishes.`,
+  ctaLabel: 'Upload Latest Syllabus', // optional
+  ctaUrl: 'https://app.dormway.com/dashboard/documents', // optional
+});
+```
+
+Key notes:
+
+- `htmlBody` is optional; if omitted we auto-generate one from the `textBody`.
+- `previewText` defaults to the first ~120 chars of the text version.
+- `templateId` defaults to `generic_email`. Override if you create a new Customer.io template.
+
+---
+
+## Workflow helper (`createSyllabusFailureNotifier`)
+
+Temporal workflows cannot access `process.env`, so the workflow-level helper accepts a `customerIOTemplateId` and other override inputs during construction.
+
+```ts
+const notifyFailure = createSyllabusFailureNotifier({
+  actualUserId,                 // required for Ably + EventTracker
+  workflowId,
+  userEmail,
+  friendlyName: friendlyDisplayName,
+  safeFilename: originalFilename,
+  ctaLabel: 'Upload Latest Syllabus',
+  ctaUrl: `${dashboardBaseUrl}/dashboard/documents`,
+  previewText: `We’re reprocessing "${safeFilename}"...`,
+  customerIOTemplateId: 'generic_email', // optional override
+  getSyllabusId: () => trackedSyllabusId,
+});
+
+// Later inside the workflow:
+return notifyFailure('Extracted text is too short or empty', { syllabusId });
+```
+
+Calling the notifier will:
+
+1. Update the syllabus record to `failed`
+2. Publish an Ably toast event
+3. Send the generic transactional email
+4. Track `syllabus_processing_failed` via Event Tracker
+
+The helper ensures we send at most one email per workflow execution.
+
+---
+
+## Overriding the template id
+
+The helper looks for `params.templateId` first, otherwise it falls back to the environment variable `CUSTOMER_IO_GENERIC_EMAIL_TEMPLATE_ID`. Temporal workflows set `customerIOTemplateId` when the template id must be deterministic inside the sandbox.
+
+```ts
+await sendGenericTransactionalEmail({
+  email: 'student@example.edu',
+  subject: 'Testing a new template',
+  textBody: 'Hello world',
+  templateId: 'new_custom_template_id',
+});
+```
+
+---
+
+## Troubleshooting
+
+- **Template id errors**: Ensure `CUSTOMER_IO_GENERIC_EMAIL_TEMPLATE_ID` is set in Doppler for the `services-engine` project *or* explicitly provide `templateId`.
+- **HTML escaping**: The helper automatically escapes HTML in plain-text inputs. Provide `htmlBody` if you need richer markup.
+- **CTA optionality**: Skip `ctaLabel`/`ctaUrl` when you don’t want a button – the template hides the CTA block when either value is absent.
+
+For more advanced use (e.g. multi-locale templates, attachments), extend `sendCustomerIOTransactionalMessage` instead of this helper.

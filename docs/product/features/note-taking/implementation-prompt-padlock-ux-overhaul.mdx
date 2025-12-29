@@ -1,0 +1,788 @@
+---
+title: "Implementation Prompt   PadLock UX Overhaul"
+description: "Copy and paste this entire prompt into a new Claude Code chat:"
+---
+
+# Implementation Prompt - PadLock UX Overhaul
+
+#prompt #implementation #padlock #ux-overhaul
+
+**Purpose**: Comprehensive prompt for fresh Claude Code session to implement instant-start note-taking UX
+
+**Date**: October 1, 2025
+
+---
+
+## 🎯 Prompt for Fresh Claude Code Session
+
+Copy and paste this entire prompt into a new Claude Code chat:
+
+---
+
+```markdown
+# PadLock Note-Taking UX Overhaul - Implementation Task
+
+## Context
+
+I need you to completely redesign and implement the PadLock note-taking feature in DormWay to eliminate friction for college students taking notes during live lectures. The current implementation requires 10 interactions before students can start typing, which is unacceptable for the "12 seconds to capture a thought before the professor moves on" reality.
+
+## 🔍 Step 1: Review Documentation
+
+First, search and read these documents in the Obsidian vault to understand the full context:
+
+```bash
+# From dormway-platform directory
+npm run obsidian:search -- "PadLock UX Analysis College Student Flow"
+npm run obsidian:search -- "note taking student autosave flow"
+npm run obsidian:search -- "current class detection calendar context"
+npm run obsidian:search -- "DocVault document metadata"
+```
+
+**Key Documents to Read**:
+1. `Features/Note Taking/PadLock UX Analysis - College Student Flow.md` - Complete UX analysis with wireframes
+2. Architecture docs about current PadLock implementation
+3. Calendar integration docs for auto-class detection
+4. DocVault backend API documentation
+
+## 📍 Step 2: Locate Current Implementation
+
+Find and examine these files:
+
+**Frontend (dormway-lockedin):**
+```bash
+# Search for PadLock components
+cd services/dormway-lockedin
+find . -name "*padlock*" -o -name "*PadLock*" -o -name "*note*" | grep -v node_modules
+```
+
+**Expected locations:**
+- `src/app/(authenticated)/padlock/page.tsx` - Main PadLock page
+- `src/components/padlock/` - PadLock-specific components
+- `src/lib/api/notes.ts` or similar - API client for notes
+
+**Backend (api-router):**
+```bash
+# Search for notes/documents routes
+cd services/api-router
+grep -r "padlock\|notes\|documents" src/routes/ --include="*.ts"
+```
+
+**Expected locations:**
+- `src/routes/notes-routes.ts` or `src/routes/documents-routes.ts`
+- Look for endpoints like `/api/notes`, `/api/documents/text`
+
+## 🎯 Step 3: Understand Current Flow Issues
+
+Based on the UX analysis, the current flow has these problems:
+
+### Current Flow (BAD - 10 interactions):
+1. User clicks "Notes" tab
+2. Sees empty PadLock page
+3. Clicks "New Document" button
+4. **MODAL APPEARS** 🚨
+5. Must enter "Document Title"
+6. Must select "Associate with Class" dropdown
+7. Must select "Document Type" (Notes/Essay/Summary/Other)
+8. Optional tags field
+9. Clicks "Start Document"
+10. Finally can type
+
+### Target Flow (GOOD - 1 interaction):
+1. User clicks "Notes" tab
+2. **Cursor is already in editor, starts typing immediately**
+
+### What Should Happen Automatically:
+- ✅ Detect current class from calendar
+- ✅ Auto-save to browser storage every 3 seconds
+- ✅ Sync to backend every 30 seconds
+- ✅ Show subtle "Saved to DIGITAL 202" banner
+- ✅ AI suggests title after 50+ words typed
+- ✅ Default document type = "Notes"
+
+## 🛠️ Step 4: Implementation Tasks
+
+### P0: Must Have (Lecture MVP)
+
+#### Task 1: Remove Modal, Enable Instant Start
+**File**: `src/app/(authenticated)/padlock/page.tsx` (or similar)
+
+**Changes**:
+1. Remove "New Document" button and modal component
+2. Render editor directly on page load
+3. Auto-focus cursor in editor on mount
+4. Initialize empty document session in memory
+
+**Code Pattern**:
+```typescript
+// BAD - Current
+const [showModal, setShowModal] = useState(false);
+<Button onClick={() => setShowModal(true)}>New Document</Button>
+{showModal && <DocumentModal />}
+
+// GOOD - New
+const editorRef = useRef<HTMLTextAreaElement>(null);
+
+useEffect(() => {
+  // Auto-focus editor on mount
+  editorRef.current?.focus();
+
+  // Initialize empty session
+  initializeNoteSession();
+}, []);
+
+return <Editor ref={editorRef} autoFocus />;
+```
+
+#### Task 2: Implement Browser-Based Autosave
+**File**: `src/lib/autosave.ts` (create new)
+
+**Requirements**:
+- Save to `localStorage` every 3 seconds
+- Key format: `padlock_draft_${timestamp}`
+- Include: content, class context, metadata
+- Restore on page reload
+
+**Code Pattern**:
+```typescript
+// New file: src/lib/autosave.ts
+const AUTOSAVE_INTERVAL = 3000; // 3s
+const STORAGE_KEY_PREFIX = 'padlock_draft_';
+
+export function useAutosave(content: string, metadata: NoteMetadata) {
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const draft = {
+        content,
+        metadata,
+        timestamp: Date.now(),
+        version: 1
+      };
+      localStorage.setItem(
+        `${STORAGE_KEY_PREFIX}${metadata.id}`,
+        JSON.stringify(draft)
+      );
+    }, AUTOSAVE_INTERVAL);
+
+    return () => clearInterval(timer);
+  }, [content, metadata]);
+}
+
+export function restoreDraft(): NoteDraft | null {
+  // Find most recent draft
+  const keys = Object.keys(localStorage)
+    .filter(k => k.startsWith(STORAGE_KEY_PREFIX));
+
+  if (keys.length === 0) return null;
+
+  // Get most recent
+  const latestKey = keys.sort().pop()!;
+  const draft = localStorage.getItem(latestKey);
+  return draft ? JSON.parse(draft) : null;
+}
+```
+
+#### Task 3: Auto-Detect Current Class
+**File**: `src/lib/context/class-detection.ts` (create new)
+
+**API Integration**:
+```typescript
+// Call existing calendar endpoint
+const response = await fetch('/api/mobile/calendar/current');
+const currentClass = await response.json();
+
+// Expected response:
+{
+  classId: 'uuid',
+  className: 'DIGITAL 202',
+  courseCode: 'DIGITAL 202/AMCULT 202',
+  startTime: '2025-10-01T14:30:00Z',
+  endTime: '2025-10-01T15:50:00Z'
+}
+```
+
+**Implementation**:
+```typescript
+export async function detectCurrentClass(): Promise<ClassContext | null> {
+  try {
+    const response = await fetch('/api/mobile/calendar/current');
+    if (!response.ok) return null;
+
+    const data = await response.json();
+    return {
+      id: data.classId,
+      name: data.className,
+      code: data.courseCode,
+      isActive: true
+    };
+  } catch (error) {
+    console.error('Failed to detect current class:', error);
+    return null;
+  }
+}
+
+// Use in PadLock component
+useEffect(() => {
+  detectCurrentClass().then(classContext => {
+    if (classContext) {
+      setNoteMetadata(prev => ({
+        ...prev,
+        classId: classContext.id,
+        className: classContext.name,
+        autoDetected: true
+      }));
+
+      // Show toast notification
+      toast.success(`Taking notes for ${classContext.name}`, {
+        icon: '📝',
+        duration: 3000
+      });
+    }
+  });
+}, []);
+```
+
+#### Task 4: Smart Context Banner
+**File**: `src/components/padlock/ContextBanner.tsx` (create new)
+
+**Design**:
+```tsx
+export function ContextBanner({
+  className,
+  autoDetected,
+  onChangeClass
+}: ContextBannerProps) {
+  if (!className) return null;
+
+  return (
+    <div className="bg-blue-50 dark:bg-blue-900/20 border-b border-blue-200 dark:border-blue-800 px-4 py-2 flex items-center justify-between">
+      <div className="flex items-center gap-2 text-sm">
+        <span className="text-blue-600 dark:text-blue-400">📚</span>
+        <span className="font-medium">{className}</span>
+        {autoDetected && (
+          <span className="text-xs text-blue-600 dark:text-blue-400">
+            (auto-detected)
+          </span>
+        )}
+        <span className="text-green-600 dark:text-green-400 text-xs">
+          Auto-saving ✓
+        </span>
+      </div>
+
+      <button
+        onClick={onChangeClass}
+        className="text-xs text-blue-600 hover:text-blue-700 dark:text-blue-400"
+      >
+        Change
+      </button>
+    </div>
+  );
+}
+```
+
+#### Task 5: Backend Sync (30s intervals)
+**File**: `src/lib/backend-sync.ts` (create new)
+
+**Requirements**:
+- Sync to backend every 30 seconds
+- Use existing `/api/proxy/search/documents/text` endpoint (or create new)
+- Queue syncs if offline, retry on reconnect
+- Show sync status in UI
+
+**Code Pattern**:
+```typescript
+const SYNC_INTERVAL = 30000; // 30s
+
+export function useBackendSync(
+  noteId: string,
+  content: string,
+  metadata: NoteMetadata
+) {
+  const [syncStatus, setSyncStatus] = useState<'idle' | 'syncing' | 'error'>('idle');
+  const [lastSyncTime, setLastSyncTime] = useState<Date | null>(null);
+
+  useEffect(() => {
+    const timer = setInterval(async () => {
+      if (content.trim().length === 0) return;
+
+      setSyncStatus('syncing');
+
+      try {
+        await fetch('/api/notes/sync', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            noteId,
+            content,
+            metadata,
+            timestamp: Date.now()
+          })
+        });
+
+        setLastSyncTime(new Date());
+        setSyncStatus('idle');
+      } catch (error) {
+        console.error('Sync failed:', error);
+        setSyncStatus('error');
+        // Will retry on next interval
+      }
+    }, SYNC_INTERVAL);
+
+    return () => clearInterval(timer);
+  }, [noteId, content, metadata]);
+
+  // Sync immediately on page unload
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      // Use synchronous storage as fallback
+      localStorage.setItem(`pending_sync_${noteId}`, JSON.stringify({
+        content,
+        metadata,
+        timestamp: Date.now()
+      }));
+    };
+
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [noteId, content, metadata]);
+
+  return { syncStatus, lastSyncTime };
+}
+```
+
+### P1: Should Have (Week 1)
+
+#### Task 6: AI Title Suggestions
+**Trigger**: After student types 50+ words
+**API**: Use existing Ace LLM endpoint or create new
+
+```typescript
+async function suggestTitle(content: string): Promise<string> {
+  if (content.split(/\s+/).length < 50) return '';
+
+  const response = await fetch('/api/ai/suggest-title', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ content })
+  });
+
+  const { title } = await response.json();
+  return title; // e.g., "Notes - Lecture 5: Binary Search Trees"
+}
+
+// Show as toast with accept/dismiss
+toast.info(
+  <div>
+    <p>Suggested title: <strong>{suggestedTitle}</strong></p>
+    <button onClick={acceptTitle}>Use this</button>
+  </div>,
+  { duration: 10000 }
+);
+```
+
+#### Task 7: Recent Notes Quick-Resume
+**File**: `src/components/padlock/RecentNotes.tsx`
+
+**Design**: Show 3 most recent notes below editor when empty
+
+```tsx
+export function RecentNotes({ onResumeNote }: RecentNotesProps) {
+  const { data: recentNotes } = useQuery({
+    queryKey: ['recent-notes'],
+    queryFn: () => fetch('/api/notes/recent?limit=3').then(r => r.json())
+  });
+
+  return (
+    <div className="mt-8 border-t pt-4">
+      <h3 className="text-sm font-medium text-gray-500 mb-2">Recent notes</h3>
+      {recentNotes?.map(note => (
+        <button
+          key={note.id}
+          onClick={() => onResumeNote(note)}
+          className="w-full text-left px-3 py-2 hover:bg-gray-50 rounded"
+        >
+          <div className="font-medium">{note.title}</div>
+          <div className="text-xs text-gray-500">
+            {note.className} · {formatRelativeTime(note.updatedAt)}
+          </div>
+        </button>
+      ))}
+    </div>
+  );
+}
+```
+
+#### Task 8: Ace Chat → PadLock Handoff
+**File**: `src/components/ace/ChatMessage.tsx`
+
+**Add "Save to Notes" button** on Ace responses:
+
+```tsx
+// In Ace Chat message component
+<div className="mt-2 flex gap-2">
+  <button
+    onClick={() => saveToCurrentNotes(message.content)}
+    className="text-xs text-blue-600 hover:underline"
+  >
+    💾 Save to current notes
+  </button>
+  <button
+    onClick={() => saveAsNewNote(message.content)}
+    className="text-xs text-blue-600 hover:underline"
+  >
+    📝 Save as new note
+  </button>
+</div>
+
+// Implementation
+async function saveToCurrentNotes(content: string) {
+  // Append to active PadLock session
+  const currentSession = getPadLockSession();
+  if (currentSession) {
+    appendToPadLock(content);
+    toast.success('Added to your notes');
+  } else {
+    // Create new note
+    saveAsNewNote(content);
+  }
+}
+```
+
+#### Task 9: Inbox → Templated Notes
+**File**: `src/components/inbox/StudySuggestionCard.tsx`
+
+**Modify "Open Notes" button** to pre-populate template:
+
+```tsx
+async function openNotesWithTemplate(suggestion: StudySuggestion) {
+  const template = `# Prep for ${suggestion.title} (${suggestion.className})
+
+${suggestion.aiGeneratedContent}
+
+## My notes:
+-
+`;
+
+  // Create new note with template
+  const note = await createNote({
+    content: template,
+    classId: suggestion.classId,
+    className: suggestion.className,
+    type: 'notes',
+    metadata: {
+      source: 'inbox_suggestion',
+      suggestionId: suggestion.id
+    }
+  });
+
+  // Navigate to PadLock with this note
+  router.push(`/padlock?noteId=${note.id}`);
+}
+```
+
+## 📋 Step 5: Backend API Changes
+
+### Endpoints to Create/Modify
+
+#### 1. `POST /api/notes/sync` - Backend sync endpoint
+```typescript
+// services/api-router/src/routes/notes-routes.ts
+router.post('/sync', async (req, res) => {
+  const { noteId, content, metadata, timestamp } = req.body;
+  const userId = req.user.id; // from Auth0 JWT
+
+  // Upsert note to database
+  await db.query(`
+    INSERT INTO notes (id, user_id, content, metadata, updated_at)
+    VALUES ($1, $2, $3, $4, $5)
+    ON CONFLICT (id) DO UPDATE
+    SET content = $3, metadata = $4, updated_at = $5
+  `, [noteId, userId, content, metadata, new Date(timestamp)]);
+
+  res.json({ success: true, syncedAt: new Date() });
+});
+```
+
+#### 2. `GET /api/mobile/calendar/current` - Current class detection
+**Check if exists**, if not create:
+```typescript
+router.get('/calendar/current', async (req, res) => {
+  const userId = req.user.id;
+  const now = new Date();
+
+  // Query for class happening right now
+  const result = await db.query(`
+    SELECT
+      tb.id,
+      tb.title as class_name,
+      ctx.metadata->>'course_code' as course_code,
+      tb.start_time,
+      tb.end_time
+    FROM time_blocks tb
+    JOIN contexts ctx ON ctx.id = tb.context_id
+    WHERE tb.user_id = $1
+      AND tb.start_time <= $2
+      AND tb.end_time >= $2
+      AND tb.event_type = 'class'
+    LIMIT 1
+  `, [userId, now]);
+
+  if (result.rows.length === 0) {
+    return res.status(404).json({ message: 'No class currently in session' });
+  }
+
+  res.json({
+    classId: result.rows[0].id,
+    className: result.rows[0].class_name,
+    courseCode: result.rows[0].course_code,
+    startTime: result.rows[0].start_time,
+    endTime: result.rows[0].end_time
+  });
+});
+```
+
+#### 3. `GET /api/notes/recent` - Recent notes
+```typescript
+router.get('/recent', async (req, res) => {
+  const userId = req.user.id;
+  const limit = parseInt(req.query.limit as string) || 10;
+
+  const notes = await db.query(`
+    SELECT id, title, content, metadata, updated_at
+    FROM notes
+    WHERE user_id = $1
+    ORDER BY updated_at DESC
+    LIMIT $2
+  `, [userId, limit]);
+
+  res.json(notes.rows);
+});
+```
+
+#### 4. `POST /api/ai/suggest-title` - AI title generation
+```typescript
+router.post('/suggest-title', async (req, res) => {
+  const { content } = req.body;
+
+  // Use existing Ace LLM endpoint or OpenAI
+  const response = await fetch('http://localhost:8000/api/v1/crew/execute', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      crew: 'title-generator',
+      input: { content: content.slice(0, 500) } // First 500 chars
+    })
+  });
+
+  const { title } = await response.json();
+  res.json({ title });
+});
+```
+
+## 🧪 Step 6: Testing Checklist
+
+### Manual Testing
+1. ✅ Open PadLock → cursor in editor immediately (no clicks)
+2. ✅ Start typing → autosave indicator appears
+3. ✅ During class hours → class name auto-detected and shown
+4. ✅ Type 50+ words → AI suggests title
+5. ✅ Close tab → reopen → draft restored
+6. ✅ Go offline → type → go online → syncs automatically
+7. ✅ In Ace Chat → click "Save to notes" → appends to PadLock
+8. ✅ In Inbox → click "Open Notes" → template pre-populated
+
+### Unit Tests
+```typescript
+// tests/padlock/autosave.test.ts
+describe('Autosave', () => {
+  it('saves to localStorage every 3 seconds', async () => {
+    const { result } = renderHook(() => useAutosave('test content', metadata));
+
+    await waitFor(() => {
+      expect(localStorage.getItem).toHaveBeenCalledWith('padlock_draft_...');
+    }, { timeout: 4000 });
+  });
+
+  it('restores draft on mount', () => {
+    localStorage.setItem('padlock_draft_123', JSON.stringify(mockDraft));
+    const draft = restoreDraft();
+    expect(draft.content).toBe(mockDraft.content);
+  });
+});
+```
+
+### E2E Tests
+```typescript
+// e2e/padlock-flow.spec.ts
+test('instant start flow', async ({ page }) => {
+  await page.goto('/padlock');
+
+  // Cursor should be in editor immediately
+  const editor = page.locator('[role="textbox"]');
+  await expect(editor).toBeFocused();
+
+  // Start typing
+  await editor.type('Test note content');
+
+  // Check autosave indicator
+  await expect(page.locator('text=Auto-saving')).toBeVisible();
+
+  // Verify localStorage
+  const draft = await page.evaluate(() => {
+    const keys = Object.keys(localStorage).filter(k => k.startsWith('padlock_draft_'));
+    return localStorage.getItem(keys[0]);
+  });
+  expect(draft).toContain('Test note content');
+});
+```
+
+## 📊 Step 7: Success Metrics
+
+After implementation, track these metrics:
+
+```typescript
+// Analytics events to add
+analytics.track('padlock_opened', {
+  timeToFirstKeystroke: performance.now() - mountTime,
+  classAutoDetected: !!detectedClass,
+  hadDraftRestored: !!restoredDraft
+});
+
+analytics.track('padlock_autosave', {
+  wordCount: content.split(/\s+/).length,
+  saveLocation: 'browser' | 'backend',
+  success: true
+});
+
+analytics.track('padlock_session_complete', {
+  durationSeconds: sessionDuration,
+  finalWordCount: wordCount,
+  classAssociated: !!metadata.classId,
+  titleSuggestionAccepted: acceptedAISuggestion
+});
+```
+
+**Target Metrics**:
+- Time to first keystroke: < 500ms
+- Autosave success rate: > 99.9%
+- Class auto-detection rate: > 80% during class hours
+- Draft recovery rate: 100% on crash/reload
+- Notes per week per user: 8+ (up from 2.3)
+
+## 🚀 Step 8: Deployment Plan
+
+### Phase 1: P0 Features (Week 1)
+- Remove modal
+- Instant start with autofocus
+- Browser autosave (3s)
+- Class auto-detection
+- Context banner
+
+### Phase 2: P1 Features (Week 2)
+- Backend sync (30s)
+- Recent notes
+- AI title suggestions
+
+### Phase 3: Integrations (Week 3)
+- Ace Chat handoff
+- Inbox templated notes
+- Mobile optimizations
+
+### Rollout Strategy
+1. Deploy to staging
+2. User test with 5 students
+3. Fix critical issues
+4. Feature flag rollout (10% → 50% → 100%)
+5. Monitor metrics and iterate
+
+## 📚 Additional Resources
+
+### Related Documentation
+```bash
+npm run obsidian:search -- "calendar integration time blocks"
+npm run obsidian:search -- "Aurora database schema notes"
+npm run obsidian:search -- "Ace LLM endpoints"
+npm run obsidian:search -- "mobile autosave offline"
+```
+
+### Existing Code Patterns
+- Look at how Ace Chat handles real-time typing
+- Check how DocVault handles file uploads (for save patterns)
+- Review Inbox card actions (for template patterns)
+
+### Design System
+- Use existing DormWay design tokens
+- Follow glassmorphic theme patterns
+- Reference `src/components/ui/` components
+
+## ✅ Acceptance Criteria
+
+**Must demonstrate**:
+1. Student clicks "Notes" → typing within 300ms
+2. No modals before typing
+3. Autosave works offline
+4. Class auto-detection during lecture hours
+5. Never lose data (even on browser crash)
+
+**User test success**:
+> "You're in lecture, professor just said something important about the midterm. Capture it."
+>
+> **Success = Student typing within 2 seconds**
+
+---
+
+## 🤝 Questions to Ask Me
+
+If you need clarification on:
+1. Existing API endpoints and their exact paths
+2. Database schema for notes/documents table
+3. Auth0 JWT token validation patterns
+4. Ably real-time integration for sync status
+5. Mobile-specific considerations
+
+Just ask and I'll search the codebase/vault for you.
+
+## 📝 Deliverables
+
+When complete, provide:
+1. ✅ List of all files modified with git diff summaries
+2. ✅ New API endpoints created with curl examples
+3. ✅ Migration plan for existing notes (if schema changes)
+4. ✅ Updated documentation in Obsidian vault
+5. ✅ Test results (manual + automated)
+6. ✅ Deployment checklist
+
+---
+
+**Let's build a note-taking experience that feels like magic.** 🚀
+```
+
+---
+
+## Usage Instructions
+
+1. **Copy the entire prompt above** (everything between the triple backticks)
+2. **Start a fresh Claude Code chat**
+3. **Paste the prompt**
+4. **Let Claude Code investigate** using the vault search commands
+5. **Claude will**:
+   - Search vault for UX analysis
+   - Locate current implementation files
+   - Understand the issues
+   - Implement P0 features
+   - Create tests
+   - Provide deployment plan
+
+## Why This Prompt Works
+
+✅ **Self-contained**: Fresh chat has everything it needs
+✅ **Guided discovery**: Uses vault search to build context
+✅ **Clear priorities**: P0 → P1 → P2 structure
+✅ **Code examples**: Shows exact patterns to implement
+✅ **Acceptance criteria**: Defines "done"
+✅ **Fallback**: Asks for clarification if stuck
+
+---
+
+## Tags
+
+#prompt #implementation #padlock #ux-overhaul #claude-code #instant-start #autosave

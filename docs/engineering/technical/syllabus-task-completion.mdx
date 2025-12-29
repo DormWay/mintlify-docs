@@ -1,0 +1,225 @@
+---
+title: "Syllabus Task Completion"
+description: "Syllabus tasks are ephemeral assignments extracted from processed syllabus data. Unlike manual tasks (stored in `tasks` table) or Canvas assignments (synced..."
+---
+
+# Syllabus Task Completion System
+
+## Overview
+
+Syllabus tasks are ephemeral assignments extracted from processed syllabus data. Unlike manual tasks (stored in `tasks` table) or Canvas assignments (synced from LMS), syllabus tasks are generated on-the-fly from `service_data` with no inherent persistence.
+
+This document describes the completion tracking system that allows students to mark syllabus tasks as complete.
+
+## Problem Statement
+
+Previously, syllabus tasks had no completion mechanism:
+- Generated dynamically with `status: 'pending'` always
+- No way to mark them complete
+- Past-due tasks cluttered the task list (90-day lookback)
+- iOS and web apps had no API to complete them
+
+## Solution Architecture
+
+### Task ID Format
+
+Syllabus tasks use a synthetic ID format:
+```
+syllabus-{courseContextId}-{index}
+```
+
+Example: `syllabus-a1b2c3d4-5678-90ab-cdef-123456789012-3`
+
+### Completion Storage
+
+Completions are stored in the `assignment_completion` table (same as Canvas assignments):
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `user_id` | UUID | Student's account ID |
+| `assignment_id` | TEXT | The syllabus task ID |
+| `context_id` | UUID | Course context ID (optional) |
+| `completed_at` | TIMESTAMPTZ | When completed |
+| `is_completed` | BOOLEAN | Completion status |
+| `completion_source` | TEXT | Always `'manual'` for syllabus tasks |
+
+### Data Flow
+
+```
+iOS/Web App
+    │
+    ▼ PATCH /api/v2/students/me/tasks/{taskId}
+    │
+API Router (students.routes.ts)
+    │
+    ▼ student.completeSyllabusTask(taskId)
+    │
+Student Entity (dormway-core)
+    │
+    ▼ INSERT INTO assignment_completion
+    │
+PostgreSQL (Neon)
+```
+
+## Implementation Details
+
+### Student Entity Methods
+
+**Location:** `services/shared/dormway-core/src/entities/student/student.entity.ts`
+
+#### `completeSyllabusTask(taskId, options?)`
+
+Marks a syllabus task as complete.
+
+```typescript
+async completeSyllabusTask(
+  taskId: string,
+  options?: {
+    actualMinutes?: number;
+    difficultyRating?: number;
+    notes?: string;
+  }
+): Promise<ServiceResult<{ completed: boolean; taskId: string }>>
+```
+
+**Behavior:**
+- Validates task ID format (must start with `syllabus-`)
+- Extracts course context ID from task ID
+- Inserts/updates `assignment_completion` record
+- Clears entity cache
+
+#### `getCompletedSyllabusTaskIds()` (private)
+
+Returns a `Set<string>` of completed syllabus task IDs for filtering.
+
+```typescript
+private async getCompletedSyllabusTaskIds(): Promise<Set<string>>
+```
+
+**Behavior:**
+- Queries `assignment_completion` for `LIKE 'syllabus-%'`
+- Cached via lazy loading
+- Used by `getSyllabusAssignments()` to filter completed tasks
+
+#### `getSyllabusAssignments()` (updated)
+
+Now filters out completed tasks and only shows future assignments.
+
+**Changes:**
+- Fetches completed task IDs before generating list
+- Skips tasks that are in the completion set
+- Date range changed from `-90 days` to `now` (no past tasks)
+
+### API Endpoint
+
+**Endpoint:** `PATCH /api/v2/students/me/tasks/:taskId`
+
+**Location:** `services/api-router/src/routes/v2/students.routes.ts`
+
+**Request:**
+```json
+{
+  "status": "completed"
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "id": "syllabus-{courseId}-{index}",
+    "status": "completed",
+    "completedAt": "2025-12-19T10:30:00.000Z"
+  }
+}
+```
+
+**Logic:**
+1. Detects syllabus task via `taskId.startsWith('syllabus-')`
+2. Gets student entity via `StudentFactory`
+3. Calls `student.completeSyllabusTask(taskId)`
+4. Invalidates dashboard cache
+5. Returns completion response
+
+## Database Schema
+
+### assignment_completion Table
+
+```sql
+CREATE TABLE assignment_completion (
+  id UUID DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES accounts(id),
+  assignment_id TEXT NOT NULL,  -- Accepts syllabus task IDs
+  context_id UUID REFERENCES contexts(id),
+  completed_at TIMESTAMPTZ,
+  is_completed BOOLEAN DEFAULT FALSE,
+  completion_source TEXT CHECK (completion_source IN (
+    'manual', 'lms_sync', 'inferred', 'onboarding_bulk', 'migration_assumed'
+  )),
+  actual_minutes INTEGER,
+  difficulty_rating INTEGER CHECK (difficulty_rating BETWEEN 1 AND 5),
+  notes TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+) PARTITION BY RANGE (created_at);
+```
+
+**Key Points:**
+- `assignment_id` is TEXT, not UUID - accepts synthetic IDs
+- Partitioned by `created_at` for performance
+- Same table used for Canvas assignment completion
+
+## Task Sources Summary
+
+| Source | Storage | Completion Method |
+|--------|---------|-------------------|
+| Manual | `tasks` table | UPDATE tasks SET status = 'completed' |
+| Canvas | `canvas_assignments` | `assignment_completion` table |
+| Syllabus | Ephemeral (service_data) | `assignment_completion` table |
+
+## Related Files
+
+- **Entity:** `services/shared/dormway-core/src/entities/student/student.entity.ts`
+- **API Route:** `services/api-router/src/routes/v2/students.routes.ts`
+- **Migration:** `infrastructure/database/migrations/20251003_create_assignment_completion.sql`
+- **Types:** `services/shared/dormway-core/src/entities/student/student.types.ts`
+
+## Implementation Notes
+
+### Partitioned Table Constraint
+
+The `assignment_completion` table is partitioned by `created_at`, so the unique constraint is:
+```sql
+UNIQUE(user_id, assignment_id, created_at)
+```
+
+This means `ON CONFLICT (user_id, assignment_id)` **will not work** because that constraint doesn't exist.
+
+**Solution:** Check for existing completion first, then insert:
+```typescript
+// Check if already completed
+const existingCheck = await pool.query(
+  `SELECT id FROM assignment_completion
+   WHERE user_id = $1 AND assignment_id = $2 AND is_completed = true
+   LIMIT 1`,
+  [userId, taskId]
+);
+
+if (existingCheck.rows.length > 0) {
+  return { success: true, data: { completed: true, taskId } };
+}
+
+// Insert new completion record
+await pool.query(`INSERT INTO assignment_completion (...) VALUES (...)`);
+```
+
+## Future Considerations
+
+1. **Stable Task IDs:** Current ID format (`syllabus-{courseId}-{index}`) depends on assignment order. If syllabus data changes, IDs may shift. Consider hashing assignment properties for stability.
+
+2. **Undo Completion:** No current mechanism to un-complete a syllabus task. Could add `DELETE FROM assignment_completion` method if needed.
+
+3. **Completion Sync:** Canvas assignments sync completion from LMS. Syllabus tasks are manual-only.
+
+4. **Analytics:** Track `actual_minutes` and `difficulty_rating` for study time estimation ML.

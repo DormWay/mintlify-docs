@@ -1,0 +1,302 @@
+---
+title: "Google Calendar Onboarding Integration"
+description: "Added a new \"Integrations\" step to the dormway-lockedin onboarding flow where students can connect their Google Calendar during signup. This step is designed..."
+---
+
+# Google Calendar Onboarding Integration
+
+**Status**: ✅ Implemented
+**Date**: 2025-10-13
+**Linear Issue**: [DORM-340](https://linear.app/dormwayllc/issue/DORM-340)
+**Branch**: `feat/dorm-340-google-calendar-onboarding`
+
+## Overview
+
+Added a new "Integrations" step to the dormway-lockedin onboarding flow where students can connect their Google Calendar during signup. This step is designed for extensibility to support future integrations (Gmail, Google Drive, Notion, etc.).
+
+## Motivation
+
+Previously, students could only connect Google Calendar from the Vault section after completing onboarding. By offering this during onboarding:
+
+1. **Improved activation**: Students connect services when motivation is highest
+2. **Better first-run experience**: Calendar syncs immediately
+3. **Future-proof architecture**: Easy to add new integrations (Gmail, Drive, Notion)
+4. **Clear separation**: Schedule step = importing classes, Integrations step = connecting services
+
+## Implementation
+
+### New Onboarding Flow
+
+**Before** (6 steps):
+1. Welcome → Campus → Schedule → Housing → Personality → Complete
+
+**After** (7 steps):
+1. Welcome → Campus → Schedule → **Integrations** → Housing → Personality → Complete
+
+### Architecture
+
+#### Components Created
+
+**1. `IntegrationCard.tsx`** (`src/components/onboarding/IntegrationCard.tsx`)
+- Reusable card component for any integration
+- Handles all connection states: idle, connecting, connected, error
+- Supports "Coming Soon" placeholder state
+- Props:
+  - `title`, `description`, `icon` - Display info
+  - `status` - Connection state
+  - `comingSoon` - Disable for future integrations
+  - `errorMessage` - Error feedback
+  - `onConnect` - Connection handler
+  - `connectedContent` - Custom content when connected
+
+**2. `GoogleCalendarIntegration.tsx`** (`src/components/onboarding/GoogleCalendarIntegration.tsx`)
+- Wraps OAuth logic from existing `GoogleCalendarCard`
+- Uses `IntegrationCard` for consistent UI
+- OAuth popup flow with status polling
+- PostMessage integration for connection detection
+- Amplitude analytics tracking
+- Props:
+  - `onConnected` - Callback when successfully connected
+  - `className` - Optional styling
+
+#### Modified Files
+
+**`src/app/onboarding/page.tsx`**
+- Added `integrations` step definition
+- Added `integrationsConnected` state object
+- Implemented integrations step rendering
+- Added Google Calendar with 3 "Coming Soon" placeholders
+- Made step optional/skippable
+- Updated navigation logic
+
+### OAuth Flow
+
+```
+User clicks "Connect"
+  → POST /v1/calendar/google/auth (get authorize_url)
+  → Open popup window with Google OAuth
+  → User completes OAuth in popup
+  → Backend receives callback
+  → Popup sends postMessage('calendar-connected')
+  → Component starts status polling
+  → GET /v1/mobile/calendar/google/status (every 5s, max 24 attempts)
+  → Connection detected
+  → Update UI to "Connected" state
+  → Call onConnected() callback
+  → Update formData.integrationsConnected.googleCalendar = true
+```
+
+### State Management
+
+```typescript
+formData: {
+  // ... existing fields
+  integrationsConnected: {
+    googleCalendar: boolean,
+    // Future: gmail, drive, notion, etc.
+  }
+}
+```
+
+State is:
+- Tracked in component state during onboarding
+- Persisted to localStorage on completion
+- Sent to backend via `/api/proxy/mobile/onboarding/complete`
+
+### UI/UX Design
+
+**Integrations Step Layout:**
+```
+┌─────────────────────────────────────────┐
+│     Connect Your Tools (Optional)        │
+│   Link services you use to supercharge   │
+│              DormWay                      │
+├─────────────────────────────────────────┤
+│  ┌──────────────┐  ┌──────────────┐    │
+│  │ 📅 Google    │  │ 📧 Gmail     │    │
+│  │ Calendar     │  │ (Coming      │    │
+│  │              │  │  Soon)       │    │
+│  │ [Connect]    │  │              │    │
+│  └──────────────┘  └──────────────┘    │
+│                                          │
+│  ┌──────────────┐  ┌──────────────┐    │
+│  │ 📁 Google    │  │ 📝 Notion    │    │
+│  │ Drive        │  │ (Coming      │    │
+│  │ (Coming      │  │  Soon)       │    │
+│  │  Soon)       │  │              │    │
+│  └──────────────┘  └──────────────┘    │
+└─────────────────────────────────────────┘
+```
+
+**Connection States:**
+- **Idle**: Purple gradient button "Connect"
+- **Connecting**: Loading spinner + "Connecting..."
+- **Connected**: Green checkmark badge + "Connected" button (disabled)
+- **Error**: Amber border + error message + "Try Again" button
+- **Coming Soon**: Grayed out + "Available Soon" (disabled)
+
+### Analytics Events
+
+All events use `trackEventWithDefaults()` from Amplitude:
+
+1. **`onboarding_integration_viewed`**
+   - Fired when integrations step loads
+   - Properties: `service_name: 'google_calendar'`
+
+2. **`onboarding_integration_connect_clicked`**
+   - Fired when user clicks "Connect"
+   - Properties: `service_name: 'google_calendar'`
+
+3. **`onboarding_integration_connected`**
+   - Fired on successful connection
+   - Properties: `service_name: 'google_calendar'`, `connection_method: 'oauth_popup'`
+
+4. **`onboarding_integration_connect_failed`**
+   - Fired on connection error
+   - Properties: `service_name: 'google_calendar'`, `error: string`
+
+5. **`onboarding_step_completed`**
+   - Existing event, now fires for integrations step
+   - Properties: `step_name: 'integrations'`, `step_number: 4`
+
+## Environment Requirements
+
+**Required:**
+- `NEXT_PUBLIC_GOOGLE_CLIENT_ID` - Google OAuth client ID
+
+**Backend Endpoints Used** (already exist):
+- `GET /v1/mobile/calendar/google/status` - Check connection status
+- `POST /v1/calendar/google/auth` - Initiate OAuth flow
+- `DELETE /v1/mobile/calendar/google/disconnect` - Disconnect (not used in onboarding)
+
+## Testing
+
+### Manual Testing Checklist
+
+**Visual/UI:**
+- [ ] Integrations step appears as step 4 of 7
+- [ ] Grid layout: 2 columns desktop, 1 column mobile
+- [ ] Google Calendar card interactive, others show "Coming Soon"
+- [ ] UI matches onboarding design system
+
+**Google Calendar Connection:**
+- [ ] Click "Connect" opens OAuth popup
+- [ ] Status changes to "Connecting..." with spinner
+- [ ] Complete OAuth flow
+- [ ] Popup auto-closes
+- [ ] Card shows "Connected" with checkmark
+- [ ] Last sync time displays
+
+**Error Handling:**
+- [ ] Close popup → error state with "Try Again"
+- [ ] Retry works
+
+**Navigation:**
+- [ ] Back button → Schedule step
+- [ ] "Skip this step" button appears
+- [ ] Continue button → Housing step
+- [ ] Can skip without connecting
+
+**State Persistence:**
+- [ ] Complete onboarding with calendar connected
+- [ ] Check localStorage `userPreferences`
+- [ ] Verify `integrationsConnected.googleCalendar: true`
+
+**Analytics:**
+- [ ] All events fire correctly (check browser console)
+
+### Smoke Test Script
+
+```bash
+# Start dev server
+cd services/dormway-lockedin
+npm run dev
+
+# Navigate to http://localhost:3008/onboarding
+# Complete steps 1-3
+# On step 4 (Integrations):
+#   - Click "Connect" on Google Calendar
+#   - Complete OAuth in popup
+#   - Verify "Connected" state
+#   - Click Continue
+# Complete remaining steps
+# Verify onboarding completes successfully
+```
+
+## Future Extensions
+
+### Adding New Integrations
+
+**Example: Adding Gmail Integration**
+
+1. Create `src/components/onboarding/GmailIntegration.tsx`:
+```typescript
+export function GmailIntegration({ onConnected, className }) {
+  // OAuth flow similar to GoogleCalendarIntegration
+  // Use IntegrationCard for UI
+  // Track with service_name: 'gmail'
+}
+```
+
+2. Update `src/app/onboarding/page.tsx`:
+```typescript
+// Replace "Coming Soon" placeholder
+<GmailIntegration
+  onConnected={() => {
+    setFormData(prev => ({
+      ...prev,
+      integrationsConnected: {
+        ...prev.integrationsConnected,
+        gmail: true,
+      }
+    }));
+  }}
+/>
+```
+
+3. Add backend endpoints:
+- `POST /v1/gmail/auth` - Initiate OAuth
+- `GET /v1/gmail/status` - Check connection
+- `DELETE /v1/gmail/disconnect` - Disconnect
+
+### Integration Guidelines
+
+**For each new integration:**
+1. Create dedicated component in `src/components/onboarding/`
+2. Use `IntegrationCard` wrapper for consistent UI
+3. Follow OAuth popup pattern
+4. Add status polling (5s intervals, 24 max attempts)
+5. Track analytics with `service_name` property
+6. Update `integrationsConnected` state object
+7. Add backend endpoints as needed
+
+**Design Considerations:**
+- Grid layout supports 4+ cards (wraps nicely)
+- Cards have consistent height (~200px)
+- "Coming Soon" opacity: 50%
+- Connected state: green accent (#10b981)
+- Error state: amber accent (#f59e0b)
+
+## Known Issues / Limitations
+
+1. **OAuth popup blockers**: Some browsers may block the popup. Users need to allow popups for the site.
+2. **Status polling timeout**: If backend is slow, 2-minute timeout may not be enough (increase `attempts` if needed).
+3. **No disconnect during onboarding**: Users must complete onboarding to disconnect from Vault section.
+4. **Environment variable required**: `NEXT_PUBLIC_GOOGLE_CLIENT_ID` must be set or integration shows error.
+
+## Related Documentation
+
+- [Google Calendar Card (Vault)](../../Engineering/Technical/iOS/iOS%20Calendar%20Sync%20System.md)
+- [Onboarding Flow Architecture](../../Engineering/Technical/Engine/Onboarding%20Workflows.md)
+- [OAuth Implementation Guide](../../Engineering/Technical/Authentication/OAuth%20Patterns.md)
+- Linear Issue: [DORM-340](https://linear.app/dormwayllc/issue/DORM-340)
+
+## Changelog
+
+**2025-10-13** - Initial implementation
+- Created `IntegrationCard` reusable component
+- Created `GoogleCalendarIntegration` with OAuth flow
+- Added "Integrations" step to onboarding (step 4 of 7)
+- Added placeholder cards for Gmail, Drive, Notion
+- Implemented analytics tracking
+- Made step optional/skippable

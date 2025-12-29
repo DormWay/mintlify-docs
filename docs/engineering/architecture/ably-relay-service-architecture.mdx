@@ -1,0 +1,722 @@
+---
+title: "Ably Relay Service Architecture"
+description: "1. #service-overview|Service Overview 2. #architecture-components|Architecture Components 3. #message-flow-patterns|Message Flow Patterns 4. #presence-manage..."
+---
+
+# Ably Relay Service Architecture
+
+**Overview**: The Ably Relay service is a critical TypeScript/Node.js service that acts as a bridge between Temporal workflows and Ably real-time channels, enabling seamless communication between the iOS app and backend processing systems.
+
+## Table of Contents
+
+1. #service-overview|Service Overview
+2. #architecture-components|Architecture Components
+3. #message-flow-patterns|Message Flow Patterns
+4. #presence-management|Presence Management
+5. #telemetry-processing|Telemetry Processing
+6. #integration-points|Integration Points
+7. #deployment--scaling|Deployment & Scaling
+
+## Service Overview
+
+### Purpose and Responsibilities
+
+```mermaid
+graph TB
+    subgraph "iOS App Ecosystem"
+        iOS[DormWayFresh iOS]
+        Telemetry[Telemetry Data]
+        Presence[User Presence]
+    end
+    
+    subgraph "Ably Relay Service"
+        Listener[Ably Listener]
+        Orchestrator[Relay Orchestrator]
+        Dispatcher[Temporal Dispatcher]
+        PresenceHandler[Presence Handler]
+    end
+    
+    subgraph "Backend Processing"
+        Temporal[Temporal Workflows]
+        Context[Context Processing]
+        Analytics[Analytics Engine]
+    end
+    
+    iOS --> Telemetry
+    iOS --> Presence
+    
+    Telemetry --> Listener
+    Presence --> PresenceHandler
+    
+    Listener --> Orchestrator
+    PresenceHandler --> Orchestrator
+    Orchestrator --> Dispatcher
+    
+    Dispatcher --> Temporal
+    Temporal --> Context
+    Temporal --> Analytics
+```
+
+**Core Responsibilities:**
+1. **Real-time Bridge**: Connect Ably channels to Temporal workflows
+2. **Telemetry Relay**: Forward iOS telemetry data to processing systems
+3. **Presence Tracking**: Monitor user sessions and activity states
+4. **Event Orchestration**: Coordinate between real-time events and batch processing
+5. **Session Management**: Track user lifecycle across the platform
+6. **Context Prediction Telemetry**: Comprehensive logging of ML prediction requests and responses for deep analysis
+
+## Architecture Components
+
+### Service Structure
+
+```mermaid
+graph LR
+    subgraph "Core Services"
+        AL[AblyListener]
+        TD[TemporalDispatcher]
+        PH[PresenceHandler]
+        RO[RelayOrchestrator]
+    end
+    
+    subgraph "Configuration"
+        Config[Config Manager]
+        Logger[Logger Service]
+    end
+    
+    subgraph "External Interfaces"
+        Ably[Ably Real-time]
+        Temporal[Temporal Client]
+        Metrics[Metrics Store]
+    end
+    
+    Config --> AL
+    Config --> TD
+    Config --> PH
+    
+    AL --> Ably
+    TD --> Temporal
+    RO --> Metrics
+    
+    AL --> RO
+    TD --> RO
+    PH --> RO
+    
+    Logger --> AL
+    Logger --> TD
+    Logger --> PH
+```
+
+### Component Responsibilities
+
+#### AblyListener (`ably-listener.ts`)
+- Subscribes to Ably channels for incoming messages
+- Handles connection state management
+- Processes real-time events from iOS app
+- Manages channel subscriptions and unsubscriptions
+
+#### TemporalDispatcher (`temporal-dispatcher.ts`)
+- Dispatches events to appropriate Temporal workflows
+- Handles workflow execution management
+- Manages retry logic for failed dispatches
+- Maintains workflow state tracking
+
+#### PresenceHandler (`presence-handler.ts`)
+- Tracks user presence events (enter/leave/update)
+- Manages session duration tracking
+- Handles presence data aggregation
+- Coordinates with user context updates
+
+#### RelayOrchestrator (`relay-orchestrator.ts`)
+- Coordinates between all service components
+- Manages event routing and prioritization
+- Handles service health monitoring
+- Orchestrates shutdown and cleanup procedures
+
+## Message Flow Patterns
+
+### Telemetry Data Flow
+
+```mermaid
+sequenceDiagram
+    participant iOS as iOS App
+    participant Ably as Ably Channel
+    participant Relay as Ably Relay
+    participant Temporal as Temporal Workflow
+    participant Storage as Data Storage
+    
+    iOS->>Ably: Publish telemetry event
+    Note over iOS,Ably: Channel: "telemetry"
+    
+    Ably->>Relay: Forward event to listener
+    Relay->>Relay: Validate & enrich event
+    Relay->>Temporal: Dispatch to processing workflow
+    
+    Temporal->>Temporal: Process telemetry data
+    Temporal->>Storage: Store processed data
+    Temporal->>Temporal: Trigger context updates
+    
+    Note over Relay,Temporal: Event types: location, health, screentime
+```
+
+### User Update Flow
+
+```mermaid
+sequenceDiagram
+    participant Temporal as Temporal Workflow
+    participant API as API Router
+    participant Ably as Ably Channel
+    participant Relay as Ably Relay
+    participant iOS as iOS App
+    
+    Temporal->>Temporal: Process context change
+    Temporal->>API: Trigger user update
+    API->>Ably: Publish to user channel
+    Note over API,Ably: Channel: "user:userid:updates"
+    
+    Ably->>iOS: Deliver update message
+    iOS->>iOS: Update UI state
+    
+    Note over Temporal,iOS: Update types: context, widget, notification, insight
+```
+
+### System Broadcast Flow
+
+```mermaid
+sequenceDiagram
+    participant Admin as Admin/System
+    participant API as API Router
+    participant Ably as Ably Channel
+    participant iOS as iOS App
+    participant Relay as Ably Relay
+    
+    Admin->>API: Trigger system broadcast
+    API->>Ably: Publish to broadcast channel
+    Note over API,Ably: Channel: "system:broadcast"
+    
+    Ably->>iOS: Deliver to all connected users
+    Ably->>Relay: Monitor broadcast metrics
+    
+    iOS->>iOS: Handle system message
+    Relay->>Relay: Track broadcast delivery
+    
+    Note over Admin,Relay: Broadcast types: maintenance, updates, alerts
+```
+
+## Presence Management
+
+### Presence Event Handling
+
+```mermaid
+stateDiagram-v2
+    [*] --> Offline
+    Offline --> Online : User enters presence
+    Online --> Active : User activity detected
+    Active --> Idle : No activity timeout
+    Idle --> Active : Activity resumed
+    Active --> Online : Reduced activity
+    Online --> Offline : User leaves presence
+    Offline --> [*]
+    
+    state Online {
+        [*] --> Connecting
+        Connecting --> Connected
+        Connected --> Reconnecting : Connection lost
+        Reconnecting --> Connected : Connection restored
+        Reconnecting --> Disconnected : Max retries exceeded
+        Disconnected --> [*]
+    }
+```
+
+### Presence Data Structure
+
+```typescript
+interface PresenceData {
+  userId: string;
+  device: 'ios' | 'web';
+  platform: string;
+  version: string;
+  model?: string;
+  timestamp: number;
+  type: 'telemetry_producer' | 'update_consumer';
+  sessionId: string;
+  location?: {
+    campus?: string;
+    building?: string;
+  };
+}
+```
+
+### Session Tracking Flow
+
+```mermaid
+sequenceDiagram
+    participant iOS as iOS App
+    participant Ably as Ably Presence
+    participant Relay as Ably Relay
+    participant Temporal as Session Workflow
+    participant Analytics as Analytics
+    
+    iOS->>Ably: Enter presence with data
+    Ably->>Relay: Presence enter event
+    Relay->>Temporal: Start session tracking
+    Temporal->>Analytics: Log session start
+    
+    Note over iOS,Analytics: User active session
+    
+    iOS->>Ably: Update presence data
+    Ably->>Relay: Presence update event
+    Relay->>Temporal: Update session metadata
+    
+    iOS->>Ably: Leave presence (app background/close)
+    Ably->>Relay: Presence leave event
+    Relay->>Temporal: End session tracking
+    Temporal->>Analytics: Log session end with duration
+```
+
+## Telemetry Processing
+
+### Context Prediction Telemetry Flow
+
+```mermaid
+sequenceDiagram
+    participant iOS as iOS App
+    participant API as API Router
+    participant Ably as Ably Channel
+    participant Relay as Ably Relay
+    participant SB as Supabase Handler
+    participant DB as Database
+    
+    Note over iOS,DB: Context Prediction Request Flow
+    iOS->>API: POST /ai/predict-context (with health/screen time data)
+    API->>API: Fetch weather data from database
+    API->>Ably: Publish request telemetry
+    Note over API,Ably: type: context_prediction_request
+    API->>API: Call PortKey/Nova for prediction
+    API->>Ably: Publish response telemetry
+    Note over API,Ably: type: context_prediction_response
+    API->>iOS: Return prediction result
+    
+    Note over Ably,DB: Ably Relay Processing
+    Ably->>Relay: Forward request message
+    Relay->>SB: processContextPredictionRequest()
+    SB->>DB: Store request + health/screen time data
+    
+    Ably->>Relay: Forward response message
+    Relay->>SB: processContextPredictionResponse()
+    SB->>DB: Store prediction + confidence scores
+    
+    Note over DB: Available for Deep Context Analysis
+```
+
+### Context Prediction Data Structure
+
+**Request Telemetry**:
+```typescript
+interface ContextPredictionRequest {
+  type: 'context_prediction_request';
+  userId: string;
+  data: {
+    userId: string;
+    request: {
+      user: { major: string; year: string; campus: string };
+      environment: { location: LocationData; timeOfDay: string; weatherDetails: WeatherData };
+      health?: { stepCount?: number; heartRate?: HeartRateData; sleepAnalysis?: SleepData };
+      screenTime?: { totalMinutesToday?: number; pickupCount?: number };
+      recentActivity: ActivityData;
+      calendar: CalendarData;
+      patterns: PatternData;
+    };
+    metadata: {
+      weatherSource: 'database' | 'api' | 'fallback';
+      cacheHit: boolean;
+      campusDetected?: string;
+    };
+    timestamp: string;
+  };
+}
+```
+
+**Response Telemetry**:
+```typescript
+interface ContextPredictionResponse {
+  type: 'context_prediction_response';
+  userId: string;
+  data: {
+    userId: string;
+    input: ContextPredictionRequest['data']['request'];
+    output: {
+      primaryState: string;
+      confidence: number;
+      reasoning: string;
+      locationAnalysis: LocationAnalysis;
+      temporalInsights: TemporalInsights;
+      environmentalFactors: EnvironmentalFactors;
+    };
+    weatherSource: string;
+    metadata: {
+      inferenceTimeMs: number;
+      modelUsed: string;
+      tokenCount?: number;
+      cacheUsed: boolean;
+    };
+    timestamp: string;
+  };
+}
+```
+
+### Event Processing Pipeline
+
+```mermaid
+graph TB
+    subgraph "Ingestion Layer"
+        A[Raw Telemetry Event]
+        B[Event Validation]
+        C[Data Enrichment]
+    end
+    
+    subgraph "Processing Layer"
+        D[Event Classification]
+        E[Priority Assignment]
+        F[Batch Grouping]
+    end
+    
+    subgraph "Dispatch Layer"
+        G[Workflow Selection]
+        H[Temporal Dispatch]
+        I[Error Handling]
+    end
+    
+    subgraph "Storage Layer"
+        J[Event Storage]
+        K[Metrics Update]
+        L[Context Trigger]
+    end
+    
+    A --> B
+    B --> C
+    C --> D
+    D --> E
+    E --> F
+    F --> G
+    G --> H
+    H --> I
+    H --> J
+    J --> K
+    K --> L
+```
+
+### Event Types and Workflows
+
+```mermaid
+graph LR
+    subgraph "Location Events"
+        A[location.update] --> W1[LocationProcessingWorkflow]
+        B[location.campus_entry] --> W2[CampusEntryWorkflow]
+        C[location.building_entry] --> W3[BuildingContextWorkflow]
+    end
+    
+    subgraph "Health Events"
+        D[health.update] --> W4[HealthAnalysisWorkflow]
+        E[health.workout_start] --> W5[WorkoutTrackingWorkflow]
+    end
+    
+    subgraph "App Events"
+        F[app.launch] --> W6[AppUsageWorkflow]
+        G[user.action] --> W7[UserBehaviorWorkflow]
+    end
+    
+    subgraph "Context Prediction Events"
+        H[context_prediction_request] --> SH[SupabaseHandler]
+        I[context_prediction_response] --> SH
+        SH --> SD[(service_data)]
+    end
+    
+    subgraph "Context Workflows"
+        W1 --> CU[Context Update]
+        W2 --> CU
+        W3 --> CU
+        W4 --> CU
+        W5 --> CU
+        W6 --> CU
+        W7 --> CU
+        SD --> CA[Context Analysis]
+    end
+```
+
+### Error Handling and Retries
+
+```mermaid
+graph TB
+    A[Incoming Event] --> B{Valid Event?}
+    B -->|No| C[Log Error & Discard]
+    B -->|Yes| D[Attempt Dispatch]
+    
+    D --> E{Dispatch Success?}
+    E -->|Yes| F[Log Success]
+    E -->|No| G{Retry Count < Max?}
+    
+    G -->|Yes| H[Exponential Backoff]
+    H --> I[Increment Retry Count]
+    I --> D
+    
+    G -->|No| J[Send to DLQ]
+    J --> K[Alert Operations]
+```
+
+## Integration Points
+
+### Temporal Integration
+
+```mermaid
+graph TB
+    subgraph "Ably Relay"
+        R[Relay Service]
+        TD[Temporal Dispatcher]
+    end
+    
+    subgraph "Temporal Cluster"
+        TC[Temporal Client]
+        WF1[User Context Workflow]
+        WF2[Analytics Workflow]
+        WF3[Notification Workflow]
+    end
+    
+    subgraph "Workflow Activities"
+        A1[Data Processing]
+        A2[Context Analysis]
+        A3[Notification Trigger]
+        A4[Storage Update]
+    end
+    
+    R --> TD
+    TD --> TC
+    TC --> WF1
+    TC --> WF2
+    TC --> WF3
+    
+    WF1 --> A1
+    WF1 --> A2
+    WF2 --> A1
+    WF2 --> A4
+    WF3 --> A3
+```
+
+### API Router Integration
+
+```mermaid
+sequenceDiagram
+    participant Relay as Ably Relay
+    participant API as API Router
+    participant Auth as Auth Service
+    participant Ably as Ably Service
+    
+    Note over Relay,Ably: Service startup
+    Relay->>API: Request Ably credentials
+    API->>Auth: Validate service auth
+    Auth->>API: Service authenticated
+    API->>Ably: Generate service token
+    API->>Relay: Return Ably credentials
+    Relay->>Ably: Connect with credentials
+    
+    Note over Relay,Ably: Runtime operation
+    Relay->>API: Health check ping
+    API->>Relay: Health status
+```
+
+### Database Integration
+
+```mermaid
+graph TB
+    subgraph "Relay Service"
+        RL[Ably Relay]
+        PS[Presence Service]
+        TS[Telemetry Service]
+    end
+    
+    subgraph "Database Layer"
+        PG[(PostgreSQL)]
+        UserSessions[user_sessions]
+        TelemetryEvents[telemetry_events]
+        PresenceLog[presence_log]
+    end
+    
+    subgraph "Analytics Store"
+        AS[(Analytics DB)]
+        SessionMetrics[session_metrics]
+        UserBehavior[user_behavior]
+    end
+    
+    PS --> UserSessions
+    PS --> PresenceLog
+    TS --> TelemetryEvents
+    
+    UserSessions --> SessionMetrics
+    TelemetryEvents --> UserBehavior
+    PresenceLog --> SessionMetrics
+```
+
+## Deployment & Scaling
+
+### Deployment Architecture
+
+```mermaid
+graph TB
+    subgraph "Load Balancer"
+        LB[Railway Load Balancer]
+    end
+    
+    subgraph "Relay Instances"
+        R1[Relay Instance 1]
+        R2[Relay Instance 2]
+        R3[Relay Instance 3]
+    end
+    
+    subgraph "External Services"
+        Ably[Ably Service]
+        Temporal[Temporal Cluster]
+        DB[(Database)]
+    end
+    
+    LB --> R1
+    LB --> R2
+    LB --> R3
+    
+    R1 --> Ably
+    R2 --> Ably
+    R3 --> Ably
+    
+    R1 --> Temporal
+    R2 --> Temporal
+    R3 --> Temporal
+    
+    R1 --> DB
+    R2 --> DB
+    R3 --> DB
+```
+
+### Scaling Considerations
+
+```mermaid
+graph LR
+    subgraph "Scaling Metrics"
+        A[Concurrent Users]
+        B[Events per Second]
+        C[Memory Usage]
+        D[CPU Usage]
+    end
+    
+    subgraph "Scaling Actions"
+        E[Horizontal Scaling]
+        F[Vertical Scaling]
+        G[Load Balancing]
+        H[Caching Layer]
+    end
+    
+    subgraph "Monitoring"
+        I[Health Checks]
+        J[Performance Metrics]
+        K[Error Rates]
+        L[Alert System]
+    end
+    
+    A --> E
+    B --> E
+    C --> F
+    D --> F
+    
+    E --> G
+    F --> H
+    
+    G --> I
+    H --> J
+    I --> K
+    J --> L
+```
+
+### Environment Configuration
+
+```mermaid
+graph TB
+    subgraph "Configuration Sources"
+        ENV[Environment Variables]
+        Secrets[Railway Secrets]
+        Config[Config Files]
+    end
+    
+    subgraph "Service Configuration"
+        AblyConfig[Ably Connection]
+        TemporalConfig[Temporal Client]
+        DBConfig[Database Connection]
+        LogConfig[Logging Config]
+    end
+    
+    subgraph "Runtime Settings"
+        Channels[Channel Subscriptions]
+        Retries[Retry Policies]
+        Timeouts[Timeout Settings]
+        Monitoring[Health Check Config]
+    end
+    
+    ENV --> AblyConfig
+    Secrets --> AblyConfig
+    Config --> TemporalConfig
+    
+    AblyConfig --> Channels
+    TemporalConfig --> Retries
+    DBConfig --> Timeouts
+    LogConfig --> Monitoring
+```
+
+## Monitoring and Observability
+
+### Health Monitoring
+
+```mermaid
+graph TB
+    subgraph "Health Checks"
+        A[Service Health]
+        B[Ably Connection]
+        C[Temporal Connection]
+        D[Database Connection]
+    end
+    
+    subgraph "Metrics Collection"
+        E[Event Processing Rate]
+        F[Error Rates]
+        G[Response Times]
+        H[Resource Usage]
+    end
+    
+    subgraph "Alerting"
+        I[Health Alerts]
+        J[Performance Alerts]
+        K[Error Threshold Alerts]
+        L[Resource Alerts]
+    end
+    
+    A --> I
+    B --> I
+    C --> I
+    D --> I
+    
+    E --> J
+    F --> K
+    G --> J
+    H --> L
+```
+
+### Performance Metrics
+
+- **Event Processing Rate**: Events per second processed
+- **Dispatch Latency**: Time from event receipt to Temporal dispatch
+- **Connection Health**: Ably and Temporal connection status
+- **Error Rates**: Failed dispatches and processing errors
+- **Memory/CPU Usage**: Resource consumption monitoring
+- **Active Sessions**: Current user presence count
+
+## Related Documentation
+
+- [DormWayFresh Architecture](/docs/engineering/architecture/dormwayfresh-ios-architecture)
+- Real-time Updates Strategy
+- API Router Integration
+- [Temporal Workflows](/docs/engineering/architecture/sot-context-system)

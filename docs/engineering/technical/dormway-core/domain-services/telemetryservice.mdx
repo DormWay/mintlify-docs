@@ -1,0 +1,390 @@
+---
+title: "TelemetryService"
+description: "import { TelemetryService } from '@dormway/core'; import { getConnectionPool } from '@dormway/core/database'; import { createStructuredLogger } from '@dormwa..."
+---
+
+# TelemetryService
+
+## Overview
+
+**TelemetryService** provides unified event tracking via Amplitude (analytics) and Ably (realtime messaging).
+
+**Purpose**: Single interface for tracking user events, identifying users, incrementing metrics, and publishing realtime updates.
+
+**Location**: `@dormway/core/domains/telemetry`
+
+---
+
+## Installation
+
+```typescript
+import { TelemetryService } from '@dormway/core';
+import { getConnectionPool } from '@dormway/core/database';
+import { createStructuredLogger } from '@dormway/core/logger';
+
+const pool = getConnectionPool();
+const logger = createStructuredLogger({ service: 'api-router' });
+
+const telemetry = new TelemetryService({
+  pool,
+  logger,
+  amplitudeApiKey: process.env.AMPLITUDE_API_KEY,
+  ablyApiKey: process.env.ABLY_API_KEY,
+});
+```
+
+---
+
+## Methods
+
+### trackEvent
+
+Track user event to Amplitude and optionally publish to Ably.
+
+**Signature**:
+```typescript
+trackEvent(options: TrackEventOptions): Promise<ServiceResult<void>>
+```
+
+**Options**:
+```typescript
+interface TrackEventOptions {
+  userId: string;
+  eventName: string;
+  properties?: EventProperties;
+  deviceId?: string;
+  timestamp?: Date | number;
+  publishToRealtime?: boolean;  // Default: true
+  realtimeChannel?: string;
+}
+```
+
+**Examples**:
+
+**Track page view**:
+```typescript
+await telemetry.trackEvent({
+  userId: 'user-123',
+  eventName: 'page_viewed',
+  properties: {
+    page: '/dashboard',
+    referrer: document.referrer,
+  },
+});
+```
+
+**Track feature usage**:
+```typescript
+await telemetry.trackEvent({
+  userId: 'user-123',
+  eventName: 'dayplan_generated',
+  properties: {
+    date: '2025-11-23',
+    generationTimeMs: 1500,
+    itemCount: 12,
+  },
+});
+```
+
+**Track without realtime**:
+```typescript
+await telemetry.trackEvent({
+  userId: 'user-123',
+  eventName: 'background_sync',
+  publishToRealtime: false,  // Don't publish to Ably
+});
+```
+
+---
+
+### identifyUser
+
+Set user properties in Amplitude.
+
+**Signature**:
+```typescript
+identifyUser(options: IdentifyUserOptions): Promise<ServiceResult<void>>
+```
+
+**Example**:
+```typescript
+await telemetry.identifyUser({
+  userId: 'user-123',
+  properties: {
+    email: 'student@umich.edu',
+    name: 'Alice Johnson',
+    campus: 'University of Michigan',
+    plan: 'premium',
+    createdAt: new Date().toISOString(),
+  },
+});
+```
+
+---
+
+### incrementMetric
+
+Increment a counter metric for a user.
+
+**Signature**:
+```typescript
+incrementMetric(options: IncrementMetricOptions): Promise<ServiceResult<void>>
+```
+
+**Example**:
+```typescript
+// Increment dayplans generated
+await telemetry.incrementMetric({
+  userId: 'user-123',
+  metric: 'dayplans_generated',
+  value: 1,
+});
+
+// Increment courses added
+await telemetry.incrementMetric({
+  userId: 'user-123',
+  metric: 'courses_added',
+  value: 3,
+});
+```
+
+---
+
+### publishRealtime
+
+Publish message to Ably channel (without Amplitude tracking).
+
+**Signature**:
+```typescript
+publishRealtime(options: PublishRealtimeOptions): Promise<ServiceResult<void>>
+```
+
+**Example**:
+```typescript
+await telemetry.publishRealtime({
+  channel: 'campus:umich:announcements',
+  eventName: 'announcement_posted',
+  data: {
+    title: 'Weather Alert',
+    message: 'Classes cancelled due to snow',
+  },
+});
+```
+
+---
+
+### batchTrackEvents
+
+Track multiple events efficiently.
+
+**Signature**:
+```typescript
+batchTrackEvents(events: TrackEventOptions[]): Promise<ServiceResult<void>>
+```
+
+**Example**:
+```typescript
+const events = [
+  {
+    userId: 'user-123',
+    eventName: 'course_completed',
+    properties: { courseId: 'cs101', grade: 'A' },
+  },
+  {
+    userId: 'user-123',
+    eventName: 'achievement_unlocked',
+    properties: { achievement: 'straight-as' },
+  },
+];
+
+await telemetry.batchTrackEvents(events);
+```
+
+---
+
+### flush
+
+Flush pending events to Amplitude (useful before shutdown).
+
+**Signature**:
+```typescript
+flush(): Promise<ServiceResult<void>>
+```
+
+**Example**:
+```typescript
+// Before application shutdown
+await telemetry.flush();
+```
+
+---
+
+### shutdown
+
+Shutdown telemetry service (disconnects adapters).
+
+**Signature**:
+```typescript
+shutdown(): Promise<ServiceResult<void>>
+```
+
+**Example**:
+```typescript
+process.on('SIGTERM', async () => {
+  await telemetry.shutdown();
+  process.exit(0);
+});
+```
+
+---
+
+## Common Patterns
+
+### Pattern 1: Track User Onboarding
+
+```typescript
+import { TelemetryService } from '@dormway/core';
+
+const telemetry = new TelemetryService({ pool, logger });
+
+async function onboardUser(userId: string, campusId: string) {
+  // Identify user
+  await telemetry.identifyUser({
+    userId,
+    properties: {
+      campus: campusId,
+      status: 'onboarding',
+      createdAt: new Date().toISOString(),
+    },
+  });
+
+  // Track onboarding start
+  await telemetry.trackEvent({
+    userId,
+    eventName: 'onboarding_started',
+  });
+
+  // ... onboarding steps ...
+
+  // Track onboarding completion
+  await telemetry.trackEvent({
+    userId,
+    eventName: 'onboarding_completed',
+    properties: {
+      durationSeconds: 120,
+      stepsCompleted: 5,
+    },
+  });
+}
+```
+
+### Pattern 2: Track Feature Usage
+
+```typescript
+async function generateDayPlan(userId: string, date: string) {
+  const startTime = Date.now();
+
+  // Generate dayplan
+  const dayplan = await generateDayPlanLogic(userId, date);
+
+  // Track event
+  await telemetry.trackEvent({
+    userId,
+    eventName: 'dayplan_generated',
+    properties: {
+      date,
+      itemCount: dayplan.items.length,
+      generationTimeMs: Date.now() - startTime,
+    },
+  });
+
+  // Increment metric
+  await telemetry.incrementMetric({
+    userId,
+    metric: 'dayplans_generated',
+  });
+
+  return dayplan;
+}
+```
+
+### Pattern 3: Realtime Notifications
+
+```typescript
+async function sendNotification(userId: string, notification: Notification) {
+  // Track event (goes to Amplitude)
+  await telemetry.trackEvent({
+    userId,
+    eventName: 'notification_sent',
+    properties: {
+      type: notification.type,
+      priority: notification.priority,
+    },
+  });
+
+  // Publish to realtime (goes to Ably)
+  await telemetry.publishRealtime({
+    userId,
+    channel: `user:${userId}:notifications`,
+    eventName: 'notification_received',
+    data: notification,
+  });
+}
+```
+
+---
+
+## Event Naming Conventions
+
+**Format**: `object_action`
+
+**Examples**:
+```typescript
+// Good
+'user_created'
+'dayplan_generated'
+'course_added'
+'assignment_completed'
+'notification_sent'
+'page_viewed'
+
+// Bad
+'create_user'          // ❌ action_object (backwards)
+'DayPlanGenerated'     // ❌ PascalCase
+'user-created'         // ❌ kebab-case
+```
+
+---
+
+## Best Practices
+
+### ✅ Do
+
+- **Track meaningful events** (user actions, not system internals)
+- **Use consistent naming** (`object_action` format)
+- **Include relevant properties** (context for analysis)
+- **Identify users** on signup/login
+- **Increment metrics** for counting behaviors
+- **Batch events** when tracking multiple at once
+- **Flush on shutdown** for pending events
+
+### ❌ Don't
+
+- **Don't track PII** in event properties (passwords, tokens)
+- **Don't track too frequently** (creates noise)
+- **Don't use dynamic event names** (hurts analytics)
+- **Don't forget to flush** before shutdown
+- **Don't track server errors** (use logger instead)
+
+---
+
+## Related Documentation
+
+- [DormWay Core Library (@dormway-core)](/docs/engineering/technical/dormway-core-library-dormway-core) - Main overview
+- [Realtime Adapter](/docs/engineering/technical/dormway-core/adapters/realtime-adapter) - Ably integration
+- [Structured Logger](/docs/engineering/technical/dormway-core/utilities/structured-logger) - Logging vs telemetry
+
+---
+
+**Last Updated**: 2025-11-23
+**Maintainer**: Platform Team

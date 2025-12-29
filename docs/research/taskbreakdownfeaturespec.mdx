@@ -1,0 +1,598 @@
+---
+title: "Task_Breakdown_Feature_Spec"
+description: "Students often face overwhelming assignments like \"Write research paper\" or \"Complete final project\" that feel impossible to start. A **Goblin Tools-style ta..."
+---
+
+# Task Breakdown Feature: Goblin Tools-Style Implementation
+
+**Date:** 2025-12-08  
+**Purpose:** Specification for AI-powered task breakdown feature that breaks complex assignments into manageable steps  
+**Inspiration:** Goblin Tools (https://goblin.tools/)  
+**Integration:** Tasks Widget, Ace LLM, TaskDetailPopover
+
+---
+
+## Executive Summary
+
+Students often face overwhelming assignments like "Write research paper" or "Complete final project" that feel impossible to start. A **Goblin Tools-style task breakdown** feature would use Ace LLM to automatically break complex tasks into smaller, actionable steps, making assignments feel manageable and helping students get started.
+
+**Key Value:** Transforms "I don't know where to start" into "Here are 8 clear steps to complete this."
+
+---
+
+## User Experience Flow
+
+### Scenario: Student sees "Research Paper Due in 2 Weeks"
+
+**Current Experience:**
+- Sees task in Tasks Widget: "Research Paper - Due 12/22"
+- Feels overwhelmed, doesn't know where to start
+- Procrastinates until last minute
+
+**With Task Breakdown:**
+1. Clicks on task in Tasks Widget
+2. TaskDetailPopover opens
+3. Sees "Break Down Task" button
+4. Clicks button → Ace LLM analyzes task
+5. Gets breakdown:
+   ```
+   📋 Research Paper Breakdown (8 steps)
+   
+   ✅ 1. Choose research topic (2 hours)
+   ✅ 2. Find 5-7 academic sources (3 hours)
+   ✅ 3. Create outline with thesis statement (2 hours)
+   ✅ 4. Write introduction paragraph (1 hour)
+   ✅ 5. Write body paragraphs (6 hours)
+   ✅ 6. Write conclusion paragraph (1 hour)
+   ✅ 7. Format citations and bibliography (1 hour)
+   ✅ 8. Proofread and edit (2 hours)
+   
+   Total estimated time: 18 hours
+   ```
+6. Can check off steps as they complete them
+7. Progress bar shows completion percentage
+8. Steps can be scheduled into DayPlan
+
+---
+
+## Feature Specifications
+
+### 1. Task Breakdown Generation
+
+**Trigger:**
+- User clicks "Break Down Task" button in TaskDetailPopover
+- Or automatic breakdown for complex tasks (configurable)
+
+**Input to Ace LLM:**
+```typescript
+{
+  taskTitle: string;
+  taskDescription?: string;
+  courseCode?: string;
+  dueDate: string;
+  courseContext?: {
+    syllabus?: string;
+    assignmentDetails?: string;
+  };
+  userPreferences?: {
+    detailLevel: 'simple' | 'detailed' | 'very-detailed';
+    includeTimeEstimates: boolean;
+  };
+}
+```
+
+**Ace LLM Prompt:**
+```
+You are helping a college student break down a complex assignment into manageable steps.
+
+Task: {taskTitle}
+Course: {courseCode}
+Due: {dueDate}
+Description: {taskDescription}
+
+Break this task down into 5-12 clear, actionable steps that a student can complete sequentially.
+Each step should be:
+- Specific and actionable (not vague like "do research")
+- Small enough to complete in 1-4 hours
+- In logical order
+- Include time estimate if possible
+
+Format as JSON:
+{
+  "steps": [
+    {
+      "id": "step-1",
+      "title": "Step title",
+      "description": "What to do",
+      "estimatedHours": 2,
+      "order": 1
+    }
+  ],
+  "totalEstimatedHours": 18,
+  "complexity": "medium" | "high" | "very-high"
+}
+```
+
+**Output:**
+```typescript
+interface TaskBreakdown {
+  steps: TaskStep[];
+  totalEstimatedHours: number;
+  complexity: 'low' | 'medium' | 'high' | 'very-high';
+  generatedAt: string;
+  generatedBy: 'ace-llm';
+}
+
+interface TaskStep {
+  id: string;
+  title: string;
+  description: string;
+  estimatedHours: number;
+  order: number;
+  completed: boolean;
+  completedAt?: string;
+}
+```
+
+---
+
+### 2. UI Components
+
+#### A. TaskDetailPopover Enhancement
+
+**Add to TaskDetailPopover:**
+- "Break Down Task" button (if no breakdown exists)
+- "View Breakdown" button (if breakdown exists)
+- Progress indicator (X of Y steps completed)
+
+**Location:** `widgets/TaskDetailPopover.tsx`
+
+**New UI Elements:**
+```tsx
+{!taskBreakdown && (
+  <button onClick={handleBreakDown}>
+    <Sparkles /> Break Down Task
+  </button>
+)}
+
+{taskBreakdown && (
+  <div>
+    <ProgressBar 
+      completed={completedSteps} 
+      total={totalSteps} 
+    />
+    <button onClick={handleViewBreakdown}>
+      View {completedSteps}/{totalSteps} Steps
+    </button>
+  </div>
+)}
+```
+
+---
+
+#### B. Task Breakdown Modal/Drawer
+
+**New Component:** `TaskBreakdownView.tsx`
+
+**Features:**
+- List of steps with checkboxes
+- Time estimates per step
+- Progress bar
+- "Mark as Complete" for each step
+- "Schedule Steps" button (adds to DayPlan)
+- "Regenerate Breakdown" button
+- "Export Breakdown" button
+
+**Layout:**
+```
+┌─────────────────────────────────────┐
+│ Task Breakdown: Research Paper      │
+│ Progress: ████████░░░░ 4/8 steps    │
+├─────────────────────────────────────┤
+│ ✅ 1. Choose research topic (2h)   │
+│ ✅ 2. Find 5-7 academic sources (3h)│
+│ ✅ 3. Create outline (2h)           │
+│ ⬜ 4. Write introduction (1h)       │
+│ ⬜ 5. Write body paragraphs (6h)    │
+│ ⬜ 6. Write conclusion (1h)         │
+│ ⬜ 7. Format citations (1h)         │
+│ ⬜ 8. Proofread and edit (2h)       │
+├─────────────────────────────────────┤
+│ Total: 18 hours | 4/8 complete     │
+│ [Schedule Steps] [Regenerate]      │
+└─────────────────────────────────────┘
+```
+
+---
+
+#### C. Tasks Widget Integration
+
+**Show breakdown status in Tasks Widget:**
+- Small badge: "8 steps" or "4/8 ✓"
+- Visual indicator when breakdown exists
+- Click to expand breakdown inline (for larger widget sizes)
+
+**Compact View:**
+```
+Research Paper
+Due: 12/22 | 4/8 steps ✓
+```
+
+**Standard View:**
+```
+Research Paper
+Due: 12/22
+Progress: ████████░░░░ 4/8 steps
+[View Breakdown]
+```
+
+---
+
+### 3. Backend Implementation
+
+#### A. Database Schema
+
+**New Table:** `task_breakdowns`
+```sql
+CREATE TABLE task_breakdowns (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  task_id UUID NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  user_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  
+  -- Breakdown metadata
+  steps JSONB NOT NULL, -- Array of TaskStep objects
+  total_estimated_hours DECIMAL(5,2),
+  complexity VARCHAR(20),
+  
+  -- Generation info
+  generated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+  generated_by VARCHAR(50) NOT NULL DEFAULT 'ace-llm',
+  ace_prompt_id UUID, -- Reference to PortKey prompt
+  
+  -- Progress tracking
+  completed_steps INTEGER DEFAULT 0,
+  total_steps INTEGER NOT NULL,
+  
+  -- Metadata
+  created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_task_breakdowns_task_id ON task_breakdowns(task_id);
+CREATE INDEX idx_task_breakdowns_user_id ON task_breakdowns(user_id);
+```
+
+**Update `tasks` table:**
+```sql
+ALTER TABLE tasks ADD COLUMN has_breakdown BOOLEAN DEFAULT FALSE;
+ALTER TABLE tasks ADD COLUMN breakdown_id UUID REFERENCES task_breakdowns(id);
+```
+
+---
+
+#### B. API Endpoints
+
+**1. Generate Breakdown**
+```
+POST /api/v1/tasks/{taskId}/breakdown
+```
+
+**Request:**
+```json
+{
+  "detailLevel": "detailed",
+  "includeTimeEstimates": true
+}
+```
+
+**Response:**
+```json
+{
+  "breakdown": {
+    "id": "uuid",
+    "steps": [...],
+    "totalEstimatedHours": 18,
+    "complexity": "high"
+  }
+}
+```
+
+**2. Get Breakdown**
+```
+GET /api/v1/tasks/{taskId}/breakdown
+```
+
+**3. Update Step Completion**
+```
+PATCH /api/v1/tasks/{taskId}/breakdown/steps/{stepId}
+{
+  "completed": true
+}
+```
+
+**4. Regenerate Breakdown**
+```
+POST /api/v1/tasks/{taskId}/breakdown/regenerate
+```
+
+---
+
+#### C. Ace LLM Integration
+
+**New PortKey Prompt:** `task-breakdown`
+
+**Prompt Template:**
+```
+You are helping a college student break down a complex assignment into manageable steps.
+
+Task: {{taskTitle}}
+Course: {{courseCode}}
+Due Date: {{dueDate}}
+{{#if taskDescription}}
+Description: {{taskDescription}}
+{{/if}}
+{{#if courseContext}}
+Course Context:
+{{courseContext}}
+{{/if}}
+
+Break this task down into 5-12 clear, actionable steps that a student can complete sequentially.
+
+Guidelines:
+- Each step should be specific and actionable (not vague)
+- Steps should be small enough to complete in 1-4 hours
+- Steps should be in logical order
+- Include realistic time estimates
+- Consider the due date when suggesting pacing
+
+Format your response as JSON:
+{
+  "steps": [
+    {
+      "id": "step-1",
+      "title": "Clear, actionable step title",
+      "description": "What to do in this step",
+      "estimatedHours": 2,
+      "order": 1
+    }
+  ],
+  "totalEstimatedHours": 18,
+  "complexity": "medium"
+}
+
+Complexity levels:
+- "low": Simple task, 3-5 steps, <10 hours
+- "medium": Moderate task, 5-8 steps, 10-20 hours
+- "high": Complex task, 8-12 steps, 20-40 hours
+- "very-high": Very complex, 12+ steps, 40+ hours
+```
+
+**Implementation:**
+- Use existing Ace LLM infrastructure
+- Call PortKey API with prompt
+- Parse JSON response
+- Store in database
+
+---
+
+### 4. Smart Features
+
+#### A. Automatic Breakdown Suggestions
+
+**When to suggest:**
+- Task title contains keywords: "paper", "project", "essay", "presentation", "report"
+- Task has no breakdown and is due in >3 days
+- Task complexity detected from title/description
+
+**UI:**
+- Badge in Tasks Widget: "💡 Break this down?"
+- Tooltip: "This looks like a complex task. Break it into steps?"
+
+---
+
+#### B. Step Scheduling Integration
+
+**"Schedule Steps" Feature:**
+- Takes breakdown steps
+- Suggests dates based on:
+  - Due date
+  - Estimated hours per step
+  - Student's available time (from schedule)
+  - Workload balance
+- Adds to DayPlan as scheduled tasks
+
+**Example:**
+```
+Step 1: Choose topic (2h) → Schedule for Dec 8
+Step 2: Find sources (3h) → Schedule for Dec 9
+Step 3: Create outline (2h) → Schedule for Dec 10
+...
+```
+
+---
+
+#### C. Progress Tracking
+
+**Visual Progress:**
+- Progress bar in TaskDetailPopover
+- Progress percentage in Tasks Widget
+- Completion celebration when all steps done
+
+**Analytics:**
+- Track breakdown usage
+- Track completion rates
+- Track time estimates vs. actual time
+
+---
+
+#### D. Breakdown Templates
+
+**Common Assignment Types:**
+- Research Paper
+- Group Project
+- Presentation
+- Lab Report
+- Essay
+- Final Exam Study Plan
+
+**Pre-built templates** that Ace LLM can customize based on course context.
+
+---
+
+## Implementation Phases
+
+### Phase 1: Core Breakdown (2-3 weeks)
+1. ✅ Database schema
+2. ✅ API endpoints
+3. ✅ Ace LLM prompt
+4. ✅ TaskDetailPopover "Break Down" button
+5. ✅ Basic breakdown modal
+6. ✅ Step completion tracking
+
+### Phase 2: UI Polish (1-2 weeks)
+1. ✅ Progress indicators in Tasks Widget
+2. ✅ Breakdown view improvements
+3. ✅ Regenerate breakdown
+4. ✅ Export breakdown
+
+### Phase 3: Smart Features (2-3 weeks)
+1. ✅ Automatic breakdown suggestions
+2. ✅ Step scheduling integration
+3. ✅ Breakdown templates
+4. ✅ Analytics tracking
+
+---
+
+## Design Considerations
+
+### 1. Performance
+- Cache breakdowns (don't regenerate every time)
+- Lazy load breakdown modal
+- Optimistic UI updates for step completion
+
+### 2. Error Handling
+- Handle Ace LLM failures gracefully
+- Fallback to template-based breakdown
+- Allow manual step editing
+
+### 3. Privacy
+- Breakdowns are user-specific
+- Not shared between users
+- Can be deleted
+
+### 4. Accessibility
+- Keyboard navigation
+- Screen reader support
+- Clear visual indicators
+
+---
+
+## Success Metrics
+
+### Engagement
+- % of complex tasks with breakdowns
+- Breakdown completion rate
+- Average steps per breakdown
+
+### Impact
+- Time to start task (before vs. after breakdown)
+- Task completion rate
+- Student-reported stress reduction
+
+### Quality
+- Time estimate accuracy
+- Step completion order (do students follow order?)
+- Regeneration rate (how often do students regenerate?)
+
+---
+
+## Competitive Advantage
+
+**Why This Matters:**
+- **Goblin Tools** is popular but generic (doesn't know your courses)
+- **DormWay's version** would be:
+  - Course-aware (uses syllabus context)
+  - Integrated with assignments (automatic breakdowns)
+  - Connected to schedule (can schedule steps)
+  - Part of unified dashboard (not separate tool)
+
+**Differentiation:**
+- Not just a task breakdown tool
+- Part of the complete student OS
+- Uses course-specific context
+- Integrates with existing workflow
+
+---
+
+## Example Use Cases
+
+### Use Case 1: Research Paper
+**Input:** "Research Paper - Due 12/22"
+**Output:** 8 steps from topic selection to proofreading
+**Impact:** Student knows exactly what to do, when
+
+### Use Case 2: Group Project
+**Input:** "Group Project Presentation - Due 12/15"
+**Output:** 10 steps including collaboration checkpoints
+**Impact:** Prevents last-minute panic, ensures team coordination
+
+### Use Case 3: Final Exam Study
+**Input:** "Study for ECON 301 Final - Due 12/18"
+**Output:** 12 steps covering all topics from syllabus
+**Impact:** Structured study plan prevents cramming
+
+---
+
+## Technical Architecture
+
+### Component Structure
+```
+widgets/
+  TaskDetailPopover.tsx (enhanced)
+  TaskBreakdownView.tsx (new)
+  TaskBreakdownStep.tsx (new)
+
+lib/
+  tasks/
+    breakdown.ts (new - API client)
+    breakdown-utils.ts (new - helpers)
+
+api/
+  routes/
+    tasks/
+      breakdown.ts (new - endpoints)
+
+services/
+  engine/
+    workflows/
+      taskBreakdown.workflow.ts (new - Temporal workflow)
+```
+
+---
+
+## Future Enhancements
+
+1. **Collaborative Breakdowns** - Share breakdowns with study groups
+2. **Breakdown Library** - Save and reuse breakdowns
+3. **AI Refinement** - Learn from user edits to improve breakdowns
+4. **Time Tracking** - Track actual vs. estimated time per step
+5. **Breakdown Analytics** - Show which steps take longest, etc.
+
+---
+
+## Conclusion
+
+A Goblin Tools-style task breakdown feature would be a **game-changer** for DormWay, transforming overwhelming assignments into manageable steps. By integrating with Ace LLM, the Tasks Widget, and DayPlan, it becomes part of the complete student OS rather than a separate tool.
+
+**Key Benefits:**
+- Reduces procrastination (clear starting point)
+- Improves time management (realistic estimates)
+- Increases completion rates (small wins)
+- Reduces stress (feels manageable)
+
+**Implementation Priority:** 🔥🔥 HIGH - High student value, moderate technical complexity, strong differentiation
+
+---
+
+## Tags
+#task-breakdown #goblin-tools #ace-llm #productivity #feature-spec #tasks-widget

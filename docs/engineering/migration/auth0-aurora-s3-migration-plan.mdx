@@ -1,0 +1,241 @@
+---
+title: "Auth0 Aurora S3 Migration Plan"
+description: "This document outlines the migration plan from Supabase to:"
+---
+
+# Auth0 + Aurora + S3 Migration Plan
+
+## Overview
+This document outlines the migration plan from Supabase to:
+- **Auth0** for authentication and user management
+- **Aurora Serverless v2** for database (PostgreSQL)
+- **AWS S3** for file storage
+
+## Current State (Supabase)
+- **Authentication**: Supabase Auth
+- **Database**: Supabase PostgreSQL (Postgres 15)
+- **Storage**: Supabase Storage (S3-compatible)
+- **Real-time**: Not used (we use Ably)
+
+## Target State
+- **Authentication**: Auth0
+- **Database**: Aurora Serverless v2 (PostgreSQL 15.4)
+- **Storage**: AWS S3
+- **Real-time**: Ably (no change)
+
+## Migration Benefits
+1. **Better Auth Features**: Auth0 provides more robust authentication features, SSO options, and better enterprise support
+2. **Cost Optimization**: Direct AWS services can be more cost-effective at scale
+3. **Performance**: Aurora with RDS Proxy provides better connection pooling and performance
+4. **Compliance**: Direct control over data residency and compliance requirements
+
+## Phase 1: Infrastructure Setup ✅
+
+### 1.1 Aurora Setup (COMPLETED)
+- [x] Aurora Serverless v2 cluster deployed
+- [x] RDS Proxy configured for connection pooling
+- [x] VPC and security groups configured
+- [x] Bastion host for secure access
+- [x] Database schema migrated
+
+### 1.2 S3 Setup (TODO)
+- [ ] Create S3 buckets for file uploads
+  - `dormway-uploads-prod` for production
+  - `dormway-uploads-dev` for development
+- [ ] Configure bucket policies and CORS
+- [ ] Set up CloudFront distribution for CDN
+- [ ] Configure lifecycle policies for cost optimization
+
+### 1.3 Auth0 Setup (TODO)
+- [x] Create Auth0 tenant
+- [ ] Configure applications:
+  - iOS app (Native)
+  - API (Machine-to-Machine)
+  - Web apps (SPA)
+- [ ] Set up custom domain
+- [ ] Configure email templates
+- [ ] Set up social connections (if needed)
+
+## Phase 2: Data Migration
+
+### 2.1 Database Migration (IN PROGRESS)
+Current status from Aurora import:
+- [x] Schema migrated
+- [x] Most tables imported successfully
+- [ ] Complete contexts table import (1,281 remaining records)
+- [ ] Verify all foreign key constraints
+- [ ] Test database performance
+
+Tables successfully migrated:
+- campaigns ✅
+- campuses ✅
+- dining_favorites ✅
+- dining_feedback ✅
+- dining_items ✅
+- dining_menus ✅
+- dining_periods ✅
+- dining_places ✅
+- laundry_machines ✅
+- laundry_rooms ✅
+- meal_swipes ✅
+- uploads ✅
+- url_shortener ✅
+- user_campus_associations ✅
+- user_sent_messages ✅
+
+### 2.2 User Migration to Auth0 (TODO)
+Steps:
+1. Export user data from Supabase Auth
+2. Prepare Auth0 bulk import format
+3. Import users with temporary passwords
+4. Send password reset emails
+5. Update user metadata mappings
+
+User data to migrate:
+- Email addresses
+- User metadata (name, preferences)
+- Role assignments
+- Campus associations
+
+### 2.3 File Storage Migration (TODO)
+Current Supabase storage buckets to migrate:
+- User avatars
+- Document uploads
+- Calendar files
+- Dining place images
+
+Migration approach:
+1. List all objects in Supabase storage
+2. Download files in batches
+3. Upload to S3 with same key structure
+4. Update database references
+5. Verify all files accessible
+
+## Phase 3: Application Updates
+
+### 3.1 API Router Updates (TODO)
+- [ ] Install Auth0 SDK: `@auth0/express-oauth2-jwt-bearer`
+- [ ] Update authentication middleware
+- [ ] Replace Supabase client with Aurora connection
+- [ ] Update file upload endpoints for S3
+- [ ] Update environment variables
+- [ ] Test all endpoints
+
+### 3.2 iOS App Updates (TODO)
+- [ ] Install Auth0 SDK: `Auth0.swift`
+- [ ] Update authentication flow
+- [ ] Replace Supabase client with API calls
+- [ ] Update file upload to use presigned S3 URLs
+- [ ] Test on all iOS versions
+
+### 3.3 Engine Service Updates (TODO)
+- [ ] Remove Supabase client
+- [ ] Update to use Aurora connection
+- [ ] Update file processing for S3
+- [ ] Test all workflows
+
+### 3.4 Other Services Updates (TODO)
+- [ ] ICS Uploader: Update for S3 uploads
+- [ ] Syllabus Webviewer: Update auth and database
+- [ ] Ably Relay: Update database connection
+- [ ] Crews Service: Update database queries
+
+## Phase 4: Migration Execution
+
+### 4.1 Pre-Migration Checklist
+- [ ] Full database backup
+- [ ] User communication sent
+- [ ] Rollback plan documented
+- [ ] All services tested in staging
+- [ ] Load testing completed
+
+### 4.2 Migration Day Steps
+1. **Maintenance Mode** (2 hours)
+   - Enable maintenance mode in all apps
+   - Stop write operations
+   
+2. **Final Data Sync**
+   - Export latest data from Supabase
+   - Import to Aurora
+   - Migrate any new files to S3
+   
+3. **DNS/Config Updates**
+   - Update environment variables
+   - Deploy updated services
+   - Update DNS if needed
+   
+4. **Testing**
+   - Smoke tests on all services
+   - Critical user journeys
+   - Performance validation
+   
+5. **Go Live**
+   - Disable maintenance mode
+   - Monitor closely
+
+### 4.3 Post-Migration
+- [ ] Monitor error rates
+- [ ] Check performance metrics
+- [ ] User feedback collection
+- [ ] Document lessons learned
+- [ ] Decommission Supabase resources
+
+## Phase 5: Optimization
+
+### 5.1 Performance Tuning
+- [ ] Aurora query optimization
+- [ ] Index tuning based on usage
+- [ ] S3 transfer acceleration
+- [ ] CloudFront caching rules
+
+### 5.2 Cost Optimization
+- [ ] Right-size Aurora cluster
+- [ ] S3 intelligent tiering
+- [ ] Review Auth0 plan usage
+- [ ] Set up cost alerts
+
+## Risk Mitigation
+
+### Risks and Mitigations
+1. **Data Loss**
+   - Mitigation: Multiple backups, staged migration
+   
+2. **Authentication Disruption**
+   - Mitigation: Parallel run period, gradual rollout
+   
+3. **Performance Degradation**
+   - Mitigation: Load testing, monitoring, rollback plan
+
+4. **Cost Overrun**
+   - Mitigation: Usage projections, cost alerts, regular reviews
+
+## Timeline Estimate
+- Phase 1: 1 week (mostly complete)
+- Phase 2: 1 week
+- Phase 3: 2 weeks
+- Phase 4: 1 day
+- Phase 5: Ongoing
+
+Total: ~4 weeks to complete migration
+
+## Success Criteria
+- [ ] All users can authenticate via Auth0
+- [ ] All data accessible in Aurora
+- [ ] All files accessible in S3
+- [ ] No increase in error rates
+- [ ] Performance metrics maintained or improved
+- [ ] Cost within projected budget
+
+## Rollback Plan
+If critical issues arise:
+1. Revert service deployments
+2. Restore DNS/configs
+3. Re-enable Supabase connections
+4. Communicate to users
+5. Post-mortem analysis
+
+## Next Steps
+1. Get Auth0 tenant provisioned
+2. Complete Aurora data import
+3. Create S3 buckets and policies
+4. Begin service updates in development

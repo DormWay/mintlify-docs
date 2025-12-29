@@ -1,0 +1,185 @@
+---
+title: "AceLLM Integration Plan (Pre‑Launch)"
+description: "Goal: Replace Vectara with Ragie under the AceLLM abstraction while establishing a simple, OpenAI-like API for the app. Support connectors (Gmail, Google Dri..."
+---
+
+# AceLLM Integration Plan
+
+Goal: Replace Vectara with Ragie under the AceLLM abstraction while establishing a simple, OpenAI-like API for the app. Support connectors (Gmail, Google Drive, Notion, Dropbox), partitions for isolation (user/class/school), metadata filters, webhooks, and future white‑label embed.
+
+We’re pre‑launch: implement cleanly without migration constraints. Keep compatibility with existing tables by temporarily reusing `vectara_*` columns for Ragie IDs; add new columns in Phase 2.
+
+## Current State (as of this plan)
+
+- Engine: Introduced `SearchProvider` abstraction with a Ragie scaffold; can switch via `SEARCH_PROVIDER` env.
+- Engine still logs/stores under existing `vectara_*` fields. Behavior unchanged by default (provider=vectara).
+- API Router: Uses `vectara-service` directly for chat/upload/delete; not abstracted yet.
+
+## Target Architecture
+
+- AceLLM provider interface shared across services: `ensureUserCorpus|workspace`, `uploadDocument`, `queryWithMetadata`, `deleteDocument`.
+- Partitions map to Ragie partitions:
+  - user: `user:{userId}` (ACE/Braingains per user)
+  - class/course: `course:{courseContextId}`
+  - school/org: `org:{organizationId}`
+- Document metadata standardized and filterable (see Metadata section).
+- Webhooks from Ragie notify indexing status, connector syncs, and errors.
+- Connectors via Ragie Connect initiate OAuth and sync into user partition by default, with optional sub‑partitions by app folder/notion space.
+
+## Connectors (Ragie Connect)
+
+Scope: Gmail, Google Drive, Notion, Dropbox.
+
+Flow:
+1) App calls `POST /api/search/connect/start` with `{ provider }`.
+2) API Router requests a connect session from Ragie, scoping to `user:{userId}` partition and returns `{ connectUrl | embedToken }`.
+3) Frontend opens hosted connect flow (or embeds per white‑label 1.1 post‑MVP).
+4) Ragie ingests and emits webhooks (connection.created, sync.started, file.indexed, file.failed, sync.completed).
+
+Security:
+- Store minimal connection metadata; never store provider secrets directly (Ragie holds tokens).
+- Verify Ragie webhook signatures.
+
+Open Questions / TODOs:
+- Confirm Ragie endpoint names for session creation, scopes, and available connector IDs.
+- Determine polling vs. webhook‑only visibility for sync progress.
+
+## Partitions
+
+- Default assignment:
+  - Manual uploads: `user:{userId}`
+  - Syllabus + course artifacts: also mirror to `course:{courseContextId}`
+  - Institution‑wide docs: `org:{organizationId}`
+- Query scoping options:
+  - `scope: { type: 'user'|'course'|'org', id?: string }`
+  - Multi‑scope union queries (user ∪ course) for personalization.
+- Storage mapping (Phase 1):
+  - Reuse `braingains_documents.vectara_corpus_key` to store Ragie partition key
+  - Reuse `braingains_documents.vectara_document_id` for Ragie doc ID
+- Storage mapping (Phase 2):
+  - Add `ragie_partition_key`, `ragie_document_id` and backfill; keep read compatibility.
+
+## Metadata
+
+Standard keys (string unless noted):
+- `document_type`: syllabus | lecture_notes | assignment | textbook | presentation | research_paper | general
+- `content_type`: raw_document | processed_insight
+- `insight_type`: course_details | assignments | important_dates | policies | grading | insights | cost_estimation | web_experience
+- `course_code`, `course_name`, `professor`, `semester`, `department`
+- `courseContextId`, `organizationId`, `userId`
+- `filename`, `uploadDate` (ISO datetime)
+
+Filters:
+- Accept key/value equality and simple AND combinations for first release.
+- Example: `content_type='processed_insight' AND insight_type='assignments' AND course_code='CS101'`.
+
+## Entity Extraction
+
+Use Ragie entity extraction for normalized entities to improve filtering and UX:
+- Target entities: course codes, instructor names, dates/deadlines, policy types, file types, campus names.
+- Store extracted entities alongside document metadata for fast filtering and facets.
+- Consider writing to a dedicated table (`braingains_entities`) with `document_id`, `type`, `value`, `normalized_value`, `confidence`.
+
+## Webhooks (monitoring, route to studentWatcher)
+
+Events of interest:
+- Connection lifecycle: created, sync.started, sync.completed, sync.failed
+- Document lifecycle: file.discovered, file.indexed, file.failed, file.updated, file.deleted
+- Query usage (if available): for rate limits/analytics
+
+Handler:
+- `POST /api/search/webhooks/ragie` (HMAC signature verification)
+- Actions:
+  - Upsert document records/status with `processing_status` (pending|processing|indexed|failed|deleted)
+  - Increment usage counters on index/queries
+  - Route downstream to Temporal studentWatcher (e.g., notify when new course docs are indexed so studentWatcher can recompute insights/schedules). Consider a small dispatcher that maps webhook events to specific workflows or activities.
+
+## API Design (OpenAI‑like, simple & robust)
+
+Base path: `/api/search` (AceLLM)
+
+Endpoints:
+- `POST /documents` (multipart form)
+  - fields: `documentType`, optional `courseCode`, optional `metadata` (JSON), file: `document`
+  - behavior: uploads to S3 (if needed), submits to Ragie (via AceLLM) for indexing under user partition; optionally mirrors to course partition
+  - returns: `{ id, partitionKey, status, metadata }`
+
+- `GET /documents`
+  - query: `partitionType=user|course|org`, `partitionId?`, `documentType?`, `contentType?`, paging
+  - returns: list with basic metadata + status
+
+- `DELETE /documents/:id`
+  - deletes in provider and marks record deleted locally
+
+- `POST /query`
+  - body: `{ q, scope: { type, id? } | { type: 'multi', scopes: [...] }, filters?: { key: value }, limit?: number }`
+  - returns: `{ answer, sources: [{ id, snippet, score, metadata }], fcScore? }`
+
+- `POST /connect/start`
+  - body: `{ provider: 'gmail'|'gdrive'|'notion'|'dropbox', scope?: { type, id? } }`
+  - returns: `{ connectUrl | embedToken, expiresAt }`
+
+- `POST /webhooks/ragie`
+  - consumes Ragie events; 200 on success
+
+Auth & Tenancy:
+- All endpoints require user auth; server resolves `userId` and enforces partition scoping.
+
+## Implementation Plan
+
+Phase 0 — Abstraction (done in Engine)
+- AceLLM abstraction implemented; `ACE_LLM_PROVIDER` flag (fallback to `SEARCH_PROVIDER`).
+
+Phase 1 — API Router integration
+1) Add AceLLM provider abstraction to API Router (mirror Engine).
+2) Implement `search-routes.ts` with endpoints above; keep `braingains-*` routes intact for now.
+3) Wire uploads to Ragie; store partition/document IDs (Phase 1 mapping).
+4) Implement basic query with metadata filters.
+5) Add `SEARCH_PROVIDER` and Ragie env vars to router config.
+
+Phase 2 — Connectors & Webhooks
+6) `POST /connect/start` to initiate Ragie Connect sessions; persist connection metadata.
+7) `POST /webhooks/ragie` with signature verification; update document statuses and usage.
+8) Add Temporal hooks if we want async enrichment on webhook events.
+
+Phase 3 — Entities & Filters
+9) Enable entity extraction on ingest; persist entities. Add query filters/facets for entities.
+10) Expand metadata filter syntax (ranges, OR) if Ragie supports.
+
+Phase 4 — Data Model Cleanup
+11) Add `ragie_partition_key`, `ragie_document_id` columns; backfill; deprecate `vectara_*`.
+
+Phase 5 — White‑Label Embed (v1.1)
+12) Support embedded Connect UX (whitelabel) post‑MVP.
+
+## Environment & Config
+
+- `ACE_LLM_PROVIDER`: `vectara` | `ragie` (default `vectara`)
+- Backward compatibility: `SEARCH_PROVIDER` also supported
+- Ragie: `RAGIE_API_KEY`, `RAGIE_BASE_URL` (default `https://api.ragie.ai`)
+- Webhooks: `RAGIE_WEBHOOK_SECRET`, public URL path `/api/search/webhooks/ragie`
+
+## Testing & Validation
+
+- Unit tests for provider selection and argument passing.
+- Integration tests for `/documents` and `/query` happy paths and error handling.
+- Webhook signature tests and idempotency (retry safe).
+- Load test queries with multi‑scope partitions.
+
+## Risks & Mitigations
+
+- Unknowns in Ragie API surface → Stubbed adapter, feature flag, dual‑write fallback (optional).
+- Connector auth complexity → Start with hosted flow, move to white‑label after core stabilizes.
+- Metadata schema drift → Centralize keys; validate/normalize in router.
+
+## Work Items (Checklist)
+
+- [ ] Router: Add `SearchProvider` and Ragie adapter
+- [ ] Router: Implement `/api/search/*` endpoints
+- [ ] Router: Env vars + config for provider
+- [ ] Webhooks: `/api/search/webhooks/ragie` + signature verification
+- [ ] Connectors: `/api/search/connect/start` + minimal connection store
+- [ ] Engine: Switch provider flag in dev and validate indexing/query
+- [ ] Entities: Persist extracted entities and expose filters
+- [ ] Data model: Add `ragie_*` columns and backfill
+- [ ] Docs: Update service READMEs and .env examples

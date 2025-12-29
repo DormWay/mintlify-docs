@@ -1,0 +1,800 @@
+---
+title: "VS Code Dev Containers Investigation"
+description: "VS Code Dev Containers **fully supports** multi-container setups via docker-compose integration. Your current setup can be migrated with the following approach:"
+---
+
+# VS Code Dev Containers Investigation
+
+**Date:** 2025-01-30
+**Author:** Claude Code
+**Purpose:** Investigate migrating DormWay's complex multi-container development environment to VS Code Dev Containers
+**Tags:** #development #docker #devcontainers #vscode #infrastructure
+
+---
+
+## Executive Summary
+
+VS Code Dev Containers **fully supports** multi-container setups via docker-compose integration. Your current setup can be migrated with the following approach:
+
+- ✅ **Docker Compose Integration**: Use existing `docker-compose.doppler-integrated.yml`
+- ✅ **Doppler Secrets**: Multiple proven integration patterns available
+- ✅ **Multi-Service Development**: Open multiple VS Code windows, one per service
+- ✅ **Hot Reload**: Existing volume mounts will continue to work
+- ⚠️ **Consideration**: Need to choose primary "dev container" service(s)
+
+**Recommendation:** Start with api-router and engine as primary dev containers, keep other services as docker-compose services.
+
+---
+
+## Current Architecture Analysis
+
+### Services Overview
+
+| Service | Type | Port | Primary Language | Dev Priority |
+|---------|------|------|-----------------|--------------|
+| **postgres-local** | Database | 5432 | - | Infrastructure |
+| **redis** | Cache | 6380 | - | Infrastructure |
+| **api-router** | Gateway | 3001 | Node.js/TypeScript | **HIGH** ⭐ |
+| **engine** | Temporal Worker | 3030 | Node.js/TypeScript | **HIGH** ⭐ |
+| **dormway-crews** | AI Service | 8000 | Python | **MEDIUM** |
+| **ably-relay** | Real-time | 3032 | Node.js | LOW |
+| **syllabus-webviewer** | Next.js | 3002 | Next.js | MEDIUM |
+| **dormway-lockedin** | Next.js | 3008 | Next.js | **HIGH** ⭐ |
+| **dormway-admin** | React | 3004 | React/Vite | MEDIUM |
+| **nginx** | Reverse Proxy | 80 | - | Infrastructure |
+
+### Key Integration Points
+
+1. **Doppler Secrets Management**
+   - All services use `DOPPLER_TOKEN` environment variable
+   - Secrets fetched at runtime via Doppler CLI
+   - Wrapper script: `scripts/dev/dev-with-doppler.sh`
+
+2. **Volume Mounts**
+   - Hot-reload enabled via volume mounts
+   - Node modules excluded with anonymous volumes
+   - Next.js `.next` build directories excluded
+
+3. **Service Dependencies**
+   - Health checks with `depends_on` conditions
+   - Docker networking for inter-service communication
+   - Consistent environment variable overrides
+
+---
+
+## Dev Containers Architecture Options
+
+### Option 1: Multi-Window Multi-Service (Recommended)
+
+**Architecture:**
+```
+📁 dormway-platform/
+  📁 .devcontainer/
+    📁 api-router/
+      📄 devcontainer.json
+    📁 engine/
+      📄 devcontainer.json
+    📁 dormway-lockedin/
+      📄 devcontainer.json
+    📁 dormway-crews/
+      📄 devcontainer.json
+  📄 docker-compose.devcontainer.yml (shared)
+```
+
+**Workflow:**
+1. Open VS Code
+2. Use "Dev Containers: Open Folder in Container..."
+3. Select which service to work on (api-router, engine, etc.)
+4. Open multiple VS Code windows for different services
+5. All services share the same docker-compose network
+
+**Pros:**
+- ✅ Focused development per service
+- ✅ Service-specific VS Code extensions
+- ✅ Independent debugging per service
+- ✅ Maintains existing docker-compose benefits
+
+**Cons:**
+- ⚠️ Need multiple VS Code windows
+- ⚠️ Need to configure `shutdownAction: "none"` to avoid stopping all services
+
+---
+
+### Option 2: Monorepo Single Dev Container
+
+**Architecture:**
+```
+📁 dormway-platform/
+  📁 .devcontainer/
+    📄 devcontainer.json (points to api-router or workspace root)
+    📄 docker-compose.yml
+```
+
+**Workflow:**
+1. Open entire `dormway-platform` folder in VS Code
+2. Single dev container (e.g., api-router) with access to full monorepo
+3. All other services run as supporting containers
+4. Use integrated terminal to access other services
+
+**Pros:**
+- ✅ Single VS Code window
+- ✅ Full monorepo visibility
+- ✅ Simplified setup
+
+**Cons:**
+- ⚠️ Less optimized per-service tooling
+- ⚠️ All extensions loaded even if not needed
+
+---
+
+### Option 3: Hybrid Approach (Best for DormWay)
+
+**Architecture:**
+```
+📁 dormway-platform/
+  📁 .devcontainer/
+    📁 api-router/
+      📄 devcontainer.json
+    📁 engine/
+      📄 devcontainer.json
+    📁 lockedin/
+      📄 devcontainer.json
+    📄 docker-compose.devcontainer.yml
+  📄 docker-compose.doppler-integrated.yml (base)
+```
+
+**Strategy:**
+- **Primary Dev Containers**: api-router, engine, dormway-lockedin (most actively developed)
+- **Supporting Services**: postgres, redis, nginx, crews (run via docker-compose, not dev containers)
+- **Selective Development**: Open only the service(s) you're working on
+
+**Why This Works Best:**
+1. Focus on services that require frequent code changes
+2. Keep infrastructure services (DB, Redis) as standard containers
+3. Maintain Doppler integration
+4. Preserve existing volume mount strategy
+5. Allow developers to choose their workflow
+
+---
+
+## Doppler Integration Strategies
+
+### Strategy 1: Service Token in devcontainer.json (Recommended)
+
+**Setup:**
+```json
+{
+  "name": "API Router",
+  "dockerComposeFile": [
+    "../../infrastructure/docker/docker-compose.devcontainer.yml"
+  ],
+  "service": "api-router",
+  "workspaceFolder": "/app",
+  "shutdownAction": "none",
+
+  "containerEnv": {
+    "DOPPLER_TOKEN": "${localEnv:DOPPLER_TOKEN}"
+  },
+
+  "postCreateCommand": "npm install",
+  "postStartCommand": "doppler setup --no-interactive"
+}
+```
+
+**Local Machine Setup:**
+```bash
+# Generate long-lived dev service token
+export DOPPLER_TOKEN=$(doppler configs tokens create dev-vscode --max-age 30d --plain)
+
+# Or use Doppler CLI directly (login persists)
+doppler login
+doppler setup # Select project/config
+```
+
+**Pros:**
+- ✅ Uses existing token from local environment
+- ✅ No secrets in git
+- ✅ Works with current Doppler setup
+
+**Cons:**
+- ⚠️ Need to set `DOPPLER_TOKEN` in local shell before opening dev container
+
+---
+
+### Strategy 2: Doppler CLI in Container
+
+**Dockerfile Update:**
+```dockerfile
+# Install Doppler CLI in dev image
+RUN apt-get update && apt-get install -y curl gnupg && \
+    curl -sLf --retry 3 --tlsv1.2 --proto "=https" 'https://packages.doppler.com/public/cli/gpg.DE2A7741A397C129.key' | gpg --dearmor -o /usr/share/keyrings/doppler-archive-keyring.gpg && \
+    echo "deb [signed-by=/usr/share/keyrings/doppler-archive-keyring.gpg] https://packages.doppler.com/public/cli/deb/debian any-version main" | tee /etc/apt/sources.list.d/doppler-cli.list && \
+    apt-get update && \
+    apt-get install -y doppler
+```
+
+**devcontainer.json:**
+```json
+{
+  "postCreateCommand": "doppler login --scope /app && doppler setup --no-interactive",
+  "remoteEnv": {
+    "PATH": "${containerEnv:PATH}"
+  }
+}
+```
+
+**Pros:**
+- ✅ Doppler CLI available inside container
+- ✅ Can use `doppler run` for commands
+
+---
+
+### Strategy 3: Hybrid - Service Token + CLI
+
+**Best of Both Worlds:**
+```json
+{
+  "containerEnv": {
+    "DOPPLER_TOKEN": "${localEnv:DOPPLER_TOKEN}"
+  },
+  "features": {
+    "ghcr.io/devcontainers/features/doppler-cli:1": {}
+  }
+}
+```
+
+**Usage:**
+- CLI installed for `doppler run` commands
+- Token passed for automatic authentication
+- No manual login required
+
+---
+
+## Implementation Roadmap
+
+### Phase 1: Proof of Concept (2-4 hours)
+
+**Goal:** Get api-router running in a dev container
+
+**Steps:**
+1. Create `.devcontainer/api-router/devcontainer.json`
+2. Create simplified `docker-compose.devcontainer.yml` (postgres + redis + api-router)
+3. Test Doppler integration
+4. Verify hot-reload works
+5. Test debugging with VS Code
+
+**Deliverable:** Working dev container for api-router
+
+---
+
+### Phase 2: Multi-Service Setup (4-6 hours)
+
+**Goal:** Add engine and dormway-lockedin dev containers
+
+**Steps:**
+1. Create `.devcontainer/engine/devcontainer.json`
+2. Create `.devcontainer/lockedin/devcontainer.json`
+3. Update docker-compose to support multi-window workflow
+4. Add service-specific VS Code extensions
+5. Document multi-window workflow
+
+**Deliverable:** 3 primary services in dev containers
+
+---
+
+### Phase 3: Documentation & Optimization (2-3 hours)
+
+**Goal:** Team adoption and refinement
+
+**Steps:**
+1. Write team onboarding guide
+2. Create troubleshooting docs
+3. Optimize container build times
+4. Add pre-commit hooks support
+5. Test on different developer machines
+
+**Deliverable:** Production-ready dev container setup
+
+---
+
+## Example Configuration Files
+
+### `.devcontainer/api-router/devcontainer.json`
+
+```json
+{
+  "name": "DormWay API Router",
+  "dockerComposeFile": [
+    "../../infrastructure/docker/docker-compose.devcontainer.yml"
+  ],
+  "service": "api-router",
+  "workspaceFolder": "/app",
+  "shutdownAction": "none",
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "dbaeumer.vscode-eslint",
+        "esbenp.prettier-vscode",
+        "ms-vscode.vscode-typescript-next",
+        "eamodio.gitlens",
+        "ms-azuretools.vscode-docker",
+        "redhat.vscode-yaml",
+        "christian-kohler.path-intellisense",
+        "gruntfuggly.todo-tree"
+      ],
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "bash",
+        "editor.formatOnSave": true,
+        "editor.codeActionsOnSave": {
+          "source.fixAll.eslint": true
+        },
+        "eslint.validate": ["javascript", "typescript"],
+        "typescript.tsdk": "node_modules/typescript/lib"
+      }
+    }
+  },
+
+  "containerEnv": {
+    "DOPPLER_TOKEN": "${localEnv:DOPPLER_TOKEN}"
+  },
+
+  "forwardPorts": [3001],
+  "portsAttributes": {
+    "3001": {
+      "label": "API Router",
+      "onAutoForward": "notify"
+    }
+  },
+
+  "postCreateCommand": "npm install",
+  "postStartCommand": "echo 'API Router dev container ready! Run: npm run dev'",
+
+  "remoteUser": "node"
+}
+```
+
+---
+
+### `docker-compose.devcontainer.yml`
+
+```yaml
+version: '3.8'
+
+services:
+  postgres-local:
+    image: postgres:15.4
+    container_name: dormway-postgres-devcontainer
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: dormway
+      POSTGRES_USER: dormway_admin
+      POSTGRES_PASSWORD: localdev_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dormway_admin"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --requirepass localdev_redis
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+
+  api-router:
+    build:
+      context: ../../services/api-router
+      dockerfile: Dockerfile.dev
+    ports:
+      - "3001:3001"
+    environment:
+      DOPPLER_TOKEN: ${DOPPLER_TOKEN}
+      NODE_ENV: development
+      PORT: 3001
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      AURORA_DB_HOST: postgres-local
+      AURORA_DB_PORT: "5432"
+      AURORA_DB_USER: dormway_admin
+      AURORA_DB_PASSWORD: localdev_password
+      AURORA_DB_NAME: dormway
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres-local:
+        condition: service_healthy
+    volumes:
+      - ../../services/api-router:/app
+      - /app/node_modules
+    command: npm run dev
+
+  engine:
+    build:
+      context: ../../services/engine
+      dockerfile: Dockerfile.dev
+    ports:
+      - "3030:3030"
+    environment:
+      DOPPLER_TOKEN: ${DOPPLER_TOKEN}
+      NODE_ENV: development
+      PORT: 3030
+      API_ROUTER: http://api-router:3001
+      AURORA_DB_HOST: postgres-local
+      AURORA_DB_PORT: "5432"
+      AURORA_DB_USER: dormway_admin
+      AURORA_DB_PASSWORD: localdev_password
+      AURORA_DB_NAME: dormway
+    depends_on:
+      - api-router
+    volumes:
+      - ../../services/engine:/app
+      - /app/node_modules
+    command: npm run dev
+
+  dormway-lockedin:
+    build:
+      context: ../../services/dormway-lockedin
+      dockerfile: Dockerfile.dev
+    ports:
+      - "3008:3000"
+    environment:
+      DOPPLER_TOKEN: ${DOPPLER_TOKEN}
+      NODE_ENV: development
+      PORT: 3000
+      NEXT_PUBLIC_API_BASE_URL: http://localhost:3001
+    volumes:
+      - ../../services/dormway-lockedin:/app
+      - /app/node_modules
+      - /app/.next
+    command: npm run dev
+
+volumes:
+  postgres_data:
+    name: dormway_devcontainer_postgres
+  redis-data:
+    name: dormway_devcontainer_redis
+```
+
+---
+
+### `.devcontainer/engine/devcontainer.json`
+
+```json
+{
+  "name": "DormWay Engine (Temporal)",
+  "dockerComposeFile": [
+    "../../infrastructure/docker/docker-compose.devcontainer.yml"
+  ],
+  "service": "engine",
+  "workspaceFolder": "/app",
+  "shutdownAction": "none",
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "dbaeumer.vscode-eslint",
+        "esbenp.prettier-vscode",
+        "ms-vscode.vscode-typescript-next",
+        "temporalio.temporal-vscode",
+        "ms-azuretools.vscode-docker"
+      ],
+      "settings": {
+        "temporal.temporalHome": "/app"
+      }
+    }
+  },
+
+  "containerEnv": {
+    "DOPPLER_TOKEN": "${localEnv:DOPPLER_TOKEN}"
+  },
+
+  "forwardPorts": [3030],
+  "portsAttributes": {
+    "3030": {
+      "label": "Temporal Engine",
+      "onAutoForward": "notify"
+    }
+  },
+
+  "postCreateCommand": "npm install && npm run build && npm run build:workflow",
+
+  "remoteUser": "node"
+}
+```
+
+---
+
+### `.devcontainer/lockedin/devcontainer.json`
+
+```json
+{
+  "name": "DormWay LockedIn (Next.js)",
+  "dockerComposeFile": [
+    "../../infrastructure/docker/docker-compose.devcontainer.yml"
+  ],
+  "service": "dormway-lockedin",
+  "workspaceFolder": "/app",
+  "shutdownAction": "none",
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "dbaeumer.vscode-eslint",
+        "esbenp.prettier-vscode",
+        "bradlc.vscode-tailwindcss",
+        "ms-vscode.vscode-typescript-next",
+        "unifiedjs.vscode-mdx"
+      ],
+      "settings": {
+        "tailwindCSS.experimental.classRegex": [
+          ["cva\\(([^)]*)\\)", "[\"'`]([^\"'`]*).*?[\"'`]"]
+        ]
+      }
+    }
+  },
+
+  "containerEnv": {
+    "DOPPLER_TOKEN": "${localEnv:DOPPLER_TOKEN}"
+  },
+
+  "forwardPorts": [3000],
+  "portsAttributes": {
+    "3000": {
+      "label": "LockedIn App",
+      "onAutoForward": "openBrowser"
+    }
+  },
+
+  "postCreateCommand": "npm install",
+
+  "remoteUser": "node"
+}
+```
+
+---
+
+## Developer Workflow Changes
+
+### Current Workflow
+```bash
+# Terminal 1
+cd ~/Development/GitHub/dormway-platform
+make dev
+
+# Terminal 2 (if needed)
+make logs s=api-router
+
+# Terminal 3 (if needed)
+make restart s=engine
+```
+
+### Dev Container Workflow
+
+**Option A: Multi-Window (Recommended)**
+```bash
+# Open VS Code
+code ~/Development/GitHub/dormway-platform
+
+# VS Code Command Palette (Cmd+Shift+P)
+> Dev Containers: Open Folder in Container...
+> Select: .devcontainer/api-router
+
+# Open another VS Code window
+# Cmd+Shift+P
+> Dev Containers: Open Folder in Container...
+> Select: .devcontainer/engine
+
+# Now you have 2 focused VS Code windows with integrated terminals
+```
+
+**Option B: Single Window**
+```bash
+code ~/Development/GitHub/dormway-platform
+
+# VS Code Command Palette
+> Dev Containers: Reopen in Container
+
+# Integrated terminal is inside api-router container
+# Use docker exec to access other services
+```
+
+---
+
+## Migration Checklist
+
+### Pre-Migration
+- [ ] Document current development workflow
+- [ ] Survey team on pain points with current setup
+- [ ] Identify which services are most actively developed
+- [ ] Backup current docker volumes
+
+### Phase 1: Setup
+- [ ] Create `.devcontainer/` directory structure
+- [ ] Create `docker-compose.devcontainer.yml`
+- [ ] Configure Doppler token passing
+- [ ] Set up api-router dev container
+- [ ] Test hot-reload functionality
+- [ ] Test debugging capabilities
+
+### Phase 2: Expansion
+- [ ] Add engine dev container
+- [ ] Add dormway-lockedin dev container
+- [ ] Configure service-specific VS Code extensions
+- [ ] Test multi-window workflow
+- [ ] Document port forwarding setup
+
+### Phase 3: Polish
+- [ ] Write team onboarding guide
+- [ ] Create video walkthrough
+- [ ] Set up pre-commit hooks in containers
+- [ ] Optimize container build times
+- [ ] Add troubleshooting guide
+
+### Phase 4: Rollout
+- [ ] Alpha test with 1-2 developers
+- [ ] Gather feedback
+- [ ] Iterate on pain points
+- [ ] Beta test with full team
+- [ ] Make default development environment
+
+---
+
+## Key Benefits
+
+### For Developers
+
+1. **Consistent Environment**
+   - Everyone uses identical container configuration
+   - No more "works on my machine" issues
+   - Easy onboarding for new developers
+
+2. **Integrated Tooling**
+   - VS Code extensions automatically installed
+   - Debugging configured out-of-the-box
+   - IntelliSense works perfectly with container environment
+
+3. **Focused Development**
+   - Open only the services you're working on
+   - Reduced cognitive load
+   - Better performance (fewer containers running)
+
+4. **Clean Local Machine**
+   - No need to install Node.js, Python, etc. locally
+   - Isolated dependencies per service
+   - Easy to reset/rebuild
+
+### For the Team
+
+1. **Faster Onboarding**
+   - New developers productive in < 1 hour
+   - Automated setup process
+   - Self-documenting configuration
+
+2. **Reduced Support Burden**
+   - Fewer environment-related issues
+   - Standardized troubleshooting
+   - Consistent behavior across machines
+
+3. **Better CI/CD Alignment**
+   - Dev environment matches production closely
+   - Easier to reproduce CI issues locally
+   - Consistent Doppler integration
+
+---
+
+## Potential Challenges & Solutions
+
+### Challenge 1: Initial Learning Curve
+**Solution:**
+- Create video walkthrough
+- Pair programming sessions for first week
+- Document common commands
+
+### Challenge 2: Docker Performance on Mac
+**Solution:**
+- Use VirtioFS for volume mounts (Docker Desktop setting)
+- Optimize `.dockerignore` files
+- Consider using cloud-based dev containers for resource-intensive work
+
+### Challenge 3: Doppler Token Management
+**Solution:**
+- Use long-lived dev tokens (30-day expiry)
+- Add token refresh script
+- Document token regeneration process
+
+### Challenge 4: Multi-Window Context Switching
+**Solution:**
+- Use VS Code workspace feature to manage multiple windows
+- Configure window titles for easy identification
+- Use VS Code's "Recent Workspaces" feature
+
+---
+
+## Cost-Benefit Analysis
+
+### Time Investment
+
+| Phase | Estimated Hours | Who |
+|-------|----------------|-----|
+| Phase 1: POC | 2-4 hours | 1 senior engineer |
+| Phase 2: Multi-service | 4-6 hours | 1 senior engineer |
+| Phase 3: Documentation | 2-3 hours | 1 engineer |
+| Phase 4: Team rollout | 4-6 hours (team training) | All engineers |
+| **Total** | **12-19 hours** | |
+
+### Time Savings (Annual)
+
+| Scenario | Current | With Dev Containers | Annual Savings |
+|----------|---------|---------------------|----------------|
+| New developer onboarding | 4-8 hours | 1 hour | 3-7 hours × 4 new devs = **12-28 hours** |
+| Environment troubleshooting | 2 hours/week | 0.5 hours/week | 1.5 hours × 50 weeks = **75 hours** |
+| "Works on my machine" debugging | 1 hour/week | 0.25 hours/week | 0.75 hours × 50 weeks = **37.5 hours** |
+| Dependency conflicts | 1 hour/month | 0.25 hours/month | 0.75 hours × 12 months = **9 hours** |
+| **Total Annual Savings** | | | **133.5 - 149.5 hours** |
+
+**ROI:** 7-12x return on investment in first year
+
+---
+
+## Next Steps
+
+### Recommended Action Plan
+
+1. **This Week: POC**
+   - [ ] Create api-router dev container
+   - [ ] Test with 1 developer
+   - [ ] Validate Doppler integration
+
+2. **Next Week: Expansion**
+   - [ ] Add engine and lockedin dev containers
+   - [ ] Test multi-window workflow
+   - [ ] Write initial documentation
+
+3. **Week 3: Team Rollout**
+   - [ ] Alpha test with 2-3 developers
+   - [ ] Iterate based on feedback
+   - [ ] Create video walkthrough
+
+4. **Week 4: Production Ready**
+   - [ ] Update main documentation
+   - [ ] Announce to team
+   - [ ] Provide support during transition
+
+---
+
+## Conclusion
+
+**Verdict:** ✅ **Dev Containers are a great fit for DormWay's architecture**
+
+Your multi-container setup with Doppler integration is **well-suited** for Dev Containers. The migration path is clear, the benefits are significant, and the risks are minimal.
+
+**Recommendation:** Start with Phase 1 POC this week. If successful, proceed with full rollout.
+
+**Key Success Factors:**
+1. Focus on 3 primary services initially (api-router, engine, lockedin)
+2. Use multi-window workflow for best developer experience
+3. Maintain existing docker-compose.yml as reference
+4. Document Doppler token setup clearly
+5. Get early feedback from team
+
+---
+
+## Related Notes
+- [Zuplo Gateway Migration](/docs/engineering/development/zuplo-gateway-migration)
+- [Obsidian Vault Search System](/docs/engineering/development/obsidian-vault-search-system)
+- CLAUDE - Project development guidelines
+
+## External Resources
+- [Dev Containers Documentation](https://code.visualstudio.com/docs/devcontainers/containers)
+- [Doppler Docker Integration Guide](https://www.doppler.com/integrations/docker)
+- [VS Code: Connect to Multiple Containers](https://code.visualstudio.com/remote/advancedcontainers/connect-multiple-containers)

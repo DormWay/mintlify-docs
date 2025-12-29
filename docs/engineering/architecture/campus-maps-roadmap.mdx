@@ -1,0 +1,972 @@
+---
+title: "Campus Maps Roadmap"
+description: "Maps are not a separate product area. They're a **2-click affordance** inside Schedule / Events / Campus widgets:"
+---
+
+# Campus Maps Roadmap
+
+**Created:** 2025-12-12
+**Updated:** 2025-12-15
+**Status:** Draft
+**Related Issues:** DORM-447 (OSM research), DORM-731 (map/calendar links), DORM-690 (Moovit research)
+
+### Phase 1 Linear Issues
+| Issue | Title | Status |
+|-------|-------|--------|
+| DORM-747 | [Maps P1.0] Geo infrastructure config | Triage |
+| DORM-748 | [Maps P1.1] Add LocationRef to dormway-core | Triage |
+| DORM-749 | [Maps P1.2] Backend: emit walkingTimes | Triage |
+| DORM-750 | [Maps P1.3] LockedIn: interactive map modal | Triage |
+| DORM-751 | [Maps P1.4] iOS: Location map sheet | Triage |
+| DORM-752 | [Maps P1.5] Map quality dashboard (admin) | Triage |
+| DORM-753 | [Maps P1.6] Remove UMich placeholder | Triage |
+
+---
+
+## North Star
+
+Maps are not a separate product area. They're a **2-click affordance** inside Schedule / Events / Campus widgets:
+
+- **Click 1:** See a mini map (pin + context: "next class" / "event")
+- **Click 2:** Route / directions (native) + "view source" if needed
+
+---
+
+## Phase 1: Ship Map Value Now (No New Geo Ingest)
+
+**Goal:** Make maps useful immediately using existing infrastructure.
+
+### 1.0 Map Infrastructure Decisions (MUST DO FIRST)
+
+Before writing any map UI code, make these decisions and configure them properly.
+
+#### Tile Provider Strategy
+
+> **WARNING:** Do NOT use `https://{s}.tile.openstreetmap.org/...` in production.
+> OSMF tile servers have no SLA, will throttle/block heavy users, and explicitly warn against production use.
+> See: https://operations.osmfoundation.org/policies/tiles/
+
+**Options (pick one):**
+
+| Provider | Cost | Notes |
+|----------|------|-------|
+| **Mapbox** | $0.50/1000 loads | Best quality, easy setup, has free tier |
+| **Maptiler** | Free tier + paid | Good MapLibre support |
+| **Stadia Maps** | Free tier + paid | Requires API key even for free tier |
+| **Self-hosted** | Server costs | Full control, no per-request costs |
+
+**Config pattern:**
+
+```typescript
+// services/shared/dormway-core/src/config/map-config.ts
+
+export const mapConfig = {
+  tileProvider: process.env.MAP_TILE_PROVIDER || 'mapbox',
+
+  tileUrls: {
+    mapbox: `https://api.mapbox.com/styles/v1/mapbox/streets-v12/tiles/{z}/{x}/{y}?access_token=${process.env.MAPBOX_ACCESS_TOKEN}`,
+    maptiler: `https://api.maptiler.com/maps/streets/{z}/{x}/{y}.png?key=${process.env.MAPTILER_API_KEY}`,
+    stadia: `https://tiles.stadiamaps.com/tiles/alidade_smooth/{z}/{x}/{y}.png?api_key=${process.env.STADIA_API_KEY}`,
+  },
+
+  // Required environment variables
+  requiredEnvVars: ['MAP_TILE_PROVIDER', 'MAPBOX_ACCESS_TOKEN'], // or equivalent
+};
+```
+
+**Action items:**
+- [ ] Choose tile provider and sign up for API key
+- [ ] Add keys to Doppler (dev + prod)
+- [ ] Create `map-config.ts` with provider abstraction
+
+#### Attribution Requirements
+
+> **LEGAL REQUIREMENT:** If you render OSM-derived maps, attribution must be visible.
+> Hidden attribution (e.g., behind a menu) violates the license.
+> See: https://osmfoundation.org/wiki/Licence/Attribution_Guidelines
+
+**Required text:** `© OpenStreetMap contributors`
+
+**Where to show:**
+- Bottom-left or bottom-right of map component
+- Must be visible without interaction
+- iOS: in map view footer
+- Web: overlay on map canvas
+
+---
+
+### 1.1 Introduce `LocationRef` Primitive
+
+Add to dashboard composite payload (use everywhere `location?: string` exists):
+
+```typescript
+// services/shared/dormway-core/src/types/location.ts
+
+export type LocationRef = {
+  /** Human-readable label: "Engineering Building", "Room 101" */
+  label: string;
+
+  /** Campus context ID for resolution */
+  campusId?: string;
+
+  /** Coordinates when known */
+  lat?: number;
+  lng?: number;
+
+  /** How confident are we in this location? (optional - defaults to 'low' if coords missing) */
+  confidence?: 'high' | 'med' | 'low';
+
+  /** Where did this location data come from? */
+  source?: 'campus_ingest' | 'geocode' | 'manual' | 'schedule_parse' | 'unknown';
+
+  /** Deep link for in-app navigation */
+  deepLink?: string;  // dormway://campus/map?lat=...&lng=...
+
+  /** External fallback (Apple/Google Maps) */
+  externalUrl?: string;
+};
+```
+
+**Files to modify:**
+- `services/api-router/src/services/dashboard-composite-transformer.ts` - Add LocationRef to schedule events
+- `services/shared/dormway-core/src/types/` - New location types
+- Widget props interfaces
+
+---
+
+### 1.2 Walking Time Estimator v1 (Non-Routed)
+
+> **This is v1 ETA using straight-line distance.** It intentionally over-estimates via buffer.
+> Real routed ETAs come in Phase 3.
+
+**Acceptance criteria:**
+- Must not under-estimate by more than 2 minutes for typical campus distances (<1km)
+- Buffer multiplier ensures we err on the side of "leave earlier"
+- Fallback to 10 min when coords unavailable
+
+```typescript
+// services/shared/dormway-core/src/utils/walking-time.ts
+
+export interface WalkingTimeResult {
+  minutes: number;
+  confidence: 'routed' | 'estimated' | 'fallback';
+  distanceMeters?: number;
+  /** Indicates this is v1 straight-line estimate, not routed */
+  isV1Estimate: boolean;
+}
+
+export function estimateWalkingTimeV1(
+  from: { lat: number; lng: number } | null,
+  to: { lat: number; lng: number } | null,
+  options?: {
+    walkingSpeedMps?: number;  // default: 1.4 m/s (~5 km/h)
+    bufferMultiplier?: number; // default: 1.4 (40% buffer for stairs, crowds, indirect paths)
+  }
+): WalkingTimeResult {
+  const { walkingSpeedMps = 1.4, bufferMultiplier = 1.4 } = options ?? {};
+
+  // No coords? Fall back to heuristic
+  if (!from?.lat || !to?.lat) {
+    return { minutes: 10, confidence: 'fallback', isV1Estimate: true };
+  }
+
+  // Haversine straight-line distance
+  const distanceMeters = haversineDistance(from, to);
+
+  // Walking time with buffer (40% accounts for non-straight paths)
+  const rawMinutes = (distanceMeters / walkingSpeedMps) / 60;
+  const bufferedMinutes = Math.ceil(rawMinutes * bufferMultiplier);
+
+  return {
+    minutes: Math.max(2, bufferedMinutes), // Minimum 2 min
+    confidence: 'estimated',
+    distanceMeters,
+    isV1Estimate: true,
+  };
+}
+
+function haversineDistance(
+  a: { lat: number; lng: number },
+  b: { lat: number; lng: number }
+): number {
+  const R = 6371000; // Earth radius in meters
+  const dLat = toRad(b.lat - a.lat);
+  const dLng = toRad(b.lng - a.lng);
+  const lat1 = toRad(a.lat);
+  const lat2 = toRad(b.lat);
+
+  const x = Math.sin(dLat / 2) ** 2 +
+            Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
+
+  return R * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1 - x));
+}
+
+const toRad = (deg: number) => deg * (Math.PI / 180);
+```
+
+**Dashboard composite changes:**
+
+```typescript
+// In buildScheduleWidget() or buildDayPlanWidget()
+
+// Calculate walking times between consecutive events
+const eventsWithWalkTime = events.map((event, i) => {
+  const nextEvent = events[i + 1];
+  if (!nextEvent) return event;
+
+  const walkTime = estimateWalkingTimeV1(
+    event.location?.lat && event.location?.lng
+      ? { lat: event.location.lat, lng: event.location.lng }
+      : null,
+    nextEvent.location?.lat && nextEvent.location?.lng
+      ? { lat: nextEvent.location.lat, lng: nextEvent.location.lng }
+      : null
+  );
+
+  return {
+    ...event,
+    walkingTimeToNext: walkTime,
+  };
+});
+```
+
+---
+
+### 1.3 LockedIn MapLibre Component
+
+**Component spec:**
+
+```typescript
+// services/dormway-lockedin/src/components/maps/LocationMapModal.tsx
+
+interface LocationMapModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  location: LocationRef;
+  title?: string;  // "Next Class", "Event Location"
+  showDirectionsButton?: boolean;
+}
+
+// Features:
+// - MapLibre GL JS with CONFIGURED tile provider (not hardcoded)
+// - Single pin at location
+// - Zoom controls
+// - VISIBLE attribution (bottom of map)
+// - "Get Directions" button → opens native maps app
+// - "Copy Address" action
+```
+
+**Implementation:**
+
+```tsx
+'use client';
+
+import { useEffect, useRef } from 'react';
+import maplibregl from 'maplibre-gl';
+import 'maplibre-gl/dist/maplibre-gl.css';
+import { mapConfig } from '@/config/map-config';
+
+export function LocationMapModal({
+  isOpen,
+  onClose,
+  location,
+  title = 'Location',
+  showDirectionsButton = true
+}: LocationMapModalProps) {
+  const mapContainer = useRef<HTMLDivElement>(null);
+  const map = useRef<maplibregl.Map | null>(null);
+
+  useEffect(() => {
+    if (!isOpen || !mapContainer.current || !location.lat || !location.lng) return;
+
+    // Use configured tile provider - NOT hardcoded demo URLs
+    const styleUrl = mapConfig.getStyleUrl();
+
+    map.current = new maplibregl.Map({
+      container: mapContainer.current,
+      style: styleUrl,
+      center: [location.lng, location.lat],
+      zoom: 16,
+      attributionControl: true,  // REQUIRED - shows OSM attribution
+    });
+
+    new maplibregl.Marker({ color: '#6366f1' })
+      .setLngLat([location.lng, location.lat])
+      .addTo(map.current);
+
+    return () => map.current?.remove();
+  }, [isOpen, location]);
+
+  const handleDirections = () => {
+    const url = `https://maps.apple.com/?daddr=${location.lat},${location.lng}`;
+    window.open(url, '_blank');
+  };
+
+  if (!isOpen) return null;
+
+  return (
+    <Dialog open={isOpen} onOpenChange={onClose}>
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>{title}</DialogTitle>
+          <DialogDescription>{location.label}</DialogDescription>
+        </DialogHeader>
+
+        <div ref={mapContainer} className="h-64 w-full rounded-lg" />
+
+        {/* Attribution is handled by MapLibre's attributionControl */}
+
+        {showDirectionsButton && location.lat && (
+          <Button onClick={handleDirections} className="w-full">
+            <Navigation className="mr-2 h-4 w-4" />
+            Get Directions
+          </Button>
+        )}
+      </DialogContent>
+    </Dialog>
+  );
+}
+```
+
+**Integration points:**
+- `ScheduleWidget.tsx` - Click on location opens map
+- `DayPlanWidget.tsx` - Click on event location
+- Event detail views
+
+---
+
+### 1.4 iOS Map Sheet
+
+**SwiftUI spec:**
+
+```swift
+// Core/Views/Maps/LocationMapSheet.swift
+
+struct LocationMapSheet: View {
+    let location: LocationRef
+    let title: String
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                // Map region centered on location
+                Map(initialPosition: .region(MKCoordinateRegion(
+                    center: CLLocationCoordinate2D(
+                        latitude: location.lat ?? 0,
+                        longitude: location.lng ?? 0
+                    ),
+                    span: MKCoordinateSpan(latitudeDelta: 0.005, longitudeDelta: 0.005)
+                ))) {
+                    Marker(location.label, coordinate: CLLocationCoordinate2D(
+                        latitude: location.lat ?? 0,
+                        longitude: location.lng ?? 0
+                    ))
+                }
+                .mapStyle(.standard)
+                .frame(height: 300)
+
+                // Attribution - REQUIRED for OSM-derived data
+                Text("© OpenStreetMap contributors")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                    .padding(.horizontal, 8)
+                    .padding(.top, 4)
+
+                // Actions
+                VStack(spacing: 12) {
+                    Text(location.label)
+                        .font(.headline)
+
+                    // confidence is optional in LocationRef
+                    if let confidence = location.confidence {
+                        Text("Location confidence: \(confidence)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Button {
+                        openInMaps()
+                    } label: {
+                        Label("Get Directions", systemImage: "arrow.triangle.turn.up.right.diamond")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+                .padding()
+            }
+            .navigationTitle(title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+    }
+
+    private func openInMaps() {
+        guard let lat = location.lat, let lng = location.lng else { return }
+        let url = URL(string: "maps://?daddr=\(lat),\(lng)")!
+        UIApplication.shared.open(url)
+    }
+}
+```
+
+---
+
+### 1.5 Map Quality Dashboard (Admin)
+
+Track per-campus location resolution quality:
+
+```typescript
+// Admin dashboard metrics
+
+interface CampusMapQuality {
+  campusId: string;
+  campusName: string;
+
+  // Coverage metrics
+  totalScheduleLocations: number;
+  resolvedToCoords: number;      // Have lat/lng
+  resolvedToBuilding: number;    // Matched to known building
+  unresolvedCount: number;       // Raw strings only
+
+  // Quality score (0-100)
+  score: number;  // (resolvedToCoords / total) * 100
+
+  // Issues
+  topUnresolvedStrings: string[];  // Most common unmatched locations
+  lastUpdated: Date;
+}
+```
+
+**SQL query for metrics:**
+
+```sql
+SELECT
+  c.id as campus_id,
+  c.name as campus_name,
+  COUNT(DISTINCT sd.id) as total_locations,
+  COUNT(DISTINCT CASE WHEN sd.data->>'lat' IS NOT NULL THEN sd.id END) as resolved_count,
+  ROUND(
+    COUNT(DISTINCT CASE WHEN sd.data->>'lat' IS NOT NULL THEN sd.id END)::numeric /
+    NULLIF(COUNT(DISTINCT sd.id), 0) * 100,
+    1
+  ) as quality_score
+FROM contexts c
+JOIN service_data sd ON sd.context_id = c.id
+WHERE c.type = 'campus'
+  AND sd.method = 'schedule_location'
+GROUP BY c.id, c.name
+ORDER BY quality_score ASC;
+```
+
+---
+
+## Phase 2: Campus Geo Layer (OSM Backbone)
+
+**Goal:** Turn pins into real campus understanding at scale.
+
+### 2.1 Campus Geo Identity
+
+Extend campus data with geographic boundaries.
+
+> **NOTE:** Campus boundaries are often MULTIPOLYGON (multiple separate areas), not simple POLYGON.
+
+```sql
+-- Migration: 20251213_add_campus_geo_fields.sql
+
+-- Add geo columns one at a time (Postgres doesn't support multi-column ADD IF NOT EXISTS)
+ALTER TABLE campus_registry
+  ADD COLUMN IF NOT EXISTS boundary_polygon GEOMETRY(MULTIPOLYGON, 4326);
+
+ALTER TABLE campus_registry
+  ADD COLUMN IF NOT EXISTS centroid GEOMETRY(POINT, 4326);
+
+ALTER TABLE campus_registry
+  ADD COLUMN IF NOT EXISTS bbox GEOMETRY(POLYGON, 4326);
+
+ALTER TABLE campus_registry
+  ADD COLUMN IF NOT EXISTS osm_relation_id BIGINT;
+
+ALTER TABLE campus_registry
+  ADD COLUMN IF NOT EXISTS wikidata_qid VARCHAR(20);
+
+ALTER TABLE campus_registry
+  ADD COLUMN IF NOT EXISTS geo_updated_at TIMESTAMPTZ;
+
+-- Spatial indexes
+CREATE INDEX IF NOT EXISTS idx_campus_boundary
+  ON campus_registry USING GIST (boundary_polygon);
+
+CREATE INDEX IF NOT EXISTS idx_campus_centroid
+  ON campus_registry USING GIST (centroid);
+
+CREATE INDEX IF NOT EXISTS idx_campus_bbox
+  ON campus_registry USING GIST (bbox);
+```
+
+---
+
+### 2.2 Buildings & POIs Tables
+
+```sql
+-- Migration: 20251213_create_campus_buildings.sql
+
+CREATE TABLE IF NOT EXISTS campus_buildings (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  campus_id UUID NOT NULL REFERENCES campus_registry(id) ON DELETE CASCADE,
+
+  -- Identity
+  name VARCHAR(255) NOT NULL,
+  short_name VARCHAR(50),  -- "ENG", "EECS", etc.
+  osm_way_id BIGINT,
+
+  -- Location
+  centroid GEOMETRY(POINT, 4326) NOT NULL,
+  footprint GEOMETRY(MULTIPOLYGON, 4326),  -- Building outline (can be multi-part)
+
+  -- Metadata
+  building_type VARCHAR(50),  -- academic, residential, dining, library, etc.
+  floor_count INTEGER,
+  accessibility_notes TEXT,
+
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW(),
+
+  UNIQUE(campus_id, name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_buildings_campus ON campus_buildings(campus_id);
+CREATE INDEX IF NOT EXISTS idx_buildings_centroid ON campus_buildings USING GIST (centroid);
+CREATE INDEX IF NOT EXISTS idx_buildings_short_name ON campus_buildings(campus_id, short_name);
+
+
+CREATE TABLE IF NOT EXISTS building_aliases (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  campus_id UUID NOT NULL REFERENCES campus_registry(id) ON DELETE CASCADE,
+  building_id UUID NOT NULL REFERENCES campus_buildings(id) ON DELETE CASCADE,
+  alias VARCHAR(100) NOT NULL,  -- "GG Brown", "GGBL", "G.G. Brown Laboratory"
+
+  UNIQUE(campus_id, alias)
+);
+
+CREATE INDEX IF NOT EXISTS idx_aliases_lookup ON building_aliases(campus_id, LOWER(alias));
+
+
+CREATE TABLE IF NOT EXISTS campus_pois (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  campus_id UUID NOT NULL REFERENCES campus_registry(id) ON DELETE CASCADE,
+  building_id UUID REFERENCES campus_buildings(id) ON DELETE SET NULL,
+
+  name VARCHAR(255) NOT NULL,
+  poi_type VARCHAR(50) NOT NULL,  -- dining, library, gym, study_space, parking, etc.
+
+  centroid GEOMETRY(POINT, 4326) NOT NULL,
+
+  -- Hours (optional)
+  hours_json JSONB,  -- { "mon": "8am-10pm", ... }
+
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_pois_campus ON campus_pois(campus_id);
+CREATE INDEX IF NOT EXISTS idx_pois_centroid ON campus_pois USING GIST (centroid);
+CREATE INDEX IF NOT EXISTS idx_pois_type ON campus_pois(campus_id, poi_type);
+```
+
+---
+
+### 2.3 Location Resolver Service
+
+```typescript
+// services/shared/dormway-core/src/domains/location/location-resolver.ts
+
+export interface ResolvedLocation extends LocationRef {
+  buildingId?: string;
+  buildingName?: string;
+  roomNumber?: string;
+}
+
+export class LocationResolverService {
+  constructor(
+    private pool: Pool,
+    private logger: Logger,
+    private cache?: CacheAdapter
+  ) {}
+
+  async resolveLocation(
+    campusId: string,
+    rawLocationString: string
+  ): Promise<ResolvedLocation> {
+    const cacheKey = `loc:${campusId}:${rawLocationString}`;
+
+    // Check cache first
+    const cached = await this.cache?.get(cacheKey);
+    if (cached) return JSON.parse(cached);
+
+    // 1. Try exact alias match
+    const aliasMatch = await this.findByAlias(campusId, rawLocationString);
+    if (aliasMatch) {
+      await this.cache?.set(cacheKey, JSON.stringify(aliasMatch), 86400);
+      return aliasMatch;
+    }
+
+    // 2. Try pattern extraction (e.g., "EECS 1200" → building EECS, room 1200)
+    const parsed = this.parseLocationString(rawLocationString);
+    if (parsed.buildingCode) {
+      const buildingMatch = await this.findByShortName(campusId, parsed.buildingCode);
+      if (buildingMatch) {
+        const result = { ...buildingMatch, roomNumber: parsed.roomNumber };
+        await this.cache?.set(cacheKey, JSON.stringify(result), 86400);
+        return result;
+      }
+    }
+
+    // 3. Fuzzy search on building names
+    const fuzzyMatch = await this.fuzzyBuildingSearch(campusId, rawLocationString);
+    if (fuzzyMatch) {
+      await this.cache?.set(cacheKey, JSON.stringify(fuzzyMatch), 86400);
+      return fuzzyMatch;
+    }
+
+    // 4. Log miss for admin review
+    await this.logUnresolvedLocation(campusId, rawLocationString);
+
+    return {
+      label: rawLocationString,
+      campusId,
+      confidence: 'low',
+      source: 'unknown',
+    };
+  }
+
+  private parseLocationString(raw: string): {
+    buildingCode?: string;
+    roomNumber?: string
+  } {
+    // Common patterns:
+    // "EECS 1200" → { buildingCode: "EECS", roomNumber: "1200" }
+    // "North Quad 2435" → { buildingCode: "North Quad", roomNumber: "2435" }
+    // "Room 101, Engineering" → { buildingCode: "Engineering", roomNumber: "101" }
+
+    const patterns = [
+      /^([A-Z]{2,6})\s+(\d{3,5}[A-Z]?)$/i,  // EECS 1200
+      /^(.+?)\s+(\d{3,5}[A-Z]?)$/i,          // Building Name 1200
+      /^Room\s+(\d+),?\s*(.+)$/i,            // Room 101, Building
+    ];
+
+    for (const pattern of patterns) {
+      const match = raw.match(pattern);
+      if (match) {
+        return { buildingCode: match[1], roomNumber: match[2] };
+      }
+    }
+
+    return {};
+  }
+
+  // ... additional methods
+}
+```
+
+---
+
+### 2.4 OSM Ingestion Job
+
+> **WARNING:** Overpass API has rate limits. Heavy users get deprioritized.
+> See: https://dev.overpass-api.de/overpass-doc/en/preface/commons.html
+>
+> **REQUIREMENTS:**
+> - Run as OFFLINE BATCH JOB only (not per-user request)
+> - Implement rate limiting (max 1 request per 10 seconds)
+> - Cache results aggressively (buildings don't change often)
+> - Consider self-hosting Overpass for production scale
+
+```typescript
+// services/engine/src/jobs/campus-osm-ingest.ts
+
+import { RateLimiter } from '@dormway/core';
+
+interface OSMIngestParams {
+  campusId: string;
+  osmRelationId: number;  // e.g., 2297951 for University of Michigan
+}
+
+// Rate limiter: max 1 request per 10 seconds to Overpass
+const overpassLimiter = new RateLimiter({
+  maxRequests: 1,
+  windowMs: 10000,
+});
+
+export async function ingestCampusFromOSM(params: OSMIngestParams): Promise<void> {
+  const { campusId, osmRelationId } = params;
+
+  // Rate limit before each Overpass request
+  await overpassLimiter.acquire();
+
+  // 1. Fetch campus boundary from Overpass
+  const boundaryQuery = `
+    [out:json][timeout:60];
+    relation(${osmRelationId});
+    out geom;
+  `;
+  const boundary = await fetchOverpass(boundaryQuery);
+
+  await overpassLimiter.acquire();
+
+  // 2. Fetch buildings within boundary
+  const buildingsQuery = `
+    [out:json][timeout:120];
+    area(id:${3600000000 + osmRelationId})->.campus;
+    (
+      way["building"](area.campus);
+      relation["building"](area.campus);
+    );
+    out center tags;
+  `;
+  const buildings = await fetchOverpass(buildingsQuery);
+
+  // 3. Upsert buildings
+  for (const building of buildings.elements) {
+    await upsertBuilding(campusId, {
+      osmWayId: building.id,
+      name: building.tags?.name || building.tags?.['addr:housename'] || `Building ${building.id}`,
+      shortName: building.tags?.['short_name'] || building.tags?.ref,
+      centroid: { lat: building.center.lat, lng: building.center.lon },
+      buildingType: mapOSMBuildingType(building.tags),
+    });
+  }
+
+  logger.info(`Ingested ${buildings.elements.length} buildings for campus ${campusId}`);
+}
+
+async function fetchOverpass(query: string): Promise<any> {
+  // Use public Overpass for dev/low-volume
+  // TODO: Self-host for production scale
+  const response = await fetch('https://overpass-api.de/api/interpreter', {
+    method: 'POST',
+    body: `data=${encodeURIComponent(query)}`,
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Overpass error: ${response.status}`);
+  }
+
+  return response.json();
+}
+```
+
+---
+
+## Phase 3: Real Routing & ETAs
+
+**Goal:** Accurate ETAs + route polylines.
+
+### Mapbox Walking Directions Research (Dec 2025)
+
+> **Finding:** Mapbox supports building-to-building walking directions, but quality depends on OSM data coverage.
+
+#### Mapbox Walking Profile Capabilities
+
+| Feature | Support | Notes |
+|---------|---------|-------|
+| Sidewalks & trails | ✅ Yes | Prioritizes pedestrian infrastructure |
+| Walkway bias | ✅ Yes | Parameter `-1` to `1` to prefer/avoid pedestrian paths |
+| Custom walking speed | ✅ Yes | `walking_speed`: 0.14 - 6.94 m/s |
+| Building highlighting | ✅ Yes | SDK can highlight destination buildings on arrival |
+| Building entrance routing | ⚠️ Partial | Routes to nearest road point, not specific entrance |
+| Indoor navigation | ❌ No | Requires MapsPeople/MapsIndoors integration |
+
+#### Key Parameters
+
+```typescript
+// Mapbox Directions API walking options
+{
+  profile: 'mapbox/walking',
+  walking_speed: 1.42,    // m/s (default ~5.1 km/h)
+  walkway_bias: 1,        // -1 to 1: prefer walkways/trails
+  steps: true,            // Enable turn-by-turn instructions
+}
+```
+
+#### Campus Routing Limitation
+
+**Known Issue:** Routes may default to main roads instead of campus paths when pedestrian paths aren't well-mapped in OSM.
+
+From [GitHub Issue #1155](https://github.com/mapbox/mapbox-navigation-android/issues/1155):
+> "Directions still head towards main roads instead of pedestrian paths within areas like college campuses"
+
+**Mitigation:**
+1. Set `walkway_bias: 1` to maximize pedestrian path preference
+2. Verify OSM data coverage for target campuses
+3. Consider contributing missing paths to OSM for priority campuses
+4. Route to building entrance coordinates (not centroids) for accuracy
+
+#### Location vs Routable Points
+
+Mapbox distinguishes between:
+- **Location point**: Where the building actually exists
+- **Routable point**: Road-snapped point used for navigation
+
+For building-to-building routing, use `waypointTargetsList` to supply location points alongside routable coordinates.
+
+#### Indoor Navigation (Future)
+
+For true indoor + outdoor wayfinding, Mapbox partners with **MapsPeople's MapsIndoors**:
+- Floor plan integration
+- Indoor route networks
+- Seamless indoor-outdoor transitions
+- Additional cost/complexity
+
+**Sources:**
+- [Mapbox Directions API](https://docs.mapbox.com/api/navigation/directions/)
+- [Mapbox Routing Profiles](https://docs.mapbox.com/help/glossary/routing-profile/)
+- [Mapbox Building Highlights](https://docs.mapbox.com/android/navigation/guides/ui-components/buildings/)
+- [MapsPeople + Mapbox](https://www.mapbox.com/showcase/mapspeople)
+
+---
+
+### 3.1 Routing Engine Integration
+
+> **WARNING:** Do NOT use `router.project-osrm.org` in production.
+> It's a demo server with no SLA, no guarantees, and explicitly not for production use.
+> See: https://community.openstreetmap.org/t/osrm-api-not-working/138942
+
+**Options (pick one BEFORE enabling routed ETAs):**
+
+| Provider | Cost | Setup |
+|----------|------|-------|
+| **Self-hosted OSRM** | Server costs (~$20/mo) | Docker, needs map data updates |
+| **Self-hosted Valhalla** | Server costs | Multi-modal, more complex |
+| **Mapbox Directions** | $0.50/1000 requests | Easiest, pay-as-you-go |
+| **Google Directions** | $5/1000 requests | Most accurate, expensive |
+
+```typescript
+// services/shared/dormway-core/src/adapters/routing/routing-client.ts
+
+export interface RouteResult {
+  durationSeconds: number;
+  distanceMeters: number;
+  geometry?: GeoJSON.LineString;  // For drawing route on map
+}
+
+export interface RoutingConfig {
+  provider: 'osrm-self-hosted' | 'mapbox' | 'google';
+  baseUrl: string;  // YOUR server, not public demo
+  apiKey?: string;
+}
+
+export class RoutingClient {
+  constructor(private config: RoutingConfig) {
+    // Validate we're not using public demo servers
+    if (config.baseUrl.includes('router.project-osrm.org')) {
+      throw new Error('Cannot use public OSRM demo server in production. Self-host or use paid provider.');
+    }
+  }
+
+  async getWalkingRoute(
+    from: { lat: number; lng: number },
+    to: { lat: number; lng: number }
+  ): Promise<RouteResult> {
+    const url = `${this.config.baseUrl}/route/v1/foot/${from.lng},${from.lat};${to.lng},${to.lat}?overview=simplified`;
+
+    const response = await fetch(url);
+    const data = await response.json();
+
+    if (data.code !== 'Ok' || !data.routes.length) {
+      throw new Error('No route found');
+    }
+
+    const route = data.routes[0];
+    return {
+      durationSeconds: route.duration,
+      distanceMeters: route.distance,
+      geometry: polyline.toGeoJSON(route.geometry),
+    };
+  }
+}
+```
+
+---
+
+### 3.2 Building Entrances
+
+```sql
+-- Migration: 20251213_create_building_entrances.sql
+
+CREATE TABLE IF NOT EXISTS building_entrances (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  building_id UUID NOT NULL REFERENCES campus_buildings(id) ON DELETE CASCADE,
+
+  name VARCHAR(100),  -- "Main Entrance", "North Door"
+  is_primary BOOLEAN DEFAULT false,
+
+  location GEOMETRY(POINT, 4326) NOT NULL,
+
+  -- Accessibility
+  wheelchair_accessible BOOLEAN DEFAULT true,
+  has_automatic_doors BOOLEAN,
+
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_entrances_building ON building_entrances(building_id);
+CREATE INDEX IF NOT EXISTS idx_entrances_location ON building_entrances USING GIST (location);
+```
+
+---
+
+## Phase 4: Full Campus OS Experience
+
+**Future features once foundation is solid:**
+
+- **"Leave now" notifications** - "Leave in 3 min to make your 2pm class"
+- **Between-class suggestions** - "35 min free near North Campus → best study spots"
+- **Event navigation** - Events → "Go" → routed directions
+- **Night mode / safety routes** - Prefer well-lit paths after dark
+- **Accessible routes** - Elevator-only, ramp-accessible paths
+
+---
+
+## Implementation Priority
+
+| Phase | Effort | Impact | Dependencies |
+|-------|--------|--------|--------------|
+| 1.0 Geo infra config | 2h | Critical | None |
+| 1.1 LocationRef type | 4h | High | None |
+| 1.2 Walking time v1 | 4h | High | None |
+| 1.3 LockedIn MapLibre | 8h | High | 1.0, 1.1 |
+| 1.4 iOS Map Sheet | 6h | High | 1.1 |
+| 1.5 Map quality dashboard | 4h | Medium | 1.1 |
+| 2.1-2.2 Schema | 4h | Medium | Phase 1 |
+| 2.3 Location resolver | 12h | High | 2.1-2.2 |
+| 2.4 OSM ingestion | 16h | Medium | 2.1-2.2 |
+| 3.1 Routing (self-hosted) | 8h | Medium | Phase 2 |
+| 3.2 Entrances | 4h | Low | Phase 2 |
+
+**Recommended order:** 1.0 → 1.1 → 1.2 → 1.3/1.4 (parallel) → 1.5 → 2.1-2.4 → 3.x
+
+---
+
+## Related Linear Issues
+
+- **DORM-447**: Research campus map integration using OpenStreetMap data
+- **DORM-731**: Schedule/DayPlan → map/calendar links
+- **DORM-690**: Investigate Moovit MaaS Solutions for Campus Navigation
+
+---
+
+## Appendix: Infrastructure Checklist
+
+Before shipping any map feature to production:
+
+- [ ] **Tile provider configured** - Not using OSM Foundation servers
+- [ ] **API keys in Doppler** - MAP_TILE_PROVIDER, relevant API keys
+- [ ] **Attribution visible** - "© OpenStreetMap contributors" shown on all maps
+- [ ] **No demo servers** - Not hitting router.project-osrm.org or similar
+- [ ] **Rate limiting on ingestion** - Overpass queries throttled
+- [ ] **Caching strategy** - Building data cached, not fetched per-request

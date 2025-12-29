@@ -1,0 +1,445 @@
+---
+title: "2025 10 20 auth0 error 11 root cause"
+description: "After the October 15, 2025 upgrade from `@auth0/nextjs-auth0` v3.5.0 → v4.10.0, production login broke with \"Error Code 11: Invalid state\" in Chrome/Brave br..."
+---
+
+# Auth0 Error Code 11 - Root Cause & Resolution
+
+**Date:** 2025-10-20
+**Issue:** Auth0 "Invalid state" Error Code 11 in Chrome/Brave production
+**Status:** ✅ RESOLVED
+**Root Cause:** Incomplete Auth0 v3→v4 migration (missing `appBaseUrl` config)
+
+---
+
+## Executive Summary
+
+After the October 15, 2025 upgrade from `@auth0/nextjs-auth0` v3.5.0 → v4.10.0, production login broke with "Error Code 11: Invalid state" in Chrome/Brave browsers. The root cause was an incomplete migration that failed to provide the required `appBaseUrl` configuration to the Auth0Client, preventing transaction cookie creation.
+
+**Impact:** All production users unable to log in via Chrome/Brave
+**Duration:** October 15-20, 2025 (5 days)
+**Resolution Time:** ~4 hours of debugging once properly investigated
+
+---
+
+## Timeline
+
+### October 15, 2025
+- **20:15** - Deployed commit `e3cc3287`: "feat: major UI overhaul with Auth0 v4 migration and component library"
+- Upgraded `@auth0/nextjs-auth0` from v3.5.0 → v4.10.0
+- Also upgraded React 18→19, Next.js 14→15
+
+### October 20, 2025
+- **09:00** - User report: "Log In" button triggers Error Code 11 on auth.dormway.app
+- **09:30** - Initial investigation: Suspected CookieYes blocking cookies
+- **10:45** - HAR file analysis: No Set-Cookie headers in `/auth/login` response
+- **11:30** - Discovery: SDK v4 has transaction cookie domain bug (not the issue)
+- **13:00** - Breakthrough: Realized migration was incomplete
+- **13:45** - Fix deployed: Added explicit `appBaseUrl` configuration
+- **14:00** - ✅ Verified working in production
+
+---
+
+## Problem Description
+
+### Symptoms
+
+1. User clicks "Lock In" button on dormway.app
+2. Browser navigates to `/auth/login`
+3. Immediately redirects to `auth.dormway.app/authorize?...`
+4. Auth0 Universal Login screen loads
+5. **Error Code 11: Invalid state** appears immediately (before user enters credentials)
+
+### What Was Happening
+
+The `/auth/login` endpoint was returning a **307 redirect without any Set-Cookie headers**:
+
+```http
+GET https://dormway.app/auth/login
+Response: 307 Temporary Redirect
+Location: https://auth.dormway.app/authorize?...
+Set-Cookie: (NONE - this was the problem!)
+```
+
+Without the transaction cookie (`__txn_<state>`), the Auth0 callback has no state to validate, causing Error Code 11.
+
+---
+
+## Investigation Process
+
+### Initial Hypothesis (Wrong): CookieYes Blocking Cookies
+
+**Evidence that seemed to support this:**
+- Documentation existed about CookieYes requiring whitelisting of Auth0 cookies
+- CookieYes consent manager was loaded via Google Tag Manager
+- Previous similar issues pointed to consent managers
+
+**Why this was wrong:**
+- HAR file showed no Set-Cookie headers at all (cookies weren't being set to begin with)
+- Disabling GTM/CookieYes didn't fix the issue
+- The SDK wasn't even attempting to set cookies
+
+### Second Hypothesis (Closer): SDK Domain Bug
+
+**Evidence:**
+- Found that `@auth0/nextjs-auth0` v4.10.0 has a bug where `transactionCookie.domain` is ignored
+- SDK source code showed transaction cookies don't support domain configuration:
+  ```typescript
+  // In SDK source: src/server/client.ts
+  const transactionCookieOptions = {
+    prefix: "__txn_",
+    secure: false,
+    sameSite: "lax",
+    path: "/",
+    maxAge: 3600
+    // NO DOMAIN PROPERTY!
+  };
+  ```
+- Session cookies support domain, but transaction cookies don't
+
+**Why this wasn't the full story:**
+- Even though the domain wasn't configurable, the SDK should still SET the cookie (just without domain)
+- The complete absence of Set-Cookie headers indicated a deeper issue
+
+### Breakthrough: V3→V4 Migration Was Incomplete
+
+**Key discovery:** Auth0 worked in production BEFORE October 15th but broke after the v4 upgrade.
+
+**V4 Migration Breaking Changes (from official guide):**
+
+| v3 Variable | v4 Variable | Required |
+|-------------|-------------|----------|
+| `AUTH0_BASE_URL` | `APP_BASE_URL` | ✅ YES |
+| `AUTH0_ISSUER_BASE_URL` | `AUTH0_DOMAIN` | ✅ YES |
+| Route prefix: `/api/auth/*` | Route prefix: `/auth/*` | ✅ YES |
+
+**What was missing in the code:**
+
+1. **auth0.ts**: Auth0Client created WITHOUT explicit `appBaseUrl`
+   ```typescript
+   // ❌ WRONG (what we had):
+   export const auth0 = new Auth0Client({
+     session: { cookie: { ... } },
+     transactionCookie: { ... },
+     // Missing: appBaseUrl!
+   });
+
+   // ✅ CORRECT (what we needed):
+   export const auth0 = new Auth0Client({
+     appBaseUrl: process.env.APP_BASE_URL, // Critical!
+     session: { cookie: { ... } },
+     transactionCookie: { ... },
+   });
+   ```
+
+2. **PreviewBanner.tsx**: Still checking legacy v3 environment variables
+   ```typescript
+   // ❌ WRONG:
+   const isAuthConfigured = Boolean(
+     process.env.AUTH0_BASE_URL && // v3 name
+     process.env.AUTH0_ISSUER_BASE_URL && // v3 name
+     ...
+   );
+
+   // ✅ CORRECT:
+   const isAuthConfigured = Boolean(
+     process.env.APP_BASE_URL && // v4 name
+     process.env.AUTH0_DOMAIN && // v4 name
+     ...
+   );
+   ```
+
+3. **demo-login/route.ts**: Falling back to legacy variable name
+   ```typescript
+   // ❌ WRONG:
+   const baseURL = process.env.AUTH0_BASE_URL || '';
+
+   // ✅ CORRECT:
+   const baseURL = process.env.APP_BASE_URL || process.env.AUTH0_BASE_URL || '';
+   ```
+
+---
+
+## Root Cause Analysis
+
+### Why No Transaction Cookies Were Set
+
+The Auth0 SDK v4 requires **explicit `appBaseUrl`** to:
+1. Calculate the callback URL: `${appBaseUrl}/auth/callback`
+2. Determine if the request is coming from the correct origin
+3. Generate the transaction state for PKCE flow
+4. Set the transaction cookie with proper attributes
+
+**Without `appBaseUrl`:**
+- SDK cannot determine callback URL
+- Transaction state generation is skipped
+- No Set-Cookie header is sent
+- OAuth flow fails immediately with "Invalid state"
+
+### Why V3 Worked Without Explicit Config
+
+In v3, the SDK could auto-detect `appBaseUrl` from:
+- The `AUTH0_BASE_URL` environment variable (different name)
+- Request headers (`x-forwarded-host`, etc.)
+- Next.js environment detection
+
+**In v4:**
+- Environment variable renamed to `APP_BASE_URL`
+- Auto-detection logic changed/removed
+- Explicit configuration now **required** in production
+
+---
+
+## The Fix
+
+### Code Changes
+
+**File 1: `/src/lib/auth0.ts`**
+
+```typescript
+import { Auth0Client } from '@auth0/nextjs-auth0/server';
+
+// Environment-aware cookie configuration
+const isProduction = process.env.NODE_ENV === 'production';
+
+const cookieDomain = process.env.AUTH0_COOKIE_DOMAIN !== undefined
+  ? (process.env.AUTH0_COOKIE_DOMAIN || undefined)
+  : (isProduction ? 'dormway.app' : undefined);
+
+const cookieSameSite = (process.env.AUTH0_COOKIE_SAME_SITE as 'lax' | 'none' | 'strict') || 'lax';
+const cookieSecure = process.env.AUTH0_COOKIE_SECURE !== undefined
+  ? process.env.AUTH0_COOKIE_SECURE === 'true'
+  : isProduction;
+
+// Log critical env vars in production for debugging
+console.log('[auth0] Environment check:', {
+  hasAPP_BASE_URL: Boolean(process.env.APP_BASE_URL),
+  hasAUTH0_DOMAIN: Boolean(process.env.AUTH0_DOMAIN),
+  hasAUTH0_CLIENT_ID: Boolean(process.env.AUTH0_CLIENT_ID),
+  hasAUTH0_SECRET: Boolean(process.env.AUTH0_SECRET),
+  hasAUTH0_CLIENT_SECRET: Boolean(process.env.AUTH0_CLIENT_SECRET),
+  NODE_ENV: process.env.NODE_ENV,
+});
+
+console.log('[auth0] Cookie settings:', {
+  domain: cookieDomain || '(browser default)',
+  sameSite: cookieSameSite,
+  secure: cookieSecure,
+  env: process.env.NODE_ENV,
+});
+
+// Create Auth0 client with v4 configuration
+export const auth0 = new Auth0Client({
+  // CRITICAL: Explicitly pass appBaseUrl for v4 (don't rely on auto-detection)
+  appBaseUrl: process.env.APP_BASE_URL,
+  session: {
+    cookie: {
+      sameSite: cookieSameSite,
+      secure: cookieSecure,
+      domain: cookieDomain,
+    },
+  },
+  transactionCookie: {
+    sameSite: cookieSameSite,
+    secure: cookieSecure,
+    domain: cookieDomain,
+  },
+});
+```
+
+**File 2: `/src/components/PreviewBanner.tsx`**
+
+```typescript
+export default function PreviewBanner() {
+  const isAuthConfigured = Boolean(
+    process.env.AUTH0_SECRET &&
+    process.env.APP_BASE_URL && // v4: renamed from AUTH0_BASE_URL
+    process.env.AUTH0_DOMAIN && // v4: renamed from AUTH0_ISSUER_BASE_URL
+    process.env.AUTH0_CLIENT_ID &&
+    process.env.AUTH0_CLIENT_SECRET
+  );
+
+  if (isAuthConfigured) return null;
+
+  return (
+    <div className="fixed top-16 left-0 right-0 z-40 ...">
+      Preview Mode: Auth not configured
+    </div>
+  );
+}
+```
+
+**File 3: `/src/app/api/auth/demo-login/route.ts`**
+
+```typescript
+function buildSessionConfig(): SessionConfig {
+  // v4: APP_BASE_URL renamed from AUTH0_BASE_URL
+  const baseURL = process.env.APP_BASE_URL || process.env.AUTH0_BASE_URL || '';
+  // ... rest of config
+}
+```
+
+### Environment Variables (Production Doppler)
+
+All required variables were already set correctly in Doppler `prd` config:
+
+```bash
+APP_BASE_URL=https://dormway.app                  # ✅ Correct
+AUTH0_DOMAIN=auth.dormway.app                     # ✅ Correct
+AUTH0_CLIENT_ID=erCGkcj2JtL9grZv4DOrVlS...        # ✅ Correct
+AUTH0_CLIENT_SECRET=wtgHxUxlnruHBFSfQ_v6g-6...    # ✅ Correct
+AUTH0_SECRET=ad07718290d0019fe86515b...           # ✅ Correct
+AUTH0_COOKIE_DOMAIN=dormway.app                   # ✅ Correct
+AUTH0_COOKIE_SAME_SITE=none                       # ✅ Set (though 'lax' works better)
+AUTH0_COOKIE_SECURE=true                          # ✅ Correct
+AUTH0_TRANSACTION_COOKIE_DOMAIN=dormway.app       # ❌ Not used by SDK
+AUTH0_TRANSACTION_COOKIE_SAME_SITE=none           # ❌ Not used by SDK
+AUTH0_TRANSACTION_COOKIE_SECURE=true              # ❌ Not used by SDK
+```
+
+**Note:** The `AUTH0_TRANSACTION_COOKIE_*` variables are NOT supported by the SDK in v4.10.0 or v4.11.0. Only session cookies read from environment variables.
+
+---
+
+## Verification
+
+### Before Fix
+
+```http
+GET https://dormway.app/auth/login
+Response: 307 Temporary Redirect
+Location: https://auth.dormway.app/authorize?...
+Set-Cookie: (none)
+```
+
+### After Fix
+
+```http
+GET https://dormway.app/auth/login
+Response: 307 Temporary Redirect
+Location: https://auth.dormway.app/authorize?...
+Set-Cookie: __txn_4V7seQjYxKjddeyDTiqJypasLTe6CXcSpNwmHJnMrog=...;
+           Path=/;
+           Expires=Tue, 21 Oct 2025 01:51:03 GMT;
+           Max-Age=3600;
+           Secure;
+           HttpOnly;
+           SameSite=Lax
+```
+
+**Key improvements:**
+- ✅ Transaction cookie now set correctly
+- ✅ `SameSite=Lax` (works because auth.dormway.app is same root domain)
+- ✅ `Secure` flag set (HTTPS required)
+- ✅ `HttpOnly` flag set (XSS protection)
+- ⚠️ Domain attribute still missing (SDK bug), but browser defaults to `.dormway.app` which works
+
+---
+
+## Lessons Learned
+
+### 1. Major Version Upgrades Require Complete Migration
+
+The v3→v4 upgrade changed core environment variable names. We updated the Doppler config but failed to update all code references.
+
+**Checklist for future upgrades:**
+- [ ] Read official migration guide completely
+- [ ] Search codebase for old environment variable names
+- [ ] Update all code references (not just main config)
+- [ ] Test in staging before production deployment
+- [ ] Monitor production logs after deployment
+
+### 2. Environment Variable Naming Matters
+
+The v4 SDK will NOT fall back to v3 variable names. If `APP_BASE_URL` is missing:
+- SDK initializes without error
+- No warning logs
+- Silently fails to create transaction cookies
+- Users get cryptic "Error Code 11"
+
+**Best practice:** Add runtime validation logging:
+```typescript
+console.log('[auth0] Environment check:', {
+  hasAPP_BASE_URL: Boolean(process.env.APP_BASE_URL),
+  // ... other critical vars
+});
+```
+
+### 3. HAR Files Are Essential for Auth Debugging
+
+The HAR file immediately revealed the absence of Set-Cookie headers, eliminating hours of speculation about:
+- Browser cookie blocking
+- SameSite attribute issues
+- CookieYes interference
+- Domain configuration problems
+
+**Best practice:** Always request HAR files for production auth issues.
+
+### 4. SDK Documentation Can Be Incomplete
+
+The Auth0 SDK TypeScript definitions claim `TransactionCookieOptions.domain` is supported, but the implementation ignores it. Always verify critical configuration by:
+- Reading SDK source code
+- Testing in production-like environment
+- Not relying solely on TypeScript types
+
+### 5. "It Worked Before" Is a Strong Signal
+
+When auth worked in v3.5.0 but broke after v4.10.0 upgrade, this should have immediately pointed to migration issues. We spent too long investigating browser/cookie/CookieYes theories.
+
+**Best practice:** When something breaks after an upgrade, assume incomplete migration first.
+
+---
+
+## Related Issues
+
+- **GitHub PR #293**: Fix/auth0 error 11 cookie config (this fix)
+- **GitHub PR #292**: Previous attempt (cookie domain configuration)
+- **GitHub PR #291**: Previous attempt (sameSite changes)
+- **Commit e3cc3287**: Original v3→v4 migration (Oct 15, 2025)
+
+---
+
+## Future Considerations
+
+### 1. Upgrade to v4.11.0+
+
+Monitor Auth0 releases for transaction cookie domain support. Current workaround relies on browser defaulting to root domain, which works but isn't explicit.
+
+### 2. Add Automated Testing
+
+Create E2E tests that verify:
+- Transaction cookie is set on `/auth/login`
+- Cookie has correct attributes (Secure, HttpOnly, SameSite)
+- Full OAuth flow completes successfully
+
+### 3. Improve Production Monitoring
+
+Add alerting for:
+- Missing Set-Cookie headers on `/auth/login`
+- High rate of Error Code 11 from Auth0
+- Environment variable validation failures
+
+### 4. Document Migration Procedures
+
+Create internal checklist for major dependency upgrades:
+1. Review official migration guide
+2. Search for deprecated environment variables
+3. Update code references (use grep/ripgrep)
+4. Add runtime validation logging
+5. Test in staging
+6. Monitor production logs for 24 hours post-deployment
+
+---
+
+## References
+
+- [Auth0 v4 Migration Guide](https://github.com/auth0/nextjs-auth0/blob/main/V4_MIGRATION_GUIDE.md)
+- [Auth0 SDK GitHub Repo](https://github.com/auth0/nextjs-auth0)
+- [Auth0 Error Code 11 Documentation](https://auth0.com/docs/troubleshoot/authentication-errors/invalid-state-error)
+- [SameSite Cookie Specification](https://web.dev/articles/samesite-cookies-explained)
+
+---
+
+**Author:** Claude Code + Ethan Kaplan
+**Reviewers:** Ethan Kaplan
+**Last Updated:** 2025-10-20

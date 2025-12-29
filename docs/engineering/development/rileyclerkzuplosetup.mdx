@@ -1,0 +1,346 @@
+---
+title: "RILEY_CLERK_ZUPLO_SETUP"
+description: "Riley is experiencing environment variable issues with: 1. **Clerk authentication** in dormway-lockedin (port 3008) 2. **Zuplo local gateway** (port 9000) in..."
+---
+
+# Riley's Clerk + Zuplo Local Setup Troubleshooting Guide
+
+## Current Issue
+
+Riley is experiencing environment variable issues with:
+1. **Clerk authentication** in dormway-lockedin (port 3008)
+2. **Zuplo local gateway** (port 9000) integration
+
+## Critical Environment Variables Checklist
+
+### For dormway-lockedin (Next.js)
+
+The app **WILL CRASH** without this variable (see `src/app/layout.tsx:36-40`):
+
+```bash
+# REQUIRED - App throws error if missing
+NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_test_...
+
+# Optional but recommended
+CLERK_SECRET_KEY=sk_test_...
+```
+
+### For Zuplo Gateway (dormway-api-2)
+
+Located in `~/Development/GitHub/dormway-api-2/.env`:
+
+```bash
+# Clerk Configuration (REQUIRED for Clerk auth to work)
+CLERK_ISSUER_URL=https://humorous-peacock-79.clerk.accounts.dev
+CLERK_JWKS_URL=https://humorous-peacock-79.clerk.accounts.dev/.well-known/jwks.json
+CLERK_FRONTEND_API_URL=https://humorous-peacock-79.clerk.accounts.dev
+
+# Backend Gateway URL
+API_GATEWAY=http://api-router:3001
+
+# Gateway Authentication (REQUIRED)
+GATEWAY_KEY=wibhuqwuJnEzfKi8bJp65rHlsGFdzlZWHUv3pNXKEMADtMSarJYQWo2iwpFDMqhT
+
+# CORS Configuration
+ALLOWED_ORIGINS=http://localhost:3000,http://localhost:5173,http://localhost:3003,http://localhost:3008,http://localhost:3004
+```
+
+### For API Router (dormway-platform backend)
+
+Should be in Doppler:
+
+```bash
+# If Riley's config doesn't have these, copy from dev_ethan
+GATEWAY_KEY=wibhuqwuJnEzfKi8bJp65rHlsGFdzlZWHUv3pNXKEMADtMSarJYQWo2iwpFDMqhT
+```
+
+## Step-by-Step Troubleshooting
+
+### Step 1: Verify Doppler Config
+
+```bash
+cd ~/Development/GitHub/dormway-platform
+
+# Check current Doppler config
+doppler setup --no-interactive
+
+# Should show something like:
+# Project: dormway
+# Config: dev_riley (or similar)
+
+# List available configs
+doppler configs
+
+# If Riley doesn't have a config, create one:
+doppler configs create dev_riley --project dormway
+```
+
+### Step 2: Check Doppler Secrets for Clerk
+
+```bash
+# Check if Clerk secrets exist in Riley's config
+doppler secrets get NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY --plain
+doppler secrets get CLERK_SECRET_KEY --plain
+
+# If they're missing, copy from another config (like dev_ethan):
+doppler secrets get NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY --config dev_ethan --plain
+doppler secrets get CLERK_SECRET_KEY --config dev_ethan --plain
+
+# Set in Riley's config:
+doppler secrets set NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY="pk_test_..." --config dev_riley
+doppler secrets set CLERK_SECRET_KEY="sk_test_..." --config dev_riley
+```
+
+### Step 3: Verify Zuplo Configuration
+
+```bash
+cd ~/Development/GitHub/dormway-api-2
+
+# Check .env file exists and has Clerk variables
+cat .env
+
+# Expected output should include:
+# CLERK_ISSUER_URL=https://humorous-peacock-79.clerk.accounts.dev
+# CLERK_JWKS_URL=https://humorous-peacock-79.clerk.accounts.dev/.well-known/jwks.json
+# CLERK_FRONTEND_API_URL=https://humorous-peacock-79.clerk.accounts.dev
+
+# If missing, create/update .env file (use the Write tool to update)
+```
+
+### Step 4: Test Clerk Keys
+
+```bash
+# Test if Clerk publishable key works
+curl -X GET "https://humorous-peacock-79.clerk.accounts.dev/.well-known/jwks.json"
+
+# Should return JSON with public keys, not an error
+```
+
+### Step 5: Restart Services in Correct Order
+
+```bash
+cd ~/Development/GitHub/dormway-platform
+
+# Stop everything
+make down
+
+# Verify Doppler is configured for Riley's config
+doppler setup
+
+# Start services fresh with Doppler injection
+make dev
+
+# Wait for all services to be healthy
+make status
+
+# Check dormway-lockedin logs specifically
+make logs s=dormway-lockedin
+
+# Should NOT see: "Missing NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY environment variable"
+```
+
+### Step 6: Test Zuplo Gateway
+
+```bash
+# Start Zuplo gateway
+cd ~/Development/GitHub/dormway-platform
+make zuplo
+
+# In another terminal, check logs
+make zuplo-logs
+
+# Test health endpoint
+curl http://localhost:9000/health
+
+# Should return 200 OK
+```
+
+### Step 7: Test End-to-End Auth Flow
+
+```bash
+# Open browser
+open http://localhost:3008
+
+# Should see LockedIn app WITHOUT errors
+
+# Try signing in
+# Click "Sign In" button
+# Should redirect to Clerk sign-in page (not error page)
+```
+
+## Common Errors and Solutions
+
+### Error: "Missing NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY environment variable"
+
+**Cause**: Doppler config for Riley doesn't have Clerk keys
+
+**Solution**:
+```bash
+# Get key from working config
+doppler secrets get NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY --config dev_ethan --plain
+
+# Set in Riley's config
+doppler secrets set NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY="pk_test_..." --config dev_riley
+
+# Restart services
+cd ~/Development/GitHub/dormway-platform
+make rs s=lockedin
+```
+
+### Error: Zuplo returning 401 or 403 on authenticated requests
+
+**Cause**: Zuplo can't validate Clerk JWT tokens
+
+**Solution**:
+```bash
+# Check Zuplo .env has correct Clerk URLs
+cd ~/Development/GitHub/dormway-api-2
+cat .env | grep CLERK
+
+# Should match the Clerk instance (humorous-peacock-79)
+# If not, update .env file
+
+# Restart Zuplo
+cd ~/Development/GitHub/dormway-platform
+make zuplo-restart
+```
+
+### Error: "Failed to fetch" when calling API from LockedIn
+
+**Cause**: CORS issue or Zuplo not running
+
+**Solution**:
+```bash
+# Check if Zuplo is running
+curl http://localhost:9000/health
+
+# If not running:
+cd ~/Development/GitHub/dormway-platform
+make zuplo
+
+# Check CORS configuration in dormway-api-2/.env
+# Should include: http://localhost:3008
+```
+
+### Error: Clerk sign-in page shows wrong domain
+
+**Cause**: Wrong Clerk instance URL
+
+**Solution**:
+```bash
+# Verify Clerk instance in Doppler
+doppler secrets get NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY --plain
+
+# Should start with: pk_test_...
+# The key determines which Clerk instance is used
+
+# If wrong, update with correct key from Clerk dashboard
+```
+
+## Verification Checklist
+
+After following steps above, verify:
+
+- [ ] `doppler secrets get NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY --plain` returns a key
+- [ ] `cd ~/Development/GitHub/dormway-api-2 && cat .env | grep CLERK` shows 3 Clerk URLs
+- [ ] `curl http://localhost:9000/health` returns 200
+- [ ] `curl http://localhost:3008` loads without JavaScript errors
+- [ ] Browser console at http://localhost:3008 shows no Clerk errors
+- [ ] Clicking "Sign In" redirects to Clerk (not error page)
+
+## Doppler Config Comparison
+
+If Riley's config is missing secrets, copy from a working config:
+
+```bash
+# Export all secrets from working config
+doppler secrets download --config dev_ethan --no-file --format json > ethan_secrets.json
+
+# Identify missing secrets in Riley's config
+doppler secrets download --config dev_riley --no-file --format json > riley_secrets.json
+
+# Compare files to find missing keys
+diff <(jq -S 'keys' ethan_secrets.json) <(jq -S 'keys' riley_secrets.json)
+
+# Bulk copy missing secrets (be selective, don't copy personal tokens)
+# Use doppler secrets set for each missing key
+```
+
+## Quick Fix Script
+
+Save as `fix-riley-clerk.sh`:
+
+```bash
+#!/bin/bash
+set -e
+
+echo "🔧 Fixing Riley's Clerk + Zuplo setup..."
+
+# 1. Verify Doppler config
+echo "📋 Checking Doppler config..."
+doppler setup --no-interactive
+
+# 2. Check Clerk key exists
+echo "🔑 Verifying Clerk key..."
+if ! doppler secrets get NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY --plain &>/dev/null; then
+  echo "❌ NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY missing!"
+  echo "   Run: doppler secrets set NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=\"pk_test_...\""
+  exit 1
+fi
+echo "✅ Clerk key found"
+
+# 3. Verify Zuplo .env
+echo "🌐 Checking Zuplo configuration..."
+cd ~/Development/GitHub/dormway-api-2
+if ! grep -q "CLERK_ISSUER_URL" .env; then
+  echo "❌ Zuplo .env missing Clerk configuration!"
+  echo "   Check dormway-api-2/.env file"
+  exit 1
+fi
+echo "✅ Zuplo .env configured"
+
+# 4. Restart services
+echo "🔄 Restarting services..."
+cd ~/Development/GitHub/dormway-platform
+make down
+sleep 2
+make dev &
+
+# Wait for services to start
+echo "⏳ Waiting for services to start..."
+sleep 15
+
+# 5. Test endpoints
+echo "🧪 Testing endpoints..."
+if curl -f http://localhost:9000/health &>/dev/null; then
+  echo "✅ Zuplo gateway healthy"
+else
+  echo "❌ Zuplo gateway not responding"
+  exit 1
+fi
+
+if curl -f http://localhost:3008 &>/dev/null; then
+  echo "✅ LockedIn healthy"
+else
+  echo "❌ LockedIn not responding"
+  exit 1
+fi
+
+echo ""
+echo "✅ Setup complete! Open http://localhost:3008 to test"
+```
+
+## Contact for Help
+
+If issues persist:
+1. Check #dormway-dev Slack channel
+2. Compare Riley's setup with Ethan's working setup
+3. Review Zuplo logs: `make zuplo-logs`
+4. Review LockedIn logs: `make logs s=lockedin`
+
+## Related Documentation
+
+- [CLAUDE.md](../CLAUDE.md) - Main development guide
+- [dormway-api-2/CLAUDE.md](../../dormway-api-2/CLAUDE.md) - Zuplo gateway docs
+- [dormway-lockedin/CLAUDE.md](../services/dormway-lockedin/CLAUDE.md) - LockedIn docs
+- Clerk Dashboard: https://dashboard.clerk.com/

@@ -1,0 +1,483 @@
+---
+title: "GraphQL API Guide"
+description: "DormWay exposes a GraphQL API via PostgreSQL's `pg_graphql` extension. All queries are automatically filtered by Row-Level Security (RLS) policies based on t..."
+---
+
+# DormWay GraphQL API Guide
+
+> **Issue**: DORM-680 - RLS + GraphQL API Implementation
+> **Related**: DORM-686 - GraphQL Explorer Impersonation
+> **Status**: Production-ready with Row-Level Security
+
+## Overview
+
+DormWay exposes a GraphQL API via PostgreSQL's `pg_graphql` extension. All queries are automatically filtered by Row-Level Security (RLS) policies based on the authenticated user's session.
+
+## Endpoint
+
+```
+POST /api/graphql
+```
+
+### Authentication
+
+All requests require authentication via Clerk JWT (through Zuplo gateway).
+
+Headers set by gateway:
+- `x-user-id`: User's UUID
+- `x-user-role`: User's role (`authenticated`, `admin`, `demo`, `service`)
+- `x-context-id` (optional): Context UUID for context-scoped queries
+- `x-impersonate-user-id` (optional, admin only): UUID of user to impersonate for RLS
+
+### Limits
+
+| Limit | Value | Description |
+|-------|-------|-------------|
+| Max Depth | 10 | Maximum nesting level of queries |
+| Max Complexity | 1000 | Estimated query cost (fields + connections) |
+| Max Length | 10,000 chars | Maximum query string length |
+| Rate Limit | 30 req/10s | Per-user rate limiting |
+
+### Security
+
+- **Row-Level Security (RLS)**: All data access is filtered by user ownership
+- **Introspection disabled** in production (use `/api/graphql/schema` for admin)
+- **Query validation**: Depth, complexity, and length limits enforced
+- **Impersonation auditing**: All impersonation actions are logged for security
+
+## Common Queries
+
+> **Note:** pg_graphql uses snake_case field names matching PostgreSQL column names.
+
+### Get Current User's Account
+
+```graphql
+query MyAccount {
+  accountsCollection(first: 1) {
+    edges {
+      node {
+        id
+        email
+        given_name
+        family_name
+        created_at
+      }
+    }
+  }
+}
+```
+
+### Get User's Tasks
+
+```graphql
+query MyTasks($limit: Int = 20) {
+  tasksCollection(first: $limit, orderBy: { created_at: DescNullsLast }) {
+    edges {
+      node {
+        id
+        title
+        status
+        due_date
+        priority
+        course_code
+        estimated_duration_minutes
+        source
+        created_at
+      }
+    }
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+  }
+}
+```
+
+### Get Tasks with Filtering
+
+```graphql
+query TasksByStatus($status: String!) {
+  tasksCollection(
+    filter: { status: { eq: $status } }
+    orderBy: { due_date: AscNullsLast }
+  ) {
+    edges {
+      node {
+        id
+        title
+        due_date
+      }
+    }
+  }
+}
+```
+
+Variables:
+```json
+{ "status": "pending" }
+```
+
+### Get User's Contexts (Courses, etc.)
+
+```graphql
+query MyContexts {
+  contextsCollection(
+    filter: { type: { eq: "student" } }
+  ) {
+    edges {
+      node {
+        id
+        name
+        type
+        metadata
+        parent_id
+      }
+    }
+  }
+}
+```
+
+### Get User's Notes
+
+```graphql
+query MyNotes($limit: Int = 10) {
+  notesCollection(
+    first: $limit
+    orderBy: { updated_at: DescNullsLast }
+  ) {
+    edges {
+      node {
+        id
+        content
+        created_at
+        updated_at
+      }
+    }
+  }
+}
+```
+
+### Get User's Service Data (Calendar, DayPlan, etc.)
+
+> **Note:** The `service_data` table is partitioned by month. Query the specific partition for the month you need (e.g., `service_data_2025_12Collection` for December 2025).
+
+```graphql
+query MyServiceData {
+  service_data_2025_12Collection(
+    first: 50
+    orderBy: { fetched_at: DescNullsLast }
+  ) {
+    edges {
+      node {
+        id
+        method
+        data
+        fetched_at
+        context_id
+        user_id
+      }
+    }
+  }
+}
+```
+
+Common `method` values:
+- `dayplan_context_update` - Day plan data
+- `plugin:*:events` - Plugin events (e.g., `plugin:umich:events`)
+- `plugin:*:dining` - Dining hall data
+- `plugin:*:alerts` - Campus alerts
+
+### Get User's Brain Gains Chats
+
+```graphql
+query MyChats {
+  braingains_chatsCollection(
+    orderBy: { created_at: DescNullsLast }
+  ) {
+    edges {
+      node {
+        id
+        conversation_id
+        created_at
+        updated_at
+      }
+    }
+  }
+}
+```
+
+### Get User Preferences
+
+```graphql
+query MyPreferences {
+  user_preferencesCollection(first: 10) {
+    edges {
+      node {
+        id
+        key
+        value
+        created_at
+        updated_at
+      }
+    }
+  }
+}
+```
+
+## Pagination
+
+pg_graphql uses Relay-style cursor pagination:
+
+```graphql
+query PaginatedTasks($cursor: Cursor) {
+  tasksCollection(first: 20, after: $cursor) {
+    edges {
+      node {
+        id
+        title
+      }
+      cursor
+    }
+    pageInfo {
+      hasNextPage
+      hasPreviousPage
+      startCursor
+      endCursor
+    }
+  }
+}
+```
+
+To get the next page, pass the `endCursor` as the `cursor` variable.
+
+## Filtering
+
+pg_graphql supports various filter operators:
+
+```graphql
+filter: {
+  # Equality
+  status: { eq: "pending" }
+
+  # Comparison (for timestamps/dates)
+  due_date: { lte: "2024-12-31" }
+  created_at: { gte: "2024-01-01" }
+
+  # Contains (for text)
+  title: { ilike: "%exam%" }
+
+  # In list (for enums/text)
+  priority: { in: ["high", "urgent"] }
+  status: { in: ["pending", "scheduled"] }
+
+  # Null checks
+  completed_at: { is: NULL }
+
+  # Logical operators
+  and: [{ status: { eq: "pending" } }, { priority: { eq: "high" } }]
+  or: [{ priority: { eq: "urgent" } }, { due_date: { lt: "2024-12-01" } }]
+}
+```
+
+**Note:** The `tasks` table uses text enums:
+- `priority`: `'low'`, `'medium'`, `'high'`, `'urgent'`
+- `status`: `'pending'`, `'scheduled'`, `'completed'`, `'deleted'`
+- `source`: `'manual'`, `'assignment'`, `'dayplan'`, `'ai_suggestion'`
+
+## Ordering
+
+```graphql
+orderBy: {
+  created_at: DescNullsLast
+}
+
+# Or multiple fields (array)
+orderBy: [
+  { priority: DescNullsLast },
+  { created_at: AscNullsFirst }
+]
+```
+
+Options: `AscNullsFirst`, `AscNullsLast`, `DescNullsFirst`, `DescNullsLast`
+
+## Admin Endpoints
+
+### Schema Introspection (Admin Only)
+
+```
+GET /api/graphql/schema
+```
+
+Returns the full GraphQL schema. Requires `admin` role.
+
+### API Info
+
+```
+GET /api/graphql
+```
+
+Returns API information, limits, and documentation links.
+
+### Health Check
+
+```
+GET /api/graphql/health
+```
+
+Returns database and GraphQL extension health status.
+
+## RLS Impersonation (Admin Only)
+
+Admins can execute GraphQL queries as any user to debug issues or verify what data a specific user sees. This is useful for:
+- Debugging user-reported issues
+- Verifying RLS policies are working correctly
+- Testing what data a specific user can access
+
+### Using Impersonation
+
+**Via GraphQL Explorer (Admin Dashboard)**:
+1. Open the GraphQL Explorer in the Admin Dashboard
+2. Search for a user in the impersonation toolbar
+3. Select the user to impersonate
+4. All subsequent queries will execute with that user's RLS context
+
+**Via API**:
+```bash
+curl -X POST https://api.dormway.app/api/graphql \
+  -H "Authorization: Bearer <admin-jwt>" \
+  -H "x-impersonate-user-id: <target-user-uuid>" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "{ accountsCollection { edges { node { id email } } } }"}'
+```
+
+### Security
+
+- **Admin role required**: Only users with `admin` role can impersonate
+- **Audit logging**: All impersonation actions are logged with:
+  - Admin user ID
+  - Target user ID
+  - Timestamp
+  - Operation name (if provided)
+- **Response headers**: When impersonating, response includes:
+  - `X-Impersonating-User`: The impersonated user's ID
+  - `X-Admin-User`: The admin's ID
+- **Authenticated role context**: The impersonated session uses `authenticated` role (not `admin`), so the admin sees exactly what a regular user would see
+
+### Example: Verify User's Tasks
+
+```bash
+# As admin, check what tasks user abc-123 can see
+curl -X POST https://api.dormway.app/api/graphql \
+  -H "Authorization: Bearer <admin-jwt>" \
+  -H "x-impersonate-user-id: abc12345-1234-1234-1234-123456789abc" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "{ tasksCollection { edges { node { id title status } } } }",
+    "operationName": "DebugUserTasks"
+  }'
+```
+
+## Tables Exposed via GraphQL
+
+The following tables are accessible (with RLS filtering):
+
+| Collection | Access Pattern |
+|------------|----------------|
+| `accountsCollection` | Own account only |
+| `tasksCollection` | Own tasks only |
+| `contextsCollection` | Public types + owned student contexts |
+| `context_dependenciesCollection` | Owned + public relationships |
+| `service_data_YYYY_MMCollection` | Own data (partitioned by month, e.g., `service_data_2025_12Collection`) |
+| `notesCollection` | Own notes only |
+| `braingains_chatsCollection` | Own chats only |
+| `braingains_documentsCollection` | Own documents only |
+| `user_preferencesCollection` | Own preferences only (key-value pairs) |
+| `syllabus_documentsCollection` | Own syllabi only |
+
+### Excluded Tables
+
+These tables are NOT exposed via GraphQL:
+- `device_keys`, `service_credentials` (sensitive)
+- `canvas_accounts` (OAuth tokens)
+- Worker/system tables
+- Audit/log tables
+- Location tables
+
+## Error Handling
+
+GraphQL errors are returned in standard format:
+
+```json
+{
+  "errors": [
+    {
+      "message": "Query too deep: depth 7 (max: 5)",
+      "extensions": {
+        "code": "VALIDATION_ERROR"
+      }
+    }
+  ]
+}
+```
+
+Common errors:
+- `401`: Authentication required
+- `403`: Insufficient permissions (admin-only endpoint)
+- `400`: Query validation failed (depth, complexity, length)
+- `429`: Rate limit exceeded
+
+## Best Practices
+
+1. **Use pagination**: Always use `first`/`after` for large collections
+2. **Select specific fields**: Don't request fields you don't need
+3. **Use variables**: Parameterize queries for caching and security
+4. **Handle errors**: Check for `errors` array in response
+5. **Respect limits**: Keep queries simple (max depth 10, complexity 1000)
+
+## Example: Full Client Usage
+
+```typescript
+async function fetchMyTasks(token: string) {
+  const response = await fetch('/api/graphql', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${token}`,
+    },
+    body: JSON.stringify({
+      query: `
+        query MyTasks($limit: Int!) {
+          tasksCollection(first: $limit) {
+            edges {
+              node {
+                id
+                title
+                status
+              }
+            }
+          }
+        }
+      `,
+      variables: { limit: 20 },
+    }),
+  });
+
+  const { data, errors } = await response.json();
+
+  if (errors) {
+    throw new Error(errors[0].message);
+  }
+
+  return data.tasksCollection.edges.map(e => e.node);
+}
+```
+
+## Related Documentation
+
+- RLS Policies
+- API Router Architecture
+- Database Schema
+
+## See Also
+
+- [pg_graphql Documentation](https://supabase.github.io/pg_graphql/)

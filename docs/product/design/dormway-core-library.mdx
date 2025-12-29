@@ -1,0 +1,127 @@
+---
+title: "DormWay Core Library"
+description: "1. **Unify shared logic** used by engine, api-router, CLI scripts, and future services so that preference CRUD, account lookups, service_data access, context..."
+---
+
+# DormWay Core Library – Single Source of Truth
+
+## Goals
+1. **Unify shared logic** used by engine, api-router, CLI scripts, and future services so that preference CRUD, account lookups, service_data access, context graph traversal, Ragie indexing, telemetry (Ably), workflow orchestration (Temporal), and other cross-cutting behaviors exist once.
+2. **Reduce SQL/API drift** by centralizing database access patterns and external-service clients behind typed modules; schema updates or vendor migrations happen in one place.
+3. **Provide consistent observability** (structured logging, metrics, tracing) for core data operations and third-party adapters.
+4. **Enable gradual migration** by wrapping existing implementations and exposing multiple adapters (Aurora, HTTP, Ably, Ragie, Temporal, Portkey, Customer.io, EventTracker, etc.).
+
+## Scope
+| Domain | Capabilities |
+| --- | --- |
+| Preferences | get/set/delete for all keys, deep-merge helpers, metadata sync hooks.
+| Accounts & Profiles | fetch/update accounts, resolve campus context, hydrate Clerk metadata.
+| Service Data | CRUD helpers with JSON filters, method codecs, TTL-aware caching.
+| Context Graph | fetch by ID/type, dependency traversal, graph exports, caching.
+| Campus/City | metadata, housing, weather, enrichment triggers.
+| Auth | shared Zuplo header validation, Clerk JWT verification, demo-readonly logic.
+| API Integrations | Ably telemetry, Ragie indexing/search, Temporal workflow client, Portkey/LLM wrappers, Customer.io/EventTracker, etc.
+
+## Package Layout
+```
+services/shared/dormway-core/
+  ├─ adapters/
+  │   ├─ aurora.ts        // Postgres adapter (primary) - Note: legacy naming, connects to Neon PostgreSQL
+  │   ├─ http.ts          // API router client (edge/serverless)
+  │   ├─ ably.ts          // Reusable Ably publisher/subscriber
+  │   ├─ amplitude.ts     // Amplitude identify/track client
+  │   ├─ ragie.ts         // REST client for Ragie indexing/search
+  │   ├─ temporal.ts      // Temporal WorkflowClient wrapper w/ workflow registry
+  │   ├─ portkey.ts       // LLM call helper (Portkey metadata, retries)
+  │   ├─ customerio.ts    // Notification sender helper
+  │   ├─ eventtracker.ts  // Unified telemetry/analytics emitter
+  │   └─ fetch.ts         // Shared HTTP wrapper with retries + tracing
+  ├─ domains/
+  │   ├─ preferences.ts
+  │   ├─ accounts.ts
+  │   ├─ serviceData.ts
+  │   ├─ contexts.ts
+  │   ├─ campus.ts
+  │   ├─ auth.ts
+  │   ├─ telemetry.ts      // shared Amplitude/EventTracker helpers
+  │   └─ dayplanData.ts (shared prompt inputs)
+  ├─ schemas/
+  ├─ types/
+  ├─ config.ts
+  └─ index.ts
+```
+Configuration example:
+```ts
+const core = createDormWayCore({
+  db: createAuroraAdapter(pgPool), // Note: "Aurora" is legacy naming - connects to Neon PostgreSQL
+  http: createHttpAdapter({ baseUrl: process.env.API_ROUTER, apiKey: process.env.API_KEY }),
+  ably: createAblyAdapter({ key: process.env.ABLY_KEY, telemetryChannel: 'telemetry' }),
+  amplitude: createAmplitudeAdapter({ apiKey: process.env.AMPLITUDE_API_KEY, ingestionUrl: process.env.AMPLITUDE_URL }),
+  ragie: createRagieAdapter({ baseUrl: process.env.RAGIE_URL, apiKey: process.env.RAGIE_KEY }),
+  temporal: createTemporalAdapter({ address, namespace, apiKey: process.env.TEMPORAL_API_KEY }),
+  portkey: createPortkeyAdapter({ apiKey: process.env.PORTKEY_API_KEY }),
+  customerio: createCustomerIOAdapter({ apiKey: process.env.CUSTOMERIO_API_KEY }),
+  eventTracker: createEventTrackerAdapter({ apiKey: process.env.EVENTTRACKER_API_KEY }),
+  logger,
+  metrics
+});
+```
+
+## Domain APIs
+- **Preferences** – `getAll`, `setKey`, `merge`, `onChange` (signals + telemetry), `syncClerkMetadata`.
+- **Accounts** – `getAccount`, `updateAccount`, `linkClerkUser`, `resolveContexts` (student/campus/city IDs).
+- **Service Data** – `query`, `insert`, `upsert`, `latest`, `registerCodec` (structured validation), TTL helpers.
+- **Contexts** – `getById`, `searchDependencies`, `getGraph` with Redis-backed caching.
+- **Campus** – `getHousing`, `getWeather`, `triggerEnrichment` via Temporal.
+- **Auth** – `verifyClerkToken`, `validateGatewayHeaders`, `gatewayMiddleware` for Express/Koa.
+- **Telemetry** – wraps Amplitude identify/track/increment plus any event bus wiring (Ably/EventTracker) so both api-router (`amplitude-event-tracker.ts`, trait sync routes) and engine (`eventTracker.ts`) emit analytics via the same adapter.
+- **DayPlan Data** – assembler for schedule/preferences/context/weather/daily intelligence using the above domains + Ragie/Portkey.
+
+## API Integration Adapters
+- **Aurora Adapter**: canonical Postgres access (legacy naming - connects to Neon PostgreSQL); replaces Supabase (deprecated Q3 2025) and Aurora (deprecated Nov 2025). Edge clients should use the HTTP adapter instead of direct database access.
+- **HTTP Adapter**: wraps API router endpoints for read-only access when DB is unreachable.
+- **Ably Adapter**: standard publish/subscribe/presence with reconnects + metrics.
+- **Amplitude Adapter**: handles identify/track/increment calls with batching/retry so both engine (event tracker) and api-router workflows emit analytics the same way.
+- **Ragie Adapter**: document store/search wrapper with partition helpers and retries.
+- **Temporal Adapter**: typed workflow start/signal/query + default workflow IDs.
+- **Portkey Adapter**: structured LLM call helper with JSON enforcement + metadata injection.
+- **Customer.io Adapter**: consistent templated email/push sends, payload validation, metrics.
+- **EventTracker Adapter**: unified telemetry events across engine/api-router.
+
+## Supabase Deprecation
+Supabase adapters are removed. Wherever Supabase was previously used (e.g., `SupabaseAdapter` in engine activities) must migrate to either the Aurora adapter (preferred) or the HTTP adapter. Update documentation + lint rules to prevent new Supabase usage.
+
+## API Wrapper Candidates
+| Adapter | Current Usage | Notes |
+| --- | --- | --- |
+| Aurora | engine/api-router SQL | Primary persistence; library owns queries.
+| HTTP | CLI/edge | Fallback to API router endpoints.
+| Ably | ably-relay, admin, telemetry | Provide shared channel contracts.
+| Amplitude | eventTracker service | Identify/track/increment reuse with batching + retry logic.
+| Ragie | engine workflows, knowledge APIs | Capture indexing/search semantics.
+| Temporal | workflows everywhere | Standardize workflow invocation.
+| Portkey | DayPlan, ACE | Shared LLM invocation + guardrails.
+| Customer.io | engine notifications | Consistent message formatting.
+| EventTracker | telemetry events | unify instrumentation (may wrap Ably/Amplitude).
+| Clerk | auth metadata sync | optional helper for linking backend IDs.
+
+## Migration Strategy
+1. Implement Aurora + HTTP adapters and migrate preferences/service_data/context domains in api-router.
+2. Replace engine DB helpers with the same domains and remove Supabase dependencies.
+3. Introduce Ably + Ragie adapters; update telemetry + indexing usages to call through the core library.
+4. Add Temporal/Portkey/Customer.io/EventTracker adapters; migrate workflows + notification calls.
+5. Once adoption is widespread, enforce lint rules and document patterns for new services.
+
+## Distribution Strategy
+- **Workspace package:** host the library under `services/shared/dormway-core` and add it to the root pnpm workspace. Services depend on it via `"@dormway/core": "workspace:*"`, so `pnpm install` wires the local source during builds without publishing to npm.
+- **Dual build:** ship both CJS + ESM outputs (e.g., via tsup) so Express (api-router) and Temporal (engine) can import it natively.
+- **Versioning:** keep semantic version numbers inside `package.json`; services pin `workspace:^0.x` so lockfiles capture exact revisions even though everything lives in git.
+- **Future publish (optional):** if we ever need to reuse the core outside this repo, we can publish the same package to a private registry (GitHub Packages). Until then, the workspace module keeps cross-repo changes in a single PR.
+
+## Next Steps
+- Prototype the library with Aurora + HTTP + preference/service_data/context modules; publish v0.1 for api-router.
+- Draft adapter interfaces (AuroraAdapter, AblyAdapter, RagieAdapter, TemporalAdapter, etc.) with contract tests.
+- Update documentation to highlight Supabase deprecation and recommended adapter usage paths.
+
+## Related Documents
+- **[DormWay-Core-Library-Implementation-Plan](/docs/product/design/dormway-core-library-implementation-plan)** - Comprehensive 7-week implementation plan with detailed specifications, migration strategy, and testing approach (2025-11-17)

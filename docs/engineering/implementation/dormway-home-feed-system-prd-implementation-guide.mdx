@@ -1,0 +1,877 @@
+---
+title: "DormWay Home Feed System — PRD & Implementation Guide"
+description: "The Home Feed is the primary surface of the DormWay iOS app. It presents a **curated set of 1-5 contextual cards** based on real-time scoring, plus persisten..."
+---
+
+#
+**Version:** 1.0  
+**Date:** December 2024  
+**Status:** Ready for Implementation
+
+---
+
+## Executive Summary
+
+The Home Feed is the primary surface of the DormWay iOS app. It presents a **curated set of 1-5 contextual cards** based on real-time scoring, plus persistent app navigation. The system replaces infinite-scroll patterns with intentional, AI-powered card selection that respects student attention.
+
+**Key Principle:** Students see only what matters *right now*. The feed shows fewer cards on calm days, more during peak periods — never overwhelming, always actionable.
+
+---
+
+## 1. Architecture Overview
+
+### 1.1 System Flow
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                         5 AM: DayPlan Generation                     │
+│  ┌──────────────┐    ┌──────────────┐    ┌────────────────────────┐ │
+│  │ Tasks API    │───▶│              │───▶│ FeedCard Pool (47 types)│ │
+│  │ Schedule API │───▶│  DayPlan     │───▶│ Stored in Redis        │ │
+│  │ Workload API │───▶│  Workflow    │───▶│ TTL: 24 hours          │ │
+│  │ Campus API   │───▶│              │    └────────────────────────┘ │
+│  │ BrainGains   │───▶│              │                               │
+│  └──────────────┘    └──────────────┘                               │
+└─────────────────────────────────────────────────────────────────────┘
+                                │
+                                ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                      Request Time: Scoring API                       │
+│  ┌──────────────┐    ┌──────────────┐    ┌────────────────────────┐ │
+│  │ Current Time │───▶│              │───▶│ Scored Cards           │ │
+│  │ Location     │───▶│  Thin        │───▶│ (computedScore added)  │ │
+│  │ Context      │───▶│  Scoring     │    └────────────────────────┘ │
+│  │ Prediction   │───▶│  API         │              │                │
+│  └──────────────┘    └──────────────┘              ▼                │
+│                                        ┌────────────────────────────┐│
+│                                        │ Select Top 5               ││
+│                                        │ • Sort by score            ││
+│                                        │ • Dedupe by category       ││
+│                                        │ • Filter dismissed         ││
+│                                        └────────────────────────────┘│
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### 1.2 Data Sources
+
+| Source | Card Types Generated | Update Frequency |
+|--------|---------------------|------------------|
+| **DayPlan** | current_event, next_event, morning_briefing | 5 AM + event changes |
+| **Tasks** | due_today, due_tomorrow, overdue | Real-time on task changes |
+| **Workload** | week_load, peak_warning, stress_alert | Weekly recalc |
+| **BrainGains** | synergy, portfolio_opportunity | On syllabus upload |
+| **Campus** | campus_alert, campus_news, study_spots | Push from campus feed |
+| **City** | weather, transit, dining, deals | Periodic refresh |
+
+---
+
+## 2. UI Specification
+
+### 2.1 Home Screen Layout
+
+```
+┌─────────────────────────────────────────┐
+│ ← Status Bar                            │
+├─────────────────────────────────────────┤
+│                                         │
+│  Good morning                           │  ← Hero Header
+│  Tuesday, December 17                   │
+│                                         │
+├─────────────────────────────────────────┤
+│  ✨ FOR YOU                             │  ← Section Header
+│  ┌─────────────────────────────────────┐│
+│  │ 🚨 CAMPUS ALERT                     ││  ← Contextual Card 1
+│  │ Dorms close tomorrow 7 PM           ││
+│  │ Winter break - Reopen Jan 6         ││
+│  └─────────────────────────────────────┘│
+│  ┌─────────────────────────────────────┐│
+│  │ 📚 NEXT UP                    10:00 ││  ← Contextual Card 2
+│  │ CHEM-3A Final Review          19min ││
+│  │ Chemistry Building 1400             ││
+│  └─────────────────────────────────────┘│
+│  ┌─────────────────────────────────────┐│
+│  │ 📝 DUE TODAY                   14h  ││  ← Contextual Card 3
+│  │ EPM-4902 Capstone              left ││
+│  │ Final submission - 11:59 PM         ││
+│  └─────────────────────────────────────┘│
+│  ┌─────────────────────────────────────┐│
+│  │ 🧠 BRAIN GAINS                      ││  ← Contextual Card 4
+│  │ Use COMM-404 work in capstone       ││
+│  │ Save 3-4 hours today      ── How ── ││
+│  └─────────────────────────────────────┘│
+├─────────────────────────────────────────┤
+│  📅 TODAY                               │  ← Section Header
+│  ┌─────────────────────────────────────┐│
+│  │ ● 10:00  CHEM-3A Review             ││  ← Schedule Preview
+│  │ ○ 12:00  Free                       ││
+│  │ ● 2:00   Study Block                ││
+│  │ ● 5:00   Group Project Call         ││
+│  └─────────────────────────────────────┘│
+│  ┌───────┐ ┌───────┐ ┌───────┐         │
+│  │ Focus │ │ Study │ │Dining │         │  ← Quick Actions
+│  │  🌙   │ │ Spots │ │  🍴   │         │
+│  └───────┘ └───────┘ └───────┘         │
+│                                         │
+│  ┌─────────────────────────────────────┐│
+│  │ ☑️ Tasks                    12 due  ││  ← App Sections
+│  │ 📚 Courses                  5 active││
+│  │ 🧠 Brain Gains              3 new   ││
+│  └─────────────────────────────────────┘│
+│                                         │
+├─────────────────────────────────────────┤
+│  🏠 Home  📅 Schedule  ☑️ Tasks  🏛 Campus │ ← Tab Bar
+└─────────────────────────────────────────┘
+
+         ┌──────┐
+         │  ✨  │  ← Ace FAB (Floating Action Button)
+         └──────┘
+```
+
+### 2.2 Card States
+
+| State | Visual Treatment |
+|-------|------------------|
+| **Default** | Glass morphism background, subtle border |
+| **Urgent** | Red-tinted background, red border glow |
+| **Expanded** | Reveals additional content on tap |
+| **Swiping Right** | Green gradient reveal ("Done") |
+| **Swiping Left** | Amber gradient reveal ("Later") |
+
+### 2.3 Gesture Patterns
+
+| Gesture | Action | iOS Convention |
+|---------|--------|----------------|
+| **Tap** | Expand card in-place | Primary action |
+| **Swipe Right** | Dismiss/Complete | Matches Mail "mark read" |
+| **Swipe Left** | Snooze/Later | Reveals time picker |
+| **Long Press** | Quick actions menu | System standard |
+
+---
+
+## 3. Data Models
+
+### 3.1 FeedCard
+
+```swift
+struct FeedCard: Identifiable, Codable {
+    // Identity
+    let id: String
+    let type: CardType
+    let source: DataSource
+    let sourceId: String  // Links to task/event/etc.
+    
+    // Display
+    let category: CardCategory
+    let priority: CardPriority
+    let label: String
+    let title: String
+    let subtitle: String
+    let time: String?
+    let timeLabel: String?
+    let hasReveal: Bool
+    let revealText: String?
+    let revealContent: RevealContent?
+    
+    // Scoring Inputs (set at generation time)
+    let basePriority: Int  // 0-100
+    let timeWindow: TimeWindow?
+    let locationRelevance: LocationRelevance?
+    
+    // Computed at request time
+    var computedScore: Double?
+    
+    // State
+    var isDismissed: Bool = false
+    var dismissedAt: Date?
+}
+
+enum CardType: String, Codable, CaseIterable {
+    // Time-Triggered
+    case morningBriefing = "morning_briefing"
+    case currentEvent = "current_event"
+    case nextEvent = "next_event"
+    case eveningReview = "evening_review"
+    
+    // Tasks
+    case dueToday = "due_today"
+    case dueTomorrow = "due_tomorrow"
+    case overdue = "overdue"
+    case dueSoon = "due_soon"
+    
+    // Insights
+    case brainGains = "brain_gains"
+    case synergy = "synergy"
+    case portfolioOpportunity = "portfolio_opportunity"
+    
+    // Workload
+    case weekLoad = "week_load"
+    case peakWarning = "peak_warning"
+    case stressAlert = "stress_alert"
+    
+    // Campus
+    case campusAlert = "campus_alert"
+    case campusNews = "campus_news"
+    case studySpots = "study_spots"
+    
+    // City
+    case weather = "weather"
+    case transit = "transit"
+    case dining = "dining"
+    case deals = "deals"
+    
+    // Ace
+    case acePrompt = "ace_prompt"
+}
+
+enum CardCategory: String, Codable {
+    case alert      // Campus alerts, safety
+    case current    // What's happening now
+    case next       // Upcoming event
+    case due        // Tasks due
+    case weather    // Weather advisory
+    case insight    // Brain gains, synergies
+    case workload   // Week/term intelligence
+    case wellness   // Stress alerts, breaks
+    case ace        // Ace prompts
+}
+
+struct TimeWindow: Codable {
+    let showAfter: Date?
+    let showUntil: Date?
+    let peakStart: Date?
+    let peakEnd: Date?
+}
+
+struct LocationRelevance: Codable {
+    let latitude: Double
+    let longitude: Double
+    let radiusMeters: Double
+    let boostFactor: Double  // 1.0-2.0
+}
+```
+
+### 3.2 Card Type Configuration
+
+```swift
+struct CardTypeConfig {
+    let basePriority: Int
+    let category: CardCategory
+    let defaultTimeWindow: ((Date) -> TimeWindow)?
+    let icon: String
+    let gradientColors: [Color]
+}
+
+let cardTypeConfigs: [CardType: CardTypeConfig] = [
+    .campusAlert: CardTypeConfig(
+        basePriority: 90,
+        category: .alert,
+        defaultTimeWindow: nil,  // Always show
+        icon: "exclamationmark.triangle.fill",
+        gradientColors: [.red, .pink]
+    ),
+    .currentEvent: CardTypeConfig(
+        basePriority: 85,
+        category: .current,
+        defaultTimeWindow: { date in
+            // Peak during event, show 5min before to 15min after
+            TimeWindow(
+                showAfter: date.addingTimeInterval(-5 * 60),
+                showUntil: date.addingTimeInterval(15 * 60),
+                peakStart: date,
+                peakEnd: date.addingTimeInterval(10 * 60)
+            )
+        },
+        icon: "book.fill",
+        gradientColors: [.blue, .cyan]
+    ),
+    .dueToday: CardTypeConfig(
+        basePriority: 75,
+        category: .due,
+        defaultTimeWindow: { dueDate in
+            // Show from 8 AM, peak as deadline approaches
+            let today8am = Calendar.current.date(bySettingHour: 8, minute: 0, second: 0, of: Date())!
+            return TimeWindow(
+                showAfter: today8am,
+                showUntil: dueDate,
+                peakStart: dueDate.addingTimeInterval(-4 * 3600),
+                peakEnd: dueDate
+            )
+        },
+        icon: "doc.text.fill",
+        gradientColors: [.amber, .yellow]
+    ),
+    .brainGains: CardTypeConfig(
+        basePriority: 50,
+        category: .insight,
+        defaultTimeWindow: nil,
+        icon: "brain.head.profile",
+        gradientColors: [.purple, .pink]
+    ),
+    .stressAlert: CardTypeConfig(
+        basePriority: 70,
+        category: .wellness,
+        defaultTimeWindow: nil,
+        icon: "heart.fill",
+        gradientColors: [.pink, .purple]
+    ),
+    // ... etc for all 47 types
+]
+```
+
+---
+
+## 4. Scoring Algorithm
+
+### 4.1 Score Computation
+
+```typescript
+interface ScoringContext {
+  currentTime: Date;
+  location?: { lat: number; lng: number };
+  studentContext: ContextPrediction;  // From LLM context service
+  dismissedCardIds: Set<string>;
+}
+
+function computeScore(card: FeedCard, context: ScoringContext): number {
+  // Base priority (0-100)
+  let score = card.basePriority;
+  
+  // Time factor (0.0-2.0)
+  const timeFactor = computeTimeFactor(card.timeWindow, context.currentTime);
+  score *= timeFactor;
+  
+  // Location boost (1.0-2.0)
+  if (card.locationRelevance && context.location) {
+    const distance = haversine(
+      context.location,
+      { lat: card.locationRelevance.latitude, lng: card.locationRelevance.longitude }
+    );
+    if (distance < card.locationRelevance.radiusMeters) {
+      score *= card.locationRelevance.boostFactor;
+    }
+  }
+  
+  // Urgency boost (1.0-3.0)
+  if (card.type === 'overdue') {
+    score *= 3.0;
+  } else if (card.type === 'due_today') {
+    const hoursUntilDue = /* calculate */;
+    if (hoursUntilDue < 2) score *= 2.0;
+    else if (hoursUntilDue < 6) score *= 1.5;
+  }
+  
+  // Context modifier (0.2-2.0)
+  const contextModifier = getContextModifier(card.type, context.studentContext);
+  score *= contextModifier;
+  
+  return score;
+}
+
+function computeTimeFactor(window: TimeWindow | null, now: Date): number {
+  if (!window) return 1.0;
+  
+  // Before show window
+  if (window.showAfter && now < window.showAfter) return 0.0;
+  
+  // After show window
+  if (window.showUntil && now > window.showUntil) return 0.0;
+  
+  // In peak window
+  if (window.peakStart && window.peakEnd) {
+    if (now >= window.peakStart && now <= window.peakEnd) {
+      return 2.0;
+    }
+  }
+  
+  // In show window but not peak
+  return 1.0;
+}
+```
+
+### 4.2 Context Modifiers
+
+The LLM context prediction service (`/api/ai/predict-context`) returns:
+
+```typescript
+interface ContextPrediction {
+  primaryState: 'in_class' | 'studying' | 'meal_time' | 'social' | 'commuting' | 'at_home';
+  confidence: number;  // 0-1
+  locationAnalysis: { type: string; building?: string };
+  temporalInsights: { expectedDuration: string; nextContext: string };
+}
+```
+
+Context modifiers adjust card scores based on student state:
+
+```typescript
+const CONTEXT_MODIFIERS: Record<CardType, Record<string, number>> = {
+  // Boost study-related cards when studying
+  'study_spots':      { studying: 1.5, in_class: 0.3, social: 0.5 },
+  'brain_gains':      { studying: 1.5, social: 0.4, commuting: 0.7 },
+  
+  // Suppress academic cards during social time
+  'due_today':        { studying: 1.2, social: 0.6, meal_time: 0.8 },
+  
+  // Boost dining when hungry
+  'dining':           { meal_time: 2.0, studying: 0.5, in_class: 0.3 },
+  
+  // Transit relevant when moving
+  'transit':          { commuting: 2.0, in_class: 0.1, studying: 0.2 },
+  
+  // Always show regardless of context
+  'campus_alert':     { _default: 1.0 },
+  'overdue':          { _default: 1.0 },
+};
+
+function getContextModifier(cardType: CardType, context: ContextPrediction): number {
+  const modifiers = CONTEXT_MODIFIERS[cardType];
+  if (!modifiers) return 1.0;
+  
+  const modifier = modifiers[context.primaryState] ?? modifiers._default ?? 1.0;
+  
+  // Scale by confidence (weak prediction = less modification)
+  return 1 + (modifier - 1) * context.confidence;
+}
+```
+
+### 4.3 Selection Algorithm
+
+```typescript
+const MAX_CONTEXTUAL_CARDS = 5;
+
+function selectCardsForDisplay(
+  cards: FeedCard[],
+  context: ScoringContext
+): FeedCard[] {
+  // 1. Filter to eligible
+  const eligible = cards.filter(card => 
+    !context.dismissedCardIds.has(card.id) &&
+    isInTimeWindow(card.timeWindow, context.currentTime)
+  );
+  
+  // 2. Compute scores
+  const scored = eligible.map(card => ({
+    ...card,
+    computedScore: computeScore(card, context)
+  }));
+  
+  // 3. Sort by score descending
+  scored.sort((a, b) => b.computedScore - a.computedScore);
+  
+  // 4. Dedupe by category (one per category max)
+  const seen = new Set<CardCategory>();
+  const deduped = scored.filter(card => {
+    if (seen.has(card.category)) return false;
+    seen.add(card.category);
+    return true;
+  });
+  
+  // 5. Take top N
+  return deduped.slice(0, MAX_CONTEXTUAL_CARDS);
+}
+```
+
+---
+
+## 5. API Specification
+
+### 5.1 Feed Generation (Temporal Workflow)
+
+Called at 5 AM and on significant data changes:
+
+```typescript
+// POST /api/v1/feed/generate (internal, called by DayPlan workflow)
+
+interface GenerateFeedRequest {
+  studentId: string;
+  date: string;  // ISO date
+}
+
+interface GenerateFeedResponse {
+  success: boolean;
+  cardCount: number;
+  generatedAt: string;
+}
+```
+
+### 5.2 Feed Retrieval
+
+```typescript
+// GET /api/v1/feed?limit=10
+
+interface FeedRequest {
+  limit?: number;  // Default 10
+  context?: {
+    lat?: number;
+    lng?: number;
+  };
+}
+
+interface FeedResponse {
+  cards: FeedCard[];
+  studentContext: ContextPrediction;
+  generatedAt: string;
+  nextRefresh: string;  // Suggested next poll time
+}
+```
+
+### 5.3 Card Dismissal
+
+```typescript
+// POST /api/v1/feed/dismiss
+
+interface DismissRequest {
+  cardId: string;
+  action: 'done' | 'snooze';
+  snoozeUntil?: string;  // ISO datetime for snooze
+}
+
+interface DismissResponse {
+  success: boolean;
+  cardId: string;
+}
+```
+
+### 5.4 Card Interaction Tracking
+
+```typescript
+// POST /api/v1/feed/interaction
+
+interface InteractionRequest {
+  cardId: string;
+  action: 'tap' | 'expand' | 'dismiss' | 'snooze' | 'action_button';
+  metadata?: Record<string, any>;
+}
+```
+
+---
+
+## 6. Ace Integration
+
+### 6.1 Entry Points
+
+1. **FAB (Floating Action Button)** — Always visible bottom-right
+2. **Inline Ace Card** — Surfaces in feed when Ace has proactive suggestions
+3. **Card Action** — "Ask Ace" button on expandable cards
+
+### 6.2 Context Injection
+
+When opening Ace from a card, pass context:
+
+```swift
+struct AceContext {
+    let entryPoint: AceEntryPoint
+    let sourceCard: SourceCard?
+    let studentContext: ContextPrediction
+    let suggestedPrompt: String?
+}
+
+enum AceEntryPoint {
+    case fab
+    case inlineCard
+    case cardAction
+}
+
+struct SourceCard {
+    let type: CardType
+    let courseId: String?
+    let taskId: String?
+    let eventId: String?
+}
+
+// Example: User taps "Ask Ace" on a due_today card
+let aceContext = AceContext(
+    entryPoint: .cardAction,
+    sourceCard: SourceCard(
+        type: .dueToday,
+        courseId: "chem-3a",
+        taskId: "quiz-4"
+    ),
+    studentContext: currentContext,
+    suggestedPrompt: "Help me prepare for CHEM-3A Quiz 4"
+)
+```
+
+### 6.3 Ace Response with Task Actions
+
+```typescript
+interface AceResponse {
+  answer: string;
+  citations: Citation[];
+  suggestedTasks?: SuggestedTask[];
+}
+
+interface SuggestedTask {
+  title: string;
+  dueDate?: string;
+  courseId?: string;
+  estimatedMinutes?: number;
+  priority?: 'low' | 'normal' | 'high';
+}
+
+interface Citation {
+  documentId: string;
+  courseName: string;
+  snippet: string;
+  score: number;
+}
+```
+
+### 6.4 Add Tasks Action
+
+When Ace suggests tasks, show action button:
+
+```
+┌─────────────────────────────────────┐
+│ To prep for your CHEM final:        │
+│                                     │
+│ 1. Review Chapter 12 thermodynamics │
+│ 2. Complete practice problems       │
+│ 3. Make flashcards for formulas     │
+│                                     │
+│ ┌───────────────────────────────┐   │
+│ │  ＋  Add 3 tasks              │   │
+│ └───────────────────────────────┘   │
+│                                     │
+│ 📄 CHEM-3A Syllabus                 │
+└─────────────────────────────────────┘
+```
+
+On tap, calls:
+
+```typescript
+// POST /api/v1/tasks/bulk
+
+interface BulkCreateTasksRequest {
+  tasks: SuggestedTask[];
+  source: 'ace';
+  aceConversationId: string;
+}
+```
+
+---
+
+## 7. SwiftUI Implementation Reference
+
+### 7.1 Prototype Structure
+
+The attached prototype provides reference implementations:
+
+```
+DormWay/
+├── Models/
+│   ├── Card.swift           // Card data model
+│   ├── ScheduleEvent.swift  // Schedule event model
+│   └── MockData.swift       // Sample data for testing
+├── Theme/
+│   └── DormWayTheme.swift   // Design tokens, colors, gradients
+└── Views/
+    ├── HomeView.swift       // Main home screen layout
+    ├── ContentView.swift    // Tab bar container
+    ├── Cards/
+    │   ├── ContextualCardView.swift  // Card with swipe gestures
+    │   └── CardIconView.swift        // Card type icons
+    ├── Schedule/
+    │   └── SchedulePreviewView.swift // Schedule timeline
+    └── AppSections/
+        ├── QuickActionsView.swift    // Quick action buttons
+        └── AppRowView.swift          // App section rows
+```
+
+### 7.2 Key Components to Extend
+
+**ContextualCardView.swift** — Add:
+- Network loading states
+- Action buttons in expanded state
+- "Ask Ace" integration
+
+**HomeView.swift** — Add:
+- Real data fetching via `FeedService`
+- Pull-to-refresh
+- Ace FAB overlay
+- Empty states
+
+**Card.swift** — Extend to match `FeedCard` model with:
+- `sourceId` linking to backend entities
+- `computedScore` for sorting
+- `timeWindow` for filtering
+
+### 7.3 New Components Needed
+
+```swift
+// FeedService.swift
+@MainActor
+class FeedService: ObservableObject {
+    @Published var cards: [FeedCard] = []
+    @Published var isLoading = false
+    @Published var error: Error?
+    
+    private let apiClient: APIClient
+    private var refreshTimer: Timer?
+    
+    func loadFeed() async { /* ... */ }
+    func dismissCard(_ id: String, action: DismissAction) async { /* ... */ }
+    func startPolling(interval: TimeInterval = 60) { /* ... */ }
+}
+
+// AceFABView.swift
+struct AceFABView: View {
+    let onTap: () -> Void
+    
+    var body: some View {
+        Button(action: onTap) {
+            ZStack {
+                Circle()
+                    .fill(
+                        LinearGradient(
+                            colors: [DormWayTheme.accentCyan, DormWayTheme.accentPurple],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                    .frame(width: 56, height: 56)
+                    .shadow(color: DormWayTheme.accentCyan.opacity(0.3), radius: 12, y: 4)
+                
+                Image(systemName: "sparkles")
+                    .font(.system(size: 24, weight: .semibold))
+                    .foregroundColor(.white)
+            }
+        }
+    }
+}
+
+// AceActionButtonView.swift
+struct AceActionButtonView: View {
+    let label: String
+    let taskCount: Int
+    let onTap: () -> Void
+    
+    var body: some View {
+        Button(action: onTap) {
+            HStack(spacing: 8) {
+                Image(systemName: "plus.circle.fill")
+                Text("Add \(taskCount) tasks")
+                    .fontWeight(.semibold)
+            }
+            .font(.subheadline)
+            .foregroundColor(.white)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .background(
+                LinearGradient(
+                    colors: [DormWayTheme.accentPurple, DormWayTheme.accentPink],
+                    startPoint: .leading,
+                    endPoint: .trailing
+                )
+            )
+            .clipShape(Capsule())
+        }
+    }
+}
+```
+
+---
+
+## 8. Implementation Phases
+
+### Phase 1: Static Feed (Week 1)
+
+**Goal:** Display cards from DayPlan with client-side filtering
+
+- [ ] Extend `Card` model to `FeedCard`
+- [ ] Add `feedCards` array to DayPlan response
+- [ ] Implement `FeedService` with basic fetching
+- [ ] Client-side time window filtering
+- [ ] Static base priority per card type
+- [ ] Dismissal persisted to UserDefaults (temporary)
+
+**API Changes:**
+- Extend `GET /api/v1/dayplan` to include `feedCards[]`
+
+### Phase 2: Scoring API (Week 2)
+
+**Goal:** Server-side scoring with context
+
+- [ ] Redis storage for pre-computed cards
+- [ ] Thin scoring endpoint
+- [ ] Time factor computation
+- [ ] Location boost (if location available)
+- [ ] 60-second client polling
+
+**API Changes:**
+- Add `GET /api/v1/feed`
+- Add `POST /api/v1/feed/dismiss`
+
+### Phase 3: Context Integration (Week 3)
+
+**Goal:** LLM context modifies card scores
+
+- [ ] Connect to existing `/api/ai/predict-context`
+- [ ] Apply context modifiers to scoring
+- [ ] Track dismissals server-side
+- [ ] Engagement tracking foundation
+
+**API Changes:**
+- Add `POST /api/v1/feed/interaction`
+
+### Phase 4: Ace Integration (Week 4)
+
+**Goal:** FAB + action buttons
+
+- [ ] Add Ace FAB to HomeView
+- [ ] Pass context when opening from card
+- [ ] Parse `suggestedTasks` from Ace response
+- [ ] Implement "Add tasks" action button
+- [ ] Confirmation UI after adding tasks
+
+**API Changes:**
+- Add `POST /api/v1/tasks/bulk`
+
+### Phase 5: Real-time Updates (Week 5)
+
+**Goal:** Push updates for high-priority cards
+
+- [ ] Ably channel for feed updates
+- [ ] Priority injection for campus alerts
+- [ ] Optimistic UI for dismissals
+- [ ] Background refresh
+
+---
+
+## 9. Success Metrics
+
+| Metric | Target | Measurement |
+|--------|--------|-------------|
+| Cards per session | 2-4 avg | Analytics |
+| Dismiss rate | < 30% | Interaction tracking |
+| Ace FAB tap rate | > 10% | Analytics |
+| Task add rate (from Ace) | > 25% of suggestions | Conversion tracking |
+| Feed load time | < 500ms | Performance monitoring |
+| Context prediction accuracy | > 80% | User feedback |
+
+---
+
+## 10. Appendix: Wireframes
+
+See attached HTML files:
+- `dormway-home-layout.html` — Final home screen layout with scoring
+- `dormway-feed-catalog.html` — All 47 card types visualized
+- `dormway-ace-architecture.html` — Ace integration details
+
+---
+
+## 11. Appendix: Prototype Files
+
+The SwiftUI prototype is attached as `DormWay.zip`. Key files:
+
+| File | Purpose |
+|------|---------|
+| `HomeView.swift` | Home screen layout reference |
+| `ContextualCardView.swift` | Card rendering with swipe gestures |
+| `DormWayTheme.swift` | Design tokens and colors |
+| `Card.swift` | Card data model (extend this) |
+| `MockData.swift` | Sample cards for testing |
+
+---
+
+*End of Document*

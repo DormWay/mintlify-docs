@@ -1,0 +1,2157 @@
+---
+title: "Phase 4 iOS Implementation Specs"
+description: "1. **Canvas Assignments & Grades** (10-16 hours) 2. **Assignment Completion Tracking** (6-8 hours) 3. **Notes Sync** (6-10 hours)"
+---
+
+# Phase 4: iOS Implementation Specs - P0 Features
+**Date:** 2025-11-09
+**Related:** Phase-3-iOS-API-Integration-Audit, [Phase-2-Real-Data-Findings](/docs/engineering/phase-2-real-data-findings), [Database-Schema-Investigation-2025-11-09](/docs/engineering/database-schema-investigation-2025-11-09)
+
+---
+
+## Executive Summary
+
+**Phase 4 provides detailed implementation specifications** for the 3 critical P0 features identified in Phase 3:
+
+1. **Canvas Assignments & Grades** (10-16 hours)
+2. **Assignment Completion Tracking** (6-8 hours)
+3. **Notes Sync** (6-10 hours)
+
+**Total Effort:** 22-34 hours (3-5 days for 1 engineer)
+
+**Key Deliverables:**
+- Service architecture designs (DI-compatible)
+- Data model mappings (backend ↔ iOS)
+- API integration patterns (NetworkService + adapters)
+- UI component specifications (SwiftUI)
+- Real-time update flows (Ably integration)
+- Error handling and offline support
+
+---
+
+## Table of Contents
+
+1. [Architecture Principles](#1-architecture-principles)
+2. [Canvas Assignments Service](#2-canvas-assignments-service)
+3. [Assignment Completion Service](#3-assignment-completion-service)
+4. [Notes Sync Service](#4-notes-sync-service)
+5. [Shared Infrastructure](#5-shared-infrastructure)
+6. [Implementation Roadmap](#6-implementation-roadmap)
+
+---
+
+## 1. Architecture Principles
+
+### 1.1 iOS Architecture Overview (from ios-clean/CLAUDE.md)
+
+**Critical Rules:**
+- ✅ **Protocol-based DI** - No singletons
+- ✅ **@MainActor** for all services
+- ✅ **@Observable** macro (NOT ObservableObject)
+- ✅ **Environment injection** for DI container
+- ✅ **Packages/** for service organization
+
+**Service Location Guidelines:**
+- Network/API services → `DWServices` package
+- UI components → `DWDesign` package
+- Data models → Service-specific (within DWServices)
+
+### 1.2 Backend Integration Pattern
+
+**Standard Flow:**
+```swift
+// 1. Define protocol in Core/DependencyInjection/ServiceProtocols.swift
+@MainActor
+public protocol CanvasServiceProtocol {
+    func fetchAssignments() async throws -> [Assignment]
+}
+
+// 2. Implement service in Packages/DWServices/
+@MainActor
+public final class CanvasService {
+    private let networkService: NetworkService
+
+    public init(networkService: NetworkService) {
+        self.networkService = networkService
+    }
+}
+
+// 3. Create adapter in Core/DependencyInjection/ServiceAdapters.swift
+@MainActor
+final class CanvasServiceAdapter: CanvasServiceProtocol {
+    private let service: CanvasService
+
+    init(_ service: CanvasService) {
+        self.service = service
+    }
+}
+
+// 4. Register in Container.registerServices()
+let canvasService = CanvasService(networkService: networkService)
+registerSingleton(CanvasServiceProtocol.self,
+                 implementation: CanvasServiceAdapter(canvasService))
+```
+
+### 1.3 Design System Tokens (Verified)
+
+**Available in DWDesign package:**
+```swift
+// Colors
+DS.Color.Semantic.Text.primary
+DS.Color.Semantic.Background.surfacePrimary
+DS.Color.Palette.Brand.primary
+DS.Color.Palette.State.success
+
+// Typography
+.dsTypography(DS.Typography.Body.default)
+.dsTypography(DS.Typography.Heading.h3)
+
+// Spacing
+.padding(DS.Spacing.md)
+
+// Radius
+.cornerRadius(DS.Radius.md)
+```
+
+---
+
+## 2. Canvas Assignments Service
+
+**Effort:** 10-16 hours
+**Priority:** P0 - Critical (enables gradebook, unblocks assignment completion)
+
+### 2.1 Backend API Review
+
+**Endpoints (from Phase 3):**
+```typescript
+// Connection Management
+GET    /canvas/status                  // Connection status
+POST   /canvas/connect/manual          // Connect with PAT
+DELETE /canvas/disconnect              // Disconnect
+
+// Data Access
+GET    /canvas/courses                 // List courses
+GET    /canvas/assignments             // List assignments (with grades)
+GET    /canvas/upcoming                // Upcoming 7 days
+POST   /canvas/sync                    // Manual sync
+```
+
+**Backend Data Model (from canvas-routes.ts):**
+```typescript
+// GET /canvas/assignments response
+{
+  success: boolean
+  assignments: Assignment[]
+  total: number
+}
+
+Assignment {
+  id: string                    // Canvas assignment ID
+  courseId: string              // Canvas course ID
+  name: string
+  description: string
+  dueAt: string                 // ISO 8601
+  pointsPossible: number
+
+  // Submission data
+  submission: {
+    id: string
+    submittedAt: string
+    score: number
+    grade: string               // Letter grade or percentage
+    late: boolean
+    missing: boolean
+    excused: boolean
+    workflowState: 'unsubmitted' | 'submitted' | 'graded'
+  } | null
+
+  // Metadata
+  htmlUrl: string              // Canvas URL
+  assignmentGroupId: string
+  gradingType: string          // 'points' | 'percent' | 'letter_grade'
+}
+
+// GET /canvas/courses response
+{
+  success: boolean
+  courses: Course[]
+}
+
+Course {
+  id: string
+  name: string
+  courseCode: string
+  enrollmentState: 'active' | 'completed'
+  term: {
+    id: string
+    name: string
+    startAt: string
+    endAt: string
+  }
+}
+
+// GET /canvas/status response
+{
+  connected: boolean
+  method: 'pat' | 'oauth' | 'ics' | null
+  canvasUrl: string | null
+  lastSync: string | null
+  courses: number
+  assignments: number
+}
+```
+
+### 2.2 iOS Service Architecture
+
+**File:** `Packages/DWServices/Sources/DWServices/CanvasService.swift`
+
+```swift
+import Foundation
+
+// MARK: - Data Models
+
+/// Canvas assignment with grade and submission info
+@Observable
+public final class Assignment: Identifiable, Codable, Sendable {
+    public let id: String
+    public let courseId: String
+    public let name: String
+    public let description: String?
+    public let dueAt: Date?
+    public let pointsPossible: Double
+    public let htmlUrl: String
+    public let assignmentGroupId: String?
+    public let gradingType: GradingType
+    public var submission: Submission?
+
+    public enum GradingType: String, Codable, Sendable {
+        case points
+        case percent
+        case letterGrade = "letter_grade"
+        case passFail = "pass_fail"
+        case notGraded = "not_graded"
+    }
+
+    public init(
+        id: String,
+        courseId: String,
+        name: String,
+        description: String? = nil,
+        dueAt: Date? = nil,
+        pointsPossible: Double,
+        htmlUrl: String,
+        assignmentGroupId: String? = nil,
+        gradingType: GradingType,
+        submission: Submission? = nil
+    ) {
+        self.id = id
+        self.courseId = courseId
+        self.name = name
+        self.description = description
+        self.dueAt = dueAt
+        self.pointsPossible = pointsPossible
+        self.htmlUrl = htmlUrl
+        self.assignmentGroupId = assignmentGroupId
+        self.gradingType = gradingType
+        self.submission = submission
+    }
+}
+
+/// Assignment submission with grade
+public struct Submission: Codable, Sendable {
+    public let id: String
+    public let submittedAt: Date?
+    public let score: Double?
+    public let grade: String?
+    public let late: Bool
+    public let missing: Bool
+    public let excused: Bool
+    public let workflowState: WorkflowState
+
+    public enum WorkflowState: String, Codable, Sendable {
+        case unsubmitted
+        case submitted
+        case graded
+    }
+}
+
+/// Canvas course
+public struct CanvasCourse: Identifiable, Codable, Sendable {
+    public let id: String
+    public let name: String
+    public let courseCode: String
+    public let enrollmentState: EnrollmentState
+    public let term: CourseTerm?
+
+    public enum EnrollmentState: String, Codable, Sendable {
+        case active
+        case completed
+        case invited
+    }
+
+    public struct CourseTerm: Codable, Sendable {
+        public let id: String
+        public let name: String
+        public let startAt: Date?
+        public let endAt: Date?
+    }
+}
+
+/// Canvas connection status
+public struct CanvasStatus: Codable, Sendable {
+    public let connected: Bool
+    public let method: ConnectionMethod?
+    public let canvasUrl: String?
+    public let lastSync: Date?
+    public let courses: Int
+    public let assignments: Int
+
+    public enum ConnectionMethod: String, Codable, Sendable {
+        case pat
+        case oauth
+        case ics
+    }
+}
+
+// MARK: - Service
+
+@MainActor
+public final class CanvasService {
+    private let networkService: NetworkService
+    private let logger = Logger(subsystem: "com.dormway.dwservices", category: "CanvasService")
+
+    // Observable state for UI binding
+    @Published public private(set) var status: CanvasStatus?
+    @Published public private(set) var isLoading = false
+    @Published public private(set) var error: Error?
+
+    public init(networkService: NetworkService) {
+        self.networkService = networkService
+    }
+
+    // MARK: - Connection Management
+
+    /// Connect to Canvas with Personal Access Token
+    public func connect(canvasUrl: String, accessToken: String) async throws {
+        isLoading = true
+        defer { isLoading = false }
+
+        let endpoint = APIEndpoint(
+            path: "/canvas/connect/manual",
+            method: .POST
+        )
+
+        let body = [
+            "canvasUrl": canvasUrl,
+            "accessToken": accessToken
+        ]
+
+        let response: APIResponse<CanvasStatus> = try await networkService.request(
+            endpoint,
+            body: body
+        )
+
+        guard response.success else {
+            throw CanvasError.connectionFailed(response.error ?? "Unknown error")
+        }
+
+        status = response.data
+        logger.info("Canvas connected successfully", metadata: ["url": canvasUrl])
+    }
+
+    /// Disconnect from Canvas
+    public func disconnect() async throws {
+        isLoading = true
+        defer { isLoading = false }
+
+        let endpoint = APIEndpoint(
+            path: "/canvas/disconnect",
+            method: .DELETE
+        )
+
+        let response: APIResponse<EmptyResponse> = try await networkService.request(endpoint)
+
+        guard response.success else {
+            throw CanvasError.disconnectionFailed(response.error ?? "Unknown error")
+        }
+
+        status = nil
+        logger.info("Canvas disconnected")
+    }
+
+    /// Fetch current connection status
+    public func fetchStatus() async throws -> CanvasStatus {
+        let endpoint = APIEndpoint(
+            path: "/canvas/status",
+            method: .GET
+        )
+
+        let response: APIResponse<CanvasStatus> = try await networkService.request(endpoint)
+
+        guard response.success, let status = response.data else {
+            throw CanvasError.statusFetchFailed(response.error ?? "No data")
+        }
+
+        self.status = status
+        return status
+    }
+
+    // MARK: - Data Access
+
+    /// Fetch all Canvas courses
+    public func fetchCourses() async throws -> [CanvasCourse] {
+        let endpoint = APIEndpoint(
+            path: "/canvas/courses",
+            method: .GET
+        )
+
+        let response: APIResponse<CoursesResponse> = try await networkService.request(endpoint)
+
+        guard response.success, let courses = response.data?.courses else {
+            throw CanvasError.coursesFetchFailed(response.error ?? "No data")
+        }
+
+        return courses
+    }
+
+    /// Fetch all assignments with grades
+    public func fetchAssignments(courseId: String? = nil) async throws -> [Assignment] {
+        var endpoint = APIEndpoint(
+            path: "/canvas/assignments",
+            method: .GET
+        )
+
+        if let courseId = courseId {
+            endpoint.queryItems = [URLQueryItem(name: "courseId", value: courseId)]
+        }
+
+        let response: APIResponse<AssignmentsResponse> = try await networkService.request(endpoint)
+
+        guard response.success, let assignments = response.data?.assignments else {
+            throw CanvasError.assignmentsFetchFailed(response.error ?? "No data")
+        }
+
+        return assignments
+    }
+
+    /// Fetch upcoming assignments (next 7 days)
+    public func fetchUpcoming() async throws -> [Assignment] {
+        let endpoint = APIEndpoint(
+            path: "/canvas/upcoming",
+            method: .GET
+        )
+
+        let response: APIResponse<AssignmentsResponse> = try await networkService.request(endpoint)
+
+        guard response.success, let assignments = response.data?.assignments else {
+            throw CanvasError.upcomingFetchFailed(response.error ?? "No data")
+        }
+
+        return assignments
+    }
+
+    /// Trigger manual sync
+    public func sync() async throws {
+        isLoading = true
+        defer { isLoading = false }
+
+        let endpoint = APIEndpoint(
+            path: "/canvas/sync",
+            method: .POST
+        )
+
+        let response: APIResponse<EmptyResponse> = try await networkService.request(endpoint)
+
+        guard response.success else {
+            throw CanvasError.syncFailed(response.error ?? "Sync failed")
+        }
+
+        logger.info("Canvas sync triggered")
+    }
+}
+
+// MARK: - Response Types
+
+private struct CoursesResponse: Codable {
+    let courses: [CanvasCourse]
+}
+
+private struct AssignmentsResponse: Codable {
+    let assignments: [Assignment]
+    let total: Int
+}
+
+private struct EmptyResponse: Codable {}
+
+// MARK: - Errors
+
+public enum CanvasError: LocalizedError {
+    case connectionFailed(String)
+    case disconnectionFailed(String)
+    case statusFetchFailed(String)
+    case coursesFetchFailed(String)
+    case assignmentsFetchFailed(String)
+    case upcomingFetchFailed(String)
+    case syncFailed(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .connectionFailed(let msg):
+            return "Failed to connect to Canvas: \(msg)"
+        case .disconnectionFailed(let msg):
+            return "Failed to disconnect from Canvas: \(msg)"
+        case .statusFetchFailed(let msg):
+            return "Failed to fetch Canvas status: \(msg)"
+        case .coursesFetchFailed(let msg):
+            return "Failed to fetch courses: \(msg)"
+        case .assignmentsFetchFailed(let msg):
+            return "Failed to fetch assignments: \(msg)"
+        case .upcomingFetchFailed(let msg):
+            return "Failed to fetch upcoming assignments: \(msg)"
+        case .syncFailed(let msg):
+            return "Canvas sync failed: \(msg)"
+        }
+    }
+}
+```
+
+### 2.3 Protocol & Adapter
+
+**File:** `Core/DependencyInjection/ServiceProtocols.swift`
+
+```swift
+@MainActor
+public protocol CanvasServiceProtocol {
+    var status: CanvasStatus? { get }
+    var isLoading: Bool { get }
+    var error: Error? { get }
+
+    func connect(canvasUrl: String, accessToken: String) async throws
+    func disconnect() async throws
+    func fetchStatus() async throws -> CanvasStatus
+    func fetchCourses() async throws -> [CanvasCourse]
+    func fetchAssignments(courseId: String?) async throws -> [Assignment]
+    func fetchUpcoming() async throws -> [Assignment]
+    func sync() async throws
+}
+```
+
+**File:** `Core/DependencyInjection/ServiceAdapters.swift`
+
+```swift
+@MainActor
+final class CanvasServiceAdapter: CanvasServiceProtocol {
+    private let service: CanvasService
+
+    var status: CanvasStatus? { service.status }
+    var isLoading: Bool { service.isLoading }
+    var error: Error? { service.error }
+
+    init(_ service: CanvasService) {
+        self.service = service
+    }
+
+    func connect(canvasUrl: String, accessToken: String) async throws {
+        try await service.connect(canvasUrl: canvasUrl, accessToken: accessToken)
+    }
+
+    func disconnect() async throws {
+        try await service.disconnect()
+    }
+
+    func fetchStatus() async throws -> CanvasStatus {
+        try await service.fetchStatus()
+    }
+
+    func fetchCourses() async throws -> [CanvasCourse] {
+        try await service.fetchCourses()
+    }
+
+    func fetchAssignments(courseId: String?) async throws -> [Assignment] {
+        try await service.fetchAssignments(courseId: courseId)
+    }
+
+    func fetchUpcoming() async throws -> [Assignment] {
+        try await service.fetchUpcoming()
+    }
+
+    func sync() async throws {
+        try await service.sync()
+    }
+}
+```
+
+### 2.4 UI Components
+
+#### 2.4.1 Canvas Connection View
+
+**File:** `Core/Views/Settings/CanvasConnectionView.swift`
+
+```swift
+import SwiftUI
+import DWServices
+import DWDesign
+
+struct CanvasConnectionView: View {
+    @Environment(\.container) private var container
+    @State private var canvasUrl = ""
+    @State private var accessToken = ""
+    @State private var showingTokenHelp = false
+
+    private var canvasService: CanvasServiceProtocol {
+        container.resolve(CanvasServiceProtocol.self)
+    }
+
+    var body: some View {
+        Form {
+            Section {
+                TextField("Canvas URL", text: $canvasUrl)
+                    .dsTypography(DS.Typography.Body.default)
+                    .textContentType(.URL)
+                    .autocapitalization(.none)
+                    .keyboardType(.URL)
+
+                SecureField("Access Token", text: $accessToken)
+                    .dsTypography(DS.Typography.Body.default)
+
+                Button("How to get your access token") {
+                    showingTokenHelp = true
+                }
+                .dsTypography(DS.Typography.Body.small)
+                .foregroundColor(DS.Color.Palette.Brand.secondary)
+            } header: {
+                Text("Canvas Credentials")
+                    .dsTypography(DS.Typography.Label.small)
+            } footer: {
+                Text("Your Canvas URL (e.g., canvas.university.edu)")
+                    .dsTypography(DS.Typography.Body.caption)
+                    .foregroundColor(DS.Color.Semantic.Text.secondary)
+            }
+
+            Section {
+                Button(action: connectCanvas) {
+                    if canvasService.isLoading {
+                        ProgressView()
+                    } else {
+                        Text("Connect Canvas")
+                            .dsTypography(DS.Typography.Button.large)
+                    }
+                }
+                .frame(maxWidth: .infinity)
+                .disabled(canvasUrl.isEmpty || accessToken.isEmpty || canvasService.isLoading)
+            }
+        }
+        .navigationTitle("Connect Canvas")
+        .sheet(isPresented: $showingTokenHelp) {
+            TokenHelpView()
+        }
+        .alert("Error", isPresented: .constant(canvasService.error != nil)) {
+            Button("OK") {
+                // Clear error
+            }
+        } message: {
+            if let error = canvasService.error {
+                Text(error.localizedDescription)
+            }
+        }
+    }
+
+    private func connectCanvas() {
+        Task {
+            do {
+                try await canvasService.connect(
+                    canvasUrl: canvasUrl,
+                    accessToken: accessToken
+                )
+                // Navigate back on success
+            } catch {
+                // Error displayed via alert
+            }
+        }
+    }
+}
+```
+
+#### 2.4.2 Gradebook View
+
+**File:** `Core/Views/Academic/GradebookView.swift`
+
+```swift
+import SwiftUI
+import DWServices
+import DWDesign
+
+struct GradebookView: View {
+    @Environment(\.container) private var container
+    @State private var assignments: [Assignment] = []
+    @State private var selectedCourse: String?
+    @State private var isLoading = false
+
+    private var canvasService: CanvasServiceProtocol {
+        container.resolve(CanvasServiceProtocol.self)
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: DS.Spacing.md) {
+                // Connection status banner
+                if let status = canvasService.status, status.connected {
+                    ConnectionStatusBanner(status: status)
+                } else {
+                    NotConnectedBanner()
+                }
+
+                // Assignments list
+                if isLoading {
+                    ProgressView()
+                        .padding(DS.Spacing.xl)
+                } else if assignments.isEmpty {
+                    EmptyGradebookView()
+                } else {
+                    LazyVStack(spacing: DS.Spacing.sm) {
+                        ForEach(assignments) { assignment in
+                            AssignmentGradeCard(assignment: assignment)
+                        }
+                    }
+                    .padding(DS.Spacing.md)
+                }
+            }
+        }
+        .navigationTitle("Gradebook")
+        .toolbar {
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Button(action: refresh) {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .disabled(isLoading)
+            }
+        }
+        .task {
+            await loadAssignments()
+        }
+    }
+
+    private func loadAssignments() async {
+        isLoading = true
+        defer { isLoading = false }
+
+        do {
+            assignments = try await canvasService.fetchAssignments(courseId: selectedCourse)
+        } catch {
+            // Handle error
+        }
+    }
+
+    private func refresh() {
+        Task {
+            do {
+                try await canvasService.sync()
+                await loadAssignments()
+            } catch {
+                // Handle error
+            }
+        }
+    }
+}
+
+// MARK: - Supporting Views
+
+struct AssignmentGradeCard: View {
+    let assignment: Assignment
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: DS.Spacing.sm) {
+            HStack {
+                Text(assignment.name)
+                    .dsTypography(DS.Typography.Body.default)
+                    .foregroundColor(DS.Color.Semantic.Text.primary)
+
+                Spacer()
+
+                if let submission = assignment.submission {
+                    GradeLabel(
+                        score: submission.score,
+                        grade: submission.grade,
+                        pointsPossible: assignment.pointsPossible,
+                        late: submission.late,
+                        missing: submission.missing
+                    )
+                } else {
+                    Text("Not Submitted")
+                        .dsTypography(DS.Typography.Body.small)
+                        .foregroundColor(DS.Color.Semantic.Text.tertiary)
+                }
+            }
+
+            if let dueAt = assignment.dueAt {
+                Text("Due: \(dueAt, style: .date)")
+                    .dsTypography(DS.Typography.Body.caption)
+                    .foregroundColor(DS.Color.Semantic.Text.secondary)
+            }
+        }
+        .padding(DS.Spacing.md)
+        .background(DS.Color.Semantic.Background.surfacePrimary)
+        .cornerRadius(DS.Radius.md)
+    }
+}
+
+struct GradeLabel: View {
+    let score: Double?
+    let grade: String?
+    let pointsPossible: Double
+    let late: Bool
+    let missing: Bool
+
+    var body: some View {
+        HStack(spacing: DS.Spacing.xs) {
+            if missing {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundColor(DS.Color.Palette.State.error)
+                Text("Missing")
+                    .dsTypography(DS.Typography.Body.small)
+                    .foregroundColor(DS.Color.Palette.State.error)
+            } else if let grade = grade {
+                Text(grade)
+                    .dsTypography(DS.Typography.Heading.h3)
+                    .foregroundColor(gradeColor)
+
+                if late {
+                    Image(systemName: "clock.fill")
+                        .foregroundColor(DS.Color.Palette.State.warning)
+                }
+            } else if let score = score {
+                Text("\(Int(score))/\(Int(pointsPossible))")
+                    .dsTypography(DS.Typography.Body.default)
+                    .foregroundColor(DS.Color.Semantic.Text.primary)
+            }
+        }
+    }
+
+    private var gradeColor: Color {
+        guard let grade = grade else { return DS.Color.Semantic.Text.primary }
+
+        // Simple color coding for letter grades
+        if grade.hasPrefix("A") {
+            return DS.Color.Palette.State.success
+        } else if grade.hasPrefix("B") {
+            return DS.Color.Palette.State.info
+        } else if grade.hasPrefix("C") {
+            return DS.Color.Semantic.Text.primary
+        } else {
+            return DS.Color.Palette.State.warning
+        }
+    }
+}
+```
+
+### 2.5 Real-time Updates
+
+Canvas sync updates should be pushed via Ably when backend syncs complete.
+
+**Ably Message Type:**
+```swift
+// Listen on channel: user:{userId}:updates
+{
+    "type": "canvas_sync_complete",
+    "data": {
+        "success": true,
+        "assignmentsUpdated": 12,
+        "coursesUpdated": 4,
+        "timestamp": "2025-11-09T10:30:00Z"
+    }
+}
+```
+
+**Integration in CanvasService:**
+```swift
+// Subscribe to Ably updates in init()
+private func subscribeToUpdates() {
+    ablyService.subscribe(to: "canvas_sync_complete") { [weak self] message in
+        Task { @MainActor in
+            // Refresh assignments after sync
+            try? await self?.fetchAssignments(courseId: nil)
+        }
+    }
+}
+```
+
+### 2.6 Implementation Checklist
+
+**Phase 1: Service (6 hours)**
+- [ ] Create `CanvasService.swift` with data models (2 hours)
+- [ ] Implement all API methods (3 hours)
+- [ ] Add error handling and logging (1 hour)
+
+**Phase 2: DI Integration (2 hours)**
+- [ ] Add protocol to `ServiceProtocols.swift`
+- [ ] Create adapter in `ServiceAdapters.swift`
+- [ ] Register in `Container.registerServices()`
+- [ ] Test service injection in preview app
+
+**Phase 3: UI (6 hours)**
+- [ ] Build `CanvasConnectionView` (2 hours)
+- [ ] Build `GradebookView` (3 hours)
+- [ ] Add to settings navigation (1 hour)
+
+**Phase 4: Real-time & Polish (2 hours)**
+- [ ] Integrate Ably updates (1 hour)
+- [ ] Add loading states and error handling (1 hour)
+
+**Total: 16 hours**
+
+---
+
+## 3. Assignment Completion Service
+
+**Effort:** 6-8 hours
+**Priority:** P0 - Critical (depends on Canvas integration)
+
+### 3.1 Backend API Review
+
+**Endpoints (from Phase 3):**
+```typescript
+POST   /api/academic/assignments/:id/start       // Mark started (creates 60-min focus session)
+POST   /api/academic/assignments/:id/dismiss     // Dismiss from suggestions
+POST   /api/academic/assignments/:id/complete    // Mark complete
+PATCH  /api/academic/assignments/:id/complete    // Undo completion
+GET    /api/academic/assignments/completion-status?ids=...  // Bulk status
+POST   /api/academic/assignments/bulk-complete   // Bulk complete (onboarding)
+```
+
+**Backend Data Model:**
+```typescript
+// Database: assignment_completion table (partitioned by month)
+{
+  assignment_id: string         // Canvas assignment ID
+  user_id: string               // User UUID
+  status: 'started' | 'completed' | 'dismissed'
+  started_at: timestamp | null
+  completed_at: timestamp | null
+  dismissed_at: timestamp | null
+  focus_session_id: string | null  // Link to focus session
+}
+
+// POST /start response
+{
+  success: boolean
+  completionRecord: CompletionRecord
+  focusSession: {
+    id: string
+    startTime: string
+    endTime: string              // startTime + 60 minutes
+    assignmentId: string
+  }
+}
+
+// GET /completion-status response
+{
+  success: boolean
+  statuses: {
+    [assignmentId: string]: CompletionRecord
+  }
+}
+```
+
+### 3.2 iOS Service Architecture
+
+**File:** `Packages/DWServices/Sources/DWServices/AssignmentCompletionService.swift`
+
+```swift
+import Foundation
+
+// MARK: - Data Models
+
+public struct CompletionRecord: Codable, Sendable {
+    public let assignmentId: String
+    public let userId: String
+    public let status: CompletionStatus
+    public let startedAt: Date?
+    public let completedAt: Date?
+    public let dismissedAt: Date?
+    public let focusSessionId: String?
+
+    public enum CompletionStatus: String, Codable, Sendable {
+        case started
+        case completed
+        case dismissed
+    }
+}
+
+public struct FocusSession: Codable, Sendable {
+    public let id: String
+    public let startTime: Date
+    public let endTime: Date
+    public let assignmentId: String
+}
+
+public struct StartResponse: Codable {
+    let success: Bool
+    let completionRecord: CompletionRecord
+    let focusSession: FocusSession?
+}
+
+public struct CompletionStatusResponse: Codable {
+    let success: Bool
+    let statuses: [String: CompletionRecord]
+}
+
+// MARK: - Service
+
+@MainActor
+public final class AssignmentCompletionService {
+    private let networkService: NetworkService
+    private let logger = Logger(subsystem: "com.dormway.dwservices", category: "AssignmentCompletion")
+
+    // In-memory cache of completion statuses
+    @Published public private(set) var completionCache: [String: CompletionRecord] = [:]
+
+    public init(networkService: NetworkService) {
+        self.networkService = networkService
+    }
+
+    // MARK: - Actions
+
+    /// Mark assignment as started (creates 60-min focus session)
+    public func start(assignmentId: String) async throws -> FocusSession? {
+        let endpoint = APIEndpoint(
+            path: "/api/academic/assignments/\(assignmentId)/start",
+            method: .POST
+        )
+
+        let response: APIResponse<StartResponse> = try await networkService.request(endpoint)
+
+        guard response.success, let data = response.data else {
+            throw CompletionError.startFailed(response.error ?? "Failed to start assignment")
+        }
+
+        // Update cache
+        completionCache[assignmentId] = data.completionRecord
+
+        logger.info("Assignment started", metadata: [
+            "assignmentId": assignmentId,
+            "focusSessionId": data.focusSession?.id ?? "none"
+        ])
+
+        return data.focusSession
+    }
+
+    /// Mark assignment as complete
+    public func complete(assignmentId: String) async throws {
+        let endpoint = APIEndpoint(
+            path: "/api/academic/assignments/\(assignmentId)/complete",
+            method: .POST
+        )
+
+        let response: APIResponse<CompletionRecord> = try await networkService.request(endpoint)
+
+        guard response.success, let record = response.data else {
+            throw CompletionError.completeFailed(response.error ?? "Failed to complete assignment")
+        }
+
+        // Update cache
+        completionCache[assignmentId] = record
+
+        logger.info("Assignment completed", metadata: ["assignmentId": assignmentId])
+    }
+
+    /// Undo completion
+    public func undoComplete(assignmentId: String) async throws {
+        let endpoint = APIEndpoint(
+            path: "/api/academic/assignments/\(assignmentId)/complete",
+            method: .PATCH
+        )
+
+        let response: APIResponse<CompletionRecord> = try await networkService.request(endpoint)
+
+        guard response.success, let record = response.data else {
+            throw CompletionError.undoFailed(response.error ?? "Failed to undo completion")
+        }
+
+        // Update cache
+        completionCache[assignmentId] = record
+
+        logger.info("Assignment completion undone", metadata: ["assignmentId": assignmentId])
+    }
+
+    /// Dismiss assignment from suggestions
+    public func dismiss(assignmentId: String) async throws {
+        let endpoint = APIEndpoint(
+            path: "/api/academic/assignments/\(assignmentId)/dismiss",
+            method: .POST
+        )
+
+        let response: APIResponse<CompletionRecord> = try await networkService.request(endpoint)
+
+        guard response.success, let record = response.data else {
+            throw CompletionError.dismissFailed(response.error ?? "Failed to dismiss assignment")
+        }
+
+        // Update cache
+        completionCache[assignmentId] = record
+
+        logger.info("Assignment dismissed", metadata: ["assignmentId": assignmentId])
+    }
+
+    // MARK: - Status Queries
+
+    /// Fetch completion status for multiple assignments
+    public func fetchStatuses(assignmentIds: [String]) async throws -> [String: CompletionRecord] {
+        let idsParam = assignmentIds.joined(separator: ",")
+
+        let endpoint = APIEndpoint(
+            path: "/api/academic/assignments/completion-status",
+            method: .GET,
+            queryItems: [URLQueryItem(name: "ids", value: idsParam)]
+        )
+
+        let response: APIResponse<CompletionStatusResponse> = try await networkService.request(endpoint)
+
+        guard response.success, let statuses = response.data?.statuses else {
+            throw CompletionError.statusFetchFailed(response.error ?? "Failed to fetch statuses")
+        }
+
+        // Update cache
+        completionCache.merge(statuses) { _, new in new }
+
+        return statuses
+    }
+
+    /// Get cached status for assignment
+    public func getCachedStatus(assignmentId: String) -> CompletionRecord? {
+        completionCache[assignmentId]
+    }
+
+    // MARK: - Bulk Operations
+
+    /// Bulk complete assignments (onboarding use case)
+    public func bulkComplete(assignmentIds: [String]) async throws {
+        let endpoint = APIEndpoint(
+            path: "/api/academic/assignments/bulk-complete",
+            method: .POST
+        )
+
+        let body = ["assignmentIds": assignmentIds]
+
+        let response: APIResponse<EmptyResponse> = try await networkService.request(
+            endpoint,
+            body: body
+        )
+
+        guard response.success else {
+            throw CompletionError.bulkCompleteFailed(response.error ?? "Bulk complete failed")
+        }
+
+        // Mark all as completed in cache
+        let now = Date()
+        for id in assignmentIds {
+            completionCache[id] = CompletionRecord(
+                assignmentId: id,
+                userId: "", // Will be populated on next fetch
+                status: .completed,
+                startedAt: nil,
+                completedAt: now,
+                dismissedAt: nil,
+                focusSessionId: nil
+            )
+        }
+
+        logger.info("Bulk completed assignments", metadata: ["count": String(assignmentIds.count)])
+    }
+}
+
+// MARK: - Errors
+
+public enum CompletionError: LocalizedError {
+    case startFailed(String)
+    case completeFailed(String)
+    case undoFailed(String)
+    case dismissFailed(String)
+    case statusFetchFailed(String)
+    case bulkCompleteFailed(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .startFailed(let msg):
+            return "Failed to start assignment: \(msg)"
+        case .completeFailed(let msg):
+            return "Failed to complete assignment: \(msg)"
+        case .undoFailed(let msg):
+            return "Failed to undo completion: \(msg)"
+        case .dismissFailed(let msg):
+            return "Failed to dismiss assignment: \(msg)"
+        case .statusFetchFailed(let msg):
+            return "Failed to fetch completion status: \(msg)"
+        case .bulkCompleteFailed(let msg):
+            return "Bulk complete failed: \(msg)"
+        }
+    }
+}
+
+private struct EmptyResponse: Codable {}
+```
+
+### 3.3 UI Integration
+
+**Update `AssignmentGradeCard` to include completion actions:**
+
+```swift
+struct AssignmentGradeCard: View {
+    let assignment: Assignment
+    @Environment(\.container) private var container
+
+    private var completionService: AssignmentCompletionServiceProtocol {
+        container.resolve(AssignmentCompletionServiceProtocol.self)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: DS.Spacing.sm) {
+            // ... existing content ...
+
+            // Completion actions
+            HStack(spacing: DS.Spacing.sm) {
+                if let status = completionService.getCachedStatus(assignmentId: assignment.id) {
+                    CompletionStatusView(status: status)
+                } else {
+                    CompletionActionsView(
+                        assignmentId: assignment.id,
+                        onStart: { try await completionService.start(assignmentId: assignment.id) },
+                        onComplete: { try await completionService.complete(assignmentId: assignment.id) },
+                        onDismiss: { try await completionService.dismiss(assignmentId: assignment.id) }
+                    )
+                }
+            }
+        }
+        .padding(DS.Spacing.md)
+        .background(DS.Color.Semantic.Background.surfacePrimary)
+        .cornerRadius(DS.Radius.md)
+    }
+}
+
+struct CompletionActionsView: View {
+    let assignmentId: String
+    let onStart: () async throws -> FocusSession?
+    let onComplete: () async throws -> Void
+    let onDismiss: () async throws -> Void
+
+    @State private var isLoading = false
+
+    var body: some View {
+        HStack(spacing: DS.Spacing.sm) {
+            Button(action: { await performAction(onStart) }) {
+                Label("Start", systemImage: "play.circle")
+                    .dsTypography(DS.Typography.Body.small)
+            }
+            .buttonStyle(.bordered)
+            .disabled(isLoading)
+
+            Button(action: { await performAction(onComplete) }) {
+                Label("Complete", systemImage: "checkmark.circle")
+                    .dsTypography(DS.Typography.Body.small)
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(isLoading)
+
+            Button(action: { await performAction(onDismiss) }) {
+                Image(systemName: "xmark.circle")
+            }
+            .buttonStyle(.borderless)
+            .disabled(isLoading)
+        }
+    }
+
+    private func performAction(_ action: () async throws -> Void) async {
+        isLoading = true
+        defer { isLoading = false }
+
+        do {
+            try await action()
+        } catch {
+            // Handle error
+        }
+    }
+}
+
+struct CompletionStatusView: View {
+    let status: CompletionRecord
+
+    var body: some View {
+        HStack {
+            Image(systemName: statusIcon)
+                .foregroundColor(statusColor)
+            Text(statusText)
+                .dsTypography(DS.Typography.Body.small)
+                .foregroundColor(statusColor)
+        }
+    }
+
+    private var statusIcon: String {
+        switch status.status {
+        case .started: return "play.circle.fill"
+        case .completed: return "checkmark.circle.fill"
+        case .dismissed: return "xmark.circle.fill"
+        }
+    }
+
+    private var statusColor: Color {
+        switch status.status {
+        case .started: return DS.Color.Palette.State.info
+        case .completed: return DS.Color.Palette.State.success
+        case .dismissed: return DS.Color.Semantic.Text.tertiary
+        }
+    }
+
+    private var statusText: String {
+        switch status.status {
+        case .started: return "In Progress"
+        case .completed: return "Completed"
+        case .dismissed: return "Dismissed"
+        }
+    }
+}
+```
+
+### 3.4 Implementation Checklist
+
+**Phase 1: Service (3 hours)**
+- [ ] Create `AssignmentCompletionService.swift` (2 hours)
+- [ ] Add error handling and caching (1 hour)
+
+**Phase 2: DI Integration (1 hour)**
+- [ ] Protocol, adapter, registration
+
+**Phase 3: UI (3 hours)**
+- [ ] Update `AssignmentGradeCard` with actions (2 hours)
+- [ ] Add completion status indicators (1 hour)
+
+**Phase 4: Focus Session Integration (1 hour)**
+- [ ] Trigger focus timer when "Start" is tapped
+- [ ] Notification at 60-min mark
+
+**Total: 8 hours**
+
+---
+
+## 4. Notes Sync Service
+
+**Effort:** 6-10 hours
+**Priority:** P0 - Critical (high user value)
+
+### 4.1 Backend API Review
+
+**Endpoints (from Phase 3):**
+```typescript
+POST   /api/notes/sync                // Sync with conflict resolution
+GET    /api/notes/recent              // Fetch recent notes (pagination, course filter)
+GET    /api/notes/:id                 // Get specific note
+POST   /api/notes                     // Create note
+DELETE /api/notes/:id                 // Delete note
+```
+
+**Backend Data Model (from Phase 2):**
+```sql
+-- notes table
+CREATE TABLE notes (
+  id UUID PRIMARY KEY,
+  user_id UUID NOT NULL,
+  content TEXT NOT NULL,
+  content_hash TEXT NOT NULL,      -- SHA-256 for conflict detection
+  metadata JSONB,                   -- { courseId, tags, etc. }
+  revision INTEGER DEFAULT 1,
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW(),
+  deleted_at TIMESTAMP              -- Soft delete
+);
+
+-- note_revisions table (history)
+CREATE TABLE note_revisions (
+  id UUID PRIMARY KEY,
+  note_id UUID REFERENCES notes(id),
+  revision INTEGER NOT NULL,
+  content TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  created_at TIMESTAMP DEFAULT NOW()
+);
+```
+
+**API Responses:**
+```typescript
+// POST /api/notes/sync request
+{
+  notes: [{
+    id: string | null              // null for new notes
+    content: string
+    contentHash: string            // SHA-256 of content
+    metadata: {
+      courseId?: string
+      tags?: string[]
+      title?: string
+    }
+    revision: number
+    updatedAt: string              // ISO 8601
+    deletedAt: string | null
+  }]
+}
+
+// POST /api/notes/sync response
+{
+  success: boolean
+  synced: Note[]                   // Successfully synced
+  conflicts: [{
+    localNote: Note
+    serverNote: Note
+    resolution: 'server_wins' | 'local_wins' | 'manual'
+  }]
+}
+
+// GET /api/notes/recent response
+{
+  success: boolean
+  notes: Note[]
+  total: number
+  hasMore: boolean
+}
+```
+
+### 4.2 iOS Service Architecture
+
+**File:** `Packages/DWServices/Sources/DWServices/NotesSyncService.swift`
+
+```swift
+import Foundation
+import CryptoKit
+
+// MARK: - Data Models
+
+@Observable
+public final class Note: Identifiable, Codable, Sendable {
+    public let id: String
+    public var content: String
+    public var contentHash: String
+    public var metadata: NoteMetadata
+    public var revision: Int
+    public var createdAt: Date
+    public var updatedAt: Date
+    public var deletedAt: Date?
+
+    // Local-only fields
+    public var needsSync: Bool = false
+
+    public init(
+        id: String = UUID().uuidString,
+        content: String,
+        metadata: NoteMetadata = NoteMetadata(),
+        revision: Int = 1,
+        createdAt: Date = Date(),
+        updatedAt: Date = Date(),
+        deletedAt: Date? = nil
+    ) {
+        self.id = id
+        self.content = content
+        self.contentHash = Self.calculateHash(content)
+        self.metadata = metadata
+        self.revision = revision
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+        self.deletedAt = deletedAt
+    }
+
+    static func calculateHash(_ content: String) -> String {
+        let data = Data(content.utf8)
+        let hash = SHA256.hash(data: data)
+        return hash.compactMap { String(format: "%02x", $0) }.joined()
+    }
+}
+
+public struct NoteMetadata: Codable, Sendable {
+    public var courseId: String?
+    public var tags: [String]?
+    public var title: String?
+
+    public init(courseId: String? = nil, tags: [String]? = nil, title: String? = nil) {
+        self.courseId = courseId
+        self.tags = tags
+        self.title = title
+    }
+}
+
+public struct SyncConflict: Codable, Sendable {
+    public let localNote: Note
+    public let serverNote: Note
+    public let resolution: Resolution
+
+    public enum Resolution: String, Codable, Sendable {
+        case serverWins = "server_wins"
+        case localWins = "local_wins"
+        case manual
+    }
+}
+
+// MARK: - Service
+
+@MainActor
+public final class NotesSyncService {
+    private let networkService: NetworkService
+    private let logger = Logger(subsystem: "com.dormway.dwservices", category: "NotesSync")
+
+    // Observable state
+    @Published public private(set) var notes: [Note] = []
+    @Published public private(set) var isLoading = false
+    @Published public private(set) var isSyncing = false
+    @Published public private(set) var conflicts: [SyncConflict] = []
+
+    public init(networkService: NetworkService) {
+        self.networkService = networkService
+    }
+
+    // MARK: - CRUD Operations
+
+    /// Create a new note (marks as needs sync)
+    public func create(content: String, metadata: NoteMetadata = NoteMetadata()) -> Note {
+        let note = Note(content: content, metadata: metadata)
+        note.needsSync = true
+        notes.append(note)
+        return note
+    }
+
+    /// Update existing note (marks as needs sync)
+    public func update(noteId: String, content: String) {
+        guard let index = notes.firstIndex(where: { $0.id == noteId }) else {
+            return
+        }
+
+        notes[index].content = content
+        notes[index].contentHash = Note.calculateHash(content)
+        notes[index].updatedAt = Date()
+        notes[index].revision += 1
+        notes[index].needsSync = true
+    }
+
+    /// Delete note (soft delete, marks as needs sync)
+    public func delete(noteId: String) {
+        guard let index = notes.firstIndex(where: { $0.id == noteId }) else {
+            return
+        }
+
+        notes[index].deletedAt = Date()
+        notes[index].needsSync = true
+    }
+
+    // MARK: - Sync
+
+    /// Sync local notes with server
+    public func sync() async throws {
+        isSyncing = true
+        defer { isSyncing = false }
+
+        let localNotes = notes.filter { $0.needsSync }
+
+        guard !localNotes.isEmpty else {
+            logger.info("No notes need syncing")
+            return
+        }
+
+        let endpoint = APIEndpoint(
+            path: "/api/notes/sync",
+            method: .POST
+        )
+
+        let body = ["notes": localNotes]
+
+        let response: APIResponse<SyncResponse> = try await networkService.request(
+            endpoint,
+            body: body
+        )
+
+        guard response.success, let data = response.data else {
+            throw NotesError.syncFailed(response.error ?? "Sync failed")
+        }
+
+        // Handle successfully synced notes
+        for syncedNote in data.synced {
+            if let index = notes.firstIndex(where: { $0.id == syncedNote.id }) {
+                notes[index] = syncedNote
+                notes[index].needsSync = false
+            }
+        }
+
+        // Handle conflicts
+        conflicts = data.conflicts
+
+        logger.info("Sync complete", metadata: [
+            "synced": String(data.synced.count),
+            "conflicts": String(data.conflicts.count)
+        ])
+    }
+
+    /// Fetch recent notes from server
+    public func fetchRecent(limit: Int = 50, courseId: String? = nil) async throws {
+        isLoading = true
+        defer { isLoading = false }
+
+        var queryItems = [URLQueryItem(name: "limit", value: String(limit))]
+        if let courseId = courseId {
+            queryItems.append(URLQueryItem(name: "courseId", value: courseId))
+        }
+
+        let endpoint = APIEndpoint(
+            path: "/api/notes/recent",
+            method: .GET,
+            queryItems: queryItems
+        )
+
+        let response: APIResponse<NotesResponse> = try await networkService.request(endpoint)
+
+        guard response.success, let fetchedNotes = response.data?.notes else {
+            throw NotesError.fetchFailed(response.error ?? "Fetch failed")
+        }
+
+        // Merge with local notes (server wins for non-synced notes)
+        for fetchedNote in fetchedNotes {
+            if let index = notes.firstIndex(where: { $0.id == fetchedNote.id }) {
+                if !notes[index].needsSync {
+                    notes[index] = fetchedNote
+                }
+            } else {
+                notes.append(fetchedNote)
+            }
+        }
+
+        logger.info("Fetched recent notes", metadata: ["count": String(fetchedNotes.count)])
+    }
+
+    /// Fetch specific note
+    public func fetch(noteId: String) async throws -> Note {
+        let endpoint = APIEndpoint(
+            path: "/api/notes/\(noteId)",
+            method: .GET
+        )
+
+        let response: APIResponse<Note> = try await networkService.request(endpoint)
+
+        guard response.success, let note = response.data else {
+            throw NotesError.fetchFailed(response.error ?? "Failed to fetch note")
+        }
+
+        return note
+    }
+
+    // MARK: - Conflict Resolution
+
+    /// Resolve conflict by choosing server version
+    public func resolveConflict(conflictIndex: Int, useServer: Bool) async throws {
+        guard conflicts.indices.contains(conflictIndex) else {
+            return
+        }
+
+        let conflict = conflicts[conflictIndex]
+        let chosenNote = useServer ? conflict.serverNote : conflict.localNote
+
+        if let index = notes.firstIndex(where: { $0.id == chosenNote.id }) {
+            notes[index] = chosenNote
+            notes[index].needsSync = !useServer
+        }
+
+        conflicts.remove(at: conflictIndex)
+    }
+}
+
+// MARK: - Response Types
+
+private struct SyncResponse: Codable {
+    let success: Bool
+    let synced: [Note]
+    let conflicts: [SyncConflict]
+}
+
+private struct NotesResponse: Codable {
+    let success: Bool
+    let notes: [Note]
+    let total: Int
+    let hasMore: Bool
+}
+
+// MARK: - Errors
+
+public enum NotesError: LocalizedError {
+    case syncFailed(String)
+    case fetchFailed(String)
+    case createFailed(String)
+    case deleteFailed(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .syncFailed(let msg):
+            return "Failed to sync notes: \(msg)"
+        case .fetchFailed(let msg):
+            return "Failed to fetch notes: \(msg)"
+        case .createFailed(let msg):
+            return "Failed to create note: \(msg)"
+        case .deleteFailed(let msg):
+            return "Failed to delete note: \(msg)"
+        }
+    }
+}
+```
+
+### 4.3 UI Components
+
+#### 4.3.1 Notes List View
+
+**File:** `Core/Views/Notes/NotesListView.swift`
+
+```swift
+import SwiftUI
+import DWServices
+import DWDesign
+
+struct NotesListView: View {
+    @Environment(\.container) private var container
+    @State private var selectedCourse: String?
+
+    private var notesService: NotesSyncServiceProtocol {
+        container.resolve(NotesSyncServiceProtocol.self)
+    }
+
+    var body: some View {
+        ScrollView {
+            LazyVStack(spacing: DS.Spacing.sm) {
+                // Sync status banner
+                if notesService.isSyncing {
+                    SyncStatusBanner()
+                }
+
+                // Conflicts alert
+                if !notesService.conflicts.isEmpty {
+                    ConflictsAlert(conflicts: notesService.conflicts)
+                }
+
+                // Notes list
+                ForEach(notesService.notes.filter { $0.deletedAt == nil }) { note in
+                    NoteCard(note: note)
+                }
+            }
+            .padding(DS.Spacing.md)
+        }
+        .navigationTitle("Notes")
+        .toolbar {
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Button(action: sync) {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                }
+                .disabled(notesService.isSyncing)
+            }
+
+            ToolbarItem(placement: .navigationBarTrailing) {
+                NavigationLink(destination: NoteEditorView()) {
+                    Image(systemName: "plus")
+                }
+            }
+        }
+        .task {
+            await loadNotes()
+        }
+    }
+
+    private func loadNotes() async {
+        do {
+            try await notesService.fetchRecent(courseId: selectedCourse)
+        } catch {
+            // Handle error
+        }
+    }
+
+    private func sync() {
+        Task {
+            do {
+                try await notesService.sync()
+            } catch {
+                // Handle error
+            }
+        }
+    }
+}
+
+struct NoteCard: View {
+    let note: Note
+
+    var body: some View {
+        NavigationLink(destination: NoteEditorView(note: note)) {
+            VStack(alignment: .leading, spacing: DS.Spacing.sm) {
+                if let title = note.metadata.title {
+                    Text(title)
+                        .dsTypography(DS.Typography.Heading.h3)
+                        .foregroundColor(DS.Color.Semantic.Text.primary)
+                } else {
+                    Text(notePreview)
+                        .dsTypography(DS.Typography.Body.default)
+                        .foregroundColor(DS.Color.Semantic.Text.primary)
+                        .lineLimit(2)
+                }
+
+                HStack {
+                    Text(note.updatedAt, style: .relative)
+                        .dsTypography(DS.Typography.Body.caption)
+                        .foregroundColor(DS.Color.Semantic.Text.secondary)
+
+                    if note.needsSync {
+                        Image(systemName: "arrow.triangle.2.circlepath.circle.fill")
+                            .foregroundColor(DS.Color.Palette.State.warning)
+                    }
+
+                    Spacer()
+
+                    if let tags = note.metadata.tags, !tags.isEmpty {
+                        HStack(spacing: DS.Spacing.xs) {
+                            ForEach(tags.prefix(3), id: \.self) { tag in
+                                Text(tag)
+                                    .dsTypography(DS.Typography.Body.caption)
+                                    .padding(.horizontal, DS.Spacing.xs)
+                                    .padding(.vertical, 2)
+                                    .background(DS.Color.Semantic.Background.surfaceSecondary)
+                                    .cornerRadius(DS.Radius.sm)
+                            }
+                        }
+                    }
+                }
+            }
+            .padding(DS.Spacing.md)
+            .background(DS.Color.Semantic.Background.surfacePrimary)
+            .cornerRadius(DS.Radius.md)
+        }
+    }
+
+    private var notePreview: String {
+        note.content.prefix(100).replacingOccurrences(of: "\n", with: " ")
+    }
+}
+```
+
+#### 4.3.2 Note Editor View
+
+```swift
+struct NoteEditorView: View {
+    @Environment(\.container) private var container
+    @Environment(\.dismiss) private var dismiss
+
+    let note: Note?
+    @State private var content: String
+    @State private var title: String
+    @State private var selectedTags: [String] = []
+
+    private var notesService: NotesSyncServiceProtocol {
+        container.resolve(NotesSyncServiceProtocol.self)
+    }
+
+    init(note: Note? = nil) {
+        self.note = note
+        _content = State(initialValue: note?.content ?? "")
+        _title = State(initialValue: note?.metadata.title ?? "")
+        _selectedTags = State(initialValue: note?.metadata.tags ?? [])
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Title field
+            TextField("Title (optional)", text: $title)
+                .dsTypography(DS.Typography.Heading.h2)
+                .padding(DS.Spacing.md)
+
+            Divider()
+
+            // Content editor
+            TextEditor(text: $content)
+                .dsTypography(DS.Typography.Body.default)
+                .padding(DS.Spacing.md)
+        }
+        .navigationTitle(note == nil ? "New Note" : "Edit Note")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Button("Save", action: save)
+                    .disabled(content.isEmpty)
+            }
+        }
+    }
+
+    private func save() {
+        if let existingNote = note {
+            notesService.update(noteId: existingNote.id, content: content)
+        } else {
+            let metadata = NoteMetadata(
+                courseId: nil,
+                tags: selectedTags.isEmpty ? nil : selectedTags,
+                title: title.isEmpty ? nil : title
+            )
+            _ = notesService.create(content: content, metadata: metadata)
+        }
+
+        // Auto-sync after save
+        Task {
+            try? await notesService.sync()
+        }
+
+        dismiss()
+    }
+}
+```
+
+### 4.4 Implementation Checklist
+
+**Phase 1: Service (4 hours)**
+- [ ] Create `NotesSyncService.swift` with data models (2 hours)
+- [ ] Implement CRUD and sync logic (2 hours)
+
+**Phase 2: DI Integration (1 hour)**
+- [ ] Protocol, adapter, registration
+
+**Phase 3: UI (4 hours)**
+- [ ] Build `NotesListView` (2 hours)
+- [ ] Build `NoteEditorView` (2 hours)
+
+**Phase 4: Conflict Resolution (1 hour)**
+- [ ] Build conflict resolution UI
+- [ ] Test sync conflicts
+
+**Total: 10 hours**
+
+---
+
+## 5. Shared Infrastructure
+
+### 5.1 Network Service Extensions
+
+All three services use `NetworkService`. Ensure it supports:
+
+```swift
+// Generic API request with type safety
+func request<T: Codable>(
+    _ endpoint: APIEndpoint,
+    body: Encodable? = nil
+) async throws -> APIResponse<T>
+```
+
+### 5.2 Ably Real-time Integration
+
+**Subscribe to sync events:**
+```swift
+// In each service's init():
+private func subscribeToUpdates() {
+    // Canvas sync completion
+    ablyService.subscribe(to: "canvas_sync_complete") { [weak self] message in
+        Task { @MainActor in
+            try? await self?.fetchAssignments(courseId: nil)
+        }
+    }
+
+    // Assignment completion events
+    ablyService.subscribe(to: "assignment_completed") { [weak self] message in
+        Task { @MainActor in
+            if let assignmentId = message.data["assignmentId"] as? String {
+                try? await self?.fetchStatuses(assignmentIds: [assignmentId])
+            }
+        }
+    }
+
+    // Note sync events
+    ablyService.subscribe(to: "note_synced") { [weak self] message in
+        Task { @MainActor in
+            if let noteId = message.data["noteId"] as? String {
+                try? await self?.fetch(noteId: noteId)
+            }
+        }
+    }
+}
+```
+
+### 5.3 Error Handling Pattern
+
+**Consistent error handling across all services:**
+```swift
+do {
+    try await service.performAction()
+} catch let error as CanvasError {
+    // Handle Canvas-specific error
+    showAlert(error.localizedDescription)
+} catch let error as CompletionError {
+    // Handle completion-specific error
+    showAlert(error.localizedDescription)
+} catch {
+    // Generic error
+    showAlert("An unexpected error occurred")
+}
+```
+
+### 5.4 Offline Support
+
+**Queue operations when offline:**
+```swift
+@MainActor
+public final class OfflineQueueService {
+    private var pendingOperations: [PendingOperation] = []
+
+    public func queue(_ operation: PendingOperation) {
+        pendingOperations.append(operation)
+        // Persist to UserDefaults or SwiftData
+    }
+
+    public func processPendingOperations() async {
+        for operation in pendingOperations {
+            do {
+                try await operation.execute()
+                // Remove from queue
+            } catch {
+                // Retry later
+            }
+        }
+    }
+}
+
+public struct PendingOperation: Codable {
+    let type: OperationType
+    let data: Data
+    let timestamp: Date
+
+    enum OperationType: String, Codable {
+        case completeAssignment
+        case syncNote
+        case canvasSync
+    }
+
+    func execute() async throws {
+        // Execute based on type
+    }
+}
+```
+
+---
+
+## 6. Implementation Roadmap
+
+### Week 1: Canvas Integration (16 hours / 2 days)
+
+**Day 1: Service Layer (8 hours)**
+- [ ] Create `CanvasService.swift` with all API methods (6 hours)
+- [ ] Add protocol and adapter (1 hour)
+- [ ] Register in DI container (1 hour)
+
+**Day 2: UI Layer (8 hours)**
+- [ ] Build `CanvasConnectionView` (3 hours)
+- [ ] Build `GradebookView` (4 hours)
+- [ ] Integrate Ably updates (1 hour)
+
+### Week 2: Assignment Completion + Notes (14 hours / 2 days)
+
+**Day 3: Assignment Completion (8 hours)**
+- [ ] Create `AssignmentCompletionService.swift` (3 hours)
+- [ ] Add protocol and adapter (1 hour)
+- [ ] Update `AssignmentGradeCard` with actions (3 hours)
+- [ ] Integrate focus sessions (1 hour)
+
+**Day 4: Notes Sync (6 hours)**
+- [ ] Create `NotesSyncService.swift` (4 hours)
+- [ ] Protocol and adapter (1 hour)
+- [ ] Start UI implementation (1 hour)
+
+### Week 3: Notes UI + Testing (10 hours / 1.5 days)
+
+**Day 5: Notes UI (6 hours)**
+- [ ] Complete `NotesListView` (3 hours)
+- [ ] Complete `NoteEditorView` (2 hours)
+- [ ] Conflict resolution UI (1 hour)
+
+**Day 6: Testing & Polish (4 hours)**
+- [ ] Integration testing (2 hours)
+- [ ] Error handling refinement (1 hour)
+- [ ] Offline support testing (1 hour)
+
+**Total: 30 hours (4 days of focused work)**
+
+---
+
+## 7. Testing Strategy
+
+### Unit Tests
+
+**Canvas Service:**
+```swift
+@Test func testFetchAssignments() async throws {
+    let mockNetwork = MockNetworkService()
+    let service = CanvasService(networkService: mockNetwork)
+
+    mockNetwork.mockResponse = AssignmentsResponse(
+        assignments: [mockAssignment],
+        total: 1
+    )
+
+    let assignments = try await service.fetchAssignments(courseId: nil)
+    #expect(assignments.count == 1)
+}
+```
+
+**Assignment Completion:**
+```swift
+@Test func testStartAssignment() async throws {
+    let service = AssignmentCompletionService(networkService: mockNetwork)
+
+    let session = try await service.start(assignmentId: "test-id")
+    #expect(session != nil)
+    #expect(service.getCachedStatus(assignmentId: "test-id")?.status == .started)
+}
+```
+
+**Notes Sync:**
+```swift
+@Test func testNoteSync() async throws {
+    let service = NotesSyncService(networkService: mockNetwork)
+
+    let note = service.create(content: "Test note", metadata: NoteMetadata())
+    #expect(note.needsSync == true)
+
+    try await service.sync()
+    #expect(note.needsSync == false)
+}
+```
+
+### Integration Tests
+
+**End-to-End Flow:**
+1. Connect Canvas with PAT
+2. Fetch assignments
+3. Mark assignment as started
+4. Create note about assignment
+5. Sync note to server
+6. Complete assignment
+7. Verify all data synced
+
+---
+
+## 8. Success Criteria
+
+### Canvas Integration ✅
+- [ ] User can connect Canvas with PAT
+- [ ] Gradebook displays all assignments with grades
+- [ ] Missing/late assignments clearly indicated
+- [ ] Manual sync button works
+- [ ] Real-time sync updates UI automatically
+
+### Assignment Completion ✅
+- [ ] "Start" button creates 60-min focus session
+- [ ] "Complete" button marks assignment done
+- [ ] "Dismiss" button removes from suggestions
+- [ ] Completion status syncs across devices
+- [ ] Bulk complete works in onboarding
+
+### Notes Sync ✅
+- [ ] Notes sync across devices
+- [ ] Conflict resolution works correctly
+- [ ] Offline edits queue and sync when online
+- [ ] Notes can be filtered by course
+- [ ] Real-time updates reflect server changes
+
+---
+
+**Next Phase:** Phase-5-Implementation-Report - Final summary and deployment readiness
+
+**Last Updated:** 2025-11-09
+**Phase:** 4 of 5
+**Status:** Implementation specs complete, ready for development

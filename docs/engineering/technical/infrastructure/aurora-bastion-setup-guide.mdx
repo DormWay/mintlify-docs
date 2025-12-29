@@ -1,0 +1,178 @@
+---
+title: "Aurora Bastion Setup Guide"
+description: "Run the automated setup:"
+---
+
+# Aurora Bastion Setup Guide
+
+## Quick Start
+
+Run the automated setup:
+```bash
+cd dormway-aws-infrastructure/scripts
+./setup-aurora-dev.sh
+```
+
+This will:
+1. Check dependencies
+2. Set up SSH keys
+3. Deploy bastion host
+4. Start local PostgreSQL
+5. Optionally sync data from Aurora
+
+## Manual Setup Steps
+
+### 1. Initial Bastion Setup
+```bash
+cd dormway-aws-infrastructure
+./scripts/setup-bastion.sh
+```
+
+This creates:
+- SSH key pair at `~/.ssh/dormway-bastion`
+- Convenience scripts for SSH and tunneling
+- Configuration for terraform.tfvars
+
+### 2. Deploy Bastion Host
+```bash
+cd terraform
+terraform apply -target=aws_instance.bastion -target=aws_security_group.bastion -target=aws_key_pair.bastion
+```
+
+### 3. Start Local PostgreSQL
+```bash
+make local-db-up
+```
+
+### 4. Test SSH Tunnel
+```bash
+make aurora-tunnel
+# In another terminal:
+make aurora-console
+```
+
+## Usage Patterns
+
+### Direct Aurora Access (for migrations/schema changes)
+```bash
+# Terminal 1: Create tunnel
+make aurora-tunnel
+
+# Terminal 2: Connect to Aurora
+make aurora-console
+# or
+export DATABASE_URL="postgresql://dormway_admin:PASSWORD@localhost:5432/dormway"
+```
+
+### Local Development (recommended)
+```bash
+# Start local database
+make local-db-up
+
+# Sync data from Aurora
+make sync-aurora-data
+
+# Start services with local database
+make local-services
+```
+
+### Mixed Mode (local DB with Aurora access)
+```bash
+# Terminal 1: Aurora tunnel for reference
+make aurora-tunnel
+
+# Terminal 2: Local development
+make db-console  # Local database
+make local-services
+```
+
+## Makefile Commands
+
+| Command | Description |
+|---------|-------------|
+| `make local-db-up` | Start local PostgreSQL |
+| `make local-db-down` | Stop local PostgreSQL |
+| `make local-db-clean` | Remove local database and volumes |
+| `make db-console` | Connect to local PostgreSQL |
+| `make aurora-tunnel` | Create SSH tunnel to Aurora |
+| `make aurora-console` | Connect to Aurora via tunnel |
+| `make sync-aurora-data` | Sync data from Aurora to local |
+| `make local-services` | Start services with local database |
+
+## Environment Variables
+
+For local development:
+```bash
+USE_LOCAL_DB=true
+DATABASE_URL=postgresql://dormway_admin:local_dev_password@localhost:5432/dormway
+LOCAL_DATABASE_URL=postgresql://dormway_admin:local_dev_password@localhost:5432/dormway
+```
+
+## Service Configuration
+
+Services automatically detect local vs Aurora:
+```javascript
+// In your service code
+const isLocalDev = process.env.USE_LOCAL_DB === 'true';
+const dbConfig = isLocalDev ? {
+  connectionString: process.env.LOCAL_DATABASE_URL,
+  ssl: false
+} : {
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+};
+```
+
+## Troubleshooting
+
+### SSH Key Issues
+```bash
+# Check key permissions
+ls -la ~/.ssh/dormway-bastion*
+# Should be 600 for private key
+
+# Fix permissions
+chmod 600 ~/.ssh/dormway-bastion
+```
+
+### Tunnel Connection Failed
+```bash
+# Check bastion is running
+aws ec2 describe-instances --filters "Name=tag:Name,Values=dormway-bastion" --query "Reservations[0].Instances[0].State.Name"
+
+# Check security group
+aws ec2 describe-security-groups --group-names dormway-bastion-sg
+```
+
+### Local Database Issues
+```bash
+# Check if running
+docker ps | grep dormway_postgres
+
+# View logs
+docker logs dormway_postgres
+
+# Reset database
+make local-db-clean
+make local-db-up
+```
+
+## Security Notes
+
+1. **SSH Key**: Keep `~/.ssh/dormway-bastion` secure
+2. **IP Whitelist**: Update `allowed_ssh_ips` in terraform.tfvars when your IP changes
+3. **Passwords**: Never commit database passwords
+4. **Tunnel**: Always close SSH tunnels when done
+5. **Local Data**: Sanitized data only in local development
+
+## Cost Optimization
+
+- Bastion host (t3.micro): ~$8/month
+- Stop bastion when not needed:
+  ```bash
+  aws ec2 stop-instances --instance-ids $(terraform output -raw bastion_instance_id)
+  ```
+- Start bastion when needed:
+  ```bash
+  aws ec2 start-instances --instance-ids $(terraform output -raw bastion_instance_id)
+  ```

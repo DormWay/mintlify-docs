@@ -1,0 +1,295 @@
+---
+title: "Branch Protection Rules"
+description: "Branch protection rules ensure code quality and prevent accidental changes to the main branch. All changes must go through pull requests with proper reviews..."
+---
+
+# Branch Protection Rules
+
+## Overview
+
+Branch protection rules ensure code quality and prevent accidental changes to the main branch. All changes must go through pull requests with proper reviews and checks.
+
+## Main Branch Protection Settings
+
+### GitHub Repository Settings
+
+Navigate to: Settings → Branches → Add rule
+
+#### Rule Pattern: `main`
+
+### Protection Settings
+
+#### 1. Require a pull request before merging
+- ✅ **Require approvals**: 1 approval minimum
+- ✅ **Dismiss stale pull request approvals when new commits are pushed**
+- ✅ **Require review from CODEOWNERS** (if CODEOWNERS file exists)
+
+#### 2. Require status checks to pass before merging
+- ✅ **Require branches to be up to date before merging**
+- Required status checks:
+  - `lint` (ESLint checks)
+  - `test` (Unit tests)
+  - `typecheck` (TypeScript compilation)
+  - `docker-build` (Docker image builds)
+
+#### 3. Require conversation resolution before merging
+- ✅ All PR comments must be resolved
+
+#### 4. Require signed commits
+- ✅ All commits must be signed with GPG
+
+#### 5. Include administrators
+- ❌ Admins should follow the same rules (recommended for production)
+
+#### 6. Restrict who can push to matching branches
+- Add team members who can merge PRs
+- Typically: `dormway-core` team
+
+#### 7. Allow force pushes
+- ❌ Never allow force pushes to main
+
+#### 8. Allow deletions
+- ❌ Never allow branch deletion
+
+## Setting Up via GitHub CLI
+
+```bash
+# Install GitHub CLI if not already installed
+brew install gh
+
+# Authenticate
+gh auth login
+
+# Set up branch protection
+gh api repos/dormway/dormway-platform/branches/main/protection \
+  --method PUT \
+  --field required_status_checks='{"strict":true,"contexts":["lint","test","typecheck","docker-build"]}' \
+  --field enforce_admins=false \
+  --field required_pull_request_reviews='{"dismiss_stale_reviews":true,"require_code_owner_reviews":true,"required_approving_review_count":1}' \
+  --field restrictions=null \
+  --field allow_force_pushes=false \
+  --field allow_deletions=false \
+  --field required_conversation_resolution=true \
+  --field required_signatures=true
+```
+
+## Development Workflow
+
+### 1. Create Feature Branch
+
+```bash
+# Create new feature branch from main
+git checkout main
+git pull origin main
+git checkout -b feature/your-feature-name
+```
+
+### 2. Make Changes
+
+```bash
+# Make your changes
+# Run tests locally
+npm test
+npm run lint
+npm run typecheck
+
+# Commit with signed commits
+git add .
+git commit -S -m "feat: add new feature"
+```
+
+### 3. Push Branch
+
+```bash
+git push -u origin feature/your-feature-name
+```
+
+### 4. Create Pull Request
+
+```bash
+# Using GitHub CLI
+gh pr create \
+  --title "feat: add new feature" \
+  --body "Description of changes" \
+  --base main
+
+# Or use GitHub web interface
+```
+
+### 5. PR Checks
+
+The following checks will run automatically:
+
+1. **GitHub Actions CI**
+   - Linting (ESLint)
+   - Type checking (TypeScript)
+   - Unit tests
+   - Docker build verification
+
+2. **Code Review**
+   - Wait for at least 1 approval
+   - Address any feedback
+
+3. **Merge Conflicts**
+   - Resolve any conflicts with main
+   - Rebase if necessary
+
+### 6. Merge
+
+Once all checks pass and PR is approved:
+
+```bash
+# Squash and merge is recommended
+gh pr merge --squash
+
+# Or use GitHub web interface
+```
+
+## Required GitHub Secrets
+
+Add these secrets in: Settings → Secrets and variables → Actions
+
+```yaml
+AWS_ACCESS_KEY_ID: <your-aws-access-key>
+AWS_SECRET_ACCESS_KEY: <your-aws-secret-key>
+DOPPLER_TOKEN: <service-token-for-ci>
+SLACK_WEBHOOK_URL: <optional-for-notifications>
+```
+
+## CI/CD Pipeline
+
+### Automated Checks (PR)
+
+On every pull request:
+1. Run linting
+2. Run type checking
+3. Run unit tests
+4. Build Docker images
+5. Security scanning
+
+### Automated Deployment (Main)
+
+On merge to main:
+1. Build production Docker images
+2. Push to ECR
+3. Update ECS services
+4. Run smoke tests
+5. Notify team
+
+## CODEOWNERS File
+
+Create `.github/CODEOWNERS`:
+
+```
+# Global owners
+* @dormway/core-team
+
+# Service-specific owners
+/services/api-router/ @ethan @backend-team
+/services/engine/ @ethan @ml-team
+/services/ably-relay/ @backend-team
+/services/dormway-admin/ @frontend-team
+/infrastructure/ @devops-team @ethan
+
+# Documentation
+*.md @ethan
+```
+
+## Commit Message Convention
+
+Follow conventional commits:
+
+```
+feat: add new feature
+fix: resolve bug
+docs: update documentation
+style: formatting changes
+refactor: code restructuring
+test: add tests
+chore: maintenance tasks
+```
+
+## Emergency Procedures
+
+### Bypassing Protection (Emergency Only)
+
+If you need to push a critical hotfix:
+
+1. **Document the emergency** in Slack
+2. **Get verbal approval** from team lead
+3. **Admin bypass** (if admin enforcement is off):
+   ```bash
+   git push origin main --force-with-lease
+   ```
+4. **Create retroactive PR** for audit trail
+5. **Post-mortem** to prevent future emergencies
+
+### Rollback Procedure
+
+```bash
+# Find the last known good commit
+git log --oneline -n 10
+
+# Create rollback PR
+git checkout main
+git pull
+git checkout -b hotfix/rollback-to-<commit>
+git revert <bad-commit>
+git push -u origin hotfix/rollback-to-<commit>
+
+# Create PR with expedited review
+gh pr create --title "HOTFIX: Rollback to <commit>" --body "Emergency rollback" --label hotfix
+```
+
+## Monitoring
+
+### PR Metrics to Track
+
+- Average time to merge
+- Number of force pushes prevented
+- Failed status checks by type
+- Review turnaround time
+
+### Alerts
+
+Set up GitHub webhooks to notify on:
+- Failed deployments
+- Security vulnerabilities
+- Long-running PRs (>3 days)
+
+## Troubleshooting
+
+### Common Issues
+
+#### "Branch is out of date"
+```bash
+git checkout feature/your-branch
+git fetch origin
+git rebase origin/main
+git push --force-with-lease
+```
+
+#### "Required status checks failed"
+1. Check GitHub Actions tab for details
+2. Fix the failing check locally
+3. Push fixes to PR branch
+
+#### "Waiting for code owner review"
+- Check CODEOWNERS file
+- Request review from appropriate team
+
+## Best Practices
+
+1. **Keep PRs small** - Easier to review
+2. **Write descriptive PR descriptions** - Include context and testing steps
+3. **Update branch frequently** - Rebase with main regularly
+4. **Run checks locally** - Before pushing
+5. **Respond to feedback quickly** - Keep PRs moving
+6. **Use draft PRs** - For work in progress
+7. **Link issues** - Reference related issues in PR description
+
+## Additional Resources
+
+- [GitHub Branch Protection Docs](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/defining-the-mergeability-of-pull-requests/about-protected-branches)
+- [Conventional Commits](https://www.conventionalcommits.org/)
+- [GitHub Flow](https://guides.github.com/introduction/flow/)

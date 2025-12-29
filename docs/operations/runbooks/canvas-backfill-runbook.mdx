@@ -1,0 +1,66 @@
+---
+title: "Canvas Backfill Runbook"
+description: "This runbook describes how to align legacy Canvas data with the canonical course context graph and how to validate the results."
+---
+
+# Canvas Backfill Runbook
+
+This runbook describes how to align legacy Canvas data with the canonical course context graph and how to validate the results.
+
+## Prerequisites
+
+- Neon Postgres connection string for the target branch/environment (Doppler-provided `DATABASE_URL_ADMIN` preferred).
+- Doppler access to a `dev_<name>` config (or an alternative environment that exposes the required Neon credentials).
+- Node dependencies installed under `.repos/dormway-platform/services/engine` (`npm install` or `pnpm install` already run).
+
+## Commands
+
+All commands are run from the workspace root unless otherwise noted.
+
+### Preview the backfill
+
+Use preview mode first to confirm what will happen (no writes). You can limit the scope with `--limit`, `--account`, or `--user`.
+
+```bash
+cd .repos/dormway-platform/services/engine
+doppler run --project dormway --config dev_<name> -- \
+  bash -lc 'DATABASE_URL_ADMIN=<neon-connection-string> \
+  node node_modules/.bin/ts-node src/scripts/backfill-canvas-course-contexts.ts --limit 5'
+```
+
+### Run a targeted account (optional)
+
+When debugging a single Canvas account, scope the run with `--account` and add `--execute` once the preview looks correct.
+
+```bash
+cd .repos/dormway-platform/services/engine
+doppler run --project dormway --config dev_<name> -- \
+  bash -lc 'DATABASE_URL_ADMIN=<neon-connection-string> \
+  node node_modules/.bin/ts-node src/scripts/backfill-canvas-course-contexts.ts \
+    --account <canvas_account_uuid> --execute'
+```
+
+### Full execute
+
+After validating previews, run the full migration (omit `--limit` and include `--execute`).
+
+```bash
+cd .repos/dormway-platform/services/engine
+doppler run --project dormway --config dev_<name> -- \
+  bash -lc 'DATABASE_URL_ADMIN=<neon-connection-string> \
+  node node_modules/.bin/ts-node src/scripts/backfill-canvas-course-contexts.ts --execute'
+```
+
+## Post-run verification
+
+Use the spot-check script to compare schedule-import (`mobile`) and Canvas (`canvas`) time blocks for a sample user. This ensures both sources now share the same `course_context_id`.
+
+```bash
+cd .repos/dormway-platform/services/engine
+doppler run --project dormway --config dev_<name> -- \
+  bash -lc 'DATABASE_URL_ADMIN=<neon-connection-string> \
+  node node_modules/.bin/ts-node src/scripts/spot-check-canvas-vs-schedule.ts \
+    --user <user_uuid> --limit 10'
+```
+
+The script outputs a per-course summary (Canvas vs schedule block counts) and sample events so you can visually confirm alignment.

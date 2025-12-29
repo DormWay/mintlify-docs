@@ -1,0 +1,540 @@
+---
+title: "implementation checklist"
+description: "CREATE TABLE communication_preferences ( user_id UUID REFERENCES accounts(id), marketing_emails BOOLEAN DEFAULT true, product_updates BOOLEAN DEFAULT true, w..."
+---
+
+# DormWay Customer.io Email Campaign Implementation Checklist
+
+## Phase 1: Foundation Setup (Week 1)
+
+### Database & Infrastructure
+- [ ] **Create communication_preferences table**
+  ```sql
+  CREATE TABLE communication_preferences (
+    user_id UUID REFERENCES accounts(id),
+    marketing_emails BOOLEAN DEFAULT true,
+    product_updates BOOLEAN DEFAULT true,
+    weekly_digest BOOLEAN DEFAULT true,
+    push_notifications BOOLEAN DEFAULT true,
+    sms_notifications BOOLEAN DEFAULT false,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  );
+  ```
+- [ ] **Add preference sync trigger to Customer.io**
+- [ ] **Implement preference webhook handlers**
+- [ ] **Set up unsubscribe endpoint**
+- [ ] **Configure Customer.io iOS SDK** (for push notifications)
+- [ ] **Test data flow: App → PostgreSQL → Customer.io**
+
+### Email Template Creation
+- [ ] **Create base email layout template** (header, footer, responsive design)
+- [ ] **Design email components library** (buttons, cards, badges, dividers)
+- [ ] **Set up email testing environment** (Litmus or Email on Acid)
+
+---
+
+## Phase 2: Welcome & Onboarding Series (Week 2)
+
+### Template Design & Build
+- [ ] **Email 1: Welcome (Immediate)**
+  - [ ] Design mockup approval
+  - [ ] Build HTML template
+  - [ ] Create in Customer.io (template ID: `welcome-to-dormway`)
+  - [ ] Add dynamic content: `{{first_name}}`, `{{campus_name}}`, `{{student_count}}`
+  - [ ] Set up trigger: `user_created` event
+  - [ ] Test send
+  - [ ] A/B test subject lines
+
+- [ ] **Email 2: Upload Syllabus (Day 2)**
+  - [ ] Design mockup
+  - [ ] Build template (template ID: `onboarding-syllabus-prompt`)
+  - [ ] Add trigger: Time-based (2 days after signup) + condition (`first_syllabus_uploaded` = false)
+  - [ ] Test send
+  - [ ] Configure suppression rules (skip if syllabus uploaded)
+
+- [ ] **Email 3: Connect Calendar (Day 4)**
+  - [ ] Design mockup
+  - [ ] Build template (template ID: `onboarding-calendar-prompt`)
+  - [ ] Add trigger: Time-based (4 days) + condition (`calendar_permission_granted` = false)
+  - [ ] Test send
+
+- [ ] **Email 4: Dormant Re-engagement (Day 7)**
+  - [ ] Design mockup
+  - [ ] Build template (template ID: `onboarding-dormant-reengagement`)
+  - [ ] Add trigger: Time-based (7 days) + condition (no activity)
+  - [ ] Test send
+  - [ ] Set up support escalation flow
+
+### Push Notification Setup
+- [ ] **Permission Primer (Day 2)**
+  - [ ] Create push template in Customer.io
+  - [ ] Set up trigger based on permission status
+  - [ ] Test delivery
+
+### Event Tracking Implementation
+- [ ] **Add event tracking to iOS app:**
+  ```swift
+  CustomerIO.shared.track(name: "user_created", properties: [:])
+  CustomerIO.shared.track(name: "onboarding_started", properties: [:])
+  CustomerIO.shared.track(name: "campus_selected", properties: ["campus_id": campusId])
+  CustomerIO.shared.track(name: "first_syllabus_uploaded", properties: [:])
+  CustomerIO.shared.track(name: "calendar_permission_granted", properties: [:])
+  ```
+- [ ] **Test event tracking in Customer.io dashboard**
+- [ ] **Verify events trigger correct campaigns**
+
+---
+
+## Phase 3: Syllabus Processing Series (Week 3)
+
+### Templates
+- [ ] **Email: Syllabus Success (Immediate)** ✅ ALREADY DEPLOYED
+  - [x] Template created (template ID: `syllabus-processed`)
+  - [x] Integrated with Temporal workflows
+  - [x] Event tracking: `syllabus_email_sent`
+  - [ ] A/B test variations
+
+- [ ] **Email: Processing Failed (Immediate)**
+  - [ ] Design mockup
+  - [ ] Build template (template ID: `syllabus-processing-failed`)
+  - [ ] Add trigger: `syllabus_processing_failed` event
+  - [ ] Include troubleshooting steps
+  - [ ] Add support contact link
+  - [ ] Test send
+
+- [ ] **Email: First Syllabus Milestone**
+  - [ ] Design celebration template (template ID: `first-syllabus-celebration`)
+  - [ ] Add confetti or celebration graphics
+  - [ ] Trigger: `first_syllabus_uploaded` event
+  - [ ] Include BrainGains feature unlock CTA
+  - [ ] Test send
+
+- [ ] **Email: All Syllabi Complete**
+  - [ ] Design completion template (template ID: `semester-setup-complete`)
+  - [ ] Show all courses summary
+  - [ ] Trigger: `all_syllabi_uploaded` event
+  - [ ] Enable weekly digest preference automatically
+  - [ ] Test send
+
+### Push Notifications
+- [ ] **Processing Started Push**
+  - Title: "Processing your syllabus..."
+  - Trigger: `syllabus_processing_started`
+  
+- [ ] **Processing Complete Push**
+  - Title: "Your schedule is ready! ✅"
+  - Trigger: `syllabus_processed_success` (30 seconds after start)
+
+---
+
+## Phase 4: Engagement & Feature Adoption (Week 4)
+
+### Weekly Digest Campaign
+- [ ] **Design weekly digest template** (template ID: `weekly-digest`) ✅ COMPLETED
+  - [x] High priority deadlines section
+  - [x] Schedule summary with stats
+  - [x] AI recommendations section
+  - [x] Campus events section
+- [ ] **Set up time-based trigger** (Every Monday 8am local time)
+- [ ] **Add preference check** (only send if `weekly_digest = true`)
+- [ ] **Configure personalization** (use LLM traits, campus data)
+- [ ] **Test different timezones**
+- [ ] **A/B test send times** (8am vs 6am vs 9am)
+
+### Daily Plan Campaign
+- [ ] **Design daily plan template** (template ID: `daily-plan`) ✅ COMPLETED
+  - [x] Time summary stats (classes, tasks, free hours)
+  - [x] Today's class schedule with times/locations
+  - [x] Priority tasks list with due dates
+  - [x] AI focus recommendation
+- [ ] **Set up time-based trigger** (Every day 6am local time)
+- [ ] **Add preference check** (only send if `daily_plan = true`)
+- [ ] **Configure skip logic** (skip if no classes/tasks today)
+- [ ] **Test timezone handling** (6am in user's local time)
+- [ ] **A/B test send times** (6am vs 7am vs 8am)
+
+### Feature Tutorial - BrainGains
+- [ ] **Design template** (template ID: `feature-tutorial-braingains`)
+- [ ] **Add trigger:** Day 10 + condition (no BrainGains interaction)
+- [ ] **Include video demo link**
+- [ ] **Show social proof** (usage stats)
+- [ ] **Test send**
+
+### Re-engagement Campaign
+- [ ] **7-Day Inactivity Email** (template ID: `reengagement-7day`)
+  - [ ] Design template
+  - [ ] Trigger: `last_app_open` > 7 days
+  - [ ] Show missed deadlines/updates
+  - [ ] Include peer comparison
+  - [ ] Test send
+
+- [ ] **10-Day Push Notification**
+  - [ ] Create push template
+  - [ ] Feature-specific highlight
+  - [ ] Test delivery
+
+- [ ] **14-Day Final Email** (template ID: `reengagement-14day`)
+  - [ ] Design final attempt template
+  - [ ] Offer help/support
+  - [ ] Test send
+
+---
+
+## Phase 5: Milestone & Behavioral Triggers (Week 5)
+
+### Achievement Emails
+- [ ] **Power User Achievement** (template ID: `milestone-power-user`)
+  - [ ] Design celebration template
+  - [ ] Show user stats/percentile
+  - [ ] Include referral link
+  - [ ] Trigger: `power_user_achieved` event
+  - [ ] Test send
+
+- [ ] **Finals Week Support** (template ID: `finals-week-support`)
+  - [ ] Design supportive template
+  - [ ] Show exam schedule
+  - [ ] AI study plan
+  - [ ] Mental health resources
+  - [ ] Trigger: `finals_week_started` event (AI-detected)
+  - [ ] Test send
+
+- [ ] **Midterm Motivation** (template ID: `midterm-motivation`)
+  - [ ] Design motivational template
+  - [ ] Study tips
+  - [ ] Campus resources
+  - [ ] Trigger: `midterm_season_detected`
+  - [ ] Test send
+
+### Event Tracking for Milestones
+- [ ] **Add tracking to backend:**
+  ```typescript
+  await customerIo.track({
+    userId: user.id,
+    event: 'power_user_achieved',
+    properties: {
+      engagementScore: score,
+      percentile: percentile,
+      streakDays: streakDays
+    }
+  });
+  
+  await customerIo.track({
+    userId: user.id,
+    event: 'finals_week_started',
+    properties: {
+      examCount: exams.length,
+      firstExamDate: firstExam
+    }
+  });
+  ```
+
+---
+
+## Phase 6: Transactional Hooks (Week 6)
+
+### Standard Transactional Emails
+- [ ] **Password Reset** (template ID: `password-reset`)
+  - [ ] Design secure template
+  - [ ] Add reset link with expiration
+  - [ ] Test token generation
+  - [ ] Test delivery speed
+
+- [ ] **Account Deletion** (template ID: `account-deletion-confirm`)
+  - [ ] Design confirmation template
+  - [ ] Add undo option (24-hour grace period)
+  - [ ] Test flow
+
+- [ ] **Data Export Ready** (template ID: `data-export-ready`)
+  - [ ] Design download template
+  - [ ] Add secure download link
+  - [ ] Test file generation + delivery
+
+---
+
+## Phase 7: UI Implementation (Week 7)
+
+### iOS App Preferences Screen
+- [ ] **Design preferences UI**
+  - [ ] Email preferences section
+  - [ ] Push notification toggles
+  - [ ] SMS opt-in (future)
+  - [ ] Digest frequency selector
+
+- [ ] **Build SwiftUI views:**
+  ```swift
+  struct CommunicationPreferencesView: View {
+      @State private var marketingEmails = true
+      @State private var productUpdates = true
+      @State private var weeklyDigest = true
+      @State private var pushNotifications = true
+      
+      var body: some View {
+          // Implementation
+      }
+  }
+  ```
+
+- [ ] **Wire up to API**
+  - [ ] Create PUT /preferences endpoint
+  - [ ] Sync to Customer.io on change
+  - [ ] Test real-time sync
+
+### Web Preference Center
+- [ ] **Design web preference center** (for email unsubscribe links)
+- [ ] **Build Next.js page** (`/preferences`)
+- [ ] **Add authentication** (magic link from email)
+- [ ] **One-click unsubscribe** compliance
+- [ ] **Test across browsers**
+
+### Onboarding Opt-in Screens
+- [ ] **Design opt-in modal** (during onboarding)
+- [ ] **Explain benefits** of each email type
+- [ ] **Add "Skip" option**
+- [ ] **Test conversion rates**
+
+---
+
+## Phase 8: Testing & QA (Week 8)
+
+### Email Testing
+- [ ] **Cross-client testing**
+  - [ ] Gmail (desktop + mobile)
+  - [ ] Apple Mail (macOS + iOS)
+  - [ ] Outlook (desktop + web)
+  - [ ] Yahoo Mail
+  - [ ] Proton Mail
+
+- [ ] **Responsive design testing**
+  - [ ] iPhone SE (375px)
+  - [ ] iPhone 14 Pro (393px)
+  - [ ] iPad (768px)
+  - [ ] Desktop (1024px+)
+
+- [ ] **Dark mode testing**
+  - [ ] All templates render correctly in dark mode
+  - [ ] Images have appropriate contrast
+  - [ ] Text remains readable
+
+- [ ] **Accessibility testing**
+  - [ ] Screen reader compatibility
+  - [ ] Color contrast ratios (WCAG AA)
+  - [ ] Alt text on all images
+  - [ ] Semantic HTML structure
+
+### Campaign Testing
+- [ ] **Test all trigger conditions**
+  - [ ] Time-based triggers fire correctly
+  - [ ] Event-based triggers fire immediately
+  - [ ] Suppression rules work (no duplicate sends)
+
+- [ ] **Test personalization**
+  - [ ] All merge tags populate correctly
+  - [ ] Fallback values work
+  - [ ] Campus-specific content displays
+
+- [ ] **Load testing**
+  - [ ] 1,000 simultaneous sends
+  - [ ] 10,000 simultaneous sends
+  - [ ] Peak load scenarios (Monday 8am digest)
+
+### Push Notification Testing
+- [ ] **iOS push delivery**
+  - [ ] Production environment
+  - [ ] Background delivery
+  - [ ] Rich notifications
+  - [ ] Deep link behavior
+
+- [ ] **Timing tests**
+  - [ ] Immediate push works
+  - [ ] Delayed push works
+  - [ ] Time-based push respects timezone
+
+---
+
+## Phase 9: Analytics & Monitoring (Week 9)
+
+### Dashboard Setup
+- [ ] **Customer.io analytics dashboard**
+  - [ ] Campaign performance overview
+  - [ ] Open rate tracking
+  - [ ] Click-through rate tracking
+  - [ ] Unsubscribe rate monitoring
+  - [ ] Conversion tracking
+
+- [ ] **Custom analytics**
+  - [ ] Email → app open correlation
+  - [ ] Email → feature activation correlation
+  - [ ] Re-engagement campaign effectiveness
+  - [ ] Weekly digest engagement by campus
+
+### Alert Configuration
+- [ ] **Set up monitoring alerts**
+  - [ ] Campaign failure alerts
+  - [ ] Low deliverability alerts
+  - [ ] High unsubscribe rate alerts
+  - [ ] API error alerts
+
+- [ ] **Create Slack integration** for critical alerts
+
+---
+
+## Phase 10: Compliance & Legal (Week 10)
+
+### GDPR Compliance
+- [ ] **Data processing agreement** with Customer.io
+- [ ] **Privacy policy update** (mention Customer.io)
+- [ ] **Cookie consent** (if tracking pixels used)
+- [ ] **Data retention policies** documented
+- [ ] **Right to deletion** workflow tested
+
+### CAN-SPAM Compliance
+- [ ] **All emails have:**
+  - [ ] Physical mailing address in footer
+  - [ ] Clear "From" name (DormWay)
+  - [ ] Accurate subject lines
+  - [ ] Unsubscribe link (one-click)
+  - [ ] Unsubscribe honored within 10 days
+
+### FERPA Compliance
+- [ ] **Review all templates** for educational data protection
+- [ ] **Ensure no PII in URLs** or tracking parameters
+- [ ] **Audit data shared with Customer.io**
+- [ ] **Document compliance measures**
+
+---
+
+## Phase 11: A/B Testing Strategy (Week 11)
+
+### Test Plan
+- [ ] **Subject line tests**
+  - Welcome email: 3 variations
+  - Syllabus prompt: 3 variations
+  - Weekly digest: 2 variations
+
+- [ ] **Send time tests**
+  - Weekly digest: 6am vs 8am vs 9am
+  - Re-engagement: Morning vs evening
+
+- [ ] **Content tests**
+  - CTA button text variations
+  - Copy length (short vs detailed)
+  - Visual style (minimal vs rich)
+
+- [ ] **Cadence tests**
+  - Onboarding: 2-day vs 3-day intervals
+  - Re-engagement: 7-day vs 10-day vs 14-day
+
+### Implementation
+- [ ] **Set up A/B tests in Customer.io**
+- [ ] **Define success metrics** for each test
+- [ ] **Run tests for minimum 2 weeks** (statistical significance)
+- [ ] **Document results**
+- [ ] **Implement winning variations**
+
+---
+
+## Phase 12: Launch Preparation (Week 12)
+
+### Pre-Launch Checklist
+- [ ] **All templates approved** by stakeholders
+- [ ] **All campaigns tested** in staging environment
+- [ ] **Load testing passed**
+- [ ] **Compliance verified**
+- [ ] **Analytics dashboards live**
+- [ ] **Support team trained** on new emails
+- [ ] **FAQ documentation created**
+- [ ] **Rollback plan documented**
+
+### Soft Launch
+- [ ] **Enable for 10% of new users** (Week 1)
+- [ ] **Monitor metrics closely**
+- [ ] **Gather user feedback**
+- [ ] **Fix any critical issues**
+
+### Full Launch
+- [ ] **Enable for 50% of users** (Week 2)
+- [ ] **Monitor at scale**
+- [ ] **Enable for 100% of users** (Week 3)
+- [ ] **Announcement to existing users**
+
+---
+
+## Post-Launch (Ongoing)
+
+### Optimization
+- [ ] **Weekly performance review**
+  - Open rates by campaign
+  - Click rates by campaign
+  - Unsubscribe trends
+  - Conversion rates
+
+- [ ] **Monthly content refresh**
+  - Update stats (student counts, etc.)
+  - Refresh copy based on feedback
+  - Add seasonal content
+
+- [ ] **Quarterly strategy review**
+  - Campaign performance analysis
+  - New campaign ideation
+  - User journey optimization
+
+### Maintenance
+- [ ] **Template updates** as design system evolves
+- [ ] **New event tracking** as features launch
+- [ ] **Campaign deprecation** for low performers
+- [ ] **Compliance audits** quarterly
+
+---
+
+## Success Metrics
+
+### Email Performance Targets
+- **Welcome Series:**
+  - Open rate: >45%
+  - Click rate: >15%
+  - Onboarding completion: >60%
+
+- **Syllabus Processing:**
+  - Open rate: >70% (transactional)
+  - Dashboard click rate: >40%
+
+- **Weekly Digest:**
+  - Open rate: >35%
+  - Click rate: >12%
+  - Unsubscribe rate: <2%
+
+- **Re-engagement:**
+  - Open rate: >25%
+  - Reactivation rate: >10%
+
+### Business Impact Targets
+- **User Activation:** 80% upload first syllabus within 7 days
+- **User Retention:** 70% still active after 30 days
+- **Feature Adoption:** 50% activate BrainGains within 14 days
+- **Viral Growth:** 15% referral conversion rate
+
+---
+
+## Tools & Resources
+
+### Required Access
+- [ ] Customer.io admin access
+- [ ] PostgreSQL production read/write
+- [ ] AWS SES (if needed for transactional)
+- [ ] Postmark (for inbound processing)
+- [ ] Litmus or Email on Acid
+- [ ] Figma (for design)
+
+### Documentation
+- [ ] Customer.io API docs: https://customer.io/docs/api/
+- [ ] Email best practices guide
+- [ ] DormWay design system: DormWay Design System
+- [ ] Campaign runbook
+- [ ] Incident response plan
+
+### Team Contacts
+- [ ] Customer.io support: support@customer.io
+- [ ] DormWay support: support@dormway.app
+- [ ] Engineering escalation: #engineering-urgent
+- [ ] Design team: #design

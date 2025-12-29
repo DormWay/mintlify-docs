@@ -1,0 +1,239 @@
+---
+title: "CookieYes Auth0 Error 11 Fix"
+description: "Users clicking \"Log In\" on https://dormway.app immediately get \"Error Code 11: Invalid state\" on the Auth0 login screen (`auth.dormway.app`) in Chrome/Brave..."
+---
+
+# CookieYes Configuration for Auth0 Error Code 11
+
+**Date:** 2025-10-20
+**Issue:** Auth0 "Invalid state" Error Code 11 in Chrome/Brave production
+**Root Cause:** CookieYes consent manager auto-blocking Auth0 transaction cookies
+
+## Problem Summary
+
+Users clicking "Log In" on https://dormway.app immediately get "Error Code 11: Invalid state" on the Auth0 login screen (`auth.dormway.app`) in Chrome/Brave browsers.
+
+HAR file analysis revealed that `/auth/login` responses return **307 redirects with no Set-Cookie headers**. CookieYes is stripping these headers before they reach the browser.
+
+## Root Cause
+
+Auth0 uses **two separate cookie systems**:
+
+1. **Session cookies** (`appSession`) - Manages authenticated sessions
+2. **Transaction cookies** (`__txn_*`) - Stores OAuth `state` parameter during login flow
+
+The OAuth flow:
+1. User clicks "Log In" → Auth0 SDK generates random `state` parameter
+2. SDK attempts to set `__txn_<state>` cookie on `dormway.app`
+3. **CookieYes intercepts and strips the Set-Cookie header** (cookie is "Uncategorised")
+4. Browser redirects to `auth.dormway.app` login screen without the transaction cookie
+5. User enters credentials
+6. Auth0 redirects back to callback URL with `state` parameter
+7. Auth0 SDK tries to validate `state` against the `__txn_*` cookie
+8. **Cookie doesn't exist** → "Invalid state" Error Code 11
+
+## Solution: Whitelist Auth0 Cookies in CookieYes
+
+### Required Configuration
+
+You **must** configure these cookies in CookieYes as "Strictly Necessary" to prevent auto-blocking:
+
+#### 1. Auth0 Transaction Cookie
+
+| Property | Value |
+|----------|-------|
+| **Cookie pattern** | `__txn_*` (wildcard pattern) |
+| **Domain** | `dormway.app` |
+| **Duration** | 1 hour |
+| **Category** | Strictly Necessary |
+| **Block prior to consent** | OFF |
+| **Script field** | Leave blank (HTTP-only server cookie) |
+
+#### 2. Auth0 Session Cookie
+
+| Property | Value |
+|----------|-------|
+| **Cookie name** | `appSession` |
+| **Domain** | `.dormway.app` (note leading dot) |
+| **Duration** | Session |
+| **Category** | Strictly Necessary |
+| **Block prior to consent** | OFF |
+| **Script field** | Leave blank (HTTP-only server cookie) |
+
+### Step-by-Step Configuration
+
+1. **Login to CookieYes Dashboard**
+   - URL: https://app.cookieyes.com
+   - Select `dormway.app` website
+
+2. **Navigate to Cookie Scanner**
+   - Go to "Cookies" or "Scanner" section
+   - Look for "Discovered" or "Uncategorised" cookies
+   - Find `__txn_*` and `appSession`
+
+3. **Configure Transaction Cookie (`__txn_*`)**
+   - Click on the cookie row
+   - Set **Category** = "Strictly Necessary"
+   - Ensure **Block prior to consent** is **OFF** (unchecked)
+   - Leave **Script** field blank
+   - Set **Domain** = `dormway.app`
+   - Set **Duration** = `1 hour`
+   - Click **Save**
+
+4. **Configure Session Cookie (`appSession`)**
+   - Click on the cookie row
+   - Set **Category** = "Strictly Necessary"
+   - Ensure **Block prior to consent** is **OFF** (unchecked)
+   - Leave **Script** field blank
+   - Set **Domain** = `.dormway.app` (with leading dot)
+   - Set **Duration** = `Session`
+   - Click **Save**
+
+5. **Publish Changes**
+   - Click "Publish" button in CookieYes dashboard
+   - Changes take effect immediately (no propagation delay)
+
+## Verification
+
+After configuring CookieYes, verify the fix:
+
+1. **Clear all cookies and site data**
+   - Chrome DevTools → Application → Storage → Clear site data
+
+2. **Open Network tab**
+   - Chrome DevTools → Network
+   - Filter by "login" or "auth"
+
+3. **Trigger login flow**
+   - Navigate to https://dormway.app
+   - Click "Log In"
+
+4. **Inspect `/auth/login` response**
+   - Look for 307 redirect response
+   - Check **Response Headers** section
+   - **Verify:** Should now see:
+     ```
+     Set-Cookie: __txn_<random-state>; SameSite=None; Secure; Path=/; Domain=dormway.app; Max-Age=3600
+     ```
+
+5. **Complete login**
+   - If Set-Cookie header is present, login should succeed
+   - If still missing, CookieYes is still blocking it (check configuration)
+
+## Why The Code Changes Alone Didn't Work
+
+We made two code changes that were **necessary but not sufficient**:
+
+### 1. Auth0 SDK Cookie Configuration (`/services/dormway-lockedin/src/lib/auth0.ts`)
+
+```typescript
+export const auth0 = new Auth0Client({
+  session: {
+    cookie: {
+      sameSite: 'none',  // Required for cross-origin (auth.dormway.app)
+      secure: true,      // Required when sameSite: 'none'
+    },
+  },
+});
+```
+
+This tells Auth0 SDK to **set** cookies with `SameSite=None; Secure`.
+
+### 2. Environment Variable (Not Actually Needed)
+
+```bash
+AUTH0_TRANSACTION_COOKIE_SAME_SITE=none
+```
+
+This was mentioned in Auth0 docs but turns out to be unnecessary - the code configuration above already handles it.
+
+### Why These Weren't Enough
+
+**The code tells Auth0 to SET the cookies correctly, but CookieYes intercepts the HTTP response and STRIPS the Set-Cookie header before it reaches the browser.**
+
+It's like putting a letter in a mailbox (Auth0 setting the cookie) but the mailman (CookieYes) throws it away before it gets delivered (browser receives it).
+
+## Technical Details
+
+### Cookie Attributes Explained
+
+- **SameSite=None**: Allows cross-origin cookie access (required because `auth.dormway.app` ≠ `dormway.app`)
+- **Secure**: Cookie only sent over HTTPS (required by browsers when SameSite=None)
+- **HttpOnly**: Cookie not accessible via JavaScript (security measure, set automatically by Auth0)
+- **Domain=dormway.app**: Cookie accessible on `dormway.app` and all subdomains
+
+### Why Custom Domain Matters
+
+Without a custom domain (using `<tenant>.auth0.com`), Auth0 uses third-party cookies which are already heavily restricted by browsers. Using a custom domain (`auth.dormway.app`) makes it a **first-party cookie** relative to `dormway.app`, which browsers treat more favorably.
+
+However, the subdomain difference still makes it **cross-origin**, requiring `SameSite=None`.
+
+## Troubleshooting
+
+### Issue: Set-Cookie header still missing after CookieYes update
+
+**Causes:**
+1. Changes not published in CookieYes (click "Publish" button)
+2. Cookie still marked as "Block prior to consent" (must be OFF)
+3. Cookie in wrong category (must be "Strictly Necessary")
+4. Browser cache (clear cookies and hard refresh)
+
+**Debug steps:**
+```bash
+# Check if CookieYes is modifying responses
+curl -I https://dormway.app/api/auth/login
+
+# Compare with direct backend response (bypasses CookieYes)
+# If you have direct backend access
+```
+
+### Issue: Login works but session doesn't persist
+
+This is a different issue - likely `appSession` cookie being blocked or not set with correct domain.
+
+**Verify:**
+1. Check DevTools → Application → Cookies
+2. Look for `appSession` cookie on `.dormway.app` domain
+3. Ensure it has `SameSite=None; Secure` attributes
+
+## Related Files
+
+**Codebase:**
+- `/services/dormway-lockedin/src/lib/auth0.ts` - Auth0 SDK configuration
+- `/services/dormway-lockedin/src/lib/consent.ts` - CookieYes integration
+- `/services/dormway-lockedin/.env.example` - Environment variable docs
+
+**Documentation:**
+- Engineering/Auth/Auth0-JWT-Claim-Schema - JWT structure
+- Operations/Bug Reports/2025-10-18-auth0-registration-regression - Related auth issues
+
+**External:**
+- [Auth0 SameSite Cookie Docs](https://auth0.com/docs/manage-users/cookies/samesite-cookie-attribute-changes)
+- [CookieYes Documentation](https://www.cookieyes.com/documentation/)
+
+## Pull Request
+
+**PR #290:** https://github.com/DormWay/dormway-platform/pull/290
+- Adds `sameSite: 'none'` to Auth0 client configuration
+- Documents environment variable requirements
+
+**Note:** The PR code changes are correct but won't fix the issue until CookieYes is configured.
+
+## Timeline
+
+- **2025-10-20:** Issue discovered via HAR file analysis
+- **2025-10-20:** Root cause identified (CookieYes blocking cookies)
+- **2025-10-20:** Solution documented and CookieYes configuration required
+
+## Next Steps
+
+1. ✅ Update CookieYes configuration (whitelist Auth0 cookies)
+2. ✅ Publish changes in CookieYes dashboard
+3. ⏳ Verify Set-Cookie headers appear in HAR file
+4. ⏳ Test login flow in Chrome/Brave production
+5. ⏳ Merge PR #290 (contains supporting code changes)
+
+---
+
+**Author:** Claude Code
+**Reviewed by:** Codex (identified CookieYes as root cause via HAR analysis)

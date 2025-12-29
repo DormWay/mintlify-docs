@@ -1,0 +1,240 @@
+---
+title: "Chrome Cache Issue   Log In Placeholder"
+description: "This issue has been **fixed** with a comprehensive cache invalidation solution specifically targeting the `/demo` auto-login flow."
+---
+
+# Chrome Cache Issue: "Log In" Placeholder Still Showing
+
+**Date**: 2025-10-29
+**Status**: ✅ Resolved (see update below)
+**Browser**: Windows Chrome only
+**User**: Demo user
+
+---
+
+## UPDATE: 2025-10-30 - Issue Resolved
+
+This issue has been **fixed** with a comprehensive cache invalidation solution specifically targeting the `/demo` auto-login flow.
+
+**Fix Documented**: [Windows Chrome Demo Auto-Login Cache Fix](/docs/operations/bug-reports/windows-chrome-demo-auto-login-cache-fix)
+
+**Summary**: Added multi-trigger cache invalidation on dashboard mount that detects:
+- Navigation from `/demo` page (referrer check)
+- Demo user login (email check)
+- Recent page load (time-based check < 2 seconds)
+
+**Files Changed**:
+- `services/dormway-lockedin/src/app/dashboard/home/page.tsx`
+
+**Impact**: Fixes stale data on first login for Windows Chrome `/demo` auto-login flow.
+
+---
+
+## Original Issue Report (2025-10-29)
+
+## Problem
+
+After fixing the placeholder filtering bug and optimizing caching, "Log In" still appears in Task Bank on Windows Chrome for the demo user, but NOT in other browsers.
+
+## Root Cause Analysis
+
+### Issue #1: Backend Not Restarted
+```bash
+docker ps | grep api-router
+# docker-api-router-1   Up 2 hours (unhealthy)
+```
+The api-router container has been running for 2 hours, **before the placeholder filtering fix was applied**. The new code exists locally but the container is still running the old code.
+
+### Issue #2: We Added Caching Back
+```typescript
+// OLD (before optimization):
+cache: 'no-store',  // ✅ Prevented ALL caching
+staleTime: 0,
+
+// NEW (after optimization):
+cache: 'default',   // ❌ Allows browser HTTP caching
+staleTime: 30 * 1000,
+```
+
+**What happened**:
+1. Demo user loaded page with OLD code → Chrome cached response with "Log In"
+2. We deployed fix + enabled caching
+3. Chrome serves CACHED old response (with "Log In")
+4. Other browsers either:
+   - Didn't cache it (different cache behavior)
+   - Cleared cache
+   - Haven't loaded the page yet
+
+---
+
+## Immediate Fix (3 Steps)
+
+### Step 1: Restart API Router with New Code
+```bash
+cd ~/Development/GitHub/dormway-platform
+./scripts/dev/dev-with-doppler.sh restart api-router
+
+# Verify new code is running:
+docker logs docker-api-router-1 | grep "Server started"
+```
+
+### Step 2: Add Cache Invalidation Header (Temporary)
+
+Edit `services/api-router/src/routes/dashboard-routes.ts` and add version header:
+
+```typescript
+// Add to dashboard composite endpoint response:
+res.setHeader('X-API-Version', '2.0.0'); // Bump on breaking changes
+res.setHeader('Cache-Control', 'public, max-age=30, must-revalidate');
+```
+
+This forces browsers to revalidate even if they have a cached copy.
+
+### Step 3: Hard Refresh on Chrome
+Tell demo user to do hard refresh:
+- **Windows**: `Ctrl + Shift + R` or `Ctrl + F5`
+- **Mac**: `Cmd + Shift + R`
+
+---
+
+## Long-term Solution
+
+### Option A: Add API Versioning
+```typescript
+// In useDashboardComposite.ts
+const API_VERSION = '2'; // Increment when response schema changes
+const url = proxyPath(`${endpoint}?${params}&v=${API_VERSION}`);
+```
+
+This cache-busts automatically when we make breaking changes.
+
+### Option B: Use ETag-Based Caching
+```typescript
+// Backend sends ETag header
+res.setHeader('ETag', hashOfResponse);
+
+// Frontend sends If-None-Match
+headers: {
+  'If-None-Match': previousETag
+}
+
+// Backend responds 304 Not Modified if match
+if (req.headers['if-none-match'] === currentETag) {
+  return res.status(304).end();
+}
+```
+
+### Option C: Conservative Caching for Initial Rollout
+```typescript
+// Temporarily use no-store until fix is verified
+cache: 'no-store', // Prevent caching during rollout
+
+// After 1-2 days, switch to:
+cache: 'default',
+staleTime: 30 * 1000,
+```
+
+---
+
+## Testing Steps
+
+### 1. Verify Backend Fix is Active
+```bash
+# Test endpoint directly
+curl "http://localhost:3001/dashboard/v1/composite?tab=home" \
+  -H "x-user-id: demo-user" \
+  | jq '.widgets[].content.dueSoon[]? | select(.title | contains("Log In"))'
+
+# Should return empty (no "Log In" assignments)
+```
+
+### 2. Test in Fresh Incognito Window
+```
+1. Open Windows Chrome in Incognito mode (Ctrl+Shift+N)
+2. Navigate to app
+3. Log in as demo user
+4. Check Task Bank
+5. "Log In" should NOT appear
+```
+
+### 3. Clear Cache and Test
+```
+1. Open Chrome DevTools (F12)
+2. Right-click refresh button
+3. Select "Empty Cache and Hard Reload"
+4. "Log In" should disappear
+```
+
+---
+
+## Why Only Windows Chrome?
+
+Chrome on different platforms can have different cache behavior:
+
+**Windows Chrome**:
+- More aggressive HTTP caching
+- Longer cache retention
+- Different disk cache implementation
+
+**Mac Chrome / Firefox / Safari**:
+- Different cache eviction policies
+- Might not have cached the response
+- Different cache storage limits
+
+---
+
+## Prevention for Future
+
+### 1. Add Cache-Control Headers
+```typescript
+// In dashboard endpoint handler:
+res.setHeader('Cache-Control', 'public, max-age=30, must-revalidate');
+//                                        ^^^^^^^ ^^^^^^^^^^^^^^^^
+//                                        30s TTL  Always revalidate
+```
+
+### 2. Version Query Parameter
+```typescript
+// Client side:
+const CACHE_VERSION = '2'; // Bump when schema changes
+const url = `${endpoint}?v=${CACHE_VERSION}`;
+```
+
+### 3. Monitoring
+```typescript
+// Log cache hits/misses
+console.log('[Dashboard] Cache status:', {
+  isCacheHit: response.headers.get('x-cache') === 'HIT',
+  age: response.headers.get('age'),
+  etag: response.headers.get('etag')
+});
+```
+
+---
+
+## Current Status
+
+- [ ] Restart api-router with new code
+- [ ] Verify "Log In" filtered in backend
+- [ ] Add cache-control headers
+- [ ] Test in Windows Chrome (hard refresh)
+- [ ] Verify in incognito mode
+- [ ] Monitor for 24 hours
+
+---
+
+## Related Issues
+
+- [Placeholder Assignment Filtering Bug](/docs/operations/bug-reports/placeholder-assignment-filtering-bug) - Original bug report
+- [Bug Analysis Summary - Dashboard Issues](/docs/operations/bug-reports/bug-analysis-summary-dashboard-issues) - Caching optimization
+
+---
+
+**Next Steps**:
+1. Restart api-router immediately
+2. Have demo user hard refresh (Ctrl+Shift+R)
+3. Consider reverting to `cache: 'no-store'` temporarily
+4. Add proper cache-control headers
+5. Implement API versioning
+
+**Tags**: #bug #caching #chrome #placeholder #urgent

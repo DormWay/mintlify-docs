@@ -1,0 +1,465 @@
+---
+title: "Prompt Management System"
+description: "DormWay now has a **Git-based prompt registry** for centralized LLM prompt management across all services. This replaces fragmented prompts scattered across..."
+---
+
+# Prompt Management System
+
+**Status**: Phase 1 Complete ✅
+**Epic**: DORM-467 - Centralized Prompt Management System
+**Last Updated**: 2025-01-14
+
+## Overview
+
+DormWay now has a **Git-based prompt registry** for centralized LLM prompt management across all services. This replaces fragmented prompts scattered across TypeScript files, Python files, and the Portkey dashboard.
+
+## Problem Solved
+
+### Before
+- ❌ 80+ LLM prompts scattered across 3 services
+- ❌ No Git version control for Portkey prompts (46 prompts)
+- ❌ Cannot track where prompts are used
+- ❌ Duplicate logic with copy-pasted variations
+- ❌ Difficult to test prompt changes before deployment
+- ❌ No systematic A/B testing
+
+### After (Phase 1)
+- ✅ Single source of truth in Git version control
+- ✅ 5 high-traffic prompts migrated and working
+- ✅ TypeScript and Python prompt loaders with tests
+- ✅ Validation system prevents invalid prompts
+- ✅ Usage tracking for all prompts
+- ✅ Pre-commit hooks ensure quality
+
+## Directory Structure
+
+```
+prompts/
+├── registry.json              # Central metadata registry
+├── schemas/
+│   └── registry-schema.json   # JSON schema for validation
+├── api-router/                # API Router prompts
+├── engine/                    # Engine (Temporal) prompts
+│   ├── syllabus-extraction.md
+│   ├── city-weather-context.md
+│   ├── student-context.md
+│   └── campus-events.md
+└── crews/                     # DormWay Crews agent/task prompts
+    └── student-priority-analyzer.md
+```
+
+## Quick Commands
+
+```bash
+# Validate prompt registry
+npm run prompts:validate
+
+# Install git hooks (validates prompts on commit)
+bash scripts/git-hooks/install.sh
+```
+
+## Migrated Prompts (Phase 1)
+
+| Prompt ID | Name | Provider | Service | Status |
+|-----------|------|----------|---------|--------|
+| `syllabus-extraction` | BrainGains Syllabus Extraction | OpenAI | Engine | ✅ Migrated |
+| `city-weather-context-processor` | City Weather Context | Anthropic | Engine | ✅ Migrated |
+| `student-context` | Student Daily Context | Anthropic | Engine | ✅ Migrated |
+| `campus-events` | Campus Events Processor | Anthropic | Engine | ✅ Migrated |
+| `student-priority-analyzer` | Student Priority Analyzer | OpenAI | Crews | ✅ Migrated |
+
+## Usage Examples
+
+### TypeScript (Engine, API Router)
+
+```typescript
+import { loadPrompt } from '@/shared/utils/prompt-loader';
+
+// Load and render a prompt
+const prompt = await loadPrompt('syllabus-extraction', {
+  SYLLABUS_CONTENT: extractedText
+});
+
+// Use with existing Portkey integration
+const response = await callHelicone('syllabus-extraction', {
+  SYLLABUS_CONTENT: extractedText
+});
+```
+
+**Available Functions**:
+- `loadPrompt(id, variables, options)` - Load and render prompt
+- `listPrompts(filters)` - List all prompts
+- `getPromptUsage(id)` - Get usage locations
+- `getPromptMetadata(id)` - Get metadata for prompt
+
+### Python (DormWay Crews)
+
+```python
+from shared.utils.prompt_loader import load_prompt
+
+# Load and render a prompt
+prompt = load_prompt('student-priority-analyzer', {
+    'current_datetime': datetime.now().isoformat(),
+    'student_profile': json.dumps(profile),
+    'dayplan_data': json.dumps(dayplan)
+})
+
+# Use with CrewAI agent
+agent = Agent(
+    role="Priority Analyzer",
+    goal=prompt,
+    backstory="Analyzes student priorities based on data",
+    llm=llm
+)
+```
+
+**Available Functions**:
+- `load_prompt(id, variables, validate=True)` - Load and render prompt
+- `list_prompts(provider, tag, used_in)` - List prompts
+- `get_prompt_usage(id)` - Get usage locations
+- `get_prompt_metadata(id)` - Get metadata
+
+## Adding a New Prompt
+
+### 1. Create Prompt File
+
+Create `prompts/engine/my-prompt.md`:
+
+```markdown
+---
+id: my-prompt
+name: My Prompt
+version: 1.0.0
+provider: openai
+model: gpt-4o-mini
+variables:
+  - name: input_data
+    type: string
+    required: true
+    description: The input data to process
+---
+
+You are a helpful assistant for the DormWay platform.
+
+Process this data: {{input_data}}
+
+Return valid JSON with your analysis.
+```
+
+### 2. Register in registry.json
+
+Add to `prompts/registry.json`:
+
+```json
+{
+  "id": "my-prompt",
+  "name": "My Prompt",
+  "description": "Brief description of what this prompt does",
+  "file": "engine/my-prompt.md",
+  "version": "1.0.0",
+  "provider": "openai",
+  "model": "gpt-4o-mini",
+  "usedIn": [
+    "services/engine/src/activities/my.activities.ts"
+  ],
+  "author": "Your Name",
+  "createdAt": "2025-01-14T00:00:00Z",
+  "updatedAt": "2025-01-14T00:00:00Z",
+  "tags": ["category", "use-case"],
+  "variables": [
+    {
+      "name": "input_data",
+      "type": "string",
+      "required": true,
+      "description": "The input data to process"
+    }
+  ]
+}
+```
+
+### 3. Validate
+
+```bash
+npm run prompts:validate
+```
+
+### 4. Use in Code
+
+```typescript
+const prompt = await loadPrompt('my-prompt', {
+  input_data: 'data to process'
+});
+```
+
+## Validation System
+
+The validation script (`scripts/validate-prompt-registry.js`) checks:
+
+- ✅ Registry JSON is valid and matches schema
+- ✅ All referenced prompt files exist
+- ✅ YAML frontmatter is valid
+- ✅ No duplicate prompt IDs
+- ✅ Variable definitions are complete
+- ✅ Version format is valid semver
+- ✅ Provider is in allowed list
+- ⚠️ Usage locations exist (warning only)
+
+## Git Hooks
+
+Pre-commit hook automatically validates prompts when:
+- `prompts/registry.json` is modified
+- Any `prompts/**/*.md` files are modified
+
+**Installation**:
+```bash
+bash scripts/git-hooks/install.sh
+```
+
+**Bypass** (emergency only):
+```bash
+git commit --no-verify
+```
+
+## Best Practices
+
+### Prompt Design
+- ✅ Use clear, specific instructions
+- ✅ Request JSON output format explicitly
+- ✅ Include examples when helpful
+- ✅ Document expected input/output
+- ✅ Consider edge cases and error handling
+
+### Variable Management
+- ✅ Use descriptive variable names (snake_case or camelCase)
+- ✅ Document each variable with type and description
+- ✅ Specify which variables are required
+- ✅ Provide default values where appropriate
+- ✅ Validate variable types at runtime
+
+### Versioning
+- ✅ Use semantic versioning (1.0.0)
+- ✅ Increment PATCH for bug fixes (1.0.1)
+- ✅ Increment MINOR for new features (1.1.0)
+- ✅ Increment MAJOR for breaking changes (2.0.0)
+- ✅ Update `updatedAt` timestamp when changing
+
+### Organization
+- ✅ Use kebab-case IDs (`my-prompt-name`)
+- ✅ Store prompts in service-specific directories
+- ✅ Keep `usedIn` array up to date
+- ✅ Add relevant tags for searchability
+- ✅ Group related prompts logically
+
+## Template Syntax
+
+Prompts use **Handlebars** (TypeScript) or **Jinja2** (Python) for templating:
+
+### Variables
+```handlebars
+Hello {{userName}}!
+```
+
+### Conditionals
+```handlebars
+{{#if premium}}
+You have premium access.
+{{else}}
+Upgrade to premium for more features.
+{{/if}}
+```
+
+### Loops
+```handlebars
+{{#each items}}
+- {{this.name}}: {{this.value}}
+{{/each}}
+```
+
+### Comments
+```handlebars
+{{! This is a comment and won't be rendered }}
+```
+
+## Implementation Details
+
+### TypeScript Loader
+- **File**: `services/shared/utils/prompt-loader.ts`
+- **Template Engine**: Handlebars
+- **Features**:
+  - YAML frontmatter parsing
+  - Variable type validation
+  - Default value application
+  - In-memory caching
+  - TypeScript types
+
+### Python Loader
+- **File**: `services/dormway-crews/shared/utils/prompt_loader.py`
+- **Template Engine**: Jinja2
+- **Features**:
+  - YAML frontmatter parsing
+  - Variable type validation
+  - Default value application
+  - In-memory caching
+  - Type hints
+
+### Backward Compatibility
+
+The system maintains **backward compatibility** with existing Portkey integration:
+
+- Each prompt includes `portkeyId` for mapping
+- `callHelicone()` function still works
+- Gradual migration path
+- No breaking changes to existing code
+
+## Roadmap
+
+### ✅ Phase 1: Foundation (COMPLETE)
+- [x] Directory structure
+- [x] TypeScript prompt loader with tests
+- [x] Python prompt loader with tests
+- [x] Migrate top 5 prompts
+- [x] Validation script
+- [x] Git hooks
+- [x] Documentation
+
+### 🔄 Phase 2: Portkey Sync (In Validation)
+- Status: Campus and city Engine prompts migrated to Git registry per 2025-11-15 worklog (DORM-469); Portkey sync script + GitHub Action pending production rollout.
+- [ ] Build Portkey sync script
+- [ ] Add GitHub Actions workflow
+- [ ] Migrate all 46 Engine Portkey prompts
+- [ ] Update Engine activities to use registry
+
+### 📋 Phase 3: Full Migration
+- [ ] Migrate all 13 DormWay Crews
+- [ ] Migrate remaining direct LLM calls
+- [ ] Usage tracking automation
+- [ ] Enhanced validation
+
+### 📊 Phase 4: Observability
+- [ ] Prompt analytics dashboard
+- [ ] A/B testing framework
+- [ ] Cost tracking per prompt
+- [ ] Performance monitoring
+
+## Troubleshooting
+
+### Validation Fails
+
+**Error**: "Prompt file not found"
+```bash
+# Check file path in registry.json matches actual file location
+ls -la prompts/engine/my-prompt.md
+```
+
+**Error**: "Invalid YAML frontmatter"
+```bash
+# Validate YAML syntax at https://www.yamllint.com/
+# Ensure proper formatting with correct indentation
+```
+
+**Error**: "Variable 'x' has wrong type"
+```typescript
+// Check variable types in code match registry definition
+// Ensure JSON strings are passed for object/array types
+```
+
+### Prompt Not Loading
+
+**Issue**: "Prompt not found in registry"
+```bash
+# Verify prompt ID in registry.json
+grep -r "\"id\": \"my-prompt\"" prompts/registry.json
+
+# Clear cache and retry (TypeScript)
+clearRegistryCache();
+
+# Clear cache and retry (Python)
+clear_registry_cache()
+```
+
+### Git Hook Not Running
+
+```bash
+# Reinstall hook
+bash scripts/git-hooks/install.sh
+
+# Verify hook is executable
+ls -la .git/hooks/pre-commit
+
+# Make executable if needed
+chmod +x .git/hooks/pre-commit
+```
+
+## Testing
+
+### Unit Tests
+
+**TypeScript**:
+```bash
+cd services/shared
+npm test
+```
+
+**Python**:
+```bash
+cd services/dormway-crews
+pytest tests/test_prompt_loader.py -v
+```
+
+### Integration Testing
+
+```bash
+# Test with actual prompt loading
+npm run prompts:validate
+
+# Test git hook
+git add prompts/
+git commit -m "test: validate prompts"
+```
+
+## Performance
+
+### Caching
+
+Both loaders implement in-memory caching:
+- Registry is cached after first load
+- Prompt files are cached after parsing
+- Cache can be cleared manually if needed
+
+### Benchmarks
+
+| Operation | TypeScript | Python |
+|-----------|-----------|--------|
+| First load | ~50ms | ~40ms |
+| Cached load | ~1ms | ~1ms |
+| Validation | ~100ms | ~80ms |
+
+## Security Considerations
+
+- ✅ No secrets in prompts (use environment variables)
+- ✅ Variable validation prevents injection
+- ✅ YAML parsing is safe (no code execution)
+- ✅ File paths are validated
+- ✅ Registry schema enforces structure
+
+## Related Documentation
+
+- DORM-467 - Epic: Centralized Prompt Management System
+- DORM-468 - Phase 1: Git-Based Registry Foundation
+- DORM-469 - Phase 2: Portkey Sync and Engine Migration
+- DORM-470 - Phase 3: Full Crew Migration
+- DORM-471 - Phase 4: Observability and A/B Testing
+- `prompts/README.md` - Quick reference guide
+- `CLAUDE.md` - Development commands and usage
+
+## Support
+
+For questions or issues:
+1. Check this documentation
+2. Run `npm run prompts:validate` for validation errors
+3. Review `prompts/README.md` for quick reference
+4. Ask in #engineering Slack channel
+
+---
+
+**Next Steps**: Begin Phase 2 migration of Portkey prompts to Git registry.

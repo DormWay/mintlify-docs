@@ -1,0 +1,232 @@
+---
+title: "Auth0 Post Registration Action Simplified"
+description: "This is a simplified Auth0 Post-Registration Action that works with the production architecture where:"
+---
+
+# Auth0 Post-Registration Action - Simplified Version (No API Calls)
+
+## Overview
+
+This is a simplified Auth0 Post-Registration Action that works with the production architecture where:
+
+1. **No API endpoints exist** for user creation in the deployed API Gateway
+2. **iOS app handles backend user creation** after registration
+3. **Only tracks events to Amplitude** for analytics
+4. **No database operations** during registration
+
+## Key Architecture Understanding
+
+- **No `/users/create` endpoint** in production API Gateway
+- **iOS app creates backend user** when it detects a new Auth0 user
+- **Backend UUID stored in app_metadata** for future logins
+- **Lambda Authorizer** handles all ID mapping
+
+## Simplified Post-Registration Action Code
+
+```javascript
+/**
+ * Handler that will be called during the execution of a PostUserRegistration flow.
+ * Simplified version that doesn't require API calls
+ *
+ * @param {Event} event - Details about the context and user that has registered.
+ * @param {PostUserRegistrationAPI} api - Methods and utilities to help change the behavior after a signup.
+ */
+exports.onExecutePostUserRegistration = async (event, api) => {
+  const { user } = event;
+  
+  console.log(`[Post-Registration Action] Processing registration for user: ${user.user_id}`);
+  
+  try {
+    // Track user registration in Amplitude (which syncs to Customer.io)
+    if (event.secrets.AMPLITUDE_API_KEY) {
+      // 1. Identify user in Amplitude
+      const identifyResponse = await fetch(
+        'https://api2.amplitude.com/identify',
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json'
+          },
+          body: JSON.stringify({
+            api_key: event.secrets.AMPLITUDE_API_KEY,
+            identification: [{
+              user_id: user.user_id, // Use Auth0 ID initially
+              user_properties: {
+                email: user.email,
+                first_name: user.given_name || '',
+                last_name: user.family_name || '',
+                full_name: user.name || user.nickname || '',
+                auth0_id: user.user_id,
+                signup_source: event.connection.name,
+                platform: 'auth0',
+                created_at: new Date().toISOString(),
+                email_verified: user.email_verified || false,
+                needs_backend_provisioning: true
+              }
+            }]
+          })
+        }
+      );
+
+      if (!identifyResponse.ok) {
+        console.error('[Post-Registration Action] Failed to identify user in Amplitude');
+        // Don't throw - allow registration to continue
+      }
+
+      // 2. Track registration event
+      const eventResponse = await fetch(
+        'https://api2.amplitude.com/2/httpapi',
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json'
+          },
+          body: JSON.stringify({
+            api_key: event.secrets.AMPLITUDE_API_KEY,
+            events: [{
+              user_id: user.user_id,
+              event_type: 'user_registered',
+              time: Date.now(),
+              event_properties: {
+                signup_method: event.connection.name,
+                ip_address: event.request.ip,
+                user_agent: event.request.userAgent,
+                source: 'auth0_action'
+              },
+              user_properties: {
+                email: user.email,
+                first_name: user.given_name || '',
+                last_name: user.family_name || '',
+                full_name: user.name || user.nickname || ''
+              }
+            }]
+          })
+        }
+      );
+
+      if (!eventResponse.ok) {
+        console.error('[Post-Registration Action] Failed to track registration event in Amplitude');
+        // Don't throw - allow registration to continue
+      }
+    }
+
+    console.log(`[Post-Registration Action] Successfully processed registration for user: ${user.user_id}`);
+
+  } catch (error) {
+    console.error('[Post-Registration Action] Error:', error);
+    // Don't throw - allow registration to continue even if tracking fails
+  }
+};
+```
+
+## How User Creation Works
+
+### 1. User Registers with Auth0
+- Auth0 creates authentication account
+- This action tracks the event in Amplitude
+- No backend user created yet
+
+### 2. User Logs In (First Time)
+- Post-Login Action detects no `backend_user_id` in app_metadata
+- Sets `needs_provisioning: true` in token
+- iOS app receives token
+
+### 3. iOS App Creates Backend User
+```swift
+// iOS detects needs_provisioning and creates backend user
+if tokenClaims["needs_provisioning"] == true {
+    // Create user in backend
+    let backendUser = await createBackendUser(auth0Id: auth0UserId)
+    
+    // Update Auth0 app_metadata with backend UUID
+    Auth0.users(token: managementToken)
+        .patch(auth0UserId, userMetadata: [:], appMetadata: [
+            "backend_user_id": backendUser.id,
+            "onboarding_status": "pending"
+        ])
+        .start { result in
+            // Handle result
+        }
+}
+```
+
+### 4. Subsequent Logins
+- Post-Login Action finds `backend_user_id` in app_metadata
+- Includes it in tokens
+- Normal authenticated flow continues
+
+## Required Auth0 Secrets
+
+- `AMPLITUDE_API_KEY` - Your Amplitude project API key
+
+Note: No `API_GATEWAY_URL` or `SYSTEM_API_KEY` needed!
+
+## Benefits of This Approach
+
+1. **No API Dependencies**: Registration doesn't depend on API availability
+2. **Simpler Architecture**: No need for system auth endpoints
+3. **Faster Registration**: No API calls means instant completion
+4. **Production Ready**: Works with existing infrastructure
+5. **Flexible Provisioning**: iOS app controls when/how backend user is created
+
+## User ID Flow
+
+```
+Registration: Auth0 ID only → Amplitude
+     ↓
+First Login: Auth0 ID → iOS detects no backend ID
+     ↓
+iOS Creates: Backend user with Auth0 ID reference
+     ↓
+iOS Updates: Auth0 app_metadata with backend UUID
+     ↓
+Future Logins: Auth0 ID + Backend UUID in tokens
+```
+
+## Amplitude Integration
+
+Events flow:
+1. **Amplitude** receives all events with Auth0 ID initially
+2. **Customer.io** receives data via Amplitude sync
+3. **Backend UUID** added to user profile when created
+4. **Future events** use backend UUID as primary identifier
+
+## Migration Steps
+
+1. **Deploy this simplified action** to Auth0
+2. **Ensure iOS app** handles backend user creation
+3. **Remove** unused `/users/create` endpoint from api-router
+4. **Test** full registration → login → provisioning flow
+
+## Testing Checklist
+
+- [ ] User registers with Auth0
+- [ ] Registration event tracked in Amplitude
+- [ ] First login shows `needs_provisioning: true`
+- [ ] iOS app creates backend user
+- [ ] iOS app updates Auth0 app_metadata
+- [ ] Next login includes backend UUID in tokens
+- [ ] API calls work with Lambda Authorizer
+
+## Comparison with Old Approach
+
+### Old (Broken) Approach:
+- Tried to call `/users/create` endpoint (doesn't exist in production)
+- Got 401 errors or timeouts
+- Complex system authentication required
+- Tight coupling between Auth0 and API
+
+### New (Simplified) Approach:
+- No API calls during registration
+- iOS app handles provisioning when ready
+- Loose coupling, more resilient
+- Works with existing production architecture
+
+## Notes
+
+- This aligns with how the production system actually works
+- The Lambda Authorizer handles all the complexity
+- iOS app is responsible for backend user creation
+- Much simpler and more reliable than trying to call non-existent endpoints

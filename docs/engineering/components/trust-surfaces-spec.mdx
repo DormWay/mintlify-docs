@@ -1,0 +1,362 @@
+---
+title: "trust surfaces spec"
+description: "status: spec last_reviewed: 2025-09-27 owner: engineering implementation_status: pending related_feature: today-vertical-slice component_type: ui_system"
+---
+
+# Trust Surfaces - Component Specification
+
+---
+status: spec
+last_reviewed: 2025-09-27
+owner: engineering
+implementation_status: pending
+related_feature: today-vertical-slice
+component_type: ui_system
+---
+
+## Overview
+
+Trust surfaces provide transparency into system claims through provenance tracking and confidence scoring. Every significant assertion in the app should expose how and when we determined that information.
+
+## Core Components
+
+### ProvenanceButton
+**Purpose**: Trigger for opening provenance details
+**Location**: Adjacent to claims ("All clear for 48h", "No conflicts")
+
+```typescript
+interface ProvenanceButtonProps {
+  claimId: string;
+  variant?: 'link' | 'icon' | 'button';
+  size?: 'sm' | 'md';
+  className?: string;
+}
+
+<ProvenanceButton
+  claimId="clear_for_48h"
+  variant="link"
+  size="sm"
+/>
+```
+
+**Rendering**:
+- Link variant: "Really?" text with subtle underline
+- Icon variant: Info icon with hover tooltip
+- Button variant: Bordered button for high-priority claims
+
+### ProvenancePanel
+**Purpose**: Detailed breakdown of claim evidence
+
+```typescript
+interface ProvenancePanelProps {
+  claimId: string;
+  isOpen: boolean;
+  onClose: () => void;
+  position?: 'popover' | 'drawer' | 'modal';
+  anchor?: HTMLElement;
+}
+
+interface ProvenanceData {
+  claim: string;
+  confidence: number;
+  lastChecked: Date;
+  sources: ProvenanceSource[];
+  checks: PerformedCheck[];
+  gaps: KnownGap[];
+  onRescan: () => Promise<void>;
+}
+```
+
+**Panel Sections**:
+1. **Header**: Claim summary with confidence score
+2. **Sources**: Chip grid with status indicators
+3. **Checks**: Bullet list of verification steps
+4. **Gaps**: Known limitations and missing data
+5. **Actions**: Re-scan and issue reporting
+
+### SourceChip
+**Purpose**: Individual data source representation
+
+```typescript
+interface SourceChipProps {
+  source: ProvenanceSource;
+  onClick?: () => void;
+  showDetails?: boolean;
+}
+
+interface ProvenanceSource {
+  type: 'Canvas' | 'Syllabus' | 'Calendar' | 'Email' | 'Manual';
+  status: 'ok' | 'stale' | 'error' | 'partial';
+  lastSyncAt: Date;
+  entityCount?: number;
+  summary: string;
+  confidence: number;
+}
+```
+
+**Visual States**:
+- Ok: Green background, checkmark icon
+- Stale: Amber background, clock icon
+- Error: Red background, warning icon
+- Partial: Gray background, minus icon
+
+### ConfidenceIndicator
+**Purpose**: Visual representation of system confidence
+
+```typescript
+interface ConfidenceIndicatorProps {
+  score: number; // 0-100
+  size?: 'sm' | 'md' | 'lg';
+  showLabel?: boolean;
+  variant?: 'bar' | 'circle' | 'text';
+}
+```
+
+**Confidence Ranges**:
+- 80-100%: High (green)
+- 60-79%: Medium (amber)
+- 40-59%: Low (red)
+- <40%: Very Low (red, warning icon)
+
+## Data Models
+
+### ClaimRegistry
+```typescript
+interface ClaimDefinition {
+  id: string;
+  description: string;
+  requiredSources: SourceType[];
+  minConfidence: number;
+  freshnessCriteria: FreshnessCriteria;
+}
+
+// Example claims
+const CLAIMS: Record<string, ClaimDefinition> = {
+  clear_for_48h: {
+    id: 'clear_for_48h',
+    description: 'No assignments or events in next 48 hours',
+    requiredSources: ['Canvas', 'Calendar', 'Syllabus'],
+    minConfidence: 70,
+    freshnessCriteria: { maxAge: 30 * 60 * 1000 }, // 30 minutes
+  },
+  no_conflicts: {
+    id: 'no_conflicts',
+    description: 'No scheduling conflicts detected',
+    requiredSources: ['Calendar', 'LMS'],
+    minConfidence: 80,
+    freshnessCriteria: { maxAge: 15 * 60 * 1000 }, // 15 minutes
+  },
+};
+```
+
+### ProvenanceEngine
+```typescript
+class ProvenanceEngine {
+  async evaluateClaim(claimId: string): Promise<ProvenanceData> {
+    const definition = CLAIMS[claimId];
+    const sources = await this.fetchSources(definition.requiredSources);
+    const checks = await this.performChecks(definition, sources);
+    const confidence = this.calculateConfidence(checks, sources);
+
+    return {
+      claim: definition.description,
+      confidence,
+      lastChecked: new Date(),
+      sources,
+      checks,
+      gaps: this.identifyGaps(definition.requiredSources, sources),
+      onRescan: () => this.rescanSources(definition.requiredSources),
+    };
+  }
+
+  private calculateConfidence(
+    checks: PerformedCheck[],
+    sources: ProvenanceSource[]
+  ): number {
+    // Weighted scoring based on:
+    // - Source freshness (exponential decay)
+    // - Source coverage (percentage of required sources)
+    // - Source reliability (historical accuracy)
+    // - Check success rate
+  }
+}
+```
+
+## Integration Points
+
+### Existing Components
+Update existing claim components to include provenance:
+
+```typescript
+// Before
+<DashboardCard>
+  <Text>All clear for 48 hours</Text>
+</DashboardCard>
+
+// After
+<DashboardCard>
+  <Flex items="center" gap="2">
+    <Text>All clear for 48 hours</Text>
+    <ProvenanceButton claimId="clear_for_48h" />
+  </Flex>
+</DashboardCard>
+```
+
+### Dashboard Claims
+- "All clear" status
+- Conflict detection results
+- Assignment due date accuracy
+- Event location confidence
+- Syllabus parsing results
+
+### Schedule Page Claims
+- "No conflicts detected"
+- Event timing accuracy
+- Location verification status
+- Instructor contact info confidence
+
+## Behavioral Specifications
+
+### Opening Provenance Panel
+1. User clicks/taps ProvenanceButton
+2. System fetches latest provenance data (with loading state)
+3. Panel opens with smooth transition
+4. Focus moves to panel for keyboard navigation
+5. Panel auto-closes on outside click or ESC key
+
+### Re-scanning Sources
+1. User clicks "Re-scan now" button
+2. Button shows loading spinner
+3. System triggers fresh data fetch from all sources
+4. Optimistic UI updates show "Scanning..." states
+5. Panel updates with new timestamps and confidence
+6. Success/error notifications appear
+
+### Source Chip Interaction
+1. User clicks source chip
+2. Detailed modal/popover opens showing:
+   - Last sync timestamp
+   - Number of items checked
+   - Specific entities found/missed
+   - Error details if applicable
+   - Direct link to source if available
+
+## Error Handling
+
+### Failed Source Checks
+```typescript
+interface SourceError {
+  type: 'timeout' | 'auth' | 'rate_limit' | 'server_error';
+  message: string;
+  retryable: boolean;
+  nextRetryAt?: Date;
+}
+```
+
+Display strategy:
+- Timeout: "Canvas didn't respond (trying again in 5min)"
+- Auth: "Need to reconnect Canvas account"
+- Rate limit: "Canvas rate limited (retry in 1h)"
+- Server error: "Canvas is down (check status page)"
+
+### Confidence Degradation
+When confidence drops below thresholds:
+- Show amber/red warning indicators
+- Explain why confidence is low
+- Suggest actions to improve confidence
+- Never claim absolute certainty
+
+### Stale Data
+- Mark sources as stale after freshness window
+- Reduce confidence score for old data
+- Prompt user to refresh when opening panel
+- Queue automatic refreshes in background
+
+## Performance Considerations
+
+### Caching Strategy
+```typescript
+// Cache provenance data with TTL
+const provenanceCache = new Map<string, {
+  data: ProvenanceData;
+  expiresAt: Date;
+}>();
+
+// Batch source checks to reduce API calls
+const sourceChecker = new BatchProcessor({
+  batchSize: 10,
+  maxWaitTime: 500,
+});
+```
+
+### Progressive Loading
+1. Show cached confidence score immediately
+2. Display "Checking..." state for stale data
+3. Update UI incrementally as sources respond
+4. Prioritize user-visible claims over background checks
+
+### Background Refresh
+- Refresh high-priority claims every 15 minutes
+- Refresh medium-priority claims every hour
+- Refresh low-priority claims every 4 hours
+- Respect user's device battery and network conditions
+
+## Accessibility
+
+### Screen Reader Support
+- Provenance buttons have descriptive aria-labels
+- Panel content uses proper heading hierarchy
+- Source status conveyed through text, not just color
+- Live regions announce confidence changes
+
+### Keyboard Navigation
+- Tab order: Button → Panel → Sources → Actions
+- Arrow keys navigate between source chips
+- Enter activates buttons and links
+- ESC closes panel and returns focus
+
+### Visual Design
+- High contrast mode support
+- Respect reduced motion preferences
+- Color-blind friendly status indicators
+- Consistent focus indicators
+
+## Testing Requirements
+
+### Unit Tests
+- Confidence calculation algorithms
+- Source status determination
+- Cache invalidation logic
+- Error handling scenarios
+
+### Integration Tests
+- Panel opening/closing behavior
+- Re-scan functionality
+- Source chip interactions
+- Keyboard navigation flows
+
+### E2E Tests
+- Full provenance flow from claim to source details
+- Cross-browser compatibility
+- Mobile touch interactions
+- Performance under slow network conditions
+
+## Monitoring & Analytics
+
+### Key Metrics
+- Provenance panel open rate by claim type
+- Re-scan usage frequency
+- Source reliability over time
+- User trust indicators (reduced double-checking)
+
+### Error Tracking
+- Source fetch failures by type
+- Confidence calculation errors
+- UI interaction failures
+- Performance bottlenecks
+
+### A/B Testing
+- Different confidence display formats
+- Panel layout variations
+- Source chip designs
+- Re-scan button placement

@@ -1,0 +1,869 @@
+---
+title: "LLM Integration"
+description: "import { callPortkeyPrompt, callLLMDirect, callClaudeWithDocument, loadPrompt, getPromptMetadata, } from '@dormway/core/llm';"
+---
+
+# LLM Integration
+
+## Overview
+
+**@dormway/core/llm** provides centralized LLM integration with Git-based prompt management, Portkey observability, and multi-provider support.
+
+**Purpose**: Standardize LLM interactions across all services with version-controlled prompts, automatic observability, and consistent error handling.
+
+**Location**: `@dormway/core/llm`
+
+---
+
+## Installation
+
+```typescript
+import {
+  callPortkeyPrompt,
+  callLLMDirect,
+  callClaudeWithDocument,
+  loadPrompt,
+  getPromptMetadata,
+} from '@dormway/core/llm';
+```
+
+---
+
+## Architecture
+
+### Git-Based Prompt Registry
+
+All prompts are stored in **Git** (not Portkey directly) for version control and collaboration:
+
+```
+prompts/
+├── registry.json              # Central metadata registry
+├── schemas/
+│   └── registry-schema.json   # JSON schema for validation
+├── api-router/                # API Router prompts
+├── engine/                    # Engine (Temporal) prompts
+└── crews/                     # DormWay Crews agent/task prompts
+```
+
+**Workflow**:
+1. Create prompt in Git (Markdown with YAML frontmatter)
+2. Register in `registry.json`
+3. Sync to Portkey via `npm run prompts:sync`
+4. Use in code with `callPortkeyPrompt()`
+
+---
+
+## Prompt Management
+
+### Prompt File Format
+
+Each prompt is a Markdown file with **YAML frontmatter**:
+
+```markdown
+---
+id: syllabus-extraction
+name: Syllabus Extraction
+version: 1.0.0
+provider: openai
+model: gpt-4o-mini
+variables:
+  - name: SYLLABUS_CONTENT
+    type: string
+    required: true
+    description: Raw text extracted from syllabus PDF
+  - name: current_date
+    type: string
+    required: false
+    description: ISO date for context
+---
+
+You are an expert at extracting structured information from syllabi.
+
+Extract course information from the following syllabus:
+
+{{SYLLABUS_CONTENT}}
+
+Current date: {{current_date}}
+
+Return JSON with: course_name, instructor, office_hours, grading_policy, assignments.
+```
+
+**Frontmatter Fields**:
+- `id` - Unique prompt identifier (kebab-case)
+- `name` - Display name
+- `version` - Semver (1.0.0)
+- `provider` - LLM provider (openai, anthropic, google)
+- `model` - Model name (gpt-4o-mini, claude-opus-4-1)
+- `variables` - Template variable definitions
+
+### Registry Structure
+
+`prompts/registry.json` contains metadata for all prompts:
+
+```json
+{
+  "version": "1.0.0",
+  "prompts": [
+    {
+      "id": "syllabus-extraction",
+      "name": "Syllabus Extraction",
+      "description": "Extract structured course information from syllabi",
+      "file": "engine/syllabus-extraction.md",
+      "version": "1.0.0",
+      "provider": "openai",
+      "model": "gpt-4o-mini",
+      "portkeyId": "pp-syllabus-ext-a1b2c3",
+      "usedIn": [
+        "services/engine/src/activities/syllabus.activities.ts"
+      ],
+      "author": "Platform Team",
+      "createdAt": "2025-01-14T00:00:00Z",
+      "updatedAt": "2025-11-23T00:00:00Z",
+      "tags": ["syllabus", "extraction", "courses"]
+    }
+  ]
+}
+```
+
+---
+
+## API Reference
+
+### callPortkeyPrompt
+
+Call LLM using a **managed prompt** from Git registry.
+
+**Signature**:
+```typescript
+callPortkeyPrompt<T>(
+  promptId: string,
+  inputs: Record<string, unknown>,
+  metadata?: PortkeyMetadata
+): Promise<T>
+```
+
+**Parameters**:
+- `promptId` - Prompt ID from registry
+- `inputs` - Variables to pass to prompt template
+- `metadata` - Observability metadata (userId, feature, workflow, etc.)
+
+**Returns**: Parsed JSON response
+
+**Examples**:
+
+**Extract syllabus information**:
+```typescript
+import { callPortkeyPrompt } from '@dormway/core/llm';
+
+const analysis = await callPortkeyPrompt<SyllabusAnalysis>(
+  'syllabus-extraction',
+  {
+    SYLLABUS_CONTENT: extractedText,
+  },
+  {
+    userId: 'user-123',
+    feature: 'syllabus-upload',
+    workflow: 'syllabus-processing',
+  }
+);
+
+console.log(analysis.course_name);
+console.log(analysis.instructor);
+console.log(analysis.assignments);
+```
+
+**Generate dayplan with context**:
+```typescript
+const dayplan = await callPortkeyPrompt<DayPlanResponse>(
+  'dayplan-generation',
+  {
+    STUDENT_NAME: 'Alice',
+    CURRENT_DATE: '2025-11-23',
+    COURSES: JSON.stringify(courses),
+    WEATHER: JSON.stringify(weather),
+    ASSIGNMENTS: JSON.stringify(assignments),
+  },
+  {
+    userId: studentId,
+    feature: 'dayplan-generation',
+    workflowId: 'student-watcher-' + studentId,
+  }
+);
+```
+
+**Campus enrichment**:
+```typescript
+const enriched = await callPortkeyPrompt<CampusEnrichment>(
+  'campus-metadata-comprehensive',
+  {
+    CAMPUS_NAME: 'University of Michigan',
+    CURRENT_DATE: '2025-11-23',
+  }
+);
+```
+
+---
+
+### callLLMDirect
+
+Call LLM **without using managed prompts** (for ad-hoc queries).
+
+**Signature**:
+```typescript
+callLLMDirect(
+  systemPrompt: string,
+  userPrompt: string,
+  options?: DirectLLMOptions
+): Promise<string>
+```
+
+**Options**:
+```typescript
+interface DirectLLMOptions {
+  temperature?: number;              // 0.0 - 2.0 (default: 0.7)
+  max_tokens?: number;               // Max response tokens (default: 4000)
+  max_completion_tokens?: number;    // For GPT-5 models
+  response_format?: { type: 'json_object' | 'text' };
+  metadata?: PortkeyMetadata;
+  model?: string;                    // Model override
+}
+```
+
+**Examples**:
+
+**Simple Q&A**:
+```typescript
+import { callLLMDirect } from '@dormway/core/llm';
+
+const response = await callLLMDirect(
+  'You are a helpful assistant.',
+  'Explain quantum computing in simple terms.',
+  {
+    model: 'gpt-4o-mini',
+    temperature: 0.7,
+  }
+);
+```
+
+**JSON response**:
+```typescript
+const analysis = await callLLMDirect(
+  'You are a data analyst. Always respond with valid JSON.',
+  `Analyze this data: ${JSON.stringify(data)}`,
+  {
+    model: 'gpt-4o-mini',
+    response_format: { type: 'json_object' },
+    temperature: 0.1,
+  }
+);
+
+const parsed = JSON.parse(analysis);
+```
+
+**With metadata for observability**:
+```typescript
+const response = await callLLMDirect(
+  systemPrompt,
+  userPrompt,
+  {
+    model: 'claude-opus-4-1',
+    temperature: 0.3,
+    metadata: {
+      userId: 'user-123',
+      purpose: 'campus-analysis',
+      workflow: 'campus-sync',
+    },
+  }
+);
+```
+
+---
+
+### callClaudeWithDocument
+
+Call Claude API with **document support** (PDFs, images, etc.).
+
+**Signature**:
+```typescript
+callClaudeWithDocument(
+  systemPrompt: string,
+  userPrompt: string,
+  documentData: string,
+  documentType: string,
+  options?: DirectLLMOptions
+): Promise<string>
+```
+
+**Parameters**:
+- `systemPrompt` - System prompt
+- `userPrompt` - User prompt text
+- `documentData` - **Base64 encoded** document data
+- `documentType` - MIME type (e.g., `'application/pdf'`, `'image/png'`)
+- `options` - Additional options
+
+**Examples**:
+
+**Analyze PDF syllabus**:
+```typescript
+import { callClaudeWithDocument } from '@dormway/core/llm';
+import * as fs from 'fs';
+
+const pdfBuffer = fs.readFileSync('syllabus.pdf');
+const base64Pdf = pdfBuffer.toString('base64');
+
+const analysis = await callClaudeWithDocument(
+  'You are an expert at analyzing course syllabi.',
+  'Extract key information from this syllabus: course name, instructor, grading policy, assignments.',
+  base64Pdf,
+  'application/pdf',
+  {
+    model: 'claude-opus-4-1-20250805',
+    temperature: 0.1,
+  }
+);
+```
+
+**Analyze image**:
+```typescript
+const imageBuffer = fs.readFileSync('chart.png');
+const base64Image = imageBuffer.toString('base64');
+
+const description = await callClaudeWithDocument(
+  'You are a data visualization expert.',
+  'Describe this chart and extract the key insights.',
+  base64Image,
+  'image/png',
+  {
+    model: 'claude-opus-4-1',
+    max_tokens: 2000,
+  }
+);
+```
+
+---
+
+### loadPrompt
+
+Load and render a prompt from Git registry **without calling LLM**.
+
+**Signature**:
+```typescript
+loadPrompt(
+  promptId: string,
+  variables?: Record<string, unknown>
+): Promise<string>
+```
+
+**Returns**: Rendered prompt text (after Handlebars templating)
+
+**Example**:
+```typescript
+import { loadPrompt } from '@dormway/core/llm';
+
+const prompt = await loadPrompt('campus-metadata-comprehensive', {
+  CAMPUS_NAME: 'University of Michigan',
+  CURRENT_DATE: '2025-11-23',
+});
+
+console.log(prompt);
+// "You are an expert at analyzing universities..."
+// (fully rendered prompt)
+
+// Use with external LLM call
+const response = await someExternalLLMCall(prompt);
+```
+
+---
+
+### getPromptMetadata
+
+Get metadata for a specific prompt.
+
+**Signature**:
+```typescript
+getPromptMetadata(promptId: string): Promise<PromptMetadata>
+```
+
+**Returns**:
+```typescript
+interface PromptMetadata {
+  id: string;
+  name?: string;
+  file?: string;
+  version?: string;
+  provider?: string;
+  portkeyId?: string;
+  variables?: Array<{
+    name: string;
+    type: string;
+    required?: boolean;
+    description?: string;
+  }>;
+}
+```
+
+**Example**:
+```typescript
+import { getPromptMetadata } from '@dormway/core/llm';
+
+const metadata = await getPromptMetadata('syllabus-extraction');
+
+console.log(metadata.name);        // "Syllabus Extraction"
+console.log(metadata.portkeyId);   // "pp-syllabus-ext-a1b2c3"
+console.log(metadata.version);     // "1.0.0"
+console.log(metadata.variables);   // Array of variable definitions
+```
+
+---
+
+## Common Patterns
+
+### Pattern 1: Managed Prompt with Context
+
+```typescript
+import { callPortkeyPrompt } from '@dormway/core/llm';
+import { DayPlanDataService } from '@dormway/core';
+import { createStructuredLogger } from '@dormway/core/logger';
+
+const logger = createStructuredLogger({ service: 'engine' });
+
+async function generateDayPlan(userId: string, date: string) {
+  const service = new DayPlanDataService({ pool, logger });
+
+  // Fetch all data in parallel
+  const [context, courses, weather] = await Promise.all([
+    service.getStudentContext(userId),
+    service.getEnrolledCourses(userId),
+    service.getWeatherForStudent(userId, date),
+  ]);
+
+  // Call LLM with managed prompt
+  const dayplan = await callPortkeyPrompt<DayPlanResponse>(
+    'dayplan-generation',
+    {
+      STUDENT_NAME: context.name,
+      CURRENT_DATE: date,
+      COURSES: JSON.stringify(courses),
+      WEATHER: JSON.stringify(weather),
+    },
+    {
+      userId,
+      feature: 'dayplan-generation',
+      workflowId: `student-watcher-${userId}`,
+    }
+  );
+
+  return dayplan;
+}
+```
+
+### Pattern 2: Direct LLM Call for Simple Task
+
+```typescript
+import { callLLMDirect } from '@dormway/core/llm';
+
+async function summarizeText(text: string): Promise<string> {
+  return await callLLMDirect(
+    'You are a helpful summarization assistant.',
+    `Summarize this text in 2-3 sentences:\n\n${text}`,
+    {
+      model: 'gpt-4o-mini',
+      temperature: 0.5,
+      max_tokens: 200,
+    }
+  );
+}
+```
+
+### Pattern 3: Document Processing
+
+```typescript
+import { callClaudeWithDocument } from '@dormway/core/llm';
+import { DatabaseServiceFactory } from '../services/database';
+
+async function processSyllabusPDF(
+  studentId: string,
+  courseId: string,
+  pdfBuffer: Buffer
+): Promise<SyllabusAnalysis> {
+  const base64Pdf = pdfBuffer.toString('base64');
+
+  // Extract structured data from PDF
+  const analysisText = await callClaudeWithDocument(
+    'You are an expert at analyzing course syllabi. Return valid JSON only.',
+    'Extract course information: name, instructor, office hours, grading policy, assignments, due dates.',
+    base64Pdf,
+    'application/pdf',
+    {
+      model: 'claude-opus-4-1-20250805',
+      temperature: 0.1,
+      response_format: { type: 'json_object' },
+      metadata: {
+        userId: studentId,
+        feature: 'syllabus-upload',
+      },
+    }
+  );
+
+  const analysis = JSON.parse(analysisText);
+
+  // Store in database
+  const db = DatabaseServiceFactory.getInstance();
+  await db.storeSyllabusAnalysis(studentId, courseId, analysis);
+
+  return analysis;
+}
+```
+
+### Pattern 4: Retry with Fallback Model
+
+```typescript
+import { callPortkeyPrompt } from '@dormway/core/llm';
+
+async function callWithFallback<T>(
+  promptId: string,
+  inputs: Record<string, unknown>
+): Promise<T> {
+  try {
+    // Try primary model
+    return await callPortkeyPrompt<T>(promptId, inputs);
+  } catch (error) {
+    console.error('Primary model failed, trying fallback', error);
+
+    // Fallback to cheaper model
+    return await callPortkeyPrompt<T>(`${promptId}-mini`, inputs);
+  }
+}
+```
+
+### Pattern 5: Batch Processing
+
+```typescript
+import { callPortkeyPrompt } from '@dormway/core/llm';
+
+async function enrichCampuses(campusIds: string[]): Promise<void> {
+  const batchSize = 5;
+
+  for (let i = 0; i < campusIds.length; i += batchSize) {
+    const batch = campusIds.slice(i, i + batchSize);
+
+    // Process batch in parallel
+    await Promise.all(
+      batch.map(async (campusId) => {
+        const campus = await getCampus(campusId);
+
+        const enriched = await callPortkeyPrompt('campus-enrichment', {
+          CAMPUS_NAME: campus.name,
+          CAMPUS_CITY: campus.city,
+        });
+
+        await saveCampusEnrichment(campusId, enriched);
+      })
+    );
+
+    // Rate limiting
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+}
+```
+
+---
+
+## Environment Variables
+
+**Required**:
+- `PORTKEY_API_KEY` - Portkey API key (for all LLM calls)
+
+**Provider-Specific** (for direct calls):
+- `OPENAI_API_KEY` - OpenAI API key
+- `ANTHROPIC_API_KEY` - Anthropic API key
+- `GOOGLE_GEMINI_API_KEY` - Google Gemini API key
+
+**Optional**:
+- `PORTKEY_CONFIG` - Portkey config ID (default: `pc-dormwa-82c3e9`)
+
+---
+
+## Metadata & Observability
+
+**Portkey automatically tracks**:
+- Request/response times
+- Token usage
+- Model and provider
+- Success/failure rates
+- Custom metadata
+
+**Custom Metadata**:
+```typescript
+interface PortkeyMetadata {
+  userId?: string;           // User identifier
+  userEmail?: string;        // User email
+  deviceId?: string;         // Device identifier
+  purpose?: string;          // Purpose of call
+  workflow?: string;         // Workflow name
+  student_id?: string;       // Student ID
+  sessionId?: string;        // Session ID
+  workflowId?: string;       // Temporal workflow ID
+  activityId?: string;       // Temporal activity ID
+  environment?: string;      // Environment override
+  feature?: string;          // Feature name
+  [key: string]: unknown;    // Custom fields
+}
+```
+
+**Example**:
+```typescript
+const response = await callPortkeyPrompt(
+  'dayplan-generation',
+  inputs,
+  {
+    userId: 'user-123',
+    feature: 'dayplan',
+    workflow: 'student-watcher',
+    workflowId: 'student-watcher-user-123',
+    environment: 'production',
+    custom_field: 'custom_value',
+  }
+);
+```
+
+---
+
+## Error Handling
+
+**Automatic Retries** (for Claude document calls):
+```typescript
+// Automatically retries 502, 503, 504, 429 errors up to 3 times
+const response = await callClaudeWithDocument(
+  systemPrompt,
+  userPrompt,
+  documentData,
+  'application/pdf'
+);
+```
+
+**JSON Parsing Fallback**:
+```typescript
+// If LLM returns invalid JSON, returns error object instead of throwing
+const result = await callPortkeyPrompt<MyType>('prompt-id', inputs);
+
+if ('_error' in result && result._error === 'JSON_PARSING_FAILED') {
+  console.error('LLM returned invalid JSON:', result._raw);
+  // Handle gracefully
+}
+```
+
+**Manual Error Handling**:
+```typescript
+import { callPortkeyPrompt } from '@dormway/core/llm';
+import { DatabaseError } from '@dormway/core/errors';
+
+try {
+  const response = await callPortkeyPrompt('prompt-id', inputs);
+  return response;
+} catch (error) {
+  logger.error('llm.call.failed', 'LLM call failed', {
+    error,
+    metadata: { promptId: 'prompt-id' },
+  });
+
+  throw new DatabaseError('Failed to process LLM request', {
+    originalError: String(error),
+  });
+}
+```
+
+---
+
+## Model Selection
+
+**Model Naming Patterns**:
+- **OpenAI**: `gpt-4o-mini`, `gpt-4o`, `gpt-5`, `o1-preview`, `o1-mini`
+- **Anthropic**: `claude-opus-4-1`, `claude-opus-4-1-20250805`, `claude-sonnet-3-5`
+- **Google**: `gemini-pro`, `gemini-1.5-pro`
+
+**Provider Auto-Detection** (in `callLLMDirect`):
+```typescript
+// Automatically determines provider from model name
+callLLMDirect(systemPrompt, userPrompt, { model: 'gpt-4o-mini' });     // → OpenAI
+callLLMDirect(systemPrompt, userPrompt, { model: 'claude-opus-4-1' }); // → Anthropic
+callLLMDirect(systemPrompt, userPrompt, { model: 'gemini-pro' });      // → Google
+```
+
+---
+
+## Prompt Versioning
+
+**Semantic Versioning**:
+- **MAJOR**: Breaking changes (response structure, variable names)
+- **MINOR**: New features (new fields, improvements)
+- **PATCH**: Bug fixes (clarifications, typo fixes)
+
+**Example**:
+```yaml
+# v1.0.0 - Initial version
+---
+id: syllabus-extraction
+version: 1.0.0
+---
+
+# v1.1.0 - Add optional "prerequisites" field
+---
+id: syllabus-extraction
+version: 1.1.0
+---
+
+# v2.0.0 - Breaking: Change response structure
+---
+id: syllabus-extraction
+version: 2.0.0
+---
+```
+
+**In Code**:
+```typescript
+// Use specific version if needed
+const metadata = await getPromptMetadata('syllabus-extraction');
+console.log(metadata.version); // "2.0.0"
+
+// Version-specific handling
+if (metadata.version?.startsWith('2.')) {
+  // Handle v2 response structure
+} else {
+  // Handle v1 response structure
+}
+```
+
+---
+
+## Best Practices
+
+### ✅ Do
+
+- **Use managed prompts** for production features (version control!)
+- **Add descriptive metadata** (userId, feature, workflow)
+- **Validate prompt responses** (check for required fields)
+- **Use appropriate models** (gpt-4o-mini for speed, claude-opus for quality)
+- **Set temperature correctly** (0.1 for structured output, 0.7 for creative)
+- **Version prompts carefully** (increment when changing)
+- **Test prompts locally** before committing
+- **Handle JSON parsing errors** gracefully
+- **Log LLM calls** with context
+
+### ❌ Don't
+
+- **Don't hardcode prompts** in code (use registry)
+- **Don't skip metadata** (hurts observability)
+- **Don't ignore versioning** (breaks compatibility)
+- **Don't use high temperature** for JSON responses (unreliable)
+- **Don't expose API keys** in code
+- **Don't retry infinitely** (set max retries)
+- **Don't trust LLM output** without validation
+- **Don't forget rate limiting** for batch operations
+
+---
+
+## Testing
+
+### Mock LLM Calls
+
+```typescript
+// __tests__/dayplan.test.ts
+import { callPortkeyPrompt } from '@dormway/core/llm';
+
+jest.mock('@dormway/core/llm');
+
+describe('DayPlan Generation', () => {
+  beforeEach(() => {
+    (callPortkeyPrompt as jest.Mock).mockResolvedValue({
+      dayplan: {
+        date: '2025-11-23',
+        events: [],
+        insights: 'Test insights',
+      },
+    });
+  });
+
+  it('should generate dayplan', async () => {
+    const result = await generateDayPlan('user-123', '2025-11-23');
+
+    expect(callPortkeyPrompt).toHaveBeenCalledWith(
+      'dayplan-generation',
+      expect.objectContaining({
+        STUDENT_NAME: expect.any(String),
+        CURRENT_DATE: '2025-11-23',
+      }),
+      expect.objectContaining({
+        userId: 'user-123',
+      })
+    );
+
+    expect(result.dayplan.date).toBe('2025-11-23');
+  });
+});
+```
+
+---
+
+## Troubleshooting
+
+### Problem: "No Portkey ID found for prompt"
+
+**Cause**: Prompt not synced to Portkey.
+
+**Solution**:
+```bash
+npm run prompts:sync
+```
+
+### Problem: "PORTKEY_API_KEY environment variable is required"
+
+**Cause**: Missing Portkey API key.
+
+**Solution**: Set in Doppler or `.env`:
+```bash
+PORTKEY_API_KEY=your-api-key
+```
+
+### Problem: LLM returns invalid JSON
+
+**Cause**: Model didn't follow JSON format instruction.
+
+**Solution**: Use lower temperature and add JSON instruction:
+```typescript
+const response = await callLLMDirect(
+  'You are a data analyst. You MUST respond with valid JSON only. No markdown, no explanations.',
+  userPrompt,
+  {
+    temperature: 0.1,  // Lower temperature for structured output
+    response_format: { type: 'json_object' },
+  }
+);
+```
+
+### Problem: Slow LLM responses
+
+**Cause**: Using slow model or high max_tokens.
+
+**Solution**: Use faster model:
+```typescript
+// ❌ Slow
+{ model: 'gpt-4o' }  // ~5-10s
+
+// ✅ Fast
+{ model: 'gpt-4o-mini' }  // ~1-2s
+```
+
+---
+
+## Related Documentation
+
+- [DormWay Core Library (@dormway-core)](/docs/engineering/technical/dormway-core-library-dormway-core) - Main overview
+- [Structured Logger](/docs/engineering/technical/dormway-core/utilities/structured-logger) - Logging LLM calls
+- [Error Handling](/docs/engineering/technical/dormway-core/utilities/error-handling) - Error handling patterns
+- [Temporal Adapter](/docs/engineering/technical/dormway-core/adapters/temporal-adapter) - Workflow integration
+
+---
+
+**Last Updated**: 2025-11-23
+**Maintainer**: Platform Team

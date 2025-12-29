@@ -1,0 +1,167 @@
+---
+title: "Postmark Webhook S3 Migration"
+description: "This document outlines the migration of Postmark webhook attachment storage from Supabase to AWS S3, removing the last remaining Supabase dependency from the..."
+---
+
+# Postmark Webhook S3 Migration
+
+## Overview
+
+This document outlines the migration of Postmark webhook attachment storage from Supabase to AWS S3, removing the last remaining Supabase dependency from the webhook system.
+
+## Implementation Status
+
+### Completed ✅
+
+1. **S3 Infrastructure** (`s3-webhooks.tf`)
+   - Created separate buckets for syllabus and BrainGains documents
+   - Enabled versioning and encryption
+   - Configured lifecycle policies for cost optimization
+   - Set up CORS for direct uploads
+   - Created IAM policies for ECS task access
+
+2. **S3 Client Service** (`s3-client.ts`)
+   - AWS SDK v3 integration
+   - Upload, download, and presigned URL generation
+   - Error handling and logging
+   - Support for metadata storage
+
+3. **Updated Webhook Routes** (`webhook-routes-s3.ts`)
+   - Replaced Supabase storage calls with S3
+   - Maintained existing webhook logic
+   - Updated workflow arguments for S3 paths
+   - Preserved virus scanning functionality
+
+## Migration Steps
+
+### 1. Deploy Infrastructure
+```bash
+cd dormway-aws-infrastructure/terraform
+terraform plan
+terraform apply
+```
+
+This will create:
+- S3 buckets: `dormway-syllabus-documents-prd` and `dormway-braingains-documents-prd`
+- IAM policies for API Router access
+- SSM parameters with bucket names
+
+### 2. Update Configuration
+
+Add to API Router environment variables:
+```yaml
+S3_SYLLABUS_BUCKET: dormway-syllabus-documents-prd
+S3_BRAINGAINS_BUCKET: dormway-braingains-documents-prd
+AWS_REGION: us-east-1
+```
+
+### 3. Install Dependencies
+
+In `dormway-api-router/package.json`:
+```json
+{
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.0.0",
+    "@aws-sdk/s3-request-presigner": "^3.0.0"
+  }
+}
+```
+
+### 4. Update Routes
+
+Replace the import in `routes/index.ts`:
+```typescript
+// Old
+import webhookRoutes from './webhook-routes';
+
+// New
+import webhookRoutes from './webhook-routes-s3';
+```
+
+### 5. Update Workflows
+
+The Temporal workflows need to be updated to handle S3 paths instead of Supabase:
+
+**Old workflow arguments:**
+```typescript
+{
+  supabaseBucket: string;
+  supabasePath: string;
+  // ...
+}
+```
+
+**New workflow arguments:**
+```typescript
+{
+  s3Bucket: string;
+  s3Key: string;
+  // ...
+}
+```
+
+## Benefits
+
+1. **Cost Optimization**
+   - S3 lifecycle policies automatically move old attachments to cheaper storage
+   - BrainGains documents expire after 90 days
+   - Syllabus documents move to Glacier after 180 days
+
+2. **Better Integration**
+   - Native AWS SDK usage
+   - IAM role-based authentication
+   - No external API dependencies
+
+3. **Improved Security**
+   - Server-side encryption enabled
+   - Presigned URLs for temporary access
+   - No public access allowed
+
+## Testing
+
+### Local Testing
+```bash
+# Set up AWS credentials for local development
+export AWS_ACCESS_KEY_ID=your_key
+export AWS_SECRET_ACCESS_KEY=your_secret
+export S3_SYLLABUS_BUCKET=dormway-syllabus-documents-dev
+export S3_BRAINGAINS_BUCKET=dormway-braingains-documents-dev
+
+# Test webhook endpoint
+curl -X POST http://localhost:3001/postmark/syllabus \
+  -H "Authorization: Basic $(echo -n 'username:password' | base64)" \
+  -H "Content-Type: application/json" \
+  -d @test-webhook-payload.json
+```
+
+### Production Testing
+1. Send test email to syllabus@mail.dormway.app
+2. Check S3 bucket for uploaded attachments
+3. Verify Temporal workflow receives S3 paths
+4. Confirm workflow can access files via presigned URLs
+
+## Rollback Plan
+
+If issues arise:
+1. Revert to original `webhook-routes.ts`
+2. Workflows will continue using Supabase paths
+3. Fix issues and retry migration
+
+## Monitoring
+
+### CloudWatch Metrics
+- S3 bucket size and object count
+- Upload success/failure rates
+- Presigned URL generation
+
+### Application Logs
+- Upload confirmations with S3 keys
+- Error messages with bucket/key details
+- Workflow start confirmations
+
+## Next Steps
+
+1. Update Engine workflows to download from S3
+2. Migrate existing Supabase attachments to S3 (if needed)
+3. Remove Supabase storage dependencies
+4. Update documentation

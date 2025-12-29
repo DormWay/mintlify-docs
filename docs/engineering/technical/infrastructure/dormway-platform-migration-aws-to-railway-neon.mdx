@@ -1,0 +1,482 @@
+---
+title: "DormWay Platform Migration   AWS to Railway + Neon"
+description: "DormWay is currently spending **$700-900/month** on AWS infrastructure with **zero production traffic** during beta. This document outlines a migration plan..."
+---
+
+# DormWay Platform Migration: AWS to Railway + Neon
+
+**Date**: November 12, 2025
+**Status**: Planning Phase
+**Author**: Migration analysis from AWS cost audit
+
+---
+
+## Executive Summary
+
+DormWay is currently spending **$700-900/month** on AWS infrastructure with **zero production traffic** during beta. This document outlines a migration plan to Railway (compute) + Neon (database) that would reduce costs to approximately **$50-150/month** during beta, scaling linearly with actual usage.
+
+**Key findings:**
+- AWS overhead: ~40% of codebase is AWS-specific (Secrets Manager, ECS, RDS, S3 SDK usage)
+- Current blockers: Over-provisioned RDS Aurora instances, redundant NAT Gateways, idle ECS Fargate tasks
+- Migration target: Railway for all services, Neon for PostgreSQL (Aurora replacement)
+- Web frontend: Already on Vercel (no changes needed)
+
+---
+
+## Current AWS Infrastructure & Costs
+
+### Cost Breakdown (Monthly, Beta Environment)
+
+| Resource | Configuration | Monthly Cost | Notes |
+|----------|--------------|--------------|-------|
+| **RDS Aurora PostgreSQL** | 3 instances (db.r7i.large, db.r5.large, db.t4g.medium) | ~$425 | Serverless v2 scaling with min ACU |
+| **NAT Gateways** | 3 NAT Gateways (us-east-1a/b/c) | ~$97 | $0.045/hour each + data transfer |
+| **ECS Fargate** | 10 tasks (0.5 vCPU, 1GB RAM each) | ~$100-150 | Idle most of the time |
+| **RDS Proxy** | Active connections pooling | ~$30 | Not needed with Neon connection pooling |
+| **ElastiCache Redis** | t3.micro | ~$15 | Small instance |
+| **Application Load Balancer** | 1 ALB | ~$20 | Minimal traffic |
+| **Secrets Manager** | 20 secrets | ~$8 | $0.40/secret/month |
+| **Other** | CloudWatch, S3, VPC, backups | ~$30-50 | Variable costs |
+| **TOTAL** | | **$700-900/month** | With no production traffic |
+
+### Services Running on AWS
+
+1. **api-router** (Port 3001) - Express.js API gateway
+2. **engine** (Port 3030) - Temporal workflows
+3. **dormway-crews** (Port 8000) - Python AI agents
+4. **ably-relay** (Port 3032) - Real-time messaging
+5. **canvas-sync** (Port 3033) - Canvas LMS integration
+6. **dormway-admin** (Port 3004) - React admin dashboard (on Vercel, not AWS)
+7. **dormway-lockedin** (Port 3008) - Next.js web app (on Vercel, not AWS)
+8. **PostgreSQL** - Aurora PostgreSQL 15.12 (3 instances)
+9. **Redis** - ElastiCache (t3.micro)
+
+---
+
+## Target Architecture: Railway + Neon
+
+### Railway Services (Compute)
+
+| Service | Resources | Est. Monthly Cost | Notes |
+|---------|-----------|-------------------|-------|
+| **api-router** | 2GB RAM, 2 vCPU | $10-20 | Scales to zero when idle |
+| **engine (Temporal)** | 2GB RAM, 2 vCPU | $10-20 | Long-running workflows |
+| **dormway-crews** | 4GB RAM, 2 vCPU | $20-30 | Python/FastAPI AI agents |
+| **ably-relay** | 1GB RAM, 1 vCPU | $5-10 | WebSocket relay |
+| **canvas-sync** | 1GB RAM, 1 vCPU | $5-10 | LMS integration |
+| **Redis** | Railway Redis addon | $5-10 | Managed Redis |
+| **TOTAL COMPUTE** | | **$55-100/month** | Scales with actual usage |
+
+### Neon Database (PostgreSQL)
+
+| Tier | Storage | Compute | Monthly Cost | Notes |
+|------|---------|---------|--------------|-------|
+| **Free Tier** (Launch) | 3 GB | 0.25 vCPU | $0 | Good for initial testing |
+| **Launch** (Paid) | 10 GB | 1 vCPU | $19 | Includes backups, autoscaling |
+| **Scale** | 50 GB | 4 vCPU | $69 | For production growth |
+
+**Current database size:** 500 MB (expanded from 188 MB dump due to indexes)
+**Recommended starting tier:** Launch ($19/month) or Free Tier ($0) for beta
+
+**Features included:**
+- ✅ Autoscaling compute (Neon scales to zero when idle, unlike Aurora)
+- ✅ Point-in-time recovery (30 days on Launch tier)
+- ✅ Connection pooling built-in (replaces RDS Proxy)
+- ✅ PostgreSQL 17.5 (newer than Aurora's 15.12)
+- ✅ All extensions: PostGIS, pgcrypto, uuid-ossp, pg_trgm, fuzzystrmatch, unaccent
+
+---
+
+## Migration Benefits
+
+### Cost Savings
+
+| Phase | AWS Cost | Railway + Neon Cost | Savings |
+|-------|----------|---------------------|---------|
+| **Beta (current)** | $700-900/month | $50-100/month | **85-90% reduction** |
+| **Early production** (1000 users) | $800-1000/month | $150-250/month | **75-80% reduction** |
+| **Growth** (10k users) | $1500-2000/month | $400-600/month | **70% reduction** |
+
+### Technical Benefits
+
+1. **Simpler architecture:**
+   - No VPC, NAT Gateways, or complex networking
+   - Railway handles service discovery automatically
+   - No ALB configuration needed
+
+2. **Better developer experience:**
+   - Railway auto-deploys on git push (like Vercel)
+   - Built-in logs, metrics, and monitoring
+   - No ECS task definitions or CloudFormation
+
+3. **True serverless:**
+   - Neon database scales to zero when idle (Aurora doesn't)
+   - Railway services scale based on actual traffic
+   - Pay only for what you use
+
+4. **Faster iteration:**
+   - Deploy time: ~2-3 minutes (vs 10-15 minutes on ECS)
+   - No Docker image push to ECR required
+   - Hot reload in development
+
+### Operational Benefits
+
+1. **No AWS-specific knowledge required:**
+   - Railway abstracts infrastructure complexity
+   - Neon is standard PostgreSQL (no Aurora-specific features)
+
+2. **Unified platform:**
+   - All services on Railway (except Vercel frontends)
+   - Single dashboard for logs, metrics, deployments
+   - No context switching between AWS services
+
+3. **Built-in security:**
+   - Railway handles SSL certificates automatically
+   - Neon includes SOC 2 compliance
+   - No manual IAM role management
+
+---
+
+## AWS-Specific Code Audit
+
+### Services Using AWS SDK
+
+| Service | AWS Dependencies | Railway Replacement |
+|---------|------------------|---------------------|
+| **api-router** | `@aws-sdk/client-s3`, `@aws-sdk/client-secrets-manager`, `@aws-sdk/client-sqs` | Railway environment variables, Railway Blob Storage (or Cloudflare R2) |
+| **engine** | `@aws-sdk/client-secrets-manager`, `@aws-sdk/client-rds` | Railway environment variables, Neon direct connection |
+| **dormway-crews** | `boto3` (S3, Secrets Manager) | Railway environment variables, Railway Blob Storage |
+
+### Code Changes Required
+
+**Estimated effort: 16-24 hours**
+
+1. **Secrets Management** (6-8 hours):
+   ```typescript
+   // Before (AWS Secrets Manager)
+   import { SecretsManagerClient, GetSecretValueCommand } from "@aws-sdk/client-secrets-manager";
+   const secret = await client.send(new GetSecretValueCommand({ SecretId: "prod/api" }));
+
+   // After (Railway environment variables)
+   const secret = process.env.API_SECRET; // Railway injects at runtime
+   ```
+
+2. **File Storage** (4-6 hours):
+   ```typescript
+   // Before (AWS S3)
+   import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
+   await s3.send(new PutObjectCommand({ Bucket: "uploads", Key: file.name, Body: file }));
+
+   // After (Cloudflare R2 or Railway Blob Storage)
+   import { R2 } from "@cloudflare/workers-types";
+   await env.BUCKET.put(file.name, file); // R2 is S3-compatible
+   ```
+
+3. **Database Connection** (2-3 hours):
+   ```typescript
+   // Before (RDS with IAM auth)
+   import { RDSClient } from "@aws-sdk/client-rds";
+   const token = await rds.generateAuthToken(...);
+
+   // After (Neon connection string)
+   const pool = new Pool({
+     connectionString: process.env.DATABASE_URL // Neon provides this
+   });
+   ```
+
+4. **Service Discovery** (3-4 hours):
+   ```typescript
+   // Before (AWS ECS Service Discovery)
+   const apiUrl = "http://api-router.dormway-cluster:3001";
+
+   // After (Railway private networking)
+   const apiUrl = process.env.API_ROUTER_URL; // Railway auto-generates
+   ```
+
+5. **Queue System** (2-3 hours):
+   ```typescript
+   // Before (AWS SQS)
+   import { SQSClient, SendMessageCommand } from "@aws-sdk/client-sqs";
+   await sqs.send(new SendMessageCommand({ QueueUrl: url, MessageBody: body }));
+
+   // After (Railway Redis + BullMQ)
+   import { Queue } from "bullmq";
+   const queue = new Queue("tasks", { connection: redisConnection });
+   await queue.add("task", { data });
+   ```
+
+---
+
+## Migration Plan
+
+### Phase 1: Preparation (4-6 hours)
+
+1. **Audit all AWS SDK usage** (2 hours)
+   - Search for `@aws-sdk/*` imports
+   - Search for `boto3` imports in Python services
+   - Document all AWS-specific code paths
+
+2. **Create Railway project** (1 hour)
+   - Sign up for Railway
+   - Create new project: "dormway-platform"
+   - Set up GitHub integration
+
+3. **Migrate environment variables** (2-3 hours)
+   - Export all Doppler secrets
+   - Import to Railway environment
+   - Verify no secrets are hardcoded
+
+### Phase 2: Database Migration (Already Complete)
+
+✅ **Aurora dump created:** `aurora-production-full-20251112-105732.dump` (188 MB)
+✅ **Neon database provisioned:** `neondb` on PostgreSQL 17.5
+✅ **Restore completed:** 102 tables, 455 indexes, 500 MB total size
+✅ **Extensions installed:** PostGIS, pgcrypto, uuid-ossp, pg_trgm, fuzzystrmatch, unaccent
+
+**Remaining tasks:**
+- Update connection strings in Railway environment variables
+- Test all database functions and queries
+- Run smoke tests against Neon database
+
+### Phase 3: Service-by-Service Migration (16-24 hours)
+
+**Order of migration** (reduces risk, maintains functionality):
+
+1. **ably-relay** (2-3 hours) - Minimal dependencies
+2. **canvas-sync** (2-3 hours) - Isolated service
+3. **api-router** (4-6 hours) - Core service, most AWS dependencies
+4. **engine (Temporal)** (4-6 hours) - Complex workflows, database-heavy
+5. **dormway-crews** (4-6 hours) - Python service with boto3
+
+**Per-service checklist:**
+- [ ] Remove AWS SDK dependencies
+- [ ] Update Dockerfile for Railway (if needed)
+- [ ] Configure Railway service
+- [ ] Set environment variables
+- [ ] Deploy to Railway
+- [ ] Run smoke tests
+- [ ] Monitor logs for errors
+- [ ] Verify functionality
+
+### Phase 4: Testing & Validation (4-6 hours)
+
+1. **Run full test suite** (2 hours)
+   ```bash
+   make smoke-all
+   make test-auth
+   make compat-dashboard
+   ```
+
+2. **Load testing** (1-2 hours)
+   - Simulate 100 concurrent users
+   - Test Temporal workflow execution
+   - Verify database connection pooling
+
+3. **End-to-end testing** (1-2 hours)
+   - Test dormway-lockedin (Vercel) → api-router (Railway) → Neon
+   - Test dormway-admin (Vercel) → api-router (Railway) → Neon
+   - Test mobile app → api-router (Railway) → Neon
+
+### Phase 5: Cutover & Monitoring (2-4 hours)
+
+1. **Update DNS/URLs** (30 minutes)
+   - Point `relay.dormway.app` to Railway
+   - Update Vercel environment variables
+   - Update mobile app configuration
+
+2. **Monitor for 24 hours** (ongoing)
+   - Railway logs dashboard
+   - Neon metrics dashboard
+   - Sentry error tracking
+
+3. **Decommission AWS resources** (1-2 hours)
+   - Stop ECS services
+   - Delete RDS instances (after final backup)
+   - Remove NAT Gateways
+   - Cancel AWS subscriptions
+
+---
+
+## Rollback Plan
+
+If migration fails, rollback steps:
+
+1. **Revert DNS** (5 minutes)
+   - Point `relay.dormway.app` back to AWS ALB
+   - Update Vercel environment variables
+
+2. **Restart AWS services** (10 minutes)
+   ```bash
+   aws ecs update-service --cluster dormway-cluster --service api-router --desired-count 2
+   aws ecs update-service --cluster dormway-cluster --service engine --desired-count 2
+   ```
+
+3. **Restore RDS from snapshot** (if needed, 15-20 minutes)
+   ```bash
+   aws rds restore-db-instance-from-db-snapshot \
+     --db-instance-identifier dormway-dsql-instance-1 \
+     --db-snapshot-identifier dormway-dsql-cluster-snapshot-before-delete-20251112
+   ```
+
+**Total rollback time:** 30-45 minutes
+
+---
+
+## Risk Assessment
+
+| Risk | Severity | Likelihood | Mitigation |
+|------|----------|------------|------------|
+| Database connection issues | High | Low | Test connection pooling thoroughly, keep Aurora snapshot |
+| Service communication failures | Medium | Medium | Railway private networking, environment variable validation |
+| Performance degradation | Medium | Low | Neon autoscaling, Railway horizontal scaling |
+| Data loss during migration | High | Very Low | Multiple backups, test restore before cutover |
+| Temporal workflow interruption | High | Medium | Graceful shutdown, workflow resume after cutover |
+
+---
+
+## Cost Comparison: 12-Month Projection
+
+| Scenario | AWS (Monthly) | Railway + Neon (Monthly) | Annual Savings |
+|----------|---------------|--------------------------|----------------|
+| **Beta** (current) | $800 | $75 | **$8,700** |
+| **Launch** (1k users) | $1,000 | $150 | **$10,200** |
+| **Growth** (10k users) | $1,800 | $400 | **$16,800** |
+| **Scale** (50k users) | $3,500 | $1,200 | **$27,600** |
+
+---
+
+## Recommendations
+
+### Immediate Actions (This Week)
+
+1. ✅ **Database migration complete** - Neon is ready
+2. **Test Neon performance** - Run smoke tests, verify PostGIS queries
+3. **Create Railway project** - Set up services and environment variables
+4. **Migrate ably-relay first** - Low-risk service to validate Railway workflow
+
+### Short-term (Next 2 Weeks)
+
+1. **Migrate api-router** - Core service with most AWS dependencies
+2. **Migrate engine** - Temporal workflows, test workflow continuity
+3. **Migrate remaining services** - canvas-sync, dormway-crews
+4. **Run full test suite** - Validate all functionality
+
+### Long-term (1 Month)
+
+1. **Monitor Railway costs** - Ensure projections are accurate
+2. **Optimize Neon autoscaling** - Fine-tune compute scaling rules
+3. **Decommission AWS** - Cancel subscriptions, archive backups
+4. **Document new architecture** - Update CLAUDE.md and deployment guides
+
+---
+
+## Decision Points
+
+### Should we migrate now?
+
+**Yes, if:**
+- ✅ Beta phase with no production traffic (current state)
+- ✅ Cost savings are critical ($700/month → $75/month = 90% reduction)
+- ✅ Team has bandwidth for 24-32 hour migration effort
+- ✅ Rollback plan is acceptable (30-45 minutes)
+
+**No, if:**
+- ❌ Production launch is imminent (within 2 weeks)
+- ❌ AWS-specific features are mission-critical
+- ❌ Team is unfamiliar with Railway/Neon platforms
+
+### What about Temporal Cloud?
+
+**Current:** Self-hosted Temporal on ECS
+**Alternative:** Temporal Cloud ($200-500/month depending on workflow volume)
+
+**Recommendation:** Migrate to Railway first, then evaluate Temporal Cloud once production usage is established. Self-hosted Temporal on Railway is viable for beta.
+
+---
+
+## Success Metrics
+
+### Technical Metrics
+
+- [ ] All services running on Railway with 99.9% uptime
+- [ ] Database queries performing within 10% of Aurora baseline
+- [ ] Temporal workflows resuming successfully after migration
+- [ ] Zero data loss during migration
+- [ ] All smoke tests passing
+
+### Cost Metrics
+
+- [ ] Monthly AWS bill < $50 (only backups and archived data)
+- [ ] Monthly Railway bill < $100 during beta
+- [ ] Cost per user < $0.10 at scale
+
+### Operational Metrics
+
+- [ ] Deploy time < 5 minutes (down from 10-15 minutes)
+- [ ] Time to rollback < 45 minutes
+- [ ] Team confidence in Railway platform
+
+---
+
+## Appendix A: Service Dependency Map
+
+```
+dormway-lockedin (Vercel) ----+
+dormway-admin (Vercel) --------+
+iOS app -----------------------+
+                               |
+                               v
+                         api-router (Railway)
+                               |
+                 +-------------+-------------+
+                 |             |             |
+                 v             v             v
+            engine       canvas-sync    ably-relay
+         (Railway)       (Railway)      (Railway)
+              |               |
+              v               v
+         dormway-crews    Redis
+          (Railway)      (Railway)
+              |
+              +-------------+-------------+
+                            |
+                            v
+                    Neon PostgreSQL
+```
+
+---
+
+## Appendix B: Neon vs Aurora Feature Comparison
+
+| Feature | Aurora PostgreSQL | Neon PostgreSQL | Winner |
+|---------|-------------------|-----------------|--------|
+| **PostgreSQL Version** | 15.12 | 17.5 | Neon |
+| **Autoscaling** | Min ACU (always running) | True scale-to-zero | Neon |
+| **Connection Pooling** | RDS Proxy ($30/month) | Built-in (free) | Neon |
+| **Point-in-time Recovery** | ✅ Yes | ✅ Yes (30 days) | Tie |
+| **PostGIS Support** | ✅ Yes | ✅ Yes | Tie |
+| **Branch Databases** | ❌ No | ✅ Yes (unique to Neon) | Neon |
+| **Cold Start Time** | N/A (always warm) | ~500ms | Aurora |
+| **Monthly Cost (Beta)** | ~$425 | $19 (or $0 free tier) | Neon |
+
+**Verdict:** Neon is superior for beta/early-stage, Aurora for high-traffic production with strict cold start requirements.
+
+---
+
+## Appendix C: Railway vs AWS ECS Feature Comparison
+
+| Feature | AWS ECS | Railway | Winner |
+|---------|---------|---------|--------|
+| **Deploy Time** | 10-15 minutes | 2-3 minutes | Railway |
+| **Auto-scaling** | Manual configuration | Automatic | Railway |
+| **Logs** | CloudWatch (complex) | Built-in dashboard | Railway |
+| **Networking** | VPC, subnets, NAT | Automatic private networking | Railway |
+| **SSL Certificates** | ACM, manual setup | Automatic | Railway |
+| **Cost (10 services, beta)** | ~$150/month | ~$55/month | Railway |
+
+**Verdict:** Railway is far simpler and cheaper for small teams during beta/early-stage.
+
+---
+
+**Last Updated:** November 12, 2025
+**Next Review:** After Phase 1 completion (1 week)

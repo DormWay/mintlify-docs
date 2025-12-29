@@ -1,0 +1,482 @@
+---
+title: "dashboard seed data architecture"
+description: "The current dashboard composite system uses hard-coded fallback data (\"DormWay: Log In\" assignment) that is indistinguishable from real user tasks. This crea..."
+---
+
+# Dashboard Seed Data Architecture
+
+**Date**: 2025-10-22
+**Status**: Proposed
+**Related**: [Bug Report - Stale Cache "Log In" Placeholder](../../Bug%20Reports/2025-10-22-stale-dashboard-cache-log-in-placeholder.md)
+
+## Problem Statement
+
+The current dashboard composite system uses hard-coded fallback data ("DormWay: Log In" assignment) that is indistinguishable from real user tasks. This creates several issues:
+
+1. **Fragile Text Parsing**: Frontend relies on title text to identify placeholder vs. real data
+2. **Cache Timing Dependencies**: System depends on perfect cache invalidation timing
+3. **No Metadata Signals**: No way to programmatically identify seed/placeholder data
+4. **Brittle UI Logic**: Task bank, welcome carousel, and tips modal all have different assumptions about what constitutes a "real" task
+
+**Result**: Placeholder text leaks into production UI when cache timing is off or new code paths are introduced.
+
+## Design Goals
+
+1. **Explicit Metadata**: All seed/placeholder data must be clearly marked with metadata flags
+2. **Positive Gating**: UI components only render items with explicit "actionable" signals
+3. **Type Safety**: TypeScript types enforce metadata requirements
+4. **Testability**: Integration tests can verify seed data never reaches end users
+5. **Backwards Compatibility**: Changes don't break existing dashboard consumers
+
+## Proposed Solution
+
+### 1. Seed Data Metadata Schema
+
+Add explicit metadata to distinguish placeholder/guidance from actionable tasks.
+
+#### Backend Changes
+
+**Location**: `services/api-router/src/services/dashboard-service.ts:1104-1172`
+
+```typescript
+interface DashboardTask {
+  id: string;
+  title: string;
+  priority: 'urgent' | 'high' | 'medium' | 'low';
+  estimatedDuration: number;
+  dueDate?: string;
+  courseCode?: string;
+  source: 'canvas' | 'ai_suggestion' | 'manual' | 'placeholder';  // Add 'placeholder'
+  metadata: {
+    isActionable: boolean;           // NEW: Explicit actionability flag
+    isPlaceholder?: boolean;         // NEW: Marks seed data
+    placeholderType?: 'quickstart' | 'guide' | 'tutorial';  // NEW: Type of placeholder
+    requiresData?: string[];         // NEW: What real data would replace this
+  };
+}
+
+// Updated quick-start seed data
+function getNewUserDashboard(userId: string): DashboardComposite {
+  return {
+    widgets: [
+      {
+        id: 'widget:quickstart',
+        type: 'quickstart_guide',
+        title: 'Welcome to DormWay',
+        content: {
+          // Quick start content - NOT tasks
+        },
+        metadata: {
+          isPlaceholder: true,
+          placeholderType: 'quickstart',
+        }
+      }
+    ],
+    dueSoon: [
+      {
+        id: 'placeholder:initial-setup',
+        title: 'Get Started with DormWay',
+        description: 'Complete your profile and upload your schedule',
+        isUrgent: false,  // Don't mark as urgent
+        source: 'placeholder',
+        metadata: {
+          isActionable: false,          // Explicitly NOT actionable
+          isPlaceholder: true,
+          placeholderType: 'guide',
+          requiresData: ['tasks', 'schedule'],  // What would replace this
+        }
+      }
+    ],
+    unscheduledTasks: [],  // Empty - no fake tasks
+    // ... rest of dashboard
+  };
+}
+```
+
+**Key Changes**:
+- `source: 'placeholder'` - Explicit source type
+- `metadata.isActionable: false` - Can't be dragged to timeline or marked complete
+- `metadata.isPlaceholder: true` - UI can filter these out
+- `metadata.requiresData` - Documents what real data would replace this
+- Quick-start content moved to dedicated widget type (not mixed with tasks)
+
+### 2. Frontend Type Safety
+
+**Location**: `services/dormway-lockedin/src/types/dashboard.ts`
+
+```typescript
+// Base task interface
+interface BaseTask {
+  id: string;
+  title: string;
+  priority: TaskPriority;
+  estimatedDuration: number;
+  dueDate?: string;
+  courseCode?: string;
+  source: 'canvas' | 'ai_suggestion' | 'manual' | 'placeholder';
+}
+
+// Metadata that determines actionability
+interface TaskMetadata {
+  isActionable: boolean;           // REQUIRED: Must be present
+  isPlaceholder?: boolean;         // Optional: Marks seed data
+  placeholderType?: 'quickstart' | 'guide' | 'tutorial';
+  requiresData?: string[];
+}
+
+// Actionable tasks (can be scheduled, completed, etc.)
+export interface ActionableTask extends BaseTask {
+  metadata: TaskMetadata & {
+    isActionable: true;            // Type-level guarantee
+    isPlaceholder?: false;         // Actionable tasks can't be placeholders
+  };
+}
+
+// Placeholder tasks (informational only)
+export interface PlaceholderTask extends BaseTask {
+  metadata: TaskMetadata & {
+    isActionable: false;           // Type-level guarantee
+    isPlaceholder: true;           // Required for placeholders
+    placeholderType: 'quickstart' | 'guide' | 'tutorial';
+  };
+}
+
+// Union type for all tasks
+export type DashboardTask = ActionableTask | PlaceholderTask;
+
+// Type guard to check if task is actionable
+export function isActionableTask(task: DashboardTask): task is ActionableTask {
+  return task.metadata.isActionable === true && !task.metadata.isPlaceholder;
+}
+
+// Type guard to check if task is placeholder
+export function isPlaceholderTask(task: DashboardTask): task is PlaceholderTask {
+  return task.metadata.isPlaceholder === true && !task.metadata.isActionable;
+}
+```
+
+### 3. Updated Frontend Logic
+
+**Location**: `services/dormway-lockedin/src/hooks/home/useDashboardComposite.ts:581-653`
+
+#### Before (Fragile):
+```typescript
+// Lines 581-653 - Current logic
+if (!pendingTasks || pendingTasks.length === 0) {
+  // Fallback: convert urgent assignments to unscheduled tasks
+  const urgentAssignments = dashboardData.dueSoon?.filter(a => a.isUrgent) || [];
+  unscheduledTasks = urgentAssignments.map(assignment => ({
+    id: assignment.id,
+    title: cleanAssignmentTitle(assignment.title),  // ❌ Text parsing
+    // ...
+  }));
+}
+```
+
+#### After (Robust):
+```typescript
+import { isActionableTask, isPlaceholderTask } from '@/types/dashboard';
+
+// Only use tasks explicitly marked as actionable
+const actionableTasks = (dashboardData.unscheduledTasks || [])
+  .filter(isActionableTask);  // ✅ Type-safe filtering
+
+// Filter out placeholders from assignments
+const actionableAssignments = (dashboardData.dueSoon || [])
+  .filter(assignment => {
+    // Require positive signal for actionability
+    if (assignment.metadata?.isPlaceholder) return false;
+    if (assignment.metadata?.isActionable === false) return false;
+    return true;
+  });
+
+// Only show actionable tasks in task bank
+const unscheduledTasks = actionableTasks.length > 0
+  ? actionableTasks
+  : actionableAssignments.map(assignment => ({
+      id: assignment.id,
+      title: assignment.title,  // ✅ No text parsing
+      source: assignment.source,
+      metadata: assignment.metadata,
+      // ...
+    }));
+
+// Placeholders can be shown separately (optional guidance widget)
+const guidanceTasks = (dashboardData.dueSoon || [])
+  .filter(isPlaceholderTask);
+```
+
+### 4. Task Bank Component Updates
+
+**Location**: `services/dormway-lockedin/src/components/home/taskbank/TaskBankList.tsx`
+
+```typescript
+interface TaskBankListProps {
+  tasks?: UnscheduledTask[];
+  isLoading?: boolean;
+  showPlaceholders?: boolean;  // NEW: Opt-in to show guidance
+}
+
+export function TaskBankList({ tasks, isLoading, showPlaceholders = false }: TaskBankListProps) {
+  // Filter to only actionable tasks
+  const actionableTasks = (tasks || []).filter(task => {
+    if (task.metadata?.isPlaceholder) return showPlaceholders;
+    if (task.metadata?.isActionable === false) return false;
+    return true;
+  });
+
+  if (actionableTasks.length === 0) {
+    return (
+      <div className="empty-state">
+        <h3>You're all caught up!</h3>
+        <p>All tasks are scheduled or completed.</p>
+        {/* Optional: Show guidance widget for new users */}
+        {showPlaceholders && <QuickStartGuide />}
+      </div>
+    );
+  }
+
+  return (
+    <div className="task-list">
+      {actionableTasks.map(task => (
+        <DraggableTask
+          key={task.id}
+          task={task}
+          disabled={task.metadata?.isActionable === false}  // Prevent drag if not actionable
+        />
+      ))}
+    </div>
+  );
+}
+```
+
+### 5. Welcome Carousel Updates
+
+**Location**: `services/dormway-lockedin/src/components/WelcomeCarousel.tsx`
+
+```typescript
+// Final step CTA - never derive from task data
+const finalSlide = {
+  title: "You're All Set!",
+  description: "Start organizing your college life",
+  accentColor: "from-purple-500 to-pink-500",
+  animation: LOTTIE_ANIMATIONS.success,
+  // Hard-coded CTA (not derived from placeholder tasks)
+  cta: {
+    text: "Get Started →",
+    action: onComplete,
+    // Never pull text from dashboard data
+  }
+};
+
+// If we want to show task suggestions:
+const suggestedActions = dashboardData.unscheduledTasks
+  ?.filter(isActionableTask)  // Only real, actionable tasks
+  .slice(0, 3);
+
+// Or show quick-start guidance separately:
+const quickStartItems = dashboardData.dueSoon
+  ?.filter(isPlaceholderTask)
+  .filter(p => p.metadata.placeholderType === 'quickstart');
+```
+
+### 6. Integration Test
+
+**Location**: `services/api-router/src/routes/__tests__/dashboard-onboarding.integration.test.ts` (NEW)
+
+```typescript
+import { redisCache } from '../../services/redis-cache';
+import { DashboardAuroraService } from '../../services/dashboard-aurora-service';
+
+describe('Dashboard Onboarding Integration', () => {
+  let testUserId: string;
+
+  beforeEach(async () => {
+    testUserId = `test-user-${Date.now()}`;
+  });
+
+  afterEach(async () => {
+    // Clean up test data
+    await redisCache.invalidateDashboard(testUserId);
+  });
+
+  it('should never return placeholder tasks after onboarding', async () => {
+    // 1. Simulate new user - gets placeholder data
+    const beforeOnboarding = await DashboardAuroraService.getCompleteDashboardData(
+      testUserId,
+      'campus'
+    );
+
+    // Should have placeholders for new user
+    const placeholders = beforeOnboarding.data?.dueSoon?.filter(
+      (a: any) => a.metadata?.isPlaceholder
+    ) || [];
+    expect(placeholders.length).toBeGreaterThan(0);
+
+    // 2. Create real onboarding task
+    await createDefaultOnboardingTask(testUserId);
+
+    // 3. Invalidate cache (simulating workflow)
+    await redisCache.invalidateDashboard(testUserId);
+
+    // 4. Fetch dashboard again
+    const afterOnboarding = await DashboardAuroraService.getCompleteDashboardData(
+      testUserId,
+      'campus'
+    );
+
+    // 5. Should have NO placeholders
+    const remainingPlaceholders = afterOnboarding.data?.dueSoon?.filter(
+      (a: any) => a.metadata?.isPlaceholder
+    ) || [];
+    expect(remainingPlaceholders.length).toBe(0);
+
+    // 6. Should have real task
+    const realTasks = afterOnboarding.data?.unscheduledTasks?.filter(
+      (t: any) => t.metadata?.isActionable === true
+    ) || [];
+    expect(realTasks.length).toBeGreaterThan(0);
+    expect(realTasks[0].title).toContain('Upload my schedule');
+    expect(realTasks[0].source).not.toBe('placeholder');
+  });
+
+  it('should filter placeholders from task bank data', async () => {
+    const composite = await DashboardAuroraService.getCompleteDashboardData(
+      testUserId,
+      'campus'
+    );
+
+    // Transform to frontend format
+    const transformed = transformToDashboardComposite(composite);
+
+    // Unscheduled tasks should NEVER include placeholders
+    const unscheduledTasks = transformed.unscheduledTasks || [];
+    const hasPlaceholders = unscheduledTasks.some(
+      (t: any) => t.metadata?.isPlaceholder === true
+    );
+    expect(hasPlaceholders).toBe(false);
+  });
+
+  it('should mark placeholder assignments as non-actionable', async () => {
+    const composite = await DashboardAuroraService.getCompleteDashboardData(
+      testUserId,
+      'campus'
+    );
+
+    const placeholders = (composite.data?.dueSoon || []).filter(
+      (a: any) => a.metadata?.isPlaceholder
+    );
+
+    placeholders.forEach(placeholder => {
+      expect(placeholder.metadata.isActionable).toBe(false);
+      expect(placeholder.source).toBe('placeholder');
+    });
+  });
+});
+```
+
+## Migration Strategy
+
+### Phase 1: Add Metadata (Backwards Compatible)
+1. Add `metadata.isActionable` and `metadata.isPlaceholder` to all dashboard responses
+2. Default existing tasks to `isActionable: true, isPlaceholder: false`
+3. Mark quick-start items as `isActionable: false, isPlaceholder: true`
+4. Deploy backend changes
+
+### Phase 2: Update Frontend (Gradual Rollout)
+1. Add TypeScript types with guards (`isActionableTask`, `isPlaceholderTask`)
+2. Update `useDashboardComposite` to filter on metadata (fall back to current logic if metadata missing)
+3. Update Task Bank to check `isActionable` flag
+4. Update Welcome Carousel to hard-code CTAs (don't derive from task text)
+5. Deploy frontend changes
+
+### Phase 3: Remove Fallbacks (After Validation)
+1. Add integration tests
+2. Remove title-parsing logic from `cleanAssignmentTitle` calls
+3. Remove text-based placeholder detection
+4. Enforce strict metadata requirements (fail loudly if missing)
+
+### Phase 4: Enhanced Features (Future)
+1. Add "Quick Start Guide" widget type (separate from tasks)
+2. Show placeholder tasks in optional "Getting Started" section
+3. Track completion of guidance items (separate from task completion)
+4. Personalized onboarding based on user context (campus, year, etc.)
+
+## Implementation Checklist
+
+### Backend
+- [ ] Add `metadata` field to assignment/task types
+- [ ] Update `getNewUserDashboard` to return non-actionable guidance
+- [ ] Update `transformToDashboardComposite` to preserve metadata
+- [ ] Add `source: 'placeholder'` for seed data
+- [ ] Remove "DormWay: Log In" hard-coded task
+- [ ] Add integration tests for onboarding flow
+
+### Frontend Types
+- [ ] Create `ActionableTask` and `PlaceholderTask` types
+- [ ] Add `isActionableTask` and `isPlaceholderTask` type guards
+- [ ] Update `DashboardTask` union type
+- [ ] Enforce metadata requirements in TypeScript
+
+### Frontend Components
+- [ ] Update `useDashboardComposite` to filter on `isActionable`
+- [ ] Update Task Bank to check `metadata.isActionable`
+- [ ] Update Welcome Carousel to hard-code final CTA
+- [ ] Update Tips Modal to check `metadata.isPlaceholder`
+- [ ] Remove title-parsing logic from `cleanAssignmentTitle`
+
+### Testing
+- [ ] Add integration test: new user → onboarding → no placeholders
+- [ ] Add unit test: placeholder filtering in `useDashboardComposite`
+- [ ] Add unit test: type guards work correctly
+- [ ] Add E2E test: onboarding flow shows real task after completion
+
+## Benefits
+
+1. **No Cache Timing Dependencies**: UI gracefully handles stale cache because placeholders are explicitly marked
+2. **Type Safety**: TypeScript enforces metadata requirements at compile time
+3. **Testable**: Integration tests can verify placeholder behavior
+4. **Extensible**: Easy to add new placeholder types (tutorials, tips, etc.)
+5. **User-Friendly**: Can show helpful guidance without confusing it with actionable tasks
+6. **Debuggable**: Clear metadata makes it obvious when placeholder data leaks through
+
+## Risks & Mitigation
+
+**Risk**: Existing clients don't have metadata
+**Mitigation**: Default to safe values (`isActionable: true`) for backwards compatibility
+
+**Risk**: Migration complexity
+**Mitigation**: Phased rollout with feature flags
+
+**Risk**: Performance impact of filtering
+**Mitigation**: Metadata checks are O(1), minimal overhead
+
+## Open Questions
+
+1. Should we show placeholder tasks in a separate "Getting Started" section?
+2. Should placeholders have expiration dates (e.g., remove after 7 days)?
+3. Should we track which guidance items users have dismissed?
+4. How do we handle placeholder tasks in search/filtering?
+
+## References
+
+- Original Bug: [Stale Dashboard Cache "Log In" Placeholder](../../Bug%20Reports/2025-10-22-stale-dashboard-cache-log-in-placeholder.md)
+- Task Bank Component: `services/dormway-lockedin/src/components/home/taskbank/TaskBankList.tsx`
+- Dashboard Service: `services/api-router/src/services/dashboard-service.ts`
+- Dashboard Hook: `services/dormway-lockedin/src/hooks/home/useDashboardComposite.ts`
+
+## Next Steps
+
+1. Review and approve design
+2. Create tickets for each phase
+3. Implement Phase 1 (backend metadata)
+4. Add integration tests
+5. Implement Phase 2 (frontend filtering)
+6. Monitor production for edge cases
+7. Phase 3 cleanup after validation
+
+---
+
+**Status**: 📋 Awaiting Review
+**Author**: Claude Code
+**Reviewers**: TBD

@@ -1,0 +1,247 @@
+---
+title: "Database Migration Process"
+description: "DormWay uses a unified migration runner (`scripts/database/run-migrations.sh`) that automatically tracks which migrations have been executed. This replaces t..."
+---
+
+# Database Migration Process
+
+## Overview
+
+DormWay uses a unified migration runner (`scripts/database/run-migrations.sh`) that automatically tracks which migrations have been executed. This replaces the old ad-hoc migration approach.
+
+## Running Migrations
+
+### Local Development
+
+```bash
+# Run all pending migrations
+make db-migrate
+
+# Preview which migrations will run (dry-run)
+make db-migrate-dry
+```
+
+The script will:
+- Connect to the local Docker PostgreSQL container
+- Create `migration_history` table if it doesn't exist
+- Skip migrations that have already been executed
+- Run pending migrations in alphabetical order
+
+### Production
+
+**⚠️ IMPORTANT**: Always run a dry-run first!
+
+```bash
+# Preview pending migrations
+doppler run --config prd -- make db-migrate-dry
+
+# Run migrations on production Aurora (via VPN)
+doppler run --config prd -- make db-migrate
+```
+
+The script automatically:
+- Detects the correct database from environment variables
+- Uses `AURORA_DB_*` variables for production
+- Falls back to `DATABASE_*` variables for other environments
+- Tracks migration history to prevent duplicates
+
+## Environment Variable Precedence
+
+The migration script checks environment variables in this order:
+
+1. `AURORA_DB_HOST` → `DATABASE_HOST` → `localhost`
+2. `AURORA_DB_PORT` → `DATABASE_PORT` → `5432`
+3. `AURORA_DB_NAME` → `DATABASE_NAME` → `dormway`
+4. `AURORA_DB_USER` → `DATABASE_USER` → `dormway_admin`
+5. `AURORA_DB_PASSWORD` → `DATABASE_PASSWORD` → `localdev_password`
+
+This allows the same script to work for:
+- **Local development**: Uses Docker container via localhost
+- **Production**: Uses Aurora via Doppler's `AURORA_DB_*` variables
+
+## Migration File Naming
+
+Migrations are executed in **alphabetical order**, so use consistent naming:
+
+- **Numbered**: `001_initial_schema.sql`, `002_add_users.sql`
+- **Date-based**: `20251026_add_feedback_tables.sql`
+- **Special prefix**: `000_mark_historical_migrations_complete.sql` (runs first)
+
+**✅ Good:**
+```
+000_mark_historical_migrations_complete.sql
+001_initial_schema.sql
+002_add_users.sql
+20251026_add_feedback_tables.sql
+20251027_add_indexes.sql
+```
+
+**❌ Bad:**
+```
+add_users.sql
+schema.sql
+fix_bug.sql
+```
+
+## Creating New Migrations
+
+1. **Create the migration file**:
+   ```bash
+   touch infrastructure/database/migrations/20251026_my_feature.sql
+   ```
+
+2. **Write idempotent SQL**:
+   ```sql
+   -- Add column only if it doesn't exist
+   ALTER TABLE accounts ADD COLUMN IF NOT EXISTS email_verified BOOLEAN DEFAULT false;
+   
+   -- Create table only if it doesn't exist
+   CREATE TABLE IF NOT EXISTS feature_requests (
+     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+     title TEXT NOT NULL,
+     created_at TIMESTAMPTZ DEFAULT NOW()
+   );
+   
+   -- Create index only if it doesn't exist
+   CREATE INDEX IF NOT EXISTS idx_accounts_email ON accounts(email);
+   ```
+
+3. **Test locally**:
+   ```bash
+   make db-migrate-dry  # Preview
+   make db-migrate      # Execute
+   ```
+
+4. **Commit and deploy**:
+   ```bash
+   git add infrastructure/database/migrations/20251026_my_feature.sql
+   git commit -m "feat: add my feature migration"
+   git push
+   ```
+
+5. **Run on production** (after code deploy):
+   ```bash
+   # Connect to VPN first
+   doppler run --config prd -- make db-migrate-dry  # Verify
+   doppler run --config prd -- make db-migrate      # Execute
+   ```
+
+## Migration History Table
+
+The script automatically creates and manages a `migration_history` table:
+
+```sql
+CREATE TABLE migration_history (
+    id SERIAL PRIMARY KEY,
+    filename VARCHAR(255) UNIQUE NOT NULL,
+    executed_at TIMESTAMPTZ DEFAULT NOW(),
+    checksum VARCHAR(64),
+    success BOOLEAN DEFAULT true,
+    error_message TEXT
+);
+```
+
+### Checking Migration Status
+
+```bash
+# Via Docker (local)
+docker exec dormway-postgres-local psql -U dormway_admin -d dormway -c \
+  "SELECT filename, success, executed_at FROM migration_history ORDER BY executed_at DESC LIMIT 10;"
+
+# Via Doppler (production)
+doppler run --config prd -- psql -h $AURORA_DB_HOST -U $AURORA_DB_USER -d $AURORA_DB_NAME -c \
+  "SELECT filename, success, executed_at FROM migration_history ORDER BY executed_at DESC LIMIT 10;"
+```
+
+## Catching Up Production
+
+If production migrations were run ad-hoc (outside the migration runner), you need to mark them as executed:
+
+1. **Create a catch-up migration**:
+   ```sql
+   -- 000_mark_historical_migrations_complete.sql
+   INSERT INTO migration_history (filename, checksum, executed_at, success)
+   SELECT
+     filename,
+     md5(filename)::text as checksum,
+     NOW() as executed_at,
+     true as success
+   FROM (
+     VALUES
+       ('001_old_migration.sql'),
+       ('002_another_old_migration.sql')
+   ) AS t(filename)
+   ON CONFLICT (filename) DO NOTHING;
+   ```
+
+2. **Run it first** (prefix with `000_` to ensure it runs before others):
+   ```bash
+   doppler run --config prd -- make db-migrate
+   ```
+
+This marks old migrations as complete without re-running them.
+
+## Common Issues
+
+### Migration Already Exists
+
+**Error**: `duplicate key value violates unique constraint "migration_history_filename_key"`
+
+**Cause**: Migration was already run
+
+**Solution**: This is normal - the migration is skipped automatically
+
+### Wrong Database Connection
+
+**Symptom**: Migrations run on local instead of production
+
+**Cause**: Missing `AURORA_DB_*` environment variables
+
+**Check**:
+```bash
+# Should show Aurora endpoint
+doppler run --config prd -- bash -c 'echo $AURORA_DB_HOST'
+```
+
+**Fix**: Verify Doppler config is set to `prd`
+
+### Migration Failed Mid-Execution
+
+**Error**: Migration stops with SQL error
+
+**Solution**:
+1. Check `migration_history` for the failed migration:
+   ```sql
+   SELECT * FROM migration_history WHERE success = false ORDER BY executed_at DESC LIMIT 1;
+   ```
+
+2. Fix the migration SQL
+
+3. Delete the failed record:
+   ```sql
+   DELETE FROM migration_history WHERE filename = 'failed_migration.sql';
+   ```
+
+4. Re-run:
+   ```bash
+   make db-migrate
+   ```
+
+## Best Practices
+
+1. **Always use idempotent SQL**: Use `IF NOT EXISTS`, `IF EXISTS`, `ON CONFLICT`, etc.
+2. **Test locally first**: Run `make db-migrate` on local before production
+3. **Use dry-run on production**: Always preview with `--dry-run` first
+4. **One feature per migration**: Keep migrations focused and atomic
+5. **Add rollback notes**: Document how to undo the migration if needed
+6. **Avoid data migrations in schema migrations**: Separate schema changes from data changes
+
+## Related
+
+- CLAUDE.md - Database schema rules and common mistakes
+- [Ably-Real-Time-Patterns](/docs/engineering/ably-real-time-patterns) - Real-time event patterns
+- PostGIS Functions - Spatial query functions
+
+---
+
+*Last updated: 2025-01-26*

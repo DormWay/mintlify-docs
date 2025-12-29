@@ -1,0 +1,466 @@
+---
+title: "City Processing DAG Flow"
+description: "City processing can be initiated in several ways:"
+---
+
+# City Processing DAG Flow
+
+**Overview**: This document describes the complete Directed Acyclic Graph (DAG) flow when a city processing workflow is initiated in the DormWay Temporal engine, including all data flows, signals, and real-time communications. Verify workflow names in `services/engine/src/workflows/cityProcessor.workflow.ts` and related activities before reuse; names drift over time.
+
+## Flow Trigger Points
+
+City processing can be initiated in several ways:
+
+1. **Scheduled Updates**: `scheduledCityUpdates` workflow runs every hour for all cities in an organization
+2. **Manual Trigger**: Direct invocation of `processSingleCity` workflow
+3. **API Trigger**: Via the API Router when city data needs refresh
+4. **Cascade Trigger**: From other context updates that depend on city data
+
+## Complete DAG Flow
+
+```mermaid
+graph TB
+    subgraph "Initialization"
+        A[processSingleCity Workflow Started] --> B[Update Task Status: 'processing']
+        B --> C[Fetch City Context from Database]
+    end
+    
+    subgraph "Parallel Data Fetching"
+        C --> D[Parallel Data Fetch]
+        D --> D1[fetchCityWeather<br/>Weather API]
+        D --> D2[fetchCityForecast<br/>Weather API]
+        D --> D3[fetchNews<br/>News API]
+        D --> D4[fetchTransitInfo<br/>Transit API]
+    end
+    
+    subgraph "Data Persistence"
+        D1 --> E1[saveCityWeatherData]
+        D2 --> E2[saveCityForecastData]
+        D3 --> E3[saveNewsData]
+        D4 --> E4[saveTransitData]
+        E1 --> F[Parallel Context Processing]
+        E2 --> F
+        E3 --> F
+        E4 --> F
+    end
+    
+    subgraph "Context Processing"
+        F --> F1[processCityWeatherContext<br/>LLM Processing]
+        F --> F2[processCityNewsContext<br/>LLM Processing]
+    end
+    
+    subgraph "Student Notification"
+        F1 --> G[signalStudentWatchersWorkflow]
+        F2 --> G
+        G --> G1[getStudentWatcherWorkflowIds]
+        G1 --> G2[signalStudentWatchers<br/>Send 'city_updated' signal]
+        G2 --> G3[Student Watchers Receive Signal<br/>All active student workflows]
+    end
+    
+    subgraph "Context Persistence & Decision"
+        F1 --> H[saveCityWeatherContext]
+        F2 --> H2[saveCityNewsContext]
+        H --> I{Was Context<br/>Actually Updated?}
+        H2 --> I
+    end
+    
+    subgraph "Update Propagation" 
+        I -->|Yes| J[notifyCompletion]
+        I -->|Yes| K[publishSystemBroadcast<br/>system:broadcast channel]
+        I -->|Yes| L[triggerCascadeWorkflow]
+        I -->|No| M[Skip notifications]
+    end
+    
+    subgraph "Cascade Processing"
+        L --> L1[getDependentContexts<br/>Query context_dependencies]
+        L1 --> L2[triggerCascade]
+        L2 --> L3{Dependent Type?}
+        L3 -->|campus| L4[Start processSingleCampus<br/>workflow]
+        L3 -->|student| L5[Signal studentWatcherWorkflow<br/>refreshIfStale signal]
+    end
+    
+    subgraph "Completion"
+        J --> N[Update Task Status: 'completed']
+        K --> N
+        L4 --> N
+        L5 --> N
+        M --> N
+        N --> O[Workflow Complete]
+    end
+    
+    subgraph "Real-time Channels"
+        K --> RT1[Ably: system:broadcast<br/>city.processed event]
+        G2 --> RT2[Student Workflows<br/>Receive city_updated signal]
+        L5 --> RT3[Student Watchers<br/>Receive refreshIfStale signal]
+    end
+    
+    subgraph "Error Handling"
+        E1 -.-> ERR[Catch & Update Task Status: 'failed']
+        E2 -.-> ERR
+        E3 -.-> ERR
+        E4 -.-> ERR
+        F1 -.-> ERR
+        F2 -.-> ERR
+        G -.-> ERR
+        H -.-> ERR
+        H2 -.-> ERR
+        J -.-> ERR
+        K -.-> ERR
+        L -.-> ERR
+    end
+
+    classDef workflow fill:#e1f5fe
+    classDef activity fill:#f3e5f5
+    classDef decision fill:#fff3e0
+    classDef signal fill:#e8f5e8
+    classDef broadcast fill:#fce4ec
+    classDef error fill:#ffebee
+    
+    class A,G,L,L2 workflow
+    class B,C,D1,D2,D3,D4,E1,E2,E3,E4,F1,F2,H,H2,J,N activity
+    class I,L3 decision
+    class G2,L5,RT2,RT3 signal
+    class K,RT1 broadcast
+    class ERR error
+```
+
+## Detailed Flow Breakdown
+
+### Phase 1: Initialization & Data Fetching
+
+**Workflow Start**:
+- **Trigger**: `processSingleCity(cityId, jobId?)` 
+- **Task Queue**: `city-worker`
+- **Worker**: City Worker with `cityActivities` + `ablyActivities`
+
+**Data Fetching (Parallel)**:
+```typescript
+const [weatherData, forecastData, newsData, transitData] = await Promise.all([
+  cityActivities.fetchCityWeather(cityId, cityMetadata),
+  cityActivities.fetchCityForecast(cityId, cityMetadata), 
+  cityActivities.fetchNews(cityId, cityMetadata),
+  cityActivities.fetchTransitInfo(cityId, cityMetadata)
+]);
+```
+
+**External APIs Called**:
+- Weather API (current conditions)
+- Weather API (forecast data)
+- News API (city/state news)
+- Transit API (public transportation)
+
+### Phase 2: Data Persistence
+
+**Raw Data Storage**:
+```typescript
+await cityActivities.saveCityForecastData(cityId, forecastData);
+await cityActivities.saveCityWeatherData(cityId, weatherData);
+const parsedTransitData = await cityActivities.saveTransitData(cityId, transitData);
+const parsedNewsData = await cityActivities.saveNewsData(cityId, newsData);
+```
+
+**Database Tables Updated**:
+- `city_weather_data` - Current weather conditions
+- `city_forecast_data` - Weather forecasts
+- `city_news_data` - News articles for the city
+- `city_transit_data` - Public transportation information
+
+### Phase 3: LLM Context Processing
+
+**Parallel Context Generation**:
+```typescript
+const [weatherContextData, newsContextData] = await Promise.all([
+  cityActivities.processCityWeatherContext(cityId, cityInfo, weatherData, forecastData),
+  cityActivities.processCityNewsContext(cityId, cityInfo, parsedNewsData)
+]);
+```
+
+**LLM Processing**:
+- **Weather Context**: Combines current weather + forecast into actionable insights
+- **News Context**: Processes news articles into relevant campus/student information
+- **Models Used**: Configured LLM providers (e.g., OpenAI, Anthropic)
+- **Output**: Structured JSON context data for downstream consumption
+
+### Phase 4: Student Notification
+
+**Signal Distribution**:
+```typescript
+await executeChild('signalStudentWatchersWorkflow', {
+  workflowId: `signal-student-watchers-${cityId}-${Date.now()}`,
+  taskQueue: taskQueues.student,
+  args: ['city_updated', cityId, weatherContextData, newsContextData]
+});
+```
+
+**Student Watcher Workflow Actions**:
+1. **Query**: `getStudentWatcherWorkflowIds()` - Fetch all active student workflows
+2. **Signal**: Send `city_updated` signal to all student watchers
+3. **Payload**: Includes `cityId`, `weatherContextData`, `newsContextData`
+4. **Result**: Student workflows can refresh their context with new city data
+
+### Phase 5: Context Persistence & Decision Point
+
+**Context Storage**:
+```typescript
+const wasWeatherContextUpdated = await cityActivities.saveCityWeatherContext(cityId, weatherContextData);
+const wasNewsContextUpdated = await cityActivities.saveCityNewsContext(cityId, newsContextData);
+```
+
+**Database Tables Updated**:
+- `contexts` table - City weather and news context records
+- Hash-based deduplication prevents unnecessary updates
+
+**Decision Logic**:
+```typescript
+if (wasWeatherContextUpdated || wasNewsContextUpdated) {
+  // Proceed with notifications and cascades
+} else {
+  // Skip notifications - no actual changes
+}
+```
+
+### Phase 6: System Broadcasting
+
+**System-Wide Notification**:
+```typescript
+await ablyActivities.publishSystemBroadcast('city.processed', {
+  contextId: cityId,
+  contextType: 'city',
+  name: cityContext.metadata.name,
+  metadata: {
+    weatherUpdated: wasWeatherContextUpdated,
+    newsUpdated: wasNewsContextUpdated,
+    state: cityContext.metadata.state,
+    location: cityContext.metadata.location
+  }
+});
+```
+
+**Ably Channel**: `city:{cityId}` (e.g., `city:city_ann_arbor_mi`)
+**Event Type**: `city.processed`
+**Subscribers**: Services/apps subscribed to specific city updates
+**Use Cases**: 
+- City-specific real-time dashboards
+- Location-based user notifications
+- Reduced channel overhead by scoping to city
+
+### Phase 7: Cascade Triggering
+
+**Dependency Resolution**:
+```typescript
+await executeChild('triggerCascadeWorkflow', {
+  workflowId: `cascade-from-city-${cityId}-${Date.now()}`,
+  taskQueue: taskQueues.triggerCascade,
+  args: ['city', cityId]
+});
+```
+
+**Cascade Workflow Actions**:
+
+1. **Query Dependencies**: 
+   ```sql
+   SELECT target_context_id, dependency_type 
+   FROM context_dependencies 
+   WHERE source_context_id = cityId
+   ```
+
+2. **Trigger Dependent Workflows**:
+   - **Campus Contexts**: Start `processSingleCampus` workflows
+   - **Student Contexts**: Signal `studentWatcherWorkflow` with `refreshIfStale`
+
+3. **Workflow Spawning**:
+   ```typescript
+   // For campus dependencies
+   await client.start('processSingleCampus', {
+     workflowId: `campus-context-${depId}-${Date.now()}`,
+     taskQueue: config.taskQueues.campus,
+     args: [depId]
+   });
+   
+   // For student dependencies  
+   await client.signalWithStart('studentWatcherWorkflow', {
+     workflowId: `student-watcher-${depId}`,
+     taskQueue: config.taskQueues.student,
+     signal: 'refreshIfStale',
+     signalArgs: [true],
+     args: [depId]
+   });
+   ```
+
+## Real-time Communication Flows
+
+### Ably Channels Used
+
+1. **System Broadcast**: `system:broadcast`
+   - **Event**: `city.processed`
+   - **Payload**: City metadata + processing status
+   - **Consumers**: System monitoring, admin dashboards
+
+2. **Student Signals**: Direct Temporal workflow signals
+   - **Signal**: `city_updated` 
+   - **Target**: All active `studentWatcherWorkflow` instances
+   - **Payload**: City ID + processed context data
+
+3. **Cascade Signals**: Direct Temporal workflow signals
+   - **Signal**: `refreshIfStale`
+   - **Target**: Dependent student watcher workflows
+   - **Purpose**: Trigger context refresh with new city data
+
+### Signal Propagation Timeline
+
+```mermaid
+sequenceDiagram
+    participant CW as City Worker
+    participant SW as Student Watchers
+    participant AB as Ably
+    participant CaW as Campus Workers
+    participant DB as Database
+    
+    Note over CW: City Processing Complete
+    
+    CW->>SW: signalStudentWatchersWorkflow
+    Note over SW: 'city_updated' signal sent to all
+    
+    CW->>AB: publishSystemBroadcast
+    Note over AB: system:broadcast channel
+    
+    CW->>CaW: triggerCascadeWorkflow  
+    Note over CaW: Start dependent campus processing
+    
+    CW->>SW: Cascade signals
+    Note over SW: 'refreshIfStale' signal to dependents
+    
+    CW->>DB: Update task status: 'completed'
+    
+    par Parallel Processing
+        SW->>SW: Refresh student contexts
+    and
+        CaW->>CaW: Process dependent campuses
+    and
+        AB->>AB: Broadcast to subscribers
+    end
+```
+
+## Performance Characteristics
+
+### Parallel Execution Points
+
+1. **Data Fetching**: Weather, forecast, news, transit (4 parallel API calls)
+2. **Context Processing**: Weather context + news context (2 parallel LLM calls)
+3. **Post-Processing**: Student signals + system broadcast + cascade trigger (3 parallel operations)
+
+### Scaling Considerations
+
+- **API Rate Limits**: External weather/news APIs may have rate limits
+- **LLM Processing**: Context generation can be CPU/time intensive
+- **Database Connections**: Multiple parallel writes require connection pooling
+- **Student Count**: Signal propagation scales with number of active student workflows
+
+### Typical Execution Times
+
+- **Data Fetching**: 2-5 seconds (depending on API latency)
+- **LLM Processing**: 3-10 seconds (depending on context complexity)
+- **Database Operations**: 100-500ms per operation
+- **Signal Propagation**: 100-200ms per workflow
+- **Total Workflow Time**: 10-30 seconds for typical city
+
+## Error Handling & Recovery
+
+### Activity-Level Retries
+
+All activities have built-in retry policies:
+```typescript
+const defaultActivityOptions = {
+  startToCloseTimeout: '1 minute',
+  retry: {
+    maximumAttempts: 3,
+  },
+};
+```
+
+### Failure Scenarios
+
+1. **API Failures**: Weather/news APIs unavailable
+   - **Recovery**: Retry with exponential backoff
+   - **Fallback**: Skip processing for that data type
+
+2. **LLM Processing Failures**: Context generation fails
+   - **Recovery**: Retry with different model/parameters
+   - **Fallback**: Use cached context or skip updates
+
+3. **Database Failures**: Unable to save context
+   - **Recovery**: Retry database operations
+   - **Fallback**: Mark task as failed, no cascade
+
+4. **Signal Failures**: Unable to notify dependents
+   - **Recovery**: Continue workflow, log warnings
+   - **Impact**: Some students may have stale context
+
+### Task Status Tracking
+
+Throughout the workflow, task status is updated:
+- **Start**: `'processing'`
+- **Success**: `'completed'`
+- **Failure**: `'failed'` with error message
+
+## Dependencies & Context Relationships
+
+### Database Schema Relationships
+
+```sql
+-- City context depends on organization
+contexts (city) → organizations
+
+-- Campus contexts depend on city contexts  
+context_dependencies: campus.source → city.target
+
+-- Student contexts depend on campus contexts
+context_dependencies: student.source → campus.target
+
+-- Therefore: city updates cascade to campus → student
+```
+
+### Cascade Trigger Matrix
+
+| Source Context | Dependent Type | Action Taken |
+|---------------|---------------|--------------|
+| City | Campus | Start `processSingleCampus` workflow |
+| City | Student | Signal `refreshIfStale` to student watcher |
+| Campus | Student | Signal `refreshIfStale` to student watcher |
+| Student | None | No cascade (leaf node) |
+
+## Monitoring & Observability
+
+### Key Metrics to Monitor
+
+1. **Workflow Success Rate**: Percentage of city processing workflows that complete successfully
+2. **Processing Duration**: Time from start to completion for city workflows
+3. **API Response Times**: External API latency for weather/news/transit
+4. **LLM Processing Time**: Time spent in context generation
+5. **Cascade Fan-out**: Number of dependent workflows triggered
+6. **Signal Delivery Rate**: Percentage of student signals successfully delivered
+
+### Logging Points
+
+- Workflow start/completion
+- Each API call with response times
+- LLM processing duration and token usage
+- Context save operations and hash comparisons
+- Signal delivery attempts and results
+- Error conditions with full context
+
+### Alerts to Configure
+
+- City processing failure rate > 5%
+- Average processing time > 45 seconds
+- External API failure rate > 10%
+- Signal delivery failure rate > 10%
+- Context save failure rate > 1%
+
+## Related Documentation
+
+- Campus Processing DAG Flow
+- Student Context Processing
+- Temporal Architecture Overview
+- Ably Real-time Communication
+- [Context Dependencies Schema](/docs/engineering/architecture/sot-context-system)

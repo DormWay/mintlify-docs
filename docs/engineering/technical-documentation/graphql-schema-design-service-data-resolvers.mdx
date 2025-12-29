@@ -1,0 +1,970 @@
+---
+title: "GraphQL Schema Design   Service Data Resolvers"
+description: "This document proposes GraphQL schema designs to replace complex JSONB extraction logic currently scattered across REST endpoints. Moving this logic to typed..."
+---
+
+# GraphQL Schema Design - Service Data Resolvers
+
+**Created:** 2025-10-31
+**Status:** Proposal
+**Related:** AppSync, service_data Table, GraphQL Explorer
+
+---
+
+## Overview
+
+This document proposes GraphQL schema designs to replace complex JSONB extraction logic currently scattered across REST endpoints. Moving this logic to typed GraphQL resolvers provides:
+
+- **Type Safety:** JSONB field extraction becomes strongly typed
+- **Introspection:** GraphQL Explorer shows exactly what's available
+- **Client Control:** Clients request only needed fields
+- **Reduced Over-fetching:** No more giant `data` JSONB blobs
+- **Centralized Logic:** Extraction patterns in one place
+
+---
+
+## Current State
+
+### Problems with Current REST Implementation
+
+**Location:** `services/api-router/src/routes/dashboard-routes.ts:119-162`
+
+```typescript
+// 🔴 PROBLEM: Complex pattern matching & extraction logic
+if (/dayplan$/i.test(method)) {
+  icon = 'calendar_today';
+  const evc = Array.isArray(d.events) ? d.events.length : (d.eventCount || 0);
+  const acc = Array.isArray(d.actions) ? d.actions.length : (d.actionCount || 0);
+  const dt = d.date || '';
+  title = 'DayPlan generated';
+  subtitle = `${evc} events • ${acc} actions${dt ? ` • ${dt}` : ''}`;
+} else if (/context_prediction_response/i.test(method)) {
+  // ... more extraction logic
+}
+```
+
+**Issues:**
+- No type safety on JSONB fields
+- Duplicated extraction logic across endpoints
+- Difficult to discover available fields
+- Over-fetching entire `data` JSONB blob
+
+---
+
+## Proposed GraphQL Schemas
+
+### 1. Activity Feed (Priority: HIGH)
+
+**Current Implementation:** `dashboard-routes.ts:54-200` (150+ lines)
+
+#### Schema
+
+```graphql
+"""
+User and campus activity feed with typed service_data extraction
+"""
+type Query {
+  """
+  Get recent activity for a user (personal + campus events)
+  """
+  getUserActivity(
+    userId: ID!
+    limit: Int = 20
+    location: LocationInput
+  ): ActivityFeed!
+}
+
+type ActivityFeed {
+  items: [ActivityItem!]!
+  totalCount: Int!
+  campusContext: CampusContext
+}
+
+type ActivityItem {
+  id: ID!
+  timestamp: AWSDateTime!
+  icon: String!
+  title: String!
+  subtitle: String
+  source: ActivitySource!
+  method: String!
+
+  # Typed data based on method
+  dayPlan: DayPlanActivity
+  contextUpdate: ContextUpdateActivity
+  syllabus: SyllabusActivity
+  calendar: CalendarActivity
+  document: DocumentActivity
+}
+
+enum ActivitySource {
+  USER
+  SCHOOL
+}
+
+type DayPlanActivity {
+  eventCount: Int!
+  actionCount: Int!
+  date: AWSDate
+  events: [String!]
+  actions: [String!]
+}
+
+type ContextUpdateActivity {
+  updateType: String! # calendar, location, health
+  primaryState: String
+  confidence: Float
+}
+
+type SyllabusActivity {
+  courseCode: String
+  pageCount: Int
+  processingStatus: String
+}
+
+type CalendarActivity {
+  eventsImported: Int
+  eventSummaries: [String!]
+}
+
+type DocumentActivity {
+  filename: String!
+  documentType: String!
+  pageCount: Int
+  processingStatus: String
+}
+
+input LocationInput {
+  latitude: Float!
+  longitude: Float!
+  accuracy: Float
+}
+
+type CampusContext {
+  id: ID!
+  name: String!
+}
+```
+
+#### Example Queries
+
+```graphql
+# Mobile app - minimal data for list view
+query GetActivityFeed {
+  getUserActivity(userId: "user123", limit: 10) {
+    items {
+      id
+      timestamp
+      icon
+      title
+      subtitle
+      source
+    }
+  }
+}
+
+# Web dashboard - rich data with details
+query GetActivityFeedDetailed {
+  getUserActivity(userId: "user123", limit: 20) {
+    items {
+      id
+      timestamp
+      title
+      subtitle
+      source
+
+      # Conditional fragments for typed data
+      ... on ActivityItem {
+        dayPlan {
+          eventCount
+          actionCount
+          date
+        }
+        contextUpdate {
+          updateType
+          primaryState
+          confidence
+        }
+        syllabus {
+          courseCode
+          pageCount
+        }
+      }
+    }
+    campusContext {
+      id
+      name
+    }
+  }
+}
+```
+
+#### Implementation Notes
+
+**File:** `dormway-platform/services/graphql-resolvers/activity-feed.ts` (new)
+
+```typescript
+// Resolver structure
+export const activityFeedResolvers = {
+  Query: {
+    getUserActivity: async (_, { userId, limit, location }, context) => {
+      // Query service_data with partition pruning
+      const items = await queryServiceData(userId, limit);
+
+      // Transform to typed items
+      return {
+        items: items.map(transformActivityItem),
+        totalCount: items.length,
+        campusContext: await getCampusContext(userId)
+      };
+    }
+  },
+
+  ActivityItem: {
+    // Field resolvers extract from JSONB based on method
+    dayPlan: (parent) => {
+      if (!/dayplan$/i.test(parent.method)) return null;
+      return extractDayPlanData(parent.data);
+    },
+
+    contextUpdate: (parent) => {
+      if (!/context_prediction_response/i.test(parent.method)) return null;
+      return extractContextUpdateData(parent.data);
+    },
+
+    // ... other field resolvers
+  }
+};
+```
+
+---
+
+### 2. Service Data Repository (Priority: MEDIUM)
+
+**Current Implementation:** `admin/service-data.ts:9-92`
+
+#### Schema
+
+```graphql
+"""
+Admin interface to service_data table with typed extraction
+"""
+type Query {
+  """
+  Get service data for a context (city or campus)
+  """
+  getServiceData(
+    contextId: ID!
+    methods: [String!]
+    since: AWSDateTime
+    limit: Int = 50
+  ): [ServiceDataRecord!]!
+
+  """
+  Get summary of available service data types
+  """
+  getServiceDataSummary(contextId: ID!): ServiceDataSummary!
+}
+
+type ServiceDataRecord {
+  id: ID!
+  contextId: ID!
+  method: String!
+  serviceName: String
+  fetchedAt: AWSDateTime!
+
+  # Raw JSONB for flexibility
+  rawData: AWSJSON!
+
+  # Typed extractors based on method
+  weather: WeatherServiceData
+  calendar: CalendarServiceData
+  syllabus: SyllabusServiceData
+  contextIntelligence: ContextIntelligenceData
+}
+
+type WeatherServiceData {
+  temperature: Float
+  feelsLike: Float
+  condition: String
+  icon: String
+  forecast: [ForecastDay!]
+}
+
+type ForecastDay {
+  date: AWSDate!
+  high: Float!
+  low: Float!
+  condition: String!
+  precipitationChance: Float
+}
+
+type CalendarServiceData {
+  events: [CalendarEvent!]!
+  importedCount: Int!
+  source: String
+}
+
+type CalendarEvent {
+  id: ID!
+  summary: String!
+  start: AWSDateTime!
+  end: AWSDateTime
+  location: String
+  description: String
+  attendees: [String!]
+}
+
+type SyllabusServiceData {
+  courseCode: String!
+  courseName: String
+  instructor: String
+  pageCount: Int
+  sections: [SyllabusSection!]
+  assignments: [Assignment!]
+}
+
+type SyllabusSection {
+  title: String!
+  content: String!
+  pageNumber: Int
+}
+
+type Assignment {
+  title: String!
+  dueDate: AWSDate
+  points: Int
+  description: String
+}
+
+type ContextIntelligenceData {
+  prediction: String!
+  confidence: Float!
+  reasoning: String
+  suggestedActions: [String!]
+}
+
+type ServiceDataSummary {
+  contextId: ID!
+  totalMethods: Int!
+  methods: [MethodSummary!]!
+}
+
+type MethodSummary {
+  method: String!
+  serviceName: String
+  count: Int!
+  latestFetch: AWSDateTime!
+  earliestFetch: AWSDateTime!
+}
+```
+
+#### Example Queries
+
+```graphql
+# Admin dashboard - see all weather data
+query GetCampusWeather {
+  getServiceData(
+    contextId: "campus-123"
+    methods: ["fetch_forecast", "fetch_current_weather"]
+    since: "2025-10-01T00:00:00Z"
+  ) {
+    id
+    method
+    fetchedAt
+    weather {
+      temperature
+      condition
+      forecast {
+        date
+        high
+        low
+        condition
+      }
+    }
+  }
+}
+
+# Admin - audit service data coverage
+query GetServiceDataCoverage {
+  getServiceDataSummary(contextId: "campus-123") {
+    totalMethods
+    methods {
+      method
+      serviceName
+      count
+      latestFetch
+    }
+  }
+}
+
+# Developer - extract calendar events with raw fallback
+query GetCalendarEvents {
+  getServiceData(
+    contextId: "student-ctx-456"
+    methods: ["google_calendar_sync"]
+  ) {
+    id
+    fetchedAt
+    calendar {
+      events {
+        summary
+        start
+        end
+        location
+      }
+      importedCount
+    }
+    # Fallback to raw if typed extraction fails
+    rawData
+  }
+}
+```
+
+---
+
+### 3. User Context Resolution (Priority: HIGH)
+
+**Current Implementation:** `dashboard-service.ts:40-142` (complex hierarchy traversal)
+
+#### Schema
+
+```graphql
+"""
+Resolve user context hierarchy (student → campus → city)
+"""
+type Query {
+  """
+  Get complete user context with hierarchy
+  """
+  getUserContext(userId: ID!): UserContext!
+}
+
+type UserContext {
+  userId: ID!
+  studentContext: StudentContext
+  campus: Campus
+  city: City
+
+  # Computed fields
+  isNewUser: Boolean!
+  hasCompletedOnboarding: Boolean!
+}
+
+type StudentContext {
+  id: ID!
+  parentId: ID!
+  type: String!
+  metadata: AWSJSON!
+  createdAt: AWSDateTime!
+
+  # Typed metadata extraction
+  enrollmentStatus: String
+  academicYear: Int
+  major: String
+  gradYear: Int
+}
+
+type Campus {
+  id: ID!
+  code: String
+  name: String!
+  city: String!
+  state: String!
+
+  # From contexts.metadata
+  emailDomains: [String!]
+  enrollment: Int
+  coordinates: Coordinates
+  timezone: String
+}
+
+type City {
+  id: ID!
+  name: String!
+  state: String!
+  country: String!
+  population: Int
+
+  # From contexts.metadata
+  coordinates: Coordinates
+  timezone: String
+}
+
+type Coordinates {
+  latitude: Float!
+  longitude: Float!
+}
+```
+
+#### Example Queries
+
+```graphql
+# Mobile app - basic context for header
+query GetUserContextBasic {
+  getUserContext(userId: "user123") {
+    campus {
+      name
+      city
+      state
+    }
+    isNewUser
+  }
+}
+
+# Web dashboard - full context hierarchy
+query GetUserContextFull {
+  getUserContext(userId: "user123") {
+    studentContext {
+      id
+      enrollmentStatus
+      major
+      gradYear
+    }
+    campus {
+      id
+      code
+      name
+      city
+      state
+      enrollment
+      timezone
+      coordinates {
+        latitude
+        longitude
+      }
+    }
+    city {
+      name
+      state
+      population
+      timezone
+    }
+    isNewUser
+    hasCompletedOnboarding
+  }
+}
+```
+
+---
+
+### 4. Dashboard Composite (Priority: HIGHEST)
+
+**Current Implementation:** Dashboard BFF pattern with ETag caching
+
+#### Schema
+
+```graphql
+"""
+Complete dashboard state - replace BFF endpoint
+"""
+type Query {
+  """
+  Get complete dashboard data with optional context override
+  """
+  getDashboard(
+    userId: ID
+    context: ContextType = HOME
+    campusId: ID
+  ): Dashboard!
+}
+
+enum ContextType {
+  HOME
+  CAMPUS
+  CITY
+  NEW_USER
+}
+
+type Dashboard {
+  # User data
+  profile: UserProfile!
+  context: UserContext!
+
+  # Dashboard widgets (client picks what to load)
+  weather: Weather
+  schedule: Schedule
+  dayPlan: DayPlan
+  dueSoon: [Task!]!
+  recentActivity: ActivityFeed
+
+  # Metadata
+  generatedAt: AWSDateTime!
+  contextType: ContextType!
+}
+
+type UserProfile {
+  id: ID!
+  email: String!
+  name: String
+  avatarUrl: String
+  createdAt: AWSDateTime!
+  preferences: UserPreferences
+}
+
+type UserPreferences {
+  theme: String
+  notifications: NotificationPreferences
+  timezone: String
+}
+
+type Weather {
+  current: CurrentWeather!
+  forecast: [ForecastDay!]!
+  lastUpdated: AWSDateTime!
+}
+
+type CurrentWeather {
+  temperature: Float!
+  feelsLike: Float!
+  condition: String!
+  icon: String!
+  humidity: Float
+  windSpeed: Float
+}
+
+type Schedule {
+  items: [ScheduleItem!]!
+  date: AWSDate!
+}
+
+type ScheduleItem {
+  id: ID!
+  title: String!
+  start: AWSDateTime!
+  end: AWSDateTime
+  location: String
+  type: ScheduleItemType!
+  color: String
+}
+
+enum ScheduleItemType {
+  CLASS
+  ASSIGNMENT
+  EVENT
+  MEAL
+  STUDY
+}
+
+type DayPlan {
+  date: AWSDate!
+  events: [DayPlanEvent!]!
+  actions: [DayPlanAction!]!
+  summary: String
+}
+
+type DayPlanEvent {
+  id: ID!
+  time: AWSTime!
+  title: String!
+  duration: Int # minutes
+  priority: Int
+}
+
+type DayPlanAction {
+  id: ID!
+  title: String!
+  completed: Boolean!
+  dueAt: AWSDateTime
+}
+
+type Task {
+  id: ID!
+  title: String!
+  dueAt: AWSDateTime!
+  courseCode: String
+  priority: TaskPriority!
+  completed: Boolean!
+}
+
+enum TaskPriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+```
+
+#### Example Queries
+
+```graphql
+# Mobile app - home screen (minimal data)
+query GetHomeDashboard {
+  getDashboard(userId: "user123") {
+    profile {
+      name
+      avatarUrl
+    }
+    context {
+      campus {
+        name
+      }
+    }
+    weather {
+      current {
+        temperature
+        condition
+        icon
+      }
+    }
+    schedule {
+      items(limit: 3) {
+        title
+        start
+        type
+      }
+    }
+    dueSoon(limit: 5) {
+      title
+      dueAt
+      priority
+    }
+  }
+}
+
+# Web dashboard - full home view
+query GetFullDashboard {
+  getDashboard(userId: "user123", context: HOME) {
+    profile {
+      name
+      email
+      preferences {
+        theme
+        timezone
+      }
+    }
+    context {
+      studentContext {
+        major
+        gradYear
+      }
+      campus {
+        name
+        city
+        state
+      }
+    }
+    weather {
+      current {
+        temperature
+        feelsLike
+        condition
+        icon
+      }
+      forecast {
+        date
+        high
+        low
+        condition
+      }
+    }
+    schedule {
+      items {
+        title
+        start
+        end
+        location
+        type
+      }
+    }
+    dayPlan {
+      events {
+        time
+        title
+        duration
+      }
+      actions {
+        title
+        completed
+      }
+      summary
+    }
+    dueSoon {
+      title
+      dueAt
+      courseCode
+      priority
+    }
+    recentActivity(limit: 10) {
+      items {
+        title
+        subtitle
+        timestamp
+        icon
+      }
+    }
+  }
+}
+
+# Admin override - view specific campus dashboard
+query GetCampusDashboard {
+  getDashboard(
+    userId: "admin-user"
+    context: CAMPUS
+    campusId: "campus-123"
+  ) {
+    context {
+      campus {
+        name
+        enrollment
+      }
+    }
+    weather {
+      current {
+        temperature
+        condition
+      }
+    }
+    # Campus-wide recent activity
+    recentActivity(limit: 50) {
+      items {
+        title
+        source
+        timestamp
+      }
+    }
+  }
+}
+```
+
+---
+
+## Implementation Plan
+
+### Phase 1: Proof of Concept (8 hours)
+
+1. **Set up GraphQL resolver infrastructure** (2 hours)
+   - Add `@aws-appsync/utils` package
+   - Create `graphql-resolvers/` directory
+   - Set up TypeScript types from schema
+
+2. **Implement Activity Feed resolver** (4 hours)
+   - Create schema file
+   - Implement query resolver
+   - Implement field resolvers for typed extraction
+   - Test in GraphQL Explorer
+
+3. **Deploy to AppSync** (2 hours)
+   - Create AppSync API (if not exists)
+   - Upload schema
+   - Connect to Aurora PostgreSQL data source
+   - Configure VTL/JS resolvers
+
+### Phase 2: Core Resolvers (16 hours)
+
+4. **User Context resolver** (4 hours)
+   - Schema + resolvers
+   - Hierarchy traversal logic
+   - Fallback handling
+
+5. **Service Data resolver** (6 hours)
+   - Schema for all major service_data types
+   - Typed extractors (weather, calendar, syllabus)
+   - Admin summary queries
+
+6. **Dashboard Composite resolver** (6 hours)
+   - Complete dashboard schema
+   - Integrate existing BFF logic
+   - ETag/caching strategy for GraphQL
+
+### Phase 3: Migration & Optimization (8 hours)
+
+7. **Client migration** (4 hours)
+   - Update dormway-lockedin to use GraphQL
+   - Update dormway-admin queries
+   - Update mobile app (if applicable)
+
+8. **Performance optimization** (2 hours)
+   - DataLoader for batch resolution
+   - Query complexity limits
+   - Caching headers
+
+9. **Documentation** (2 hours)
+   - Update GraphQL Explorer with examples
+   - Document all resolvers
+   - Create migration guide
+
+**Total Estimated Time:** 32 hours
+
+---
+
+## Benefits
+
+### Developer Experience
+
+- **Discoverability:** GraphQL Explorer shows all available fields
+- **Type Safety:** Auto-generated TypeScript types from schema
+- **Reduced Boilerplate:** No more manual JSONB extraction in every endpoint
+
+### Performance
+
+- **Reduced Over-fetching:** Clients request only needed fields
+- **Batching:** DataLoader batches database queries
+- **Caching:** GraphQL response caching + ETag support
+
+### Maintenance
+
+- **Centralized Logic:** JSONB extraction patterns in one place
+- **Easier Testing:** Test resolvers independently
+- **Schema Evolution:** Add fields without breaking clients
+
+---
+
+## Questions & Considerations
+
+### 1. AppSync vs Custom GraphQL Server?
+
+**Option A: AWS AppSync (Recommended)**
+- ✅ Managed infrastructure
+- ✅ Built-in auth (Clerk JWT)
+- ✅ Real-time subscriptions
+- ✅ Auto-scaling
+- ❌ VTL/JS learning curve
+
+**Option B: Custom Server (Apollo/GraphQL Yoga)**
+- ✅ Full control
+- ✅ Use existing TypeScript patterns
+- ❌ Need to manage infrastructure
+- ❌ More operational overhead
+
+**Recommendation:** Start with AppSync since Zuplo already routes to it.
+
+### 2. Migration Strategy?
+
+**Option A: Gradual (Recommended)**
+1. Deploy GraphQL alongside REST
+2. Migrate one client at a time
+3. Deprecate REST endpoints once all clients migrated
+
+**Option B: Big Bang**
+- Switch all clients at once
+- Higher risk but cleaner cutover
+
+**Recommendation:** Gradual migration, starting with new features.
+
+### 3. Schema Versioning?
+
+- Use `@deprecated` directive for old fields
+- Never remove fields, only add
+- Use field aliases for breaking changes
+
+---
+
+## Related Documentation
+
+- AppSync Setup Guide
+- service_data Table Schema
+- [Dashboard BFF Architecture](/docs/engineering/architecture/bff-dashboard-v1)
+- GraphQL Explorer Usage
+- JSONB Extraction Patterns
+
+---
+
+## Next Steps
+
+1. ✅ Review this proposal with team
+2. ⏸️ Get approval for Phase 1 (8 hours)
+3. ⏸️ Set up AppSync API in AWS
+4. ⏸️ Implement Activity Feed POC
+5. ⏸️ Test in GraphQL Explorer
+6. ⏸️ Decide on full migration plan

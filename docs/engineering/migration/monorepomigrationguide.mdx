@@ -1,0 +1,416 @@
+---
+title: "MONOREPO_MIGRATION_GUIDE"
+description: "Migrate from 24 git submodules to a single monorepo WITHOUT any production downtime or infrastructure changes."
+---
+
+# DormWay Monorepo Migration Guide
+## Zero-Downtime Migration Without Breaking Production
+
+---
+
+## 🎯 Goal
+Migrate from 24 git submodules to a single monorepo WITHOUT any production downtime or infrastructure changes.
+
+## 📋 Pre-Migration Checklist
+
+- [ ] All production services are stable
+- [ ] No pending critical deployments
+- [ ] Team is aware of migration schedule
+- [ ] Backup of all repository data
+- [ ] Document current deployment process
+- [ ] List all CI/CD webhooks and integrations
+
+---
+
+## Phase 1: Preparation (Day 1-2)
+### No Production Impact
+
+### Step 1.1: Audit Current State
+```bash
+# Document all submodules and their current commits
+cd dormway-dev-tools
+git submodule status > submodule-backup.txt
+
+# List all services currently in production
+aws ecs list-services --cluster dormway-cluster > current-services.json
+
+# Document ECR repositories
+aws ecr describe-repositories > current-ecr-repos.json
+```
+
+### Step 1.2: Create New Monorepo Structure
+```bash
+# Create new repository (DO NOT DELETE OLD ONES YET!)
+mkdir dormway-platform
+cd dormway-platform
+git init
+
+# Create structure
+mkdir -p services apps infrastructure/terraform infrastructure/docker
+```
+
+### Step 1.3: Copy Service Code (Not Move!)
+```bash
+# Copy each service (preserve git history)
+cd dormway-dev-tools
+
+# For each submodule, copy (not move) the code
+cp -r dormway/dormway-api-router ../dormway-platform/services/api-router
+cp -r dormway/engine ../dormway-platform/services/engine
+cp -r dormway/dormway-crews ../dormway-platform/services/dormway-crews
+cp -r dormway/dormway-admin ../dormway-platform/services/dormway-admin
+cp -r dormway/ably-relay ../dormway-platform/services/ably-relay
+
+# Copy infrastructure
+cp -r dormway-aws-infrastructure/terraform ../dormway-platform/infrastructure/
+cp -r dormway-aws-infrastructure/docker ../dormway-platform/infrastructure/
+```
+
+### Step 1.4: Update Docker Compose Paths (Local Only)
+```yaml
+# dormway-platform/docker-compose.yml
+services:
+  api-router:
+    build:
+      context: ./services/api-router  # Changed from submodule path
+      dockerfile: Dockerfile
+```
+
+### Step 1.5: Test Locally
+```bash
+cd dormway-platform
+docker-compose build  # Ensure all services build
+docker-compose up     # Test locally
+```
+
+---
+
+## Phase 2: Parallel Infrastructure (Day 3-4)
+### Still No Production Impact
+
+### Step 2.1: Create New GitHub Repository
+```bash
+# Push to new repo (keeps old repos intact)
+cd dormway-platform
+git remote add origin https://github.com/DormWay/dormway-platform.git
+git add .
+git commit -m "Initial monorepo structure"
+git push -u origin main
+```
+
+### Step 2.2: Setup Parallel CI/CD
+Create `.github/workflows/deploy-parallel.yml`:
+```yaml
+name: Deploy (Parallel - Testing)
+
+on:
+  push:
+    branches: [main]
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REGISTRY: ${{ secrets.ECR_REGISTRY }}
+
+jobs:
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      services: ${{ steps.detect.outputs.services }}
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 2
+      
+      - id: detect
+        run: |
+          # Detect which services changed
+          CHANGED_SERVICES=()
+          for service in services/*; do
+            if git diff HEAD^ HEAD --quiet -- "$service"; then
+              echo "No changes in $service"
+            else
+              CHANGED_SERVICES+=("$(basename $service)")
+            fi
+          done
+          echo "services=${CHANGED_SERVICES[@]}" >> $GITHUB_OUTPUT
+
+  build-test:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.services != ''
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: ${{ fromJson(needs.detect-changes.outputs.services) }}
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Build Docker Image
+        run: |
+          # Build but DON'T push to production ECR yet
+          docker build -t test-${{ matrix.service }}:${{ github.sha }} \
+            services/${{ matrix.service }}
+      
+      - name: Run Tests
+        run: |
+          # Run service tests
+          docker run test-${{ matrix.service }}:${{ github.sha }} npm test
+```
+
+### Step 2.3: Test Deployments to Staging
+```bash
+# Create staging ECS cluster (separate from production)
+aws ecs create-cluster --cluster-name dormway-staging
+
+# Deploy from monorepo to staging
+# This tests the deployment process without touching production
+```
+
+---
+
+## Phase 3: Shadow Running (Day 5-6)
+### Production Still Untouched
+
+### Step 3.1: Dual CI/CD Setup
+Keep BOTH systems running:
+- Old repos → Production ECS
+- New monorepo → Staging ECS
+
+### Step 3.2: Sync Changes
+For one week, dual-commit:
+```bash
+# When making changes:
+# 1. Make change in old repo
+cd dormway-api-router
+git add . && git commit -m "Fix: API bug"
+git push
+
+# 2. Port same change to monorepo
+cd dormway-platform/services/api-router
+# Apply same changes
+git add . && git commit -m "Fix: API bug (ported)"
+git push
+```
+
+### Step 3.3: Validate Parity
+```bash
+# Compare Docker images from both sources
+docker pull $ECR/api-router:latest-prod      # From old repo
+docker pull $ECR/api-router:latest-staging   # From monorepo
+docker diff ...  # Ensure they're identical
+```
+
+---
+
+## Phase 4: Gradual Service Migration (Week 2)
+### One Service at a Time
+
+### Step 4.1: Start with Least Critical Service
+Pick the service with least traffic (e.g., admin panel):
+
+```bash
+# 1. Update GitHub Actions in monorepo to deploy admin to PRODUCTION
+# 2. Disable CI/CD in old dormway-admin repo
+# 3. Monitor for 24 hours
+```
+
+### Step 4.2: Update ECR Push in Monorepo
+```yaml
+# .github/workflows/deploy.yml
+build-and-deploy:
+  steps:
+    - name: Build and Push
+      run: |
+        # Now push to PRODUCTION ECR
+        docker build -t $ECR_REGISTRY/$SERVICE:${{ github.sha }} \
+          services/$SERVICE
+        docker push $ECR_REGISTRY/$SERVICE:${{ github.sha }}
+    
+    - name: Update Production ECS
+      run: |
+        aws ecs update-service \
+          --cluster dormway-cluster \  # Production cluster
+          --service $SERVICE \
+          --task-definition $NEW_TASK_DEF
+```
+
+### Step 4.3: Service Migration Order
+Migrate in this order (least risky first):
+1. ✅ dormway-admin (low traffic)
+2. ✅ syllabus-webviewer (read-only)
+3. ✅ ably-relay (stateless)
+4. ✅ engine (workers)
+5. ✅ api-router (critical - do last)
+6. ✅ dormway-crews (ML service - most complex)
+
+---
+
+## Phase 5: Cut Over (Day 14)
+### Final Migration
+
+### Step 5.1: Freeze Deployments
+```bash
+# Announce deployment freeze
+echo "⚠️ DEPLOYMENT FREEZE: 6 PM Friday - Migration in progress"
+```
+
+### Step 5.2: Final Sync
+```bash
+# Ensure monorepo has latest code from all services
+for service in dormway-api-router engine dormway-crews; do
+  cd $service
+  LAST_COMMIT=$(git rev-parse HEAD)
+  # Cherry-pick any missing commits to monorepo
+done
+```
+
+### Step 5.3: Update All Webhooks
+- GitHub → Datadog
+- GitHub → Slack
+- GitHub → Linear
+- ECR → Lambda triggers
+
+### Step 5.4: DNS and Infrastructure
+```bash
+# No changes needed! Services stay at same URLs
+# api.dormway.com → Still points to same ALB
+# ALB → Still routes to same ECS services
+```
+
+---
+
+## Phase 6: Cleanup (Week 3)
+### After Verification
+
+### Step 6.1: Archive Old Repositories
+```bash
+# After 1 week of stable operation
+for repo in dormway-api-router engine dormway-crews; do
+  gh repo edit DormWay/$repo --archived --description "Archived: Moved to dormway-platform monorepo"
+done
+```
+
+### Step 6.2: Update Documentation
+- Update README files
+- Update onboarding docs
+- Update CI/CD documentation
+
+### Step 6.3: Remove Submodules from Old Repo
+```bash
+cd dormway-dev-tools
+git rm -r dormway/dormway-api-router
+git rm -r dormway/engine
+# ... etc
+git commit -m "Remove submodules - migrated to monorepo"
+```
+
+---
+
+## 🚨 Rollback Procedures
+
+### If Issues During Migration:
+
+#### Service-Level Rollback
+```bash
+# Re-enable CI/CD in old repository
+cd dormway-api-router
+git push  # Triggers old CI/CD
+
+# Disable monorepo deployment for that service
+# In monorepo workflow, add:
+if: matrix.service != 'api-router'  # Skip problematic service
+```
+
+#### Full Rollback
+```bash
+# 1. Re-enable all old repo CI/CD
+# 2. Disable monorepo CI/CD
+# 3. No infrastructure changes needed!
+```
+
+---
+
+## 📊 Success Metrics
+
+Monitor during migration:
+- [ ] No increase in error rates
+- [ ] No increase in latency
+- [ ] All health checks passing
+- [ ] No customer complaints
+- [ ] CI/CD time reduced
+- [ ] Developer satisfaction improved
+
+---
+
+## 🎉 Post-Migration Benefits
+
+Once complete, you'll have:
+1. Single `git clone` for everything
+2. Atomic commits across services
+3. 70% faster CI/CD (parallel builds)
+4. Simplified dependency updates
+5. Better code sharing
+6. Easier refactoring
+
+---
+
+## 📝 Daily Checklist During Migration
+
+### Morning
+- [ ] Check all service health metrics
+- [ ] Review overnight alerts
+- [ ] Sync any overnight commits between repos
+
+### Evening  
+- [ ] Verify staging matches production
+- [ ] Check CI/CD pipeline status
+- [ ] Document any issues encountered
+
+---
+
+## 🔑 Key Commands Reference
+
+```bash
+# Check service status
+aws ecs describe-services --cluster dormway-cluster --services api-router engine
+
+# View recent deployments
+aws ecs list-tasks --cluster dormway-cluster --service-name api-router
+
+# Rollback a service
+aws ecs update-service --cluster dormway-cluster --service api-router \
+  --task-definition api-router:previous-version
+
+# Compare images
+docker pull $OLD_ECR/api-router:latest
+docker pull $NEW_ECR/api-router:latest
+docker inspect <image-id> | jq '.Config.Env'
+```
+
+---
+
+## Team Communication Template
+
+### Week Before
+> Team: We're migrating to a monorepo structure next week. No production impact expected. Old deployment methods will continue working during transition.
+
+### Day Of
+> Starting monorepo migration Phase 1. All production deployments continue as normal through existing repos.
+
+### Service Migration
+> Migrating [service-name] to monorepo deployment. Monitoring for next 2 hours. Rollback ready if needed.
+
+### Completion
+> ✅ Monorepo migration complete! All services now deploy from dormway-platform. Old repos archived.
+
+---
+
+## Remember: ZERO Downtime Goal
+
+**The infrastructure NEVER changes:**
+- Same ECS clusters
+- Same ECR repositories  
+- Same ALB/target groups
+- Same RDS/Redis
+- Same domain names
+
+**Only the CI/CD source changes** from multiple repos to one repo!

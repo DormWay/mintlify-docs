@@ -1,0 +1,511 @@
+---
+title: "Formatting Utilities"
+description: "import { // Context formatters formatCourseName, formatCampusName, formatCityName, buildFriendlyName,"
+---
+
+# Formatting Utilities
+
+## Overview
+
+**@dormway/core/utils/formatting** provides centralized string formatting and deterministic ID generation for the DormWay platform.
+
+**Purpose**: Consistent formatting of context names (courses, campuses, cities) and stable ID generation from strings/objects.
+
+**Location**: `@dormway/core/utils/formatting`
+
+---
+
+## Installation
+
+```typescript
+import {
+  // Context formatters
+  formatCourseName,
+  formatCampusName,
+  formatCityName,
+  buildFriendlyName,
+
+  // ID generators
+  generateDeterministicId,
+  generateIdFromObject,
+  generateCompositeId,
+  isValidId,
+  extractHash,
+  extractPrefix,
+} from '@dormway/core/utils/formatting';
+```
+
+---
+
+## Context Formatters
+
+### formatCourseName
+
+Format course names consistently.
+
+**Signature**:
+```typescript
+formatCourseName(course: { code?: string; title?: string; name?: string }): string
+```
+
+**Examples**:
+```typescript
+formatCourseName({ code: 'CS 101', title: 'Intro to Computer Science' });
+// "CS 101 — Intro to Computer Science"
+
+formatCourseName({ code: 'MATH 215' });
+// "MATH 215"
+
+formatCourseName({ title: 'Introduction to Psychology' });
+// "Introduction to Psychology"
+
+formatCourseName({ name: 'Physics 101' });
+// "Physics 101"
+```
+
+---
+
+### formatCampusName
+
+Format campus names with optional city/state.
+
+**Signature**:
+```typescript
+formatCampusName(campus: { name: string; city?: string; state?: string }): string
+```
+
+**Examples**:
+```typescript
+formatCampusName({
+  name: 'University of Michigan',
+  city: 'Ann Arbor',
+  state: 'MI',
+});
+// "University of Michigan (Ann Arbor, MI)"
+
+formatCampusName({ name: 'UCLA' });
+// "UCLA"
+```
+
+---
+
+### formatCityName
+
+Format city names with state.
+
+**Signature**:
+```typescript
+formatCityName(city: { name: string; state?: string }): string
+```
+
+**Examples**:
+```typescript
+formatCityName({ name: 'Ann Arbor', state: 'MI' });
+// "Ann Arbor, MI"
+
+formatCityName({ name: 'Boston' });
+// "Boston"
+```
+
+---
+
+### buildFriendlyName
+
+Universal context formatter (auto-detects type).
+
+**Signature**:
+```typescript
+buildFriendlyName(context: Context): string
+```
+
+**Examples**:
+```typescript
+// Course context
+buildFriendlyName({
+  type: 'course',
+  metadata: { code: 'CS 101', title: 'Intro to CS' },
+});
+// "CS 101 — Intro to CS"
+
+// Campus context
+buildFriendlyName({
+  type: 'campus',
+  name: 'University of Michigan',
+  metadata: { city: 'Ann Arbor', state: 'MI' },
+});
+// "University of Michigan (Ann Arbor, MI)"
+
+// City context
+buildFriendlyName({
+  type: 'city',
+  name: 'Boston',
+  metadata: { state: 'MA' },
+});
+// "Boston, MA"
+```
+
+---
+
+## ID Generators
+
+### generateDeterministicId
+
+Generate stable IDs from strings using SHA-256 hash.
+
+**Signature**:
+```typescript
+generateDeterministicId(input: string, options?: IdGenerationOptions): string
+```
+
+**Options**:
+```typescript
+interface IdGenerationOptions {
+  prefix?: string;        // ID prefix (default: none)
+  length?: number;        // Hash length (default: 12)
+  format?: 'hex' | 'base64'; // Hash format (default: 'hex')
+}
+```
+
+**Examples**:
+```typescript
+// Basic ID generation
+generateDeterministicId('user-123-course-456');
+// "a7f8e9d2c1b0"
+
+// With prefix
+generateDeterministicId('user-123-course-456', { prefix: 'context' });
+// "context-a7f8e9d2c1b0"
+
+// Custom length
+generateDeterministicId('my-data', { length: 16 });
+// "1234567890abcdef"
+
+// Base64 format (shorter)
+generateDeterministicId('my-data', { format: 'base64', length: 8 });
+// "Xy9zAb12"
+```
+
+**Why deterministic IDs?**
+- Same input → same ID (idempotent)
+- Prevents duplicate contexts
+- Enables safe re-imports
+- URL-safe and database-friendly
+
+---
+
+### generateIdFromObject
+
+Generate IDs from objects using sorted JSON.
+
+**Signature**:
+```typescript
+generateIdFromObject(obj: Record<string, unknown>, options?: IdGenerationOptions): string
+```
+
+**Examples**:
+```typescript
+// Object to ID
+generateIdFromObject({
+  userId: 'user-123',
+  courseId: 'course-456',
+  semester: 'fall-2025',
+});
+// "f3a9c2d1e8b7"
+
+// With prefix
+generateIdFromObject(
+  { campusId: 'umich', date: '2025-11-23' },
+  { prefix: 'dayplan' }
+);
+// "dayplan-8c5e3f9a1d72"
+```
+
+**Features**:
+- Keys are sorted alphabetically (stable order)
+- Null/undefined values ignored
+- Arrays handled consistently
+- Nested objects supported
+
+---
+
+### generateCompositeId
+
+Generate IDs from multiple parts.
+
+**Signature**:
+```typescript
+generateCompositeId(parts: string[], options?: IdGenerationOptions): string
+```
+
+**Examples**:
+```typescript
+// Composite ID
+generateCompositeId(['user-123', 'course-456', 'assignment-789']);
+// "b2f4e6d8a9c1"
+
+// With prefix
+generateCompositeId(
+  ['campus-umich', '2025-11-23', 'weather'],
+  { prefix: 'cache' }
+);
+// "cache-3d7f1e9a2c5b"
+```
+
+---
+
+### isValidId
+
+Validate ID format.
+
+**Signature**:
+```typescript
+isValidId(id: string, options?: { requirePrefix?: boolean }): boolean
+```
+
+**Examples**:
+```typescript
+isValidId('a7f8e9d2c1b0'); // true
+isValidId('context-a7f8e9d2c1b0'); // true
+isValidId('invalid!@#'); // false
+isValidId('too-short'); // false
+
+// Require prefix
+isValidId('a7f8e9d2c1b0', { requirePrefix: true }); // false
+isValidId('context-a7f8e9d2c1b0', { requirePrefix: true }); // true
+```
+
+---
+
+### extractHash / extractPrefix
+
+Parse ID components.
+
+**Signatures**:
+```typescript
+extractHash(id: string): string
+extractPrefix(id: string): string | null
+```
+
+**Examples**:
+```typescript
+const id = 'context-a7f8e9d2c1b0';
+
+extractHash(id); // "a7f8e9d2c1b0"
+extractPrefix(id); // "context"
+
+extractHash('no-prefix-id'); // "no-prefix-id"
+extractPrefix('no-prefix-id'); // null
+```
+
+---
+
+## Common Patterns
+
+### Pattern 1: Format Course for Display
+
+```typescript
+import { formatCourseName } from '@dormway/core/utils/formatting';
+
+function displayCourse(course: CourseContext) {
+  return {
+    id: course.id,
+    name: formatCourseName({
+      code: course.metadata.code,
+      title: course.metadata.title,
+    }),
+  };
+}
+```
+
+---
+
+### Pattern 2: Generate Context ID
+
+```typescript
+import { generateDeterministicId } from '@dormway/core/utils/formatting';
+
+async function getOrCreateCourseContext(userId: string, courseCode: string) {
+  // Generate stable ID for course enrollment
+  const contextId = generateDeterministicId(
+    `${userId}-${courseCode}`,
+    { prefix: 'course' }
+  );
+
+  // Check if context exists
+  let context = await getContext(contextId);
+
+  if (!context) {
+    context = await createContext({
+      id: contextId,
+      type: 'course',
+      userId,
+      metadata: { code: courseCode },
+    });
+  }
+
+  return context;
+}
+```
+
+---
+
+### Pattern 3: Cache Key Generation
+
+```typescript
+import { generateCompositeId } from '@dormway/core/utils/formatting';
+
+function getCacheKey(userId: string, resource: string, params: Record<string, any>) {
+  // Generate deterministic cache key
+  return generateCompositeId(
+    [userId, resource, JSON.stringify(params)],
+    { prefix: 'cache' }
+  );
+}
+
+// Usage
+const cacheKey = getCacheKey('user-123', 'dayplan', { date: '2025-11-23' });
+// "cache-f7a2e9d1c8b3"
+```
+
+---
+
+### Pattern 4: Display Context List
+
+```typescript
+import { buildFriendlyName } from '@dormway/core/utils/formatting';
+
+function displayContexts(contexts: ContextNode[]) {
+  return contexts.map((ctx) => ({
+    id: ctx.id,
+    type: ctx.type,
+    name: buildFriendlyName(ctx),
+  }));
+}
+```
+
+---
+
+### Pattern 5: ID Validation Middleware
+
+```typescript
+import { isValidId } from '@dormway/core/utils/formatting';
+
+function validateIdParam(req: Request, res: Response, next: NextFunction) {
+  const { id } = req.params;
+
+  if (!isValidId(id)) {
+    return res.status(400).json({
+      error: 'Invalid ID format',
+      message: 'ID must be alphanumeric with optional prefix',
+    });
+  }
+
+  next();
+}
+```
+
+---
+
+### Pattern 6: Composite Key for Deduplication
+
+```typescript
+import { generateIdFromObject } from '@dormway/core/utils/formatting';
+
+async function upsertCalendarEvent(event: CalendarEvent) {
+  // Generate stable ID from event data
+  const eventId = generateIdFromObject(
+    {
+      userId: event.userId,
+      externalId: event.externalId,
+      source: event.source,
+    },
+    { prefix: 'event' }
+  );
+
+  // Upsert with stable ID
+  await pool.query(
+    `INSERT INTO calendar_events (id, user_id, title, start_time)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (id) DO UPDATE
+     SET title = $3, start_time = $4`,
+    [eventId, event.userId, event.title, event.startTime]
+  );
+}
+```
+
+---
+
+## Best Practices
+
+### ✅ Do
+
+- **Use formatters** for all context display names
+- **Use deterministic IDs** for idempotent operations
+- **Add prefixes** to IDs for clarity (e.g., `context-`, `cache-`)
+- **Validate IDs** before database queries
+- **Use generateIdFromObject** for composite keys
+- **Keep hash lengths** reasonable (12-16 characters)
+- **Handle edge cases** (missing course codes, etc.)
+
+### ❌ Don't
+
+- **Don't hardcode format strings** - use formatters
+- **Don't use random IDs** when deterministic IDs would work
+- **Don't skip ID validation** in API endpoints
+- **Don't expose raw hash values** without prefixes
+- **Don't use sensitive data** in deterministic IDs
+- **Don't forget to sort** object keys before hashing
+
+---
+
+## Troubleshooting
+
+### IDs not matching expected values
+
+**Problem**: `generateDeterministicId()` returns different IDs for same input
+
+**Solution**:
+```typescript
+// ❌ Wrong - object key order not guaranteed
+generateIdFromObject({ b: 2, a: 1 });
+
+// ✅ Correct - function sorts keys internally
+generateIdFromObject({ b: 2, a: 1 }); // Always same result
+
+// ❌ Wrong - whitespace differences
+generateDeterministicId('user 123 ');
+generateDeterministicId('user 123'); // Different hash!
+
+// ✅ Correct - normalize input first
+const normalized = input.trim().toLowerCase();
+generateDeterministicId(normalized);
+```
+
+---
+
+### Format not displaying correctly
+
+**Problem**: Course name shows raw data instead of formatted string
+
+**Solution**:
+```typescript
+// ❌ Wrong - missing formatter
+console.log(course.metadata.code); // "CS 101"
+
+// ✅ Correct - use formatter
+console.log(formatCourseName(course.metadata));
+// "CS 101 — Intro to Computer Science"
+```
+
+---
+
+## Related Documentation
+
+- [DormWay Core Library (@dormway-core)](/docs/engineering/technical/dormway-core-library-dormway-core) - Main overview
+- [ContextsService](/docs/engineering/technical/dormway-core/domain-services/contextsservice) - Context management using these formatters
+- [Validation Utilities](/docs/engineering/technical/dormway-core/utilities/validation-utilities) - Input validation
+
+---
+
+**Last Updated**: 2025-11-23
+**Maintainer**: Platform Team

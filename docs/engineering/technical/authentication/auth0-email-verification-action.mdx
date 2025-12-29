@@ -1,0 +1,253 @@
+---
+title: "Auth0 Email Verification Action"
+description: "This Auth0 Action enforces email verification for all logins, while gracefully handling the first login after signup to allow account creation."
+---
+
+# Auth0 Email Verification Action (Post-Login)
+
+## Overview
+This Auth0 Action enforces email verification for all logins, while gracefully handling the first login after signup to allow account creation.
+
+## Action Configuration
+
+### Name
+`Enforce Email Verification`
+
+### Trigger
+Post-Login
+
+### Code
+
+```javascript
+/**
+ * Handler that will be called during the execution of a PostLogin flow.
+ *
+ * @param {Event} event - Details about the user and the context in which they are logging in.
+ * @param {PostLoginAPI} api - Interface whose methods can be used to change the behavior of the login.
+ */
+exports.onExecutePostLogin = async (event, api) => {
+  console.log('[Email Verification] Login attempt', {
+    userId: event.user.user_id,
+    email: event.user.email,
+    emailVerified: event.user.email_verified,
+    loginCount: event.stats.logins_count
+  });
+
+  // ✅ Allow first login after signup (account creation flow)
+  // This ensures /users/create can be called to create the account in our database
+  if (event.stats.logins_count <= 1) {
+    console.log('[Email Verification] Allowing first login for account creation');
+    return;
+  }
+
+  // ⛔ Redirect to friendly verification page if not verified
+  if (!event.user.email_verified) {
+    console.log('[Email Verification] Email not verified, redirecting to verification page');
+
+    const appBaseUrl = event.secrets.APP_BASE_URL || 'http://localhost:3008';
+    const returnTo = event.request.query.returnTo || '/dashboard/home';
+
+    api.redirect.sendUserTo(`${appBaseUrl}/auth/verify-email`, {
+      query: {
+        email: event.user.email,
+        returnTo: returnTo
+      }
+    });
+  }
+};
+```
+
+### Secrets Required
+- `APP_BASE_URL`: The base URL of your LockedIn application
+  - Development: `http://localhost:3008`
+  - Production: `https://inclass.dormway.app`
+
+## How It Works
+
+### Flow Diagram
+```
+User Signs Up
+    ↓
+First Login (logins_count = 1)
+    ↓
+✅ Action allows (no verification check)
+    ↓
+Auth0 callback → /users/create → Account created
+    ↓
+Email verification sent by Auth0
+    ↓
+─────────────────────────────────
+User Tries to Login Again (logins_count >= 2)
+    ↓
+❓ Email verified?
+    ├─ ✅ Yes → Login succeeds
+    └─ ❌ No → Redirect to /auth/verify-email
+                    ↓
+            User sees friendly page
+                    ↓
+            Clicks "Resend Email"
+                    ↓
+            POST /api/auth/users/:userId/resend-verification
+                    ↓
+            Receives new verification email
+                    ↓
+            Clicks link in email
+                    ↓
+            Email verified → Can now login
+```
+
+### Key Design Decisions
+
+1. **Why allow first login?**
+   - The `/users/create` endpoint is called DURING the Auth0 callback flow
+   - Blocking at signup would prevent account creation in our database
+   - This is a chicken-and-egg problem - we need the login to complete to create the account
+
+2. **Why redirect instead of deny?**
+   - `api.access.deny()` shows an ugly Auth0 error page
+   - `api.redirect.sendUserTo()` keeps users in a friendly, branded experience
+   - Users can resend verification emails without leaving the app
+
+3. **Why check `logins_count <= 1` instead of `= 1`?**
+   - Edge case: If user somehow has 0 logins (shouldn't happen but be defensive)
+   - Safer to use `<=` to ensure we don't block account creation
+
+## Related Components
+
+### Backend Endpoint
+- **File**: `services/api-router/src/routes/auth0-routes.ts`
+- **Endpoint**: `POST /api/auth/users/:userId/resend-verification`
+- **Service**: `services/api-router/src/services/auth0Service.ts`
+
+### Frontend Page
+- **File**: `services/dormway-lockedin/src/app/auth/verify-email/page.tsx`
+- **Route**: `/auth/verify-email?email=...&returnTo=...`
+- **Features**:
+  - Shows user's email
+  - "Resend Verification Email" button
+  - "I've Verified - Continue" button
+  - Error handling
+  - Loading states
+
+## Testing
+
+### Test Scenarios
+
+1. **New User Signup**
+   ```
+   1. Sign up with new email
+   2. Should complete signup (no verification block)
+   3. Account created in database
+   4. Verification email sent
+   ```
+
+2. **Unverified User Tries to Login**
+   ```
+   1. User registered but hasn't verified email
+   2. Tries to log in
+   3. Should redirect to /auth/verify-email
+   4. Can resend verification email
+   ```
+
+3. **Verified User Login**
+   ```
+   1. User has verified email
+   2. Logs in
+   3. Should proceed normally to dashboard/onboarding
+   ```
+
+4. **Resend Verification**
+   ```
+   1. On /auth/verify-email page
+   2. Click "Resend Verification Email"
+   3. Should receive new email
+   4. Can verify and continue
+   ```
+
+### Manual Testing Steps
+
+1. **Setup**
+   - Ensure Auth0 email verification is enabled
+   - Deploy this Action to Auth0
+   - Add `APP_BASE_URL` secret in Auth0
+
+2. **Test Flow**
+   ```bash
+   # Clear cookies/incognito mode
+   # Navigate to https://inclass.dormway.app
+   # Click "Sign Up"
+   # Register with new email
+   # Should complete signup successfully
+   # Check database - account should exist
+   # Log out
+   # Try to log in again (without verifying email)
+   # Should redirect to /auth/verify-email
+   # Click "Resend Email"
+   # Verify email via link
+   # Click "I've Verified - Continue"
+   # Should now be able to log in
+   ```
+
+## Deployment
+
+1. **Auth0 Dashboard**
+   - Navigate to Actions → Flows → Login
+   - Click "+" to add custom action
+   - Name: "Enforce Email Verification"
+   - Copy code above
+   - Add secret: `APP_BASE_URL`
+   - Deploy
+   - Drag into Post-Login flow (AFTER "Add Roles to Token")
+
+2. **Backend Deployment**
+   ```bash
+   cd services/api-router
+   npm install auth0
+   # Build and deploy
+   ```
+
+3. **Frontend Deployment**
+   ```bash
+   cd services/dormway-lockedin
+   # Page already created at /auth/verify-email
+   # Deploy as normal
+   ```
+
+## Security Considerations
+
+1. **Defense-in-Depth**: Email verification enforced at multiple layers:
+   - Auth0 Action (primary enforcement)
+   - Backend validation (future: check email_verified in middleware)
+   - Frontend UX (graceful degradation)
+
+2. **Rate Limiting**: Consider adding rate limits to resend endpoint:
+   ```typescript
+   // Prevent abuse: max 5 resends per hour per user
+   ```
+
+3. **Token Security**: Verification tokens are managed by Auth0
+   - Short-lived (default: 5 days)
+   - Single-use
+   - Cryptographically secure
+
+## Troubleshooting
+
+### "An error occurred during the authorization flow"
+- Check if Action is blocking first login
+- Verify `logins_count <= 1` check exists
+- Check Auth0 Action logs
+
+### Verification email not sending
+- Check Auth0 email provider settings
+- Verify email templates are configured
+- Check Auth0 Management API permissions
+- Review api-router logs for sendEmailVerification errors
+
+### User stuck in redirect loop
+- Check middleware.ts onboarding logic
+- Verify returnTo parameter is passed correctly
+- Check for conflicting Auth0 Actions
+
+## Related Documentation
+- [Email Verification Enforcement Plan](Email%20Verification%20Enforcement%20Plan.md)
+- [Auth0 Registration Regression Bug](../../Bug%20Reports/2025-10-18-auth0-registration-regression.md)

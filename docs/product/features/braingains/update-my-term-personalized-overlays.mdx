@@ -1,0 +1,89 @@
+---
+title: "Update My Term Personalized Overlays"
+description: "Last updated: 2025-09-28"
+---
+
+# Update My Term Personalized Overlays
+
+Last updated: 2025-09-28
+
+## Summary
+- Extends BrainGains ingestion with per-user overlay documents layered on top of canonical `processed_syllabus_crew` data.
+- Supports natural-language “Update Course” flows that classify requests (assignment, note, etc.) and merge results without mutating the base syllabus.
+- Surfaces personalized overlays across API responses, dashboard UI, and semester aggregation so students see their own additions instantly.
+
+## End-to-End Flow
+1. **Student input** via the dashboard “Update Course” modal posts free-form text to `POST /api/braingains/documents/update-term`.
+2. **Classifier** (Portkey primary, heuristic fallback) converts the request into structured operations.
+3. **Overlay persistence** stores operations in `service_data` rows (`method = processed_syllabus_overlay`) scoped by `context_id` + `user_id` with dedupe hashing.
+4. **Personalized merge** loads the latest canonical syllabus plus active overlays and produces a merged syllabus (`personalizedSyllabus`).
+5. **Read paths** (`GET /api/braingains/documents/update-term/:contextId`, `/api/student/courses`, `/api/syllabus/processed/:contextId`) return both base and merged views, including overlay notes.
+6. **UI presentation** renders “Assign­ments added” and “Notes you added” sections and badges courses that contain personal updates.
+7. **Periodic folding** compacts older overlays into snapshots via Temporal when triggered manually or by cron (planned hourly).
+
+## Key Components
+
+### API Router
+- **Classifier service** (`services/api-router/src/services/update-term-classifier.ts`)
+  - Accepts Portkey completions (model = `update_my_term` prompt) and falls back to heuristics when the LLM times out.
+  - Normalizes `operations` into `assignment`, `note`, `todo`, `policy`, or `general` types. Added support for note-kind operations feeding overlay notes.
+- **Overlay service** (`services/api-router/src/services/syllabus-overlay.service.ts`)
+  - `createSyllabusOverlay` inserts overlay rows with hashed dedupe.
+  - `mergeSyllabusWithOverlays` now collects note payloads into `overlayNotes`, alongside assignment merges and generic overlays.
+  - `fetchMergedSyllabusForUser` returns `{ mergedSyllabus, overlays, foldedOverlays, appliedOverlayIds, snapshotId }` and replays folded snapshots when available.
+- **Routes**
+  - `POST /api/braingains/documents/update-term`: validates context, runs classifier, persists overlay, merges and responds with the personalized syllabus.
+  - `GET /api/braingains/documents/update-term/:contextId`: fetches merged syllabus, overlays, and overlay notes for the requesting user.
+  - `GET /api/student/courses`: injects `personalizedSyllabus` and `userOverlay` metadata into each course record when a user session exists.
+  - `GET /api/syllabus/processed/:contextId`: now echoes `userOverlay` so downstream clients (mobile, admin) can show personalized data.
+
+### Engine (Temporal)
+- `services/engine/src/utils/syllabusOverlay.ts` mirrors the API merge logic so workflows (folding, semester processing) operate on the same structure.
+- `foldSyllabusOverlaysWorkflow` (Temporal) compactly folds old overlays into `processed_syllabus_overlay_applied` snapshots and marks previous overlays as `status: 'folded'`.
+- Aurora helper `supersedeSyllabusOverlays` (in `auroraDb.ts`) supersedes overlays during fold operations, ensuring per-user history remains auditable.
+
+### Frontend (dormway-lockedin)
+- **Update Course modal** (`src/app/dashboard/page.tsx`)
+  - Loads merged syllabus + overlays, caches latest assignments, and now previews both assignments and note overlays in the modal after submission.
+  - History accordion shows classifier summaries including course labels.
+- **Course Command Center** (`src/components/SyllabusCoursesView.tsx`)
+  - Adds “Your Updates” tab with two panels: “Notes you added” and “Assignments you added”.
+  - Course list displays a badge when personal overlays are present.
+  - Uses `OverlayNoteSummary` to render note metadata (title/body/summary, overlay id, timestamps).
+- **Assignment aggregation** (`src/utils/collectCourseAssignments.ts`)
+  - Includes personalization by ingesting assignments from `course.personalizedSyllabus` before canonical data, ensuring due-soon feeds surface student additions.
+
+### Data Model
+- Canonical syllabus: `service_data.method = processed_syllabus_crew` (immutable snapshot).
+- Overlay document: `processed_syllabus_overlay` rows per overlay operation.
+- Applied snapshot: `processed_syllabus_overlay_applied` rows store merged syllabus + `overlayFoldHistory`.
+- Notes appear inside `mergedSyllabus.overlayNotes[]` with `overlayId`, `title`, `body`, `summary`, `createdAt`, `confidence`.
+
+### API Touchpoints
+| Endpoint | Purpose | Notes |
+| --- | --- | --- |
+| `POST /api/braingains/documents/update-term` | Accept student update text and create overlay | Returns `mergedSyllabus`, `appliedOverlayIds`, `operations`, `classifier` metadata. |
+| `GET /api/braingains/documents/update-term/:contextId` | Retrieve personalized syllabus + overlays for user | 404 when no canonical syllabus exists. |
+| `GET /api/student/courses[?preferAurora=1]` | Course directory with `personalizedSyllabus` | UI uses `userOverlay` (applied ids, overlays, folded). |
+| `GET /api/syllabus/processed/:contextId` | Canonical + `userOverlay` for admin/mobile | Returns both base `data` and `userOverlay`. |
+
+## Telemetry & Logging
+- Structured logs (`braingains-routes`) capture classifier latency, overlay ids, and merge outcomes.
+- Update modal emits client-side events for success, duplicate errors, and overlay previews.
+- Future TODO (tracked in `docs/update-my-term-followups.md`): add analytics counters (`overlay.added`, `overlay.folded`) once telemetry destinations are finalized.
+
+## Operations & Cron
+- Folding: schedule hourly via admin orchestrator (`admin/sync-orchestrator.ts`) using `triggerOverlayFoldWorkflows({ minAgeMinutes: 60, limit: 250 })`.
+- Manual fold: POST `{ contextId }` to `/admin/syllabus/fold-overlays` after major syllabus reprocessing.
+- Monitor worker logs for `foldSyllabusOverlaysWorkflow` to confirm Temporal workers export the `foldSyllabusOverlaysActivity` bundle.
+
+## Testing & Verification
+- **API Router**: `npm run build` (tsc) ensures overlay service typings compile; targeted Jest tests to be added for `mergeSyllabusWithOverlays` note paths.
+- **Frontend**: `npm run build` (Next.js) validates TS types; run in dev (`npm run dev`) to exercise modal flows manually.
+- **Engine**: `npm run build` inside `services/engine` to confirm workflow bundle exports.
+
+## Known Gaps & Next Steps
+- File uploads in Update Course modal remain out of scope; follow-up doc `docs/update-my-term-followups.md` tracks OCR plan.
+- Mobile clients still consume canonical syllabus; update to prefer `personalizedSyllabus`.
+- Need automated tests for overlay merges (assignment + note) and duplicate detection.
+- Overlay folding cron not yet deployed; wire into admin orchestrator once QA completes.

@@ -1,0 +1,199 @@
+---
+title: "Auth0 Post Registration Task"
+---
+
+`/**`
+
+* `Handler that will be called during the execution of a PostUserRegistration flow.`
+
+`*`
+
+* `@param {Event} event - Details about the context and user that has registered.`
+
+* `@param {PostUserRegistrationAPI} api - Methods and utilities to help change the behavior after a signup.`
+
+`*/`
+
+`exports.onExecutePostUserRegistration = async (event, api) => {`
+
+`const { user } = event;`
+
+`try {`
+
+`// 1. Create user profile in DormWay database`
+
+`const userProfileResponse = await fetch(${event.secrets.API_GATEWAY_URL}/users/create, {`
+
+`method: 'POST',`
+
+`headers: {`
+
+`'Content-Type': 'application/json',`
+
+`'Authorization': Bearer ${event.secrets.SYSTEM_API_KEY},`
+
+`'X-Auth0-Action': 'post-registration'`
+
+`},`
+
+`body: JSON.stringify({`
+
+`auth0_id: user.user_id,`
+
+`email: user.email,`
+
+`email_verified: user.email_verified || false,`
+
+`full_name: user.name || user.nickname || '',`
+
+`given_name: user.given_name || '',`
+
+`family_name: user.family_name || '',`
+
+`picture: user.picture || '',`
+
+`created_at: new Date().toISOString(),`
+
+`onboarding_status: 'pending',`
+
+`metadata: {`
+
+`signup_source: event.connection.name,`
+
+`signup_ip: event.request.ip,`
+
+`signup_user_agent: event.request.userAgent`
+
+`}`
+
+`})`
+
+`});`
+
+  
+
+`if (!userProfileResponse.ok) {`
+
+`console.error('Failed to create user profile:', await userProfileResponse.text());`
+
+`// Don't throw - allow registration to continue`
+
+`}`
+
+  
+
+`// 2. Create Customer.io profile for marketing automation`
+
+`const customerIoResponse = await fetch(`
+
+`https://track.customer.io/api/v1/customers/${user.user_id},`
+
+`{`
+
+`method: 'PUT',`
+
+`headers: {`
+
+`'Authorization': Basic ${Buffer.from(`
+
+`${event.secrets.CUSTOMERIO_SITE_ID}:${event.secrets.CUSTOMERIO_API_KEY}`
+
+`).toString('base64')},`
+
+`'Content-Type': 'application/json'`
+
+`},`
+
+`body: JSON.stringify({`
+
+`email: user.email,`
+
+`created_at: Math.floor(Date.now() / 1000),`
+
+`first_name: user.given_name || '',`
+
+`last_name: user.family_name || '',`
+
+`full_name: user.name || user.nickname || '',`
+
+`auth0_id: user.user_id,`
+
+`signup_source: event.connection.name,`
+
+`onboarding_status: 'pending',`
+
+`platform: 'auth0'`
+
+`})`
+
+`}`
+
+`);`
+
+  
+
+`if (!customerIoResponse.ok) {`
+
+`console.error('Failed to create Customer.io profile:', await customerIoResponse.text());`
+
+`// Don't throw - allow registration to continue`
+
+`}`
+
+  
+
+`// 3. Track registration event in Customer.io`
+
+`await fetch(`
+
+`https://track.customer.io/api/v1/customers/${user.user_id}/events,`
+
+`{`
+
+`method: 'POST',`
+
+`headers: {`
+
+`'Authorization': Basic ${Buffer.from(`
+
+`${event.secrets.CUSTOMERIO_SITE_ID}:${event.secrets.CUSTOMERIO_API_KEY}`
+
+`).toString('base64')},`
+
+`'Content-Type': 'application/json'`
+
+`},`
+
+`body: JSON.stringify({`
+
+`name: 'user_registered',`
+
+`timestamp: Math.floor(Date.now() / 1000),`
+
+`data: {`
+
+`signup_method: event.connection.name,`
+
+`ip_address: event.request.ip,`
+
+`user_agent: event.request.userAgent`
+
+`}`
+
+`})`
+
+`}`
+
+`);`
+
+  
+
+`} catch (error) {`
+
+`console.error('Post-registration action error:', error);`
+
+`// Don't throw - allow registration to continue even if actions fail`
+
+`}`
+
+`};`

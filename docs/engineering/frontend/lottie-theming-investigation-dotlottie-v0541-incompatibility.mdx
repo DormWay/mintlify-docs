@@ -1,0 +1,446 @@
+---
+title: "Lottie Theming Investigation   dotLottie v0.54.1 Incompatibility"
+description: "The dormway-lockedin app uses two Lottie rendering approaches:"
+---
+
+# Lottie Theming Investigation - dotLottie v0.54.1 Incompatibility
+
+**Status:** Completed
+**Date:** 2025-10-16
+**Platform:** dormway-lockedin (Next.js web app)
+**Library:** `@lottiefiles/dotlottie-web@0.54.1`
+
+---
+
+## Executive Summary
+
+**Finding:** `@lottiefiles/dotlottie-web@0.54.1` does **NOT** support runtime theme switching for slot-based theming in .lottie files, despite having the API methods and documentation suggesting it should work.
+
+**Recommendation:** Continue using **JSON animations with CSS theming** for UI icons that need to respond to theme changes. Reserve .lottie files for decorative animations that don't require theming.
+
+---
+
+## Problem Statement
+
+The dormway-lockedin app uses two Lottie rendering approaches:
+
+1. **JSON animations** (`.json` files) → Rendered as **SVG** via `lottie-react`
+   - ✅ Works with CSS theming via `globals.css`
+   - ✅ Colors respond to app theme changes (light/dark/glass/etc.)
+   - Example: Sidebar icons
+
+2. **.lottie animations** (`.lottie` files) → Rendered as **Canvas** via `@lottiefiles/dotlottie-react`
+   - ❌ Cannot be styled with CSS (Canvas limitation)
+   - ❌ Slot-based theming doesn't work (library limitation)
+   - Example: Attempted themed icon pack
+
+**Goal:** Enable .lottie files to respond to theme changes using the dotLottie v2 slot-based theming specification.
+
+---
+
+## Investigation Timeline
+
+### 1. Initial Setup - Build Script Implementation
+
+**Created:** `scripts/build-lottie-themes.mjs`
+
+**Purpose:** Generate themed .lottie bundles from source files by:
+- Injecting slot IDs (`sid`) into animation JSON color objects
+- Normalizing base colors to neutral gray (0.8, 0.8, 0.8)
+- Generating theme files for each theme variant
+- Building proper manifest with theme metadata
+
+**Themes Supported:**
+- `light` - RGB(17, 24, 39) → Gray-900
+- `dark` - RGB(248, 250, 252) → Slate-50
+- `glass` - RGB(249, 251, 255) → Blue-50
+- `accent` - RGB(245, 158, 11) → Amber-500
+- `muted` - RGB(148, 163, 184) → Slate-400
+- `yellow` - RGB(251, 191, 36) → Amber-300
+
+**Output:** 153 themed .lottie bundles in `public/animations/lottie-themed/`
+
+### 2. Color Format Fix (0-255 → 0-1 Range)
+
+**Issue:** Lottie expects RGB values in 0-1 range, not 0-255.
+
+**Fix:** Added normalization:
+```javascript
+const THEME_COLORS = Object.fromEntries(
+  Object.entries(THEME_COLORS_RGB).map(([name, [r, g, b]]) => [
+    name,
+    [r / 255, g / 255, b / 255]
+  ])
+);
+```
+
+**Result:** ❌ Still didn't work
+
+### 3. Slot ID Injection
+
+**Implementation:**
+```javascript
+function normalizeBaseColorsAndAssignSlots(animationJson) {
+  const TARGET_COLOR = [0.8, 0.8, 0.8, 1];
+  const slots = [];
+  let slotCounter = 0;
+
+  // Walk animation JSON tree
+  // Find all color objects (obj.c.k)
+  // Assign slot IDs: obj.sid = `slot_${slotCounter++}`
+  // Normalize base color to gray
+}
+```
+
+**Verified:** Animation JSON correctly contains:
+```json
+{
+  "c": {
+    "k": [0.8, 0.8, 0.8, 1]
+  },
+  "sid": "slot_0"
+}
+```
+
+**Result:** ❌ Still didn't work
+
+### 4. Theme File Format Corrections
+
+**Initial (Wrong):** Used v2 spec "rules" array format:
+```json
+{
+  "rules": [
+    {
+      "id": "slot_0",
+      "type": "Color",
+      "value": [r, g, b, a]
+    }
+  ]
+}
+```
+
+**Final (Correct):** Direct slot ID keys with `p.a.k` structure:
+```json
+{
+  "slot_0": {
+    "p": {
+      "a": 0,
+      "k": [r, g, b, a]
+    }
+  }
+}
+```
+
+**Verified:** Theme files match official documentation format.
+
+**Result:** ❌ Still didn't work
+
+### 5. Manifest Structure Fixes
+
+**Added:**
+1. Top-level `themes` array
+2. Animation-level `themes` array
+3. `initialTheme: "light"` for each animation
+
+**Final Manifest:**
+```json
+{
+  "version": "1",
+  "animations": [{
+    "id": "...",
+    "themes": ["light", "dark", "glass", "accent", "muted", "yellow"],
+    "initialTheme": "light"
+  }],
+  "themes": [
+    {"id": "light", "animations": ["*"]},
+    {"id": "dark", "animations": ["*"]},
+    // ... etc
+  ]
+}
+```
+
+**Result:** ❌ Still didn't work
+
+### 6. Runtime API Testing
+
+**Created:** `DotLottieThemeTest.tsx` component to test all theme APIs.
+
+**Methods Tested:**
+
+#### A. `setTheme(themeId)` - Load theme from archive
+```typescript
+const result = dotLottieRef.current.setTheme('dark');
+// Returns: false
+```
+
+#### B. `setThemeData(themeData)` - Load theme data directly
+```typescript
+const themeData = JSON.stringify({
+  slot_0: { p: { a: 0, k: [0.97, 0.98, 0.98, 1] } }
+});
+const result = dotLottieRef.current.setThemeData(themeData);
+// Returns: false
+```
+
+#### C. `setSlots(slots)` - Set slot overrides
+```typescript
+dotLottieRef.current.setSlots(themeData);
+// Executes without error, but no visual update
+```
+
+#### D. Component Remount with `themeId` Prop
+```tsx
+<DotLottiePlayer
+  key={key} // Force remount
+  themeId={currentTheme}
+  src="/animations/lottie-themed/Command.lottie"
+/>
+// No visual change on remount
+```
+
+**Critical Finding:**
+```javascript
+dotLottieRef.current.themes // Always returns: undefined
+```
+
+**Conclusion:** Library **cannot see themes** in the manifest, despite correct structure.
+
+---
+
+## Verified File Structure
+
+### Animation JSON (Excerpt)
+```json
+{
+  "layers": [{
+    "shapes": [{
+      "it": [{
+        "c": {
+          "a": 0,
+          "k": [0.8, 0.8, 0.8, 1]
+        },
+        "sid": "slot_0"  // ✅ Slot ID present
+      }]
+    }]
+  }]
+}
+```
+
+### Theme File (`themes/dark.json`)
+```json
+{
+  "slot_0": {
+    "p": {
+      "a": 0,
+      "k": [0.9725490196078431, 0.9803921568627451, 0.9882352941176471, 1]
+    }
+  },
+  "slot_1": {
+    "p": {
+      "a": 0,
+      "k": [0.9725490196078431, 0.9803921568627451, 0.9882352941176471, 1]
+    }
+  }
+}
+```
+
+### Archive Contents (via `unzip -l`)
+```
+animations/1098ecfb-8139-4645-a777-227115b7c667.json
+manifest.json
+themes/accent.json
+themes/dark.json
+themes/glass.json
+themes/light.json
+themes/muted.json
+themes/yellow.json
+```
+
+✅ All files present and correctly formatted.
+
+---
+
+## Root Cause Analysis
+
+### Why Theming Doesn't Work
+
+1. **Library Returns `themes: undefined`**
+   - Despite manifest containing themes array
+   - Library's theme loading logic is broken or unimplemented
+
+2. **All Theme Methods Fail**
+   - `setTheme()` returns `false`
+   - `setThemeData()` returns `false`
+   - `setSlots()` doesn't trigger re-render
+   - `themeId` prop ignored at initialization
+
+3. **Possible Explanations**
+   - **Bug in v0.54.1:** Theme loading from ZIP archives doesn't work
+   - **Incomplete Implementation:** API methods exist but aren't functional
+   - **Undocumented Requirements:** Missing setup we haven't discovered
+   - **Version Incompatibility:** Slot-based theming may require newer version
+
+### What Works vs. What Doesn't
+
+| Approach | Status | Notes |
+|----------|--------|-------|
+| JSON + CSS theming | ✅ Works | SVG rendering, `globals.css` overrides |
+| .lottie + `setTheme()` | ❌ Broken | Returns `false` |
+| .lottie + `setThemeData()` | ❌ Broken | Returns `false` |
+| .lottie + `setSlots()` | ❌ Broken | No visual update |
+| .lottie + `themeId` prop | ❌ Broken | Ignored on mount |
+
+---
+
+## Recommendations
+
+### Short-Term Solution (Immediate)
+
+**Continue using JSON animations for themed UI icons:**
+
+1. **For UI elements that need theming** (sidebar icons, buttons, etc.):
+   - Use `.json` animations
+   - Render with `lottie-react` (SVG)
+   - Style with CSS variables in `globals.css`
+   - ✅ Already working perfectly
+
+2. **For decorative animations**:
+   - Use `.lottie` files (smaller file size)
+   - Static color only (no theming)
+   - Canvas rendering is fine
+
+**Example Pattern:**
+```tsx
+// Themed icon (use JSON)
+import { LottiePlayer } from '@/components/LottiePlayer';
+<LottiePlayer src="/animations/json/sidebar-icon.json" />
+
+// Decorative animation (use .lottie)
+import { DotLottiePlayer } from '@/components/DotLottiePlayer';
+<DotLottiePlayer src="/animations/lottie/decorative.lottie" />
+```
+
+### Mid-Term Investigation (Next Sprint)
+
+**Test newer library versions:**
+
+1. Check `@lottiefiles/dotlottie-web` changelog for theme-related fixes
+2. Test latest version (possibly v1.x or v2.x)
+3. If newer version works:
+   - Update `@lottiefiles/dotlottie-react` to compatible version
+   - Re-run theme build and tests
+   - Migrate themed icons to .lottie format
+
+**Test with Official Examples:**
+1. Download a known-working themed .lottie from LottieFiles
+2. Test if it works with current library version
+3. Compare structure to our generated files
+4. This will confirm if issue is our build or library bug
+
+### Long-Term Architecture (Revisit in Q2 2025)
+
+**Evaluate alternative approaches:**
+
+1. **Server-Side Theming**
+   - Generate separate .lottie files per theme
+   - Serve different files based on user theme preference
+   - Pros: Works with any library version
+   - Cons: More files, more bandwidth
+
+2. **Lottie Web (Canvas) + Manual Color Manipulation**
+   - Use `lottie-web` directly
+   - Manipulate Canvas context colors manually
+   - Pros: Full control
+   - Cons: Complex, error-prone
+
+3. **Switch to Rive**
+   - Rive has robust theming support
+   - More modern animation format
+   - Pros: Better theming, smaller files
+   - Cons: New tooling, migration effort
+
+---
+
+## Code Artifacts
+
+### Build Script
+**Location:** `services/dormway-lockedin/scripts/build-lottie-themes.mjs`
+
+**Key Functions:**
+- `normalizeBaseColorsAndAssignSlots()` - Inject slot IDs
+- `buildSlotBasedTheme()` - Generate theme files
+- `formatManifest()` - Update manifest with themes
+- `createThemedBundle()` - Build final .lottie archive
+
+**Usage:**
+```bash
+npm run lottie:build  # Build all themed bundles
+npm run lottie:audit  # Generate theme index
+```
+
+### Test Component
+**Location:** `services/dormway-lockedin/src/components/test/DotLottieThemeTest.tsx`
+
+**Purpose:** Verify theme switching works
+
+**Access:** http://localhost:3008/dev/animations
+
+**Tests:**
+- Player instance methods
+- Manifest inspection
+- All theme API approaches
+- Component remount pattern
+
+### Theme Index
+**Location:** `services/dormway-lockedin/src/resources/lottieThemeIndex.ts`
+
+**Generated by:** `npm run lottie:audit`
+
+**Contains:** Metadata for all 153 themed .lottie files
+
+---
+
+## Package Versions
+
+```json
+{
+  "@lottiefiles/dotlottie-react": "^0.17.5",
+  "@lottiefiles/dotlottie-web": "0.54.1", // ← Problem version
+  "@dotlottie/dotlottie-js": "^0.7.2",
+  "lottie-react": "^2.4.1" // ← Works fine
+}
+```
+
+---
+
+## References
+
+### Documentation
+- [dotLottie v2 Spec](https://dotlottie.io/specification)
+- [Slot-based Theming Tutorial](https://developers.lottiefiles.com/docs/dotlottie-theming)
+- [@lottiefiles/dotlottie-web TypeScript Definitions](node_modules/@lottiefiles/dotlottie-web/dist/index.d.ts)
+
+### Related Files
+- Build script: `scripts/build-lottie-themes.mjs`
+- Test component: `src/components/test/DotLottieThemeTest.tsx`
+- Working JSON theming: `src/app/globals.css` (lines 200-230)
+- Theme index: `src/resources/lottieThemeIndex.ts`
+
+### GitHub Issues to Monitor
+- Search `@lottiefiles/dotlottie-web` repo for "theme" or "slot" issues
+- Watch for v0.55+ releases with theme fixes
+
+---
+
+## Tags
+#lottie #theming #animation #frontend #bug #investigation #dotlottie #canvas
+
+---
+
+## Next Actions
+
+- [ ] Test with latest `@lottiefiles/dotlottie-web` version
+- [ ] Download official themed .lottie sample for comparison
+- [ ] Document CSS theming approach for JSON animations
+- [ ] Consider filing bug report with LottieFiles team
+- [ ] Evaluate Rive as alternative for complex themed animations

@@ -1,0 +1,1568 @@
+---
+title: "ANALYST_UPLOAD_PACKAGE"
+description: "1. [Reproduction Steps](#reproduction-steps) 2. [Error Evidence](#error-evidence) 3. [Key Files](#key-files) 4. [Routing & Guard Rails](#routing--guard-rails..."
+---
+
+# DormWay Demo System - External Analyst Upload Package
+
+**Generated:** $(date)  
+**Purpose:** Comprehensive analysis of demo system architecture, current state, and recommendations
+
+---
+
+## 📋 Table of Contents
+
+1. [Reproduction Steps](#reproduction-steps)
+2. [Error Evidence](#error-evidence)
+3. [Key Files](#key-files)
+4. [Routing & Guard Rails](#routing--guard-rails)
+5. [Project Configuration](#project-configuration)
+6. [Code Search Results](#code-search-results)
+7. [Route Tree](#route-tree)
+8. [Recent Changes](#recent-changes)
+9. [Architecture Overview](#architecture-overview)
+
+---
+
+## 🔄 Reproduction Steps
+
+### How to Reproduce Demo
+
+**Local Setup:**
+```bash
+cd .repos/dormway-platform/services/dormway-lockedin
+npm install
+npm run dev
+```
+
+**Environment Variables Required:**
+- `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` (redacted)
+- `NEXT_PUBLIC_API_BASE_URL` (e.g., `http://localhost:3001`)
+- Database connection for demo data seeding
+
+**Steps to Reproduce:**
+1. Visit `http://localhost:3000/` (landing page)
+2. Scroll to the embedded demo iframe (laptop mockup section)
+3. Demo should load at `/demo/preview?hideNav=true`
+4. Click sidebar navigation items (Schedule, Academic, Notes, etc.)
+5. Try drag-and-drop tasks in the Task Bank
+6. Try clicking "AI Schedule" button
+
+**Expected Behavior:**
+- Demo loads with realistic data (4 courses, 5 assignments, 5 schedule events)
+- Navigation works between all pages (home, schedule, academic, notes, inbox, integrations)
+- Mutations show user-friendly "read-only" messages
+- Theme syncs with parent page
+- No authentication errors in console
+
+**Actual Behavior (Issues):**
+- ✅ Demo loads successfully
+- ✅ Navigation works
+- ✅ Mutations are blocked with messages
+- ⚠️ Some console warnings about cache (non-blocking)
+- ⚠️ Theme sync has 300ms fallback (minor flash possible)
+
+---
+
+## 🐛 Error Evidence
+
+### Console Logs (Current State - No Critical Errors)
+
+**Normal Demo Load:**
+```
+[demo-preview] Demo mode flag verified
+[demo-preview] Fetching demo data from /api/demo/data
+[useDashboardComposite] Using cached demo data
+```
+
+**When Attempting Mutations:**
+```
+[DragDrop] Demo mode: Skipping task schedule API call
+[preferences] Demo mode: Skipping patchPreferences API call
+```
+
+**No Authentication Errors:** All 401 errors have been resolved through demo mode detection.
+
+### Network Requests
+
+**Demo Data Fetch:**
+- **Endpoint:** `GET /api/demo/data`
+- **Status:** 200 OK
+- **Response:** Full dashboard composite structure
+- **Headers:** `x-demo-user-id: demo-student-001`
+
+**Backend Demo Endpoint:**
+- **Endpoint:** `GET /demo/dashboard`
+- **Status:** 200 OK
+- **Rate Limited:** 20 req/min per IP
+- **No Auth Required:** Public endpoint
+
+---
+
+## 📁 Key Files
+
+### Navigation Components
+
+<details>
+<summary><b>DashboardSidebar.tsx</b> (Click to expand)</summary>
+
+```tsx
+// Full file content - see attached file
+// Key features:
+// - Detects demo mode via localStorage.getItem('dw.demoMode')
+// - Rewrites /dashboard/* hrefs to /demo/preview/* in demo mode
+// - Shows demo mode badge when expanded
+// - Lines 269-277: Demo mode detection
+// - Lines 162-174: URL rewriting for demo mode
+```
+
+</details>
+
+<details>
+<summary><b>BottomNavigation.tsx</b> (Click to expand)</summary>
+
+```tsx
+// Full file content - see attached file
+// Key features:
+// - Mobile navigation component
+// - Detects demo mode (lines 36-40)
+// - Rewrites URLs for demo mode (lines 89-103)
+// - Same pattern as DashboardSidebar
+```
+
+</details>
+
+### Demo Preview Pages
+
+<details>
+<summary><b>src/app/demo/preview/page.tsx</b> (Main demo page)</summary>
+
+```tsx
+// Full file content - see attached file
+// Key features:
+// - Sets dw.demoMode and dw.embedMode synchronously (lines 28-33)
+// - Fetches from /api/demo/data (line 108)
+// - Pre-populates React Query cache (lines 122-135)
+// - Theme sync via postMessage (lines 36-92)
+// - Error handling with retry button (lines 158-176)
+```
+
+</details>
+
+<details>
+<summary><b>src/app/demo/preview/layout.tsx</b> (Demo layout)</summary>
+
+```tsx
+// Full file content - see attached file
+// Key features:
+// - Wraps with QueryProvider, FocusSessionProvider, etc.
+// - Includes DashboardSidebar and BottomNavigation
+// - Wrapped in DemoErrorBoundary (line 28)
+// - Conditionally shows DemoHeader and DemoCTA based on hideNav
+```
+
+</details>
+
+<details>
+<summary><b>src/app/demo/preview/schedule/page.tsx</b></summary>
+
+```tsx
+'use client';
+
+import { useEffect } from 'react';
+import { useRouter } from 'next/navigation';
+import dynamic from 'next/dynamic';
+
+const SchedulePage = dynamic(() => import('@/app/dashboard/schedule/page'), {
+  ssr: false,
+  loading: () => (
+    <div className="flex items-center justify-center min-h-screen">
+      <div className="text-center">
+        <p className="text-gray-600 dark:text-gray-400">Loading schedule...</p>
+      </div>
+    </div>
+  ),
+});
+
+export default function DemoSchedulePage() {
+  useEffect(() => {
+    try {
+      localStorage.setItem('dw.demoMode', '1');
+      localStorage.setItem('dw.embedMode', 'true');
+    } catch {}
+  }, []);
+
+  return <SchedulePage />;
+}
+```
+
+</details>
+
+<details>
+<summary><b>src/app/demo/preview/academic/page.tsx</b></summary>
+
+```tsx
+'use client';
+
+import { useEffect } from 'react';
+import dynamic from 'next/dynamic';
+
+const AcademicPage = dynamic(() => import('@/app/dashboard/academic/page'), {
+  ssr: false,
+  loading: () => (
+    <div className="flex items-center justify-center min-h-screen">
+      <div className="text-center">
+        <p className="text-gray-600 dark:text-gray-400">Loading academic...</p>
+      </div>
+    </div>
+  ),
+});
+
+export default function DemoAcademicPage() {
+  useEffect(() => {
+    try {
+      localStorage.setItem('dw.demoMode', '1');
+      localStorage.setItem('dw.embedMode', 'true');
+    } catch {}
+  }, []);
+
+  return <AcademicPage />;
+}
+```
+
+</details>
+
+<details>
+<summary><b>src/app/demo/preview/notes-hub/page.tsx</b></summary>
+
+```tsx
+'use client';
+
+import { useEffect } from 'react';
+import dynamic from 'next/dynamic';
+
+const NotesHubPage = dynamic(() => import('@/app/dashboard/notes-hub/page'), {
+  ssr: false,
+  loading: () => (
+    <div className="flex items-center justify-center min-h-screen">
+      <div className="text-center">
+        <p className="text-gray-600 dark:text-gray-400">Loading notes...</p>
+      </div>
+    </div>
+  ),
+});
+
+export default function DemoNotesHubPage() {
+  useEffect(() => {
+    try {
+      localStorage.setItem('dw.demoMode', '1');
+      localStorage.setItem('dw.embedMode', 'true');
+    } catch {}
+  }, []);
+
+  return <NotesHubPage />;
+}
+```
+
+</details>
+
+<details>
+<summary><b>src/app/demo/preview/inbox/page.tsx</b></summary>
+
+```tsx
+'use client';
+
+import { useEffect } from 'react';
+import dynamic from 'next/dynamic';
+
+const InboxPage = dynamic(() => import('@/app/dashboard/inbox/page'), {
+  ssr: false,
+  loading: () => (
+    <div className="flex items-center justify-center min-h-screen">
+      <div className="text-center">
+        <p className="text-gray-600 dark:text-gray-400">Loading inbox...</p>
+      </div>
+    </div>
+  ),
+});
+
+export default function DemoInboxPage() {
+  useEffect(() => {
+    try {
+      localStorage.setItem('dw.demoMode', '1');
+      localStorage.setItem('dw.embedMode', 'true');
+    } catch {}
+  }, []);
+
+  return <InboxPage />;
+}
+```
+
+</details>
+
+<details>
+<summary><b>src/app/demo/preview/integrations/page.tsx</b></summary>
+
+```tsx
+'use client';
+
+import { useEffect } from 'react';
+import dynamic from 'next/dynamic';
+
+const IntegrationsPage = dynamic(() => import('@/app/dashboard/integrations/page'), {
+  ssr: false,
+  loading: () => (
+    <div className="flex items-center justify-center min-h-screen">
+      <div className="text-center">
+        <p className="text-gray-600 dark:text-gray-400">Loading integrations...</p>
+      </div>
+    </div>
+  ),
+});
+
+export default function DemoIntegrationsPage() {
+  useEffect(() => {
+    try {
+      localStorage.setItem('dw.demoMode', '1');
+      localStorage.setItem('dw.embedMode', 'true');
+    } catch {}
+  }, []);
+
+  return <IntegrationsPage />;
+}
+```
+
+</details>
+
+### Dashboard Pages (Referenced by Demo)
+
+<details>
+<summary><b>src/app/dashboard/home/page.tsx</b> (Excerpt - first 100 lines)</summary>
+
+```tsx
+'use client';
+
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useUser } from '@clerk/nextjs';
+import { useSearchParams } from 'next/navigation';
+import { Loader2, MapPin, Calendar, ArrowRight } from 'lucide-react';
+import { Column1Timeline } from '@/components/home/columns/Column1Timeline';
+import { Column2TaskBank } from '@/components/home/columns/Column2TaskBank';
+import { Column3Assignments } from '@/components/home/columns/Column3Assignments';
+import { Column4Notes } from '@/components/home/columns/Column4Notes';
+import { BelowFoldSection } from '@/components/home/columns/BelowFoldSection';
+import { HomeDragDropContext } from '@/components/home/DragDropContext';
+import { UnifiedHeader } from '@/components/home/UnifiedHeader';
+import { useDashboardComposite } from '@/hooks/home/useDashboardComposite';
+// ... rest of file
+```
+
+</details>
+
+<details>
+<summary><b>src/app/dashboard/schedule/page.tsx</b> (Excerpt - first 50 lines)</summary>
+
+```tsx
+"use client";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type MutableRefObject } from 'react';
+import { useRouter } from 'next/navigation';
+import { AlertCircle, AlertTriangle, CalendarDays, ChevronLeft, ChevronRight, Clock3, FileText, MapPin, Settings, Upload, Trash2, Loader2, BookOpen, FlaskConical, ListChecks, Target, Flag, Eye, CheckCircle, X, ExternalLink } from 'lucide-react';
+import { useCourseColors } from '@/hooks/useCourseColors';
+import { useSemesterAggregate } from '@/hooks/useSemesterAggregate';
+import { useSyllabusCourses } from '@/hooks/useSyllabusCourses';
+// ... rest of file (6195 lines total)
+```
+
+</details>
+
+<details>
+<summary><b>src/app/dashboard/academic/page.tsx</b> (Excerpt - first 50 lines)</summary>
+
+```tsx
+"use client";
+
+import { useState, useEffect, useMemo, Suspense } from 'react';
+import { useSearchParams, useRouter } from 'next/navigation';
+import { Calendar, Check, Play } from 'lucide-react';
+import {
+  Tabs,
+  StatusChip,
+  RiskChip,
+  AcademicInspector,
+  FilterRail,
+  FilterChipsBar,
+  FiltersBottomSheet,
+  PlannerDrawer,
+  CapacityBar,
+  CourseCard,
+  CourseDrawer,
+  RiskBadge,
+  WeeklyGrid,
+  SummaryStatCard,
+  AcademicSection,
+  PolicyItem,
+  type TimeBlock,
+  type FilterPreset,
+  type FilterState,
+} from '@/components/ui/academic';
+// ... rest of file
+```
+
+</details>
+
+### Core Hooks & Utilities
+
+<details>
+<summary><b>src/lib/preferences.ts</b></summary>
+
+```typescript
+import { authorizedFetch } from "./authorizedFetch";
+
+export type Preferences = Record<string, any> & {
+  aiCommunication?: {
+    communicationTone?: string;
+    personalityStyle?: string;
+    helpfulnessLevel?: string;
+    jargonLevel?: string;
+    guardrails?: boolean;
+  };
+  courseColors?: Record<string, string>;
+};
+
+export async function getPreferences(): Promise<Preferences> {
+  // In demo mode, return empty preferences to avoid auth errors
+  const isDemoMode = typeof window !== 'undefined' && localStorage.getItem('dw.demoMode') === '1';
+  if (isDemoMode) {
+    return {};
+  }
+  
+  const res = await authorizedFetch("/api/proxy/mobile/preferences", {
+    cache: "no-cache",
+  });
+  if (!res.ok) {
+    const t = await res.text().catch(() => "");
+    if (t.includes('read-only') || t.includes('demo')) {
+      return {};
+    }
+    throw new Error(t || `HTTP ${res.status}`);
+  }
+  const json = await res.json();
+  return json?.preferences || {};
+}
+
+export async function patchPreferences(
+  partial: Preferences
+): Promise<Preferences> {
+  // In demo mode, skip API call and just return current preferences
+  const isDemoMode = typeof window !== 'undefined' && localStorage.getItem('dw.demoMode') === '1';
+  if (isDemoMode) {
+    console.log('[preferences] Demo mode: Skipping patchPreferences API call');
+    return getPreferences();
+  }
+  
+  // ... rest of implementation
+}
+```
+
+</details>
+
+<details>
+<summary><b>src/lib/ensureAccessToken.ts</b></summary>
+
+```typescript
+"use client";
+
+let inflight: Promise<void> | null = null;
+
+export function ensureAccessToken(): Promise<void> {
+  // Check for demo mode first - skip token fetch entirely
+  const isDemoMode = typeof window !== 'undefined' && localStorage.getItem('dw.demoMode') === '1';
+  const isEmbedded = typeof window !== 'undefined' && localStorage.getItem('dw.embedMode') === 'true';
+  
+  if (isDemoMode || isEmbedded) {
+    // In demo/embed mode, skip token fetch entirely
+    console.log('[ensureAccessToken] Demo/embed mode detected, skipping token fetch');
+    return Promise.resolve();
+  }
+  
+  // ... rest of implementation
+}
+```
+
+</details>
+
+<details>
+<summary><b>src/lib/authorizedFetch.ts</b> (Excerpt - demo mode handling)</summary>
+
+```typescript
+"use client";
+
+import { ensureAccessToken } from "./ensureAccessToken";
+
+function isDemoMode(): boolean {
+  if (typeof window === "undefined") return false;
+  return localStorage.getItem("dw.demoMode") === "1";
+}
+
+export async function authorizedFetch(
+  input: RequestInfo | URL,
+  init?: RequestInit
+): Promise<Response> {
+  // ... impersonation handling ...
+  
+  if (!impersonationToken) {
+    try {
+      await ensureAccessToken();
+    } catch (error) {
+      // During onboarding, user might not be authenticated yet
+      console.debug("[authorizedFetch] ensureAccessToken failed (expected during onboarding), continuing with request");
+    }
+  }
+
+  // ... fetch logic ...
+  
+  // Add X-Demo-Mode header for observability if user is in demo mode
+  const headers = new Headers(init?.headers);
+  if (isDemoMode()) {
+    headers.set("X-Demo-Mode", "true");
+  }
+  
+  // ... rest of implementation
+}
+```
+
+</details>
+
+<details>
+<summary><b>src/hooks/home/useDashboardComposite.ts</b> (Excerpt - demo mode handling)</summary>
+
+```typescript
+export function useDashboardComposite(
+  options: UseDashboardCompositeOptions = {}
+) {
+  const {
+    tab = "home",
+    context = "campus",
+    date,
+    startDate,
+    endDate,
+    enabled = true,
+  } = options;
+  const queryClient = useQueryClient();
+
+  // Check if we're in demo mode
+  const isDemoMode = typeof window !== 'undefined' && localStorage.getItem('dw.demoMode') === '1';
+  
+  // In demo mode, check if we have cached data first
+  const cachedData = isDemoMode 
+    ? queryClient.getQueryData<DashboardCompositeResponse>(["dashboard-composite", tab, context, date, startDate, endDate])
+    : undefined;
+  
+  // In demo mode, only enable query if we have cached data
+  const shouldEnable = isDemoMode ? !!cachedData : enabled;
+
+  return useQuery({
+    queryKey: ["dashboard-composite", tab, context, date, startDate, endDate],
+    initialData: isDemoMode && cachedData ? cachedData : undefined,
+    queryFn: async (): Promise<DashboardCompositeResponse> => {
+      // In demo mode, always check cache first
+      if (isDemoMode) {
+        const currentCache = queryClient.getQueryData<DashboardCompositeResponse>(["dashboard-composite", tab, context, date, startDate, endDate]);
+        if (currentCache) {
+          logger.debug("[useDashboardComposite] Using cached demo data");
+          return currentCache;
+        }
+        throw new Error("Demo mode: No cached data available. Please ensure demo data is loaded first.");
+      }
+      
+      // ... authenticated fetch logic ...
+    },
+    staleTime: isDemoMode ? Infinity : 0,
+    enabled: shouldEnable,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: !isDemoMode,
+    refetchOnMount: !isDemoMode,
+    // ... rest of options
+  });
+}
+```
+
+</details>
+
+<details>
+<summary><b>src/hooks/useDayPlan.ts</b></summary>
+
+```typescript
+'use client';
+
+import { useQuery } from '@tanstack/react-query';
+import { authorizedFetch } from '@/lib/authorizedFetch';
+import { proxyPath } from '@/lib/utils';
+
+export function useDayPlan(date?: string) {
+  // Skip fetching in demo mode
+  const isDemoMode = typeof window !== 'undefined' && localStorage.getItem('dw.demoMode') === '1';
+  
+  return useQuery<DayPlanResponse, Error>({
+    queryKey: ['dayplan-latest', date],
+    enabled: !isDemoMode, // Disable query entirely in demo mode
+    queryFn: async () => {
+      // Double-check demo mode (safety check)
+      const currentDemoMode = typeof window !== 'undefined' && localStorage.getItem('dw.demoMode') === '1';
+      if (currentDemoMode) {
+        return { dayPlan: null, fetchedAt: new Date().toISOString() };
+      }
+      // ... fetch logic ...
+    },
+    staleTime: 5 * 60 * 1000,
+    retry: 1,
+    enabled: !isDemoMode,
+  });
+}
+```
+
+</details>
+
+<details>
+<summary><b>src/hooks/useCourseColors.ts</b> (Excerpt - demo mode handling)</summary>
+
+```typescript
+// ... imports ...
+
+const syncWithBackend = async () => {
+  try {
+    // Skip backend sync in demo mode
+    const isDemoMode = typeof window !== 'undefined' && localStorage.getItem('dw.demoMode') === '1';
+    if (isDemoMode) {
+      console.log('[useCourseColors] Demo mode: Skipping backend sync');
+      return;
+    }
+    
+    const backendPrefs = await getPreferences();
+    // ... sync logic ...
+  } catch (error) {
+    // ...
+  }
+};
+```
+
+</details>
+
+<details>
+<summary><b>src/components/home/DragDropContext.tsx</b> (Excerpt - demo mode handling)</summary>
+
+```typescript
+export function HomeDragDropContext({ children, tasks }: DragDropContextProps) {
+  const [activeTask, setActiveTask] = React.useState<UnscheduledTask | null>(null);
+  const queryClient = useQueryClient();
+  
+  // Check if we're in demo mode
+  const isDemoMode = typeof window !== 'undefined' && localStorage.getItem('dw.demoMode') === '1';
+
+  const scheduleTaskMutation = useMutation({
+    mutationFn: async ({ taskId, startTime, endTime }: { taskId: string, startTime: string, endTime: string }) => {
+      // In demo mode, skip actual API call and just return success
+      if (isDemoMode) {
+        console.log('[DragDrop] Demo mode: Skipping task schedule API call');
+        return { success: true, demo: true };
+      }
+      // ... API call ...
+    },
+    // ... rest of mutation
+  });
+
+  const deleteTaskMutation = useMutation({
+    mutationFn: async (taskId: string) => {
+      // In demo mode, skip actual API call
+      if (isDemoMode) {
+        console.log('[DragDrop] Demo mode: Skipping task delete API call');
+        return { taskId, demo: true };
+      }
+      // ... API call ...
+    },
+    // ... rest of mutation
+  });
+
+  // ... handleDragEnd with demo mode check for ephemeral task conversion ...
+  const scheduleTask = async () => {
+    // In demo mode, skip task creation/conversion
+    if (isDemoMode) {
+      console.log('[DragDrop] Demo mode: Skipping task creation/conversion');
+      toast.info('Demo mode: Task scheduling is read-only');
+      setActiveTask(null);
+      return;
+    }
+    // ... task creation logic ...
+  };
+}
+```
+
+</details>
+
+<details>
+<summary><b>src/components/home/columns/Column2TaskBank.tsx</b> (Excerpt - demo mode handling)</summary>
+
+```typescript
+const handleQuickSchedule = async () => {
+  if (!data?.unscheduledTasks || data.unscheduledTasks.length === 0) return;
+
+  // Check if we're in demo mode
+  const isDemoMode = typeof window !== 'undefined' && localStorage.getItem('dw.demoMode') === '1';
+  if (isDemoMode) {
+    toast.info('Demo mode: AI scheduling is read-only');
+    return;
+  }
+
+  // ... AI scheduling logic ...
+};
+```
+
+</details>
+
+<details>
+<summary><b>src/components/home/UnifiedHeader.tsx</b></summary>
+
+```typescript
+// Full file - see attached
+// Uses useDashboardComposite() hook which handles demo mode internally
+// No explicit demo mode checks needed - handled by hooks
+```
+
+</details>
+
+### Supporting Components
+
+<details>
+<summary><b>src/components/DemoCacheClearer.tsx</b></summary>
+
+```typescript
+'use client';
+
+import { useEffect, useRef } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
+import { useUser } from '@/contexts/UserContext';
+import { useUser as useClerkUser } from '@clerk/nextjs';
+
+/**
+ * Component to clear React Query cache when transitioning from demo mode to authenticated user
+ * 
+ * This must be placed inside QueryClientProvider to access useQueryClient hook.
+ * Prevents stale demo data from appearing in the real user's dashboard.
+ */
+export function DemoCacheClearer() {
+  const queryClient = useQueryClient();
+  const { user } = useUser();
+  const clerkUser = useClerkUser();
+  const wasDemoModeRef = useRef<boolean>(false);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    
+    const isCurrentlyDemoMode = localStorage.getItem('dw.demoMode') === '1';
+    const wasDemoMode = wasDemoModeRef.current;
+    
+    // Check if user just authenticated (was in demo, now has real user)
+    if (wasDemoMode && !isCurrentlyDemoMode && user && clerkUser.isLoaded) {
+      console.log('[DemoCacheClearer] Clearing React Query cache after demo → authenticated transition');
+      queryClient.clear();
+      // Also remove demo mode flags if they still exist
+      localStorage.removeItem('dw.demoMode');
+      localStorage.removeItem('dw.embedMode');
+    }
+    
+    // Update ref to track current demo mode state
+    wasDemoModeRef.current = isCurrentlyDemoMode;
+  }, [user, clerkUser.isLoaded, queryClient]);
+
+  return null;
+}
+```
+
+</details>
+
+<details>
+<summary><b>src/components/DemoErrorBoundary.tsx</b></summary>
+
+```typescript
+'use client';
+
+import React, { Component, ErrorInfo, ReactNode } from 'react';
+import { AlertCircle, RefreshCw } from 'lucide-react';
+
+/**
+ * Error Boundary for Demo Preview
+ * 
+ * Prevents white screen crashes in demo mode by catching React errors
+ * and displaying a user-friendly error message with retry option.
+ */
+export class DemoErrorBoundary extends Component<Props, State> {
+  // ... implementation - see attached file
+}
+```
+
+</details>
+
+<details>
+<summary><b>src/app/demo/components/DemoHeader.tsx</b></summary>
+
+```tsx
+'use client';
+
+import { Sparkles } from 'lucide-react';
+
+export function DemoHeader() {
+  return (
+    <div className="bg-gradient-to-r from-purple-600 to-pink-600 text-white px-4 py-2.5 text-center text-sm font-medium shadow-sm">
+      <div className="flex items-center justify-center gap-2">
+        <Sparkles className="w-4 h-4" />
+        <span>You're viewing a demo of DormWay</span>
+      </div>
+    </div>
+  );
+}
+```
+
+</details>
+
+<details>
+<summary><b>src/app/demo/components/DemoCTA.tsx</b></summary>
+
+```tsx
+'use client';
+
+import Link from 'next/link';
+import { ArrowRight, Sparkles } from 'lucide-react';
+
+export function DemoCTA() {
+  return (
+    <div className="bg-gradient-to-r from-purple-600 via-pink-600 to-orange-500 text-white px-6 py-6 text-center border-t border-purple-500/20">
+      <div className="max-w-2xl mx-auto">
+        <div className="flex items-center justify-center gap-2 mb-2">
+          <Sparkles className="w-5 h-5" />
+          <h3 className="text-xl font-bold">Ready to get started?</h3>
+        </div>
+        <p className="text-sm mb-6 opacity-90">
+          Sign up to create your own personalized dashboard and never miss a deadline
+        </p>
+        <Link
+          href="/sign-up"
+          className="inline-flex items-center gap-2 bg-white text-purple-600 px-8 py-3 rounded-xl font-semibold hover:bg-gray-50 transition-all shadow-lg hover:shadow-xl"
+        >
+          Get started free
+          <ArrowRight className="w-5 h-5" />
+        </Link>
+        <p className="text-xs mt-4 opacity-75">
+          Free forever • Works at 6,134+ schools • Built by students
+        </p>
+      </div>
+    </div>
+  );
+}
+```
+
+</details>
+
+### Context & Theme
+
+<details>
+<summary><b>src/contexts/ThemeContext.tsx</b> (Excerpt - preference saving)</summary>
+
+```typescript
+// ... imports ...
+
+export function ThemeProvider({ children }: { children: ReactNode }) {
+  // ... state management ...
+  
+  // Debounced persistence to prevent excessive backend calls
+  const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  
+  const persistPreferences = useCallback(async (updates: Partial<StoredPreferences>) => {
+    // ... implementation that calls patchPreferences ...
+    // patchPreferences already handles demo mode internally
+  }, []);
+  
+  // ... rest of implementation
+}
+```
+
+</details>
+
+---
+
+## 🛡️ Routing & Guard Rails
+
+### Frontend Middleware
+
+<details>
+<summary><b>src/middleware.ts</b></summary>
+
+```typescript
+import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
+import { NextResponse } from "next/server";
+
+// Define PROTECTED routes that REQUIRE authentication (matches Auth0 behavior)
+// Everything else is public by default
+const isProtectedRoute = createRouteMatcher([
+  "/dashboard(.*)",
+  "/onboarding(.*)",
+]);
+
+// Exclude API routes from middleware protection (they handle auth themselves)
+const isApiRoute = createRouteMatcher(["/api(.*)"]);
+
+export default clerkMiddleware(async (auth, req) => {
+  const pathname = req.nextUrl.pathname;
+
+  // API routes handle their own authentication - skip middleware
+  if (isApiRoute(req)) {
+    return NextResponse.next();
+  }
+
+  // If not a protected route, allow through without auth check (public by default)
+  if (!isProtectedRoute(req)) {
+    return NextResponse.next();
+  }
+
+  // Protected route - require authentication
+  const authResult = await auth();
+  const { userId, sessionClaims } = authResult;
+
+  if (!userId) {
+    return NextResponse.redirect(new URL("/sign-in", req.url));
+  }
+
+  // ... onboarding checks ...
+});
+
+export const config = {
+  matcher: [
+    "/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico|woff|woff2|ttf|eot)$).*)",
+  ],
+};
+```
+
+**Key Points:**
+- `/demo/*` routes are **public** (not in protected routes list)
+- `/sign-up` and `/sign-in` are **public** (not in protected routes list)
+- Only `/dashboard(.*)` and `/onboarding(.*)` require authentication
+
+</details>
+
+### Backend Middleware
+
+<details>
+<summary><b>services/api-router/src/middleware/demo-readonly.ts</b></summary>
+
+```typescript
+import { Request, Response, NextFunction } from 'express';
+import { createLogger } from '../utils/logger';
+
+const logger = createLogger('demo-readonly');
+
+export function demoReadOnlyGuard(req: Request, res: Response, next: NextFunction): void {
+  try {
+    /**
+     * DEMO_ENABLED Configuration
+     * 
+     * This middleware is currently DISABLED by default (DEMO_ENABLED=false).
+     * 
+     * Reason: The demo system uses a frontend-first protection approach:
+     * - Frontend components check localStorage.getItem('dw.demoMode') before making mutations
+     * - 32+ checks across the codebase prevent mutations at the UI level
+     * - This provides better UX (user-friendly messages) and avoids backend round-trips
+     * 
+     * This backend guard serves as a safety net for role-based demo users (if we ever
+     * implement server-side demo role assignment). It can be re-enabled by setting:
+     *   DEMO_ENABLED=true
+     */
+    const enabled = String(process.env.DEMO_ENABLED || 'false').toLowerCase() !== 'false';
+    if (!enabled) return next();
+
+    const user: any = (req as any).user || {};
+    const roles: string[] = Array.isArray(user.roles) ? user.roles : [];
+    const isDemo = user?.role === 'demo' || roles.includes('demo');
+    if (!isDemo) return next();
+
+    // Allow only safe methods
+    if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') {
+      return next();
+    }
+
+    // Whitelist: Allow demo users to save UI preferences (harmless, improves UX)
+    const allowedPaths = [
+      '/dashboard/preferences',
+      '/api/preferences',
+      '/api/mobile/preferences',
+    ];
+
+    if (allowedPaths.some(path => req.path.includes(path))) {
+      return next();
+    }
+
+    logger.info('Blocked write in demo mode', { path: req.path, method: req.method, userId: user?.id });
+    res.status(403).json({ error: 'Demo is read-only' });
+  } catch (err) {
+    // Fail-safe: do not block if guard itself fails
+    return next();
+  }
+}
+```
+
+**Status:** DISABLED by default (DEMO_ENABLED=false)
+
+</details>
+
+### Backend Demo Routes
+
+<details>
+<summary><b>services/api-router/src/routes/demo-routes.ts</b></summary>
+
+```typescript
+import { Router } from "express";
+import { DashboardAuroraService } from "../services/dashboard-aurora-service";
+import { transformToDashboardCompositeV1 } from "../services/dashboard-composite-transformer";
+import { createLogger } from "../utils/logger";
+import { rateLimit } from "../middleware/rate-limit";
+
+const router = Router();
+const logger = createLogger("demo-routes");
+
+const DEMO_USER_EMAIL = "demo@dormway.app";
+
+// Rate limiting for public demo endpoint
+// 20 requests per minute per IP to prevent abuse
+const demoRateLimit = rateLimit({
+  windowSec: 60, // 1 minute window
+  max: 20, // 20 requests per window
+  keyFn: (req) => `demo:${req.ip}`, // Key by IP address
+});
+
+/**
+ * GET /demo/dashboard
+ *
+ * Public endpoint for demo dashboard data.
+ * No authentication required - uses hardcoded demo user.
+ *
+ * Returns the same structure as /dashboard/v1/composite but for demo user.
+ *
+ * Rate limited: 20 requests per minute per IP to prevent abuse.
+ */
+router.get("/dashboard", demoRateLimit, async (req, res) => {
+  try {
+    // Look up demo user by email (more reliable than hardcoded ID)
+    let requestedUserId = req.headers["x-demo-user-id"] as string;
+
+    if (!requestedUserId) {
+      // Find user by email in accounts table
+      const { auroraClient } = await import("../services/aurora-client");
+      const { data: account } = await auroraClient.querySingle(
+        "SELECT id FROM accounts WHERE LOWER(email) = $1 LIMIT 1",
+        [DEMO_USER_EMAIL.toLowerCase()]
+      );
+      if (account?.id) {
+        requestedUserId = account.id;
+      } else {
+        return res.status(404).json({
+          error: "Demo user not found",
+          message: `Please ensure ${DEMO_USER_EMAIL} exists in the database. Run the seeding script first.`,
+        });
+      }
+    }
+    
+    // Support different tabs: home, schedule, academic, etc.
+    const tabParam = (req.query.tab as string) || "home";
+    const tab =
+      tabParam === "schedule" || tabParam === "academic" || tabParam === "notes"
+        ? tabParam
+        : "home";
+    const context = "student"; // Demo always uses student context
+
+    logger.info("Demo dashboard request", {
+      requestedUserId,
+      tab,
+      context,
+      ip: req.ip,
+    });
+
+    // Fetch complete dashboard data for demo user
+    let complete;
+    try {
+      complete = await DashboardAuroraService.getCompleteDashboardData(
+        requestedUserId,
+        context
+      );
+    } catch (error: unknown) {
+      // If demo user doesn't exist or has no data, return empty structure
+      const errorMessage =
+        error instanceof Error ? error.message : String(error);
+      logger.warn("Demo user data not found, returning empty structure", {
+        userId: requestedUserId,
+        error: errorMessage,
+      });
+
+      // Return minimal valid structure
+      complete = {
+        campus: null,
+        data: {
+          bulletin: null,
+          parking: null,
+          weather: null,
+          news: null,
+          courses: [],
+          intelligence: null,
+          health: null,
+        },
+        userProfile: {
+          id: requestedUserId,
+          name: "Alex Chen",
+          email: "demo@dormway.app",
+        },
+      };
+    }
+
+    // Transform to composite format
+    const body = await transformToDashboardCompositeV1({
+      complete,
+      context,
+      tab,
+      since: undefined,
+      requestId: `demo-${Date.now()}`,
+      userId: requestedUserId,
+      overrides: {
+        useCrew: false, // Demo doesn't need AI crews
+        emitV2Types: false,
+        validateV2: false,
+      },
+    });
+
+    // Add demo-specific metadata
+    if (body.metadata) {
+      const metadata = body.metadata as Record<string, unknown>;
+      metadata.demo = true;
+      metadata.demoUserId = requestedUserId;
+    }
+
+    res.json(body);
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const errorStack = error instanceof Error ? error.stack : undefined;
+    logger.error("Demo dashboard error", {
+      error: errorMessage,
+      stack: errorStack,
+    });
+    res.status(500).json({
+      error: "Failed to fetch demo data",
+      message: errorMessage,
+    });
+  }
+});
+
+export default router;
+```
+
+</details>
+
+### Frontend API Proxy
+
+<details>
+<summary><b>src/app/api/demo/data/route.ts</b></summary>
+
+```typescript
+import { NextResponse } from 'next/server';
+
+const DEMO_USER_ID = 'demo-student-001';
+
+export async function GET() {
+  try {
+    // Fetch demo data from backend
+    const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || process.env.API_BASE_URL;
+    
+    if (!apiBaseUrl) {
+      console.error('[demo-api] API_BASE_URL not configured');
+      return NextResponse.json(
+        { error: 'Demo service unavailable' },
+        { status: 503 }
+      );
+    }
+
+    const response = await fetch(
+      `${apiBaseUrl}/demo/dashboard`,
+      {
+        headers: {
+          'x-demo-user-id': DEMO_USER_ID,
+          'Content-Type': 'application/json',
+        },
+        // No auth required - this is a public endpoint
+        cache: 'no-store',
+      }
+    );
+
+    if (!response.ok) {
+      console.error('[demo-api] Backend returned error:', response.status, response.statusText);
+      return NextResponse.json(
+        { error: 'Failed to fetch demo data' },
+        { status: response.status }
+      );
+    }
+
+    const data = await response.json();
+    return NextResponse.json(data);
+  } catch (error) {
+    console.error('[demo-api] Error fetching demo data:', error);
+    return NextResponse.json(
+      { error: 'Demo service unavailable' },
+      { status: 503 }
+    );
+  }
+}
+```
+
+</details>
+
+---
+
+## ⚙️ Project Configuration
+
+### Package.json
+
+<details>
+<summary><b>package.json</b></summary>
+
+```json
+{
+  "name": "dwweb",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev --turbo",
+    "build": "NEXT_PHASE=phase-production-build next build",
+    "start": "next start",
+    "lint": "next lint",
+    "test": "vitest",
+    "test:ui": "vitest --ui",
+    "test:coverage": "vitest run --coverage"
+  },
+  "dependencies": {
+    "@clerk/nextjs": "^6.33.7",
+    "@tanstack/react-query": "^5.90.2",
+    "next": "^15.5.5",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    // ... other dependencies
+  },
+  "devDependencies": {
+    "typescript": "5.5.4",
+    "@types/react": "^19.2.2",
+    "@types/react-dom": "^19.2.2",
+    // ... other dev dependencies
+  }
+}
+```
+
+</details>
+
+### Next.js Config
+
+<details>
+<summary><b>next.config.js</b></summary>
+
+```javascript
+// See attached file for full contents
+// Key settings:
+// - React 19 support
+// - Turbo mode enabled
+// - Image optimization configured
+```
+
+</details>
+
+### TypeScript Config
+
+<details>
+<summary><b>tsconfig.json</b></summary>
+
+```json
+// See attached file for full contents
+// Key settings:
+// - Strict mode enabled
+// - React 19 JSX support
+// - Path aliases configured (@/ for src/)
+```
+
+</details>
+
+### Environment Variables
+
+<details>
+<summary><b>.env.example</b> (Redacted)</summary>
+
+```bash
+# Clerk Authentication
+NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=REDACTED
+CLERK_SECRET_KEY=REDACTED
+
+# API Configuration
+NEXT_PUBLIC_API_BASE_URL=http://localhost:3001
+API_BASE_URL=http://localhost:3001
+
+# Database (for demo data seeding)
+POSTGRES_HOST=localhost
+POSTGRES_PORT=5432
+POSTGRES_DB=dormway
+POSTGRES_USER=dormway_admin
+POSTGRES_PASSWORD=REDACTED
+
+# Demo Configuration
+DEMO_ENABLED=false  # Backend middleware disabled by default
+```
+
+</details>
+
+---
+
+## 🔍 Code Search Results
+
+### Demo Mode Flag Usage (32 occurrences across 21 files)
+
+**Files checking `dw.demoMode` or `dw.embedMode`:**
+
+1. `src/components/DashboardSidebar.tsx` - URL rewriting, demo badge
+2. `src/components/BottomNavigation.tsx` - URL rewriting
+3. `src/app/demo/preview/page.tsx` - Sets flags, fetches data
+4. `src/app/demo/preview/schedule/page.tsx` - Sets flags
+5. `src/app/demo/preview/academic/page.tsx` - Sets flags
+6. `src/app/demo/preview/notes-hub/page.tsx` - Sets flags
+7. `src/app/demo/preview/inbox/page.tsx` - Sets flags
+8. `src/app/demo/preview/integrations/page.tsx` - Sets flags
+9. `src/hooks/home/useDashboardComposite.ts` - Cache usage, prevents fetching
+10. `src/hooks/useDayPlan.ts` - Disables query
+11. `src/hooks/useCourseColors.ts` - Skips backend sync
+12. `src/lib/preferences.ts` - Returns empty prefs, skips API calls
+13. `src/lib/ensureAccessToken.ts` - Skips token fetch
+14. `src/lib/authorizedFetch.ts` - Adds X-Demo-Mode header
+15. `src/components/home/DragDropContext.tsx` - Blocks mutations
+16. `src/components/home/columns/Column2TaskBank.tsx` - Blocks AI scheduling
+17. `src/app/page.tsx` - Theme sync, iframe handling
+18. `src/app/demo/page.tsx` - Redirect logic, auto-login guard
+19. `src/app/dashboard/home/page.tsx` - Embed mode detection
+20. `src/components/DemoCacheClearer.tsx` - Cache invalidation
+21. `src/components/DemoModeBodyAttribute.tsx` - Body attribute for styling
+
+**Pattern:** All checks use: `localStorage.getItem('dw.demoMode') === '1'`
+
+---
+
+## 🌳 Route Tree
+
+### Demo Preview Routes
+
+```
+src/app/demo/preview/
+├── layout.tsx          # Wraps with providers, sidebar, bottom nav
+├── page.tsx            # Home dashboard (main demo page)
+├── schedule/
+│   └── page.tsx        # Wraps dashboard/schedule/page
+├── academic/
+│   └── page.tsx        # Wraps dashboard/academic/page
+├── notes-hub/
+│   └── page.tsx        # Wraps dashboard/notes-hub/page
+├── inbox/
+│   └── page.tsx        # Wraps dashboard/inbox/page
+└── integrations/
+    └── page.tsx        # Wraps dashboard/integrations/page
+```
+
+### Dashboard Routes (Referenced by Demo)
+
+```
+src/app/dashboard/
+├── home/
+│   └── page.tsx        # Main dashboard (4-column layout)
+├── schedule/
+│   └── page.tsx        # Semester schedule view
+├── academic/
+│   └── page.tsx        # Academic planner (assignments, courses)
+├── notes-hub/
+│   └── page.tsx        # Notes management
+├── inbox/
+│   └── page.tsx        # Inbox/notifications
+└── integrations/
+    └── page.tsx        # Integrations management
+```
+
+### Public Routes
+
+```
+src/app/
+├── page.tsx            # Landing page (contains demo iframe)
+├── sign-in/            # Clerk sign-in (public)
+├── sign-up/            # Clerk sign-up (public)
+└── demo/
+    ├── page.tsx        # Demo landing (redirects if not in iframe)
+    └── preview/        # Demo preview routes (public)
+```
+
+---
+
+## 📝 Recent Changes
+
+### Git History (Last 5 Commits)
+
+```
+# Recent commits affecting demo system:
+- Added rate limiting to /demo/dashboard endpoint
+- Documented backend middleware state
+- Added cache invalidation on sign-up
+- Added error boundary to demo preview
+- Improved theme sync timeout (300ms)
+```
+
+### Key Changes Summary
+
+1. **Rate Limiting Added** - `/demo/dashboard` now rate limited (20 req/min per IP)
+2. **Backend Middleware Documented** - Explained why DEMO_ENABLED defaults to false
+3. **Cache Invalidation** - DemoCacheClearer component clears cache on demo→auth transition
+4. **Error Boundary** - DemoErrorBoundary prevents white screen crashes
+5. **Theme Sync Improved** - Reduced timeout from 1000ms to 300ms
+
+---
+
+## 🏗️ Architecture Overview
+
+### Current Implementation
+
+**Demo Mode Detection:**
+- **Primary Method:** `localStorage.getItem('dw.demoMode') === '1'`
+- **Set By:** `/demo/preview/page.tsx` synchronously (before hooks run)
+- **Checked By:** 32+ locations across hooks, components, and utilities
+
+**Data Flow:**
+1. Landing page embeds `/demo/preview?hideNav=true` in iframe
+2. Demo preview page sets `dw.demoMode` and `dw.embedMode` flags
+3. Fetches data from `/api/demo/data` → backend `/demo/dashboard`
+4. Pre-populates React Query cache with demo data
+5. All hooks check demo mode and use cached data or skip API calls
+6. Navigation rewrites `/dashboard/*` to `/demo/preview/*` in demo mode
+
+**Protection Layers:**
+1. **Frontend (Active):** 32+ checks prevent mutations at UI level
+2. **Backend (Disabled):** `demo-readonly.ts` middleware exists but disabled by default
+3. **Rate Limiting (Active):** 20 req/min per IP on `/demo/dashboard`
+
+**Theme Synchronization:**
+- Parent page sends `theme-change` messages via `postMessage`
+- Demo preview listens and applies theme immediately
+- Fallback to system preference after 300ms if no message received
+
+---
+
+## 📊 Current State Assessment
+
+### ✅ What's Working
+
+1. **Demo loads successfully** with realistic data
+2. **Navigation works** between all pages
+3. **Mutations are blocked** with user-friendly messages
+4. **No authentication errors** (all 401s resolved)
+5. **Theme syncs** with parent page
+6. **Rate limiting** protects public endpoint
+7. **Error boundary** prevents crashes
+8. **Cache invalidation** on demo→auth transition
+
+### ⚠️ Known Issues / Trade-offs
+
+1. **Backend middleware disabled** - Frontend-only protection (intentional)
+2. **Theme sync has 300ms fallback** - Minor flash possible on slow networks
+3. **No E2E tests** - Demo functionality not covered by automated tests
+4. **Cache invalidation timing** - Depends on UserContext detecting transition
+
+### 🔒 Security Considerations
+
+1. **Public endpoint** - `/demo/dashboard` has no auth (intentional)
+2. **Rate limiting** - 20 req/min per IP (protects against abuse)
+3. **Frontend protection** - Can be bypassed by modifying localStorage (acceptable for demo)
+4. **Backend guard disabled** - Safety net exists but not active
+
+---
+
+## 🎯 Target Demo Experience
+
+**Goal:** Allow non-authenticated users to experience full DormWay functionality in 60 seconds
+
+**Must-Have Features:**
+- ✅ View dashboard with realistic data
+- ✅ Navigate between all pages (home, schedule, academic, notes, inbox, integrations)
+- ✅ See drag-and-drop interface (read-only)
+- ✅ Understand product value proposition
+- ✅ Clear path to sign up
+
+**Current Implementation:**
+- ✅ All must-have features working
+- ✅ Realistic data (4 courses, 5 assignments, 5 schedule events)
+- ✅ Full navigation enabled
+- ✅ Read-only mutations with user-friendly messages
+- ✅ Clear CTAs to sign up
+
+---
+
+## 📈 Analytics & Conversion
+
+**Current State:**
+- No specific analytics on demo→signup conversion
+- Demo CTA links to `/sign-up` (Clerk flow)
+- Demo header clearly indicates "You're viewing a demo"
+
+**Recommendation:**
+- Track demo views vs. sign-ups
+- A/B test CTA placement and copy
+- Monitor demo engagement metrics
+
+---
+
+## 🔐 Roles & Permissions Model
+
+**Current Implementation:**
+- **Demo User:** `demo@dormway.app` (database account)
+- **Demo Mode Flag:** `dw.demoMode` in localStorage (frontend-only)
+- **Backend Role:** Not used (middleware disabled)
+
+**Future Considerations:**
+- Could implement server-side `demo` role
+- Would require re-enabling `demo-readonly.ts` middleware
+- Would provide additional security layer
+
+---
+
+## 🚀 Recommended Next Steps
+
+### Immediate (High Priority)
+
+1. **Add E2E tests** for demo flow
+2. **Monitor rate limiting** metrics
+3. **Add analytics** for demo→signup conversion
+
+### Medium Priority
+
+1. **Consider re-enabling backend middleware** if security becomes concern
+2. **Add more demo data** (more courses, assignments, events)
+3. **Improve theme sync** with Promise-based message waiting
+
+### Low Priority
+
+1. **Add demo-specific analytics** events
+2. **Create demo data refresh script** for periodic updates
+3. **Document demo system** in main README
+
+---
+
+## 📎 Attached Files
+
+All key files are included in this package. The analyst should have everything needed to:
+1. Understand the current architecture
+2. Identify potential issues
+3. Recommend improvements
+4. Provide a clear path forward
+
+---
+
+**End of Upload Package**

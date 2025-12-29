@@ -1,0 +1,182 @@
+---
+title: "Auth0 ID to UUID Mapping Strategy"
+description: "Tables with `user_id UUID` columns that need Auth0 ID mapping:"
+---
+
+# Auth0 ID to UUID Mapping Strategy
+
+## Problem Statement
+- Auth0 provides user IDs in format `auth0|xxxxx` (string)
+- Database tables use UUID foreign keys referencing `accounts.id`
+- Need efficient mapping between Auth0 ID and internal UUID
+
+## Tables Affected
+Tables with `user_id UUID` columns that need Auth0 ID mapping:
+- `user_preferences`
+- `user_calendar_preferences` 
+- `notifications`
+- `student_time_blocks`
+- `contexts`
+- `nonces`
+- `engine_notification_preferences`
+- `engine_notification_history`
+- `engine_notification_queue`
+- `braingains_conversations`
+- `knowledge_documents`
+- `query_logs`
+
+## Current Approaches
+
+### 1. Subquery (Currently Used)
+```sql
+INSERT INTO user_preferences (user_id, key, value) 
+VALUES ((SELECT id FROM accounts WHERE auth0_id = $1), $2, $3)
+```
+**Pros**: Simple, works everywhere
+**Cons**: Extra query overhead, repeated lookups
+
+### 2. JOIN (Used for SELECTs)
+```sql
+SELECT up.value 
+FROM user_preferences up
+INNER JOIN accounts a ON up.user_id = a.id
+WHERE a.auth0_id = $1
+```
+**Pros**: Single query, efficient for reads
+**Cons**: Only works for SELECT, not INSERT/UPDATE
+
+## Proposed Solutions
+
+### Option 1: Cache Auth0 ID → UUID Mapping in Redis
+```typescript
+// On login or first request
+const uuid = await getUserUUID(auth0Id);
+await redis.setex(`user:${auth0Id}`, 3600, uuid);
+
+// In routes
+const uuid = await redis.get(`user:${auth0Id}`) || await getUserUUID(auth0Id);
+```
+**Pros**: 
+- Fast lookups (Redis is already in use)
+- Reduces database queries
+- 1-hour cache is reasonable for user sessions
+
+**Cons**: 
+- Cache invalidation complexity
+- Extra Redis dependency
+
+### Option 2: Add Helper Method to AuroraClient
+```typescript
+class AuroraClient {
+  private userIdCache = new Map<string, string>();
+  
+  async getUserUUID(auth0Id: string): Promise<string> {
+    // Check cache first
+    if (this.userIdCache.has(auth0Id)) {
+      return this.userIdCache.get(auth0Id)!;
+    }
+    
+    // Query database
+    const result = await this.querySingle(
+      'SELECT id FROM accounts WHERE auth0_id = $1',
+      [auth0Id]
+    );
+    
+    if (result.data?.id) {
+      this.userIdCache.set(auth0Id, result.data.id);
+      return result.data.id;
+    }
+    
+    throw new Error('User not found');
+  }
+}
+```
+**Pros**: 
+- Centralized solution
+- In-memory cache per process
+- No external dependencies
+
+**Cons**: 
+- Cache not shared between processes
+- Memory usage grows with users
+
+### Option 3: Middleware Enhancement
+```typescript
+// Enhance requireUser middleware to include UUID
+export const requireUser = async (req, res, next) => {
+  // ... existing auth check ...
+  
+  // Add UUID to req.user
+  const userResult = await auroraClient.getUserById(req.user.id);
+  req.user.uuid = userResult.id;
+  req.user.auth0Id = req.user.id;
+  
+  next();
+};
+```
+**Pros**: 
+- UUID available in all routes
+- Single lookup per request
+- Clean separation of concerns
+
+**Cons**: 
+- Extra database query on every request
+- Middleware becomes heavier
+
+### Option 4: Database View (PostgreSQL)
+```sql
+CREATE VIEW user_mapping AS
+SELECT 
+  a.id as uuid,
+  a.auth0_id,
+  a.email,
+  a.created_at
+FROM accounts a;
+
+-- Then use in queries
+INSERT INTO user_preferences (user_id, key, value)
+VALUES ((SELECT uuid FROM user_mapping WHERE auth0_id = $1), $2, $3);
+```
+**Pros**: 
+- Database handles optimization
+- No application code changes for queries
+
+**Cons**: 
+- Still requires subquery
+- Minimal performance benefit
+
+## Recommendation
+
+**Short Term (Immediate)**: Continue with subqueries but standardize the pattern:
+```typescript
+// Add to aurora-client.ts
+async getUserUUIDFromAuth0(auth0Id: string): Promise<string> {
+  const result = await this.querySingle(
+    'SELECT id FROM accounts WHERE auth0_id = $1',
+    [auth0Id]
+  );
+  if (!result.data?.id) {
+    throw new Error('User not found');
+  }
+  return result.data.id;
+}
+```
+
+**Medium Term (Next Sprint)**: Implement Option 3 (Middleware Enhancement)
+- Minimal code changes
+- Consistent pattern across all routes
+- Single lookup per request
+
+**Long Term (Future)**: Consider Option 1 (Redis Cache) if performance becomes an issue
+- Monitor query performance
+- Add metrics for auth0_id lookups
+- Implement if lookup time > 50ms consistently
+
+## Implementation Checklist
+
+- [ ] Add `getUserUUIDFromAuth0` method to AuroraClient
+- [ ] Update all queries to use the helper method
+- [ ] Add performance logging for UUID lookups
+- [ ] Update middleware to include UUID in req.user
+- [ ] Document the pattern in developer guide
+- [ ] Add integration tests for Auth0 ID mapping

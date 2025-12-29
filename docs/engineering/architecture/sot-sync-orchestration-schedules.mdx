@@ -1,0 +1,61 @@
+---
+title: "Sync Orchestration & Schedules"
+---
+
+# SoT - Sync Orchestration & Schedules
+
+## Scope
+- Temporal schedule provisioning (sync, cleanup, plugin runner) and their workflow bindings.
+- Smart sync orchestration pipeline (Temporal schedule -> API router cron/admin -> city/campus workflows).
+- Course schedule import/removal orchestration and schedule reconciliation entry points.
+
+## Non-goals
+- Calendar normalization and time block storage details (see calendar SoT).
+- StudentWatcher/day plan logic or notification cadence.
+- UI dashboards for sync/maintenance operations.
+
+## Invariants & Contracts
+- Sync schedules are provisioned only when `SYNC_SCHEDULES_ENABLED === 'true'` (engine boot).
+- Sync schedule IDs and cadence: `sync-hourly-smart` (1h), `sync-city-4h` (4h), `sync-daily-force` (4am), `sync-term-data-enrichment` (5am).
+- Scheduled syncs use overlap policy `SKIP` with a 5-minute catchup window.
+- `runScheduledSyncWorkflow` triggers `triggerSyncOrchestration`, which requires `API_ROUTER` + `API_KEY` and calls `/cron/sync/orchestrate`.
+- Sync workflow IDs are idempotent: `city-sync-${contextId}` and `campus-sync-${contextId}`; task queues are `city-worker` and `campus-worker`.
+- Cleanup schedules: `daily-graph-cleanup` (2am), `weekly-timeblock-cleanup` (Sun 3am), `weekly-duplicate-detection` (Sun 4am) with overlap `SKIP`.
+- Plugin runner schedule: `plugin-runner-5m` every 5 minutes, overlap `SKIP`.
+- Schedule import writes `schedule_import` events into `time_blocks`; schedule reconciliation populates student-facing blocks via `scheduleProcessor`.
+
+## Key Flows (High-Level)
+- Engine boot -> ensure schedules (`ensureSyncSchedules`, `ensureCleanupSchedules`, `ensurePluginRunnerSchedules`) when enabled.
+- Scheduled sync -> Temporal schedule starts `runScheduledSyncWorkflow` -> API router `/cron/sync/orchestrate` -> `sync-orchestrator-service` selects candidates and starts `processSingleCity`/`processSingleCampus` workflows.
+- Manual sync -> `/api/admin/sync/orchestrate` uses the same orchestrator pipeline and can trigger overlay fold workflows.
+- Schedule import -> `scheduleImport.workflow` normalizes OCR/ICS data and stores context `time_blocks`.
+- Schedule removal -> `scheduleRemoval.workflow` marks dropped courses and deletes related `student_time_blocks` and `time_blocks`.
+
+## Data Models / IDs / Terminology
+- Sync modes: `auto`, `cities_only`, `campuses_only`, `campuses_missing_term_data`, `all`.
+- Schedule IDs: `sync-hourly-smart`, `sync-city-4h`, `sync-daily-force`, `sync-term-data-enrichment`, `weekly-timeblock-cleanup`, `plugin-runner-5m`.
+- Workflow IDs: `city-sync-${contextId}`, `campus-sync-${contextId}`, `fold-syllabus-${contextId}` (overlay fold).
+- Orchestrator config keys: `max_concurrent_cities`, `max_concurrent_campuses`, `min_priority_score`, `respect_next_sync_at`, `dry_run`.
+
+## Key Files (Code + Docs)
+- `services/engine/src/schedules/syncOrchestratorSchedules.ts` (sync schedule definitions)
+- `services/engine/src/schedules/cleanupSchedules.ts` (cleanup schedule definitions)
+- `services/engine/src/schedules/pluginRunnerSchedules.ts` (plugin runner schedule)
+- `services/engine/src/index.ts` (schedule provisioning on worker boot)
+- `services/engine/src/workflows/syncOrchestratorSchedule.workflow.ts` (schedule -> activity bridge)
+- `services/engine/src/activities/syncScheduler.activities.ts` (API router trigger)
+- `services/api-router/src/routes/cron-routes.ts` (cron sync entry point)
+- `services/api-router/src/routes/admin/sync-orchestrator.ts` (manual orchestration endpoint)
+- `services/api-router/src/services/sync-orchestrator-service.ts` (candidate selection + workflow starts)
+- `services/engine/src/workflows/scheduleImport.workflow.ts` (schedule import orchestration)
+- `services/engine/src/workflows/scheduleRemoval.workflow.ts` (schedule removal orchestration)
+- `services/engine/src/workflows/studentProcessor.workflow.ts` (`scheduleProcessor` entry point)
+
+## Update Checklist
+- Adding or changing a Temporal schedule: update the schedule definition file and ensure engine boot toggles still apply.
+- Changing sync parameters or modes: update `syncScheduler.activities.ts`, cron/admin routes, and `sync-orchestrator-service.ts`.
+- Changing workflow names/queues for sync: update `executeSyncs` and any schedule definitions that reference the workflow type.
+- Changing schedule import/removal behavior: update `scheduleImport.workflow.ts`/`scheduleRemoval.workflow.ts` and verify `scheduleProcessor` assumptions.
+
+## Recent Changes
+- 2025-12-22: Populated and verified against sync schedules, orchestrator routes, and schedule workflows.

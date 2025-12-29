@@ -1,0 +1,133 @@
+---
+title: "Home V2 Migration Runbook"
+description: "Step-by-step guide to migrate Home V2 to the batch-first, canonical-ID, singleton-API-widget end state."
+---
+
+# Home V2 Migration Runbook
+
+Step-by-step guide to migrate Home V2 to the batch-first, canonical-ID, singleton-API-widget end state.
+
+## Scope
+- Home V2 widget list + content driven by `/v2/widgets/batch`.
+- Canonical widget IDs (`widget:${type}`) for API widgets.
+- Singleton API widgets (Today/Schedule/Tasks/Courses/HeadsUp).
+- Layout persistence + widget preferences.
+
+## Non-goals
+- iOS WidgetKit or mobile dashboards.
+- Legacy V1 composite dashboard contract.
+- Adding new widget types beyond the default Home V2 set.
+
+## References
+- `obsidian-vault/DormWay/Engineering/Architecture/Home V2 Batch-First Widgets (Long-Term Spec).md`
+- `obsidian-vault/DormWay/Engineering/Architecture/SoT - Home & Widgets.md`
+- `obsidian-vault/DormWay/Engineering/Architecture/SoT - Home & Widgets.md` (Widget Contract Table)
+- `obsidian-vault/DormWay/Engineering/Architecture/Dashboard v2 & Widget Strategy (Current).md`
+
+## Contracts (Must Hold)
+- Batch-first is the only Home V2 content source.
+- API widget IDs are canonical: `widget:${type}`.
+- API widgets are singleton by type (no user widget duplicates).
+- Home tab layouts accept only the canonical 5 Home V2 types; aliases and non-home types fail fast (400).
+- Widget Contract Table in SoT is the authoritative source for types, aliases, instance policy, and eligibility.
+- Layout persistence stores ID/type/grid only (no runtime content).
+- Home V2 saves canonical 12-column layouts derived from the active breakpoint.
+- Hidden widgets use canonical IDs.
+- Partial batch errors do not crash the page.
+- Composite is not the Home V2 brain.
+
+## Preflight Checklist
+- Confirm batch endpoint returns envelopes with canonical IDs.
+- Confirm Home V2 registry lists only the default 5 types.
+- Confirm layout validation accepts `today` and `headsup` types.
+- Confirm Widget Contract Table matches registry aliases and batch widget types.
+- If pre-beta, clear Home V2 layouts + widget prefs before rollout.
+- Confirm `make docs-status` and `make docs-next` have been run.
+
+## Migration Steps
+
+### Phase 1: Registry + Client Guardrails
+1) Restrict Home V2 registry to: today, schedule, tasks, courses, headsup.
+2) Ensure toolbar/picker use registry only.
+3) Ensure debug panel only uses the Home V2 registry set.
+4) Ensure render pipeline filters out unsupported user/debug widgets.
+
+### Phase 2: Canonical ID Migration (Client)
+1) Normalize layout IDs and types to canonical `widget:${type}`.
+2) Normalize hidden widget IDs to canonical IDs.
+3) Prune unsupported user widgets and persist updated prefs.
+4) Prune user widgets that duplicate API widget types; unhide canonical IDs.
+5) Persist migration once and mark migration complete.
+
+### Phase 3: Server-Side Enforcement
+1) Layout service rejects any Home tab widget type outside the canonical 5.
+2) Layout service rejects alias types and non-canonical IDs (`widget:${type}` only).
+3) Layout service rejects duplicate Home V2 widget types.
+4) Batch endpoint keeps canonical IDs (Home V2 requests canonical types only).
+
+### Phase 4: Server-Resolved Batch Types
+1) Add a server endpoint to resolve Home V2 widget instances from layout + prefs.
+2) Use layoutId (or a home-meta endpoint) to drive batch requests.
+3) Remove client-assembled batch type lists.
+
+### Phase 5: Remove Composite Dependencies
+1) Eliminate Home V2 usage of hybrid/composite data hooks.
+2) Keep only batch-first data sources in widget components.
+
+### Phase 6: Tests + Verification
+1) Unit tests:
+   - registry contains only default Home V2 set
+   - prefs migration removes duplicate user widgets
+   - layout validation rejects duplicate API widget types
+2) Manual checks:
+   - Home V2 makes one `/v2/widgets/batch` request
+   - Layout saves and reloads correctly
+   - Hide/unhide persists after refresh
+   - No duplicate widgets from type mismatches
+
+## Pre-beta Reset (Strict Mode)
+Clear existing Home V2 layout + widget prefs so strict validation does not trip on legacy state.
+
+Verify table/column names match current schema (`user_preferences.key` + `user_preferences.value`).
+
+Preview counts (run in dev/staging):
+```
+SELECT COUNT(*) FROM user_widget_layouts WHERE tab = 'home';
+
+SELECT COUNT(*)
+FROM user_preferences
+WHERE key = 'general' AND value ? 'widgetPreferences';
+```
+
+SQL (run in dev/staging; uses `user_preferences` key `general`):
+```
+DELETE FROM user_widget_layouts WHERE tab = 'home';
+
+UPDATE user_preferences
+SET value = value #- '{widgetPreferences,home}'
+WHERE key = 'general' AND value ? 'widgetPreferences';
+```
+
+Client cleanup:
+- remove `dashboard-home-v2-layout` from localStorage (legacy fallback).
+
+## PR Acceptance Checklist (Strict Home V2)
+- [ ] Home V2 loads with 1 call to `GET /v2/widgets/home-types` and 1 call to `/v2/widgets/batch`.
+- [ ] Home layout save succeeds only when:
+  - types: `today | schedule | tasks | courses | headsup`
+  - ids: `widget:${type}`
+  - no duplicates
+- [ ] Saving a Home layout containing `dayplan`, `schedule_v2`, `canvas`, `weather`, or `user-*` ids fails with 400.
+- [ ] `layout-service.test.ts` passes via `npm run test:ci -- --no-watchman --collectCoverage=false --runTestsByPath src/__tests__/layout-service.test.ts`.
+- [ ] SoT + Runbook explicitly state: Home V2 pipeline does not accept aliases anywhere.
+
+## Rollback Plan
+- Re-enable legacy composite/hybrid hooks for Home V2 (feature flag or revert).
+- Restore client batch type assembly if server-resolved batch fails.
+- Restore previous registry set if the UI loses required widgets.
+
+## Release Checklist
+- Run `make status` for services.
+- Verify no duplicate API widgets after migration.
+- Update SoT and `last_updated` fields.
+- Capture manual verification notes (single batch call, hide/unhide, layout save).

@@ -1,0 +1,277 @@
+---
+title: "Docs Ops Overview"
+description: "This is the canonical onboarding and operating guide for the DormWay Obsidian vault. It explains what the system guarantees, what it does not, and how to wor..."
+---
+
+# Docs Ops Overview
+
+This is the canonical onboarding and operating guide for the DormWay Obsidian vault. It explains what the system guarantees, what it does not, and how to work in the vault without breaking trust.
+
+---
+
+## 1) What the vault is (and is not)
+
+- The Obsidian vault lives at `obsidian-vault/DormWay`.
+- It is synced via Obsidian Sync and intentionally excluded from git (`obsidian-vault/` is gitignored).
+- Only tooling, scripts, and workflows are committed to git.
+- Product code lives in `.repos/*` (e.g., `.repos/dormway-platform/`).
+
+---
+
+## 2) Trust model (where to rely)
+
+**Canonical buckets (source of truth):**
+- `Engineering/`
+- `Product/`
+- `Plans/`
+- `Operations/`
+- `Research/`
+
+**Non-canonical buckets (working/scratch):**
+- `Notes/` (worklogs, meetings, scratch, prompts)
+- `Generated/` (auto-generated dashboards)
+- `Archive/` (historical)
+- `Templates/` (templates)
+- `Attachments/` (media)
+
+**Rule:** If a doc is outside canonical buckets, treat it as non-canonical unless explicitly stated.
+
+---
+
+## 3) Status policy (current vs draft vs unknown)
+
+Frontmatter should include `status`:
+- `current` = reliable enough to depend on
+- `draft` = in progress
+- `deprecated` = superseded
+- `archived` = historical snapshot
+- missing status = unknown trust
+
+If unsure, leave `status: draft` and add a short “Verification Needed” section.
+
+---
+
+## 4) Verification policy (precise and enforced)
+
+Verification is enforced by tooling and applies in layers:
+
+**Hard failures (any `status: current` doc):**
+- `TBD` / `WIP` tokens are not allowed.
+
+**Strict verification requirement (default scope):**
+- `Operations/Runbooks/**` must include:
+```yaml
+verified:
+  by: <name>
+  date: YYYY-MM-DD
+  against:
+    - "path/to/source/file"
+```
+
+**Outside runbooks:**
+- Missing `verified` metadata is a warning, not a failure (until scope is expanded).
+
+You can tighten scope locally:
+```bash
+make docs-verify VERIFY_PATHS="Operations/Runbooks Engineering/Architecture"
+```
+
+---
+
+## 5) The docs ops system (what to run)
+
+**Default command:**
+```bash
+make docs
+```
+
+Runs:
+1) `make docs-health` (regenerate dashboards)
+2) `make docs-verify` (verification gate)
+3) `make docs-entry` (entry gate)
+4) `make docs-canonical` (canonical link gate + JSON artifacts)
+
+If canonical gate fails, `make docs` auto-runs triage.
+
+**Quick snapshot:**
+```bash
+make docs-status
+```
+
+**If something fails:**
+```bash
+make docs-next
+```
+
+---
+
+## 6) What the gates do (and do not do)
+
+### Entry gate
+Checks the “front door” docs:
+- `Index.md`, `CLAUDE.md`, `Changelog.md`
+- Section READMEs (Engineering/Product/Plans/Operations/Research/Notes)
+- Everything under `Generated/`
+
+Command:
+```bash
+make docs-entry
+```
+
+### Canonical link gate
+Ensures `status: current` docs in canonical buckets have no **untracked** missing links.
+Intentional placeholders must be tracked.
+
+Command:
+```bash
+make docs-canonical
+```
+
+### Verification gate
+Enforces “no unknowns” and verified runbooks.
+
+Command:
+```bash
+make docs-verify
+```
+
+**What gates do NOT do:** They do not automatically verify factual correctness against code. Human verification is required.
+
+---
+
+## 7) Missing links: broken vs intentional
+
+**Broken link options:**
+1) Fix the link in the doc.
+2) Map renames/shorthand using the mapper.
+
+**Intentional placeholders:**
+- Track in `Operations/Meta/Intentional Missing Links.md`
+- Append batch entries:
+```bash
+make docs-append-intentional N=10
+```
+
+**Mapper:**
+`scripts/obsidian-tools/map-missing-links.js`
+
+---
+
+## 8) Frontmatter coverage (doctor)
+
+Report missing frontmatter:
+```bash
+make docs-frontmatter
+```
+
+Apply minimal frontmatter (writes to many files):
+```bash
+make docs-frontmatter-apply
+```
+
+Promote runbooks (only after verification):
+```bash
+make docs-frontmatter-runbooks
+```
+
+Prefer small batches by folder to avoid huge diffs.
+
+---
+
+## 9) Generated dashboards (never edit)
+
+Regenerate:
+```bash
+make docs-health
+```
+
+Generated outputs include:
+- `Docs Health (Generated)` (gate + status + verification coverage)
+- `Docs Structure (Generated)` (vault structure / trust model)
+- `Docs Status (Generated)` (curated registry list)
+- MOCs (tag-driven maps)
+- `Vault Home (Generated)` (entry hub)
+
+If something looks wrong, fix source docs or the generator.
+
+---
+
+## 10) MOCs (Maps of Content)
+
+**Implementation MOCs (Engineering-only):**
+- `MOC API (Generated)`
+- `MOC iOS (Generated)`
+- `MOC Web (Generated)`
+
+**Governance MOCs (canonical-wide):**
+- `MOC Decisions (Generated)`
+- `MOC Risks (Generated)`
+- `MOC Blockers (Generated)`
+
+**Tag rules:**
+- Frontmatter tags omit `#` (e.g., `api`, `ios`).
+- Inline tags can still use `#tag`.
+- Tooling normalizes `#api` → `api`.
+
+---
+
+## 11) CI / automation posture
+
+The vault is not committed to git, so cloud CI cannot read it.
+
+**Current workflow:**
+- `.github/workflows/docs.yml` is manual-only.
+- Uses `DORMWAY_VAULT_PATH` to symlink the synced vault into `obsidian-vault/DormWay`.
+- Runs `make docs` on a self-hosted runner.
+
+**Intended setup:**
+- Self-hosted runner on a machine with Obsidian Sync (Mac mini ideal).
+- Re-enable PR/push triggers after the runner is stable.
+
+---
+
+## 12) Database posture (accuracy rule)
+
+DormWay is **Neon-first**. Current docs should not assume local Postgres or Aurora.
+If a doc is historical, mark it `archived` or explicitly label it “Historical.”
+
+---
+
+## 13) How to work safely (minimal checklist)
+
+Before relying on docs:
+```bash
+make docs
+```
+
+When it fails:
+```bash
+make docs-next
+```
+
+Before promoting runbooks:
+1) Verify against code/config.
+2) Add `verified:` block.
+3) Remove “Verification Needed.”
+4) Run `make docs-verify` and `make docs`.
+
+---
+
+## 14) AI agent usage
+
+If an AI agent is editing docs, it must:
+- run `make docs` before concluding anything about doc health
+- never edit `Generated/` directly
+- never set `status: current` in runbooks without a `verified:` block
+
+---
+
+## 15) Where to start reading
+
+- `Generated/Vault Home (Generated)`
+- `Generated/Docs Health (Generated)`
+- `Generated/MOC API (Generated)`
+- `Generated/MOC iOS (Generated)`
+- `Generated/MOC Web (Generated)`
+- `Operations/Meta/Documentation-Maintenance-Runbook`
+- `Operations/Meta/Documentation-Standards`

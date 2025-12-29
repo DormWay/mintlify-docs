@@ -1,0 +1,654 @@
+---
+title: "LockedIn AI Cache Invalidation"
+description: "status: spec category: technical last_updated: 2025-12-11 created: 2025-12-11 owner: engineering implementation_status: planning aliases:"
+---
+
+# LockedIn AI Cache Invalidation Patterns
+
+---
+status: spec
+category: technical
+last_updated: 2025-12-11
+created: 2025-12-11
+owner: engineering
+implementation_status: planning
+aliases:
+  - Cache Invalidation
+  - AI Cache
+  - Invalidation Matrix
+  - Cache Patterns
+  - Redis Cache AI
+  - Stale Data Prevention
+tags:
+  - '#ai'
+  - '#caching'
+  - '#lockedin'
+  - '#technical'
+  - '#backend'
+  - '#redis'
+  - '#architecture'
+  - '#green-mode'
+  - '#performance'
+  - '#observability'
+cssclass: spec-document
+---
+
+## Executive Summary
+
+Cache invalidation strategy for Green Mode AI responses. Maps events to cache keys to prevent stale suggestions while maximizing cache hit rates.
+
+**Design Principles:**
+1. Invalidate conservatively at first, optimize based on telemetry
+2. User-triggered events invalidate immediately
+3. Background sync events can batch invalidations
+4. Never serve stale data for time-sensitive prompts (deadlines, due dates)
+
+---
+
+## Cache Key Structure
+
+```typescript
+// Full cache key format
+type CacheKey = `ai:${userId}:${promptType}:${contextHash}`;
+
+// Example keys
+'ai:user_123:next_action:abc123'
+'ai:user_123:what_due_this_week:def456'
+'ai:user_123:study_suggestions:ghi789'
+```
+
+### Prompt Types Registry
+
+| Prompt Type | Description | Base TTL | Time-Sensitive |
+|-------------|-------------|----------|----------------|
+| `next_action` | What should I work on next? | 1 hour | Yes |
+| `what_due_today` | Assignments due today | 30 min | Yes |
+| `what_due_this_week` | Assignments due this week | 2 hours | Yes |
+| `study_suggestions` | What should I study? | 4 hours | No |
+| `course_summary` | Summarize course content | 24 hours | No |
+| `attendance_advice` | Can I skip this class? | 4 hours | Partial |
+| `workload_forecast` | Upcoming workload analysis | 2 hours | Yes |
+| `policy_highlight` | Key syllabus policies | 24 hours | No |
+| `explain_topic` | Explain [topic] from [course] | 24 hours | No |
+| `general_chat` | Open-ended conversation | No cache | N/A |
+
+---
+
+## Invalidation Event Matrix
+
+### Quick Reference
+
+| Event | Invalidates |
+|-------|-------------|
+| `assignment_created` | `next_action`, `what_due_*`, `workload_forecast` |
+| `assignment_completed` | `next_action`, `what_due_*`, `workload_forecast`, `study_suggestions` |
+| `assignment_updated` | `next_action`, `what_due_*`, `workload_forecast` |
+| `syllabus_uploaded` | ALL for that course |
+| `syllabus_updated` | `course_summary`, `policy_highlight`, `study_suggestions` |
+| `schedule_changed` | `next_action`, `attendance_advice` |
+| `class_attended` | `attendance_advice` |
+| `class_skipped` | `attendance_advice`, `next_action` |
+| `canvas_sync` | `next_action`, `what_due_*`, `workload_forecast` |
+| `grade_received` | `study_suggestions`, `course_summary` |
+| `user_preference_changed` | ALL |
+
+### Detailed Event Specifications
+
+#### `assignment_created`
+
+**Trigger:** New assignment added (manual or Canvas sync)
+
+**Invalidate:**
+```typescript
+const keysToInvalidate = [
+  `ai:${userId}:next_action:*`,
+  `ai:${userId}:what_due_today:*`,
+  `ai:${userId}:what_due_this_week:*`,
+  `ai:${userId}:workload_forecast:*`
+];
+```
+
+**Reason:** New assignment could change priority recommendations and due date queries.
+
+**Edge case:** If assignment due date is > 2 weeks out, consider NOT invalidating `what_due_this_week`.
+
+---
+
+#### `assignment_completed`
+
+**Trigger:** User marks assignment as done
+
+**Invalidate:**
+```typescript
+const keysToInvalidate = [
+  `ai:${userId}:next_action:*`,
+  `ai:${userId}:what_due_today:*`,
+  `ai:${userId}:what_due_this_week:*`,
+  `ai:${userId}:workload_forecast:*`,
+  `ai:${userId}:study_suggestions:*`  // May affect what to study next
+];
+```
+
+**Reason:** Completed work changes priority landscape significantly.
+
+---
+
+#### `assignment_updated`
+
+**Trigger:** Assignment details changed (due date, description, points)
+
+**Invalidate:**
+```typescript
+const keysToInvalidate = [
+  `ai:${userId}:next_action:*`,
+  `ai:${userId}:what_due_today:*`,
+  `ai:${userId}:what_due_this_week:*`,
+  `ai:${userId}:workload_forecast:*`
+];
+```
+
+**Conditional:** If only description changed (not due date), skip time-sensitive invalidations.
+
+---
+
+#### `syllabus_uploaded`
+
+**Trigger:** New syllabus uploaded for a course
+
+**Invalidate:**
+```typescript
+// FULL invalidation for course - new syllabus is major context change
+const keysToInvalidate = [
+  `ai:${userId}:*:*${courseId}*`  // All keys containing this course
+];
+
+// Also invalidate cross-course aggregates
+const aggregateKeys = [
+  `ai:${userId}:next_action:*`,
+  `ai:${userId}:workload_forecast:*`,
+  `ai:${userId}:study_suggestions:*`
+];
+```
+
+**Reason:** Syllabus contains policies, due dates, grading weights - affects almost all course-related AI context.
+
+---
+
+#### `syllabus_updated`
+
+**Trigger:** Existing syllabus re-processed or manually edited
+
+**Invalidate:**
+```typescript
+const keysToInvalidate = [
+  `ai:${userId}:course_summary:*${courseId}*`,
+  `ai:${userId}:policy_highlight:*${courseId}*`,
+  `ai:${userId}:study_suggestions:*`,
+  `ai:${userId}:attendance_advice:*${courseId}*`
+];
+```
+
+**Reason:** Policy changes affect attendance advice, study suggestions.
+
+---
+
+#### `schedule_changed`
+
+**Trigger:** Class times modified, dropped/added course
+
+**Invalidate:**
+```typescript
+const keysToInvalidate = [
+  `ai:${userId}:next_action:*`,
+  `ai:${userId}:attendance_advice:*`
+];
+```
+
+**Reason:** Schedule affects when to work on things and skip analysis.
+
+---
+
+#### `class_attended` / `class_skipped`
+
+**Trigger:** User records attendance or system detects skip
+
+**Invalidate:**
+```typescript
+const keysToInvalidate = [
+  `ai:${userId}:attendance_advice:*${courseId}*`
+];
+
+// If skipped, also invalidate next_action (may suggest catching up)
+if (event === 'class_skipped') {
+  keysToInvalidate.push(`ai:${userId}:next_action:*`);
+}
+```
+
+**Reason:** Skip count directly affects "can I skip?" advice.
+
+---
+
+#### `canvas_sync`
+
+**Trigger:** Background Canvas sync completed
+
+**Invalidate:**
+```typescript
+// Only invalidate if sync found changes
+if (syncResult.hasChanges) {
+  const keysToInvalidate = [
+    `ai:${userId}:next_action:*`,
+    `ai:${userId}:what_due_today:*`,
+    `ai:${userId}:what_due_this_week:*`,
+    `ai:${userId}:workload_forecast:*`
+  ];
+}
+```
+
+**Optimization:** Compare sync results to previous state - only invalidate if actual changes detected.
+
+---
+
+#### `grade_received`
+
+**Trigger:** New grade posted in Canvas
+
+**Invalidate:**
+```typescript
+const keysToInvalidate = [
+  `ai:${userId}:study_suggestions:*`,
+  `ai:${userId}:course_summary:*${courseId}*`
+];
+```
+
+**Reason:** Grades affect what to prioritize studying.
+
+---
+
+#### `user_preference_changed`
+
+**Trigger:** User modifies AI preferences, course colors, etc.
+
+**Invalidate:**
+```typescript
+// Nuclear option - full cache clear
+const keysToInvalidate = [
+  `ai:${userId}:*`
+];
+```
+
+**Reason:** Preferences can change context interpretation. Safer to start fresh.
+
+---
+
+## Implementation
+
+### Cache Service
+
+```typescript
+// cache-invalidation.service.ts
+
+type InvalidationEvent =
+  | 'assignment_created'
+  | 'assignment_completed'
+  | 'assignment_updated'
+  | 'syllabus_uploaded'
+  | 'syllabus_updated'
+  | 'schedule_changed'
+  | 'class_attended'
+  | 'class_skipped'
+  | 'canvas_sync'
+  | 'grade_received'
+  | 'user_preference_changed';
+
+interface InvalidationContext {
+  userId: string;
+  courseId?: string;
+  assignmentId?: string;
+  metadata?: Record<string, unknown>;
+}
+
+class CacheInvalidationService {
+  private redis: Redis;
+  private logger: Logger;
+
+  async invalidate(
+    event: InvalidationEvent,
+    context: InvalidationContext
+  ): Promise<InvalidationResult> {
+    const patterns = this.getPatternsForEvent(event, context);
+
+    this.logger.info('Cache invalidation triggered', {
+      event,
+      userId: context.userId,
+      patterns: patterns.length
+    });
+
+    let invalidatedCount = 0;
+
+    for (const pattern of patterns) {
+      const keys = await this.redis.keys(pattern);
+      if (keys.length > 0) {
+        await this.redis.del(...keys);
+        invalidatedCount += keys.length;
+      }
+    }
+
+    // Track for observability
+    await this.trackInvalidation(event, context, invalidatedCount);
+
+    return {
+      event,
+      patternsChecked: patterns.length,
+      keysInvalidated: invalidatedCount
+    };
+  }
+
+  private getPatternsForEvent(
+    event: InvalidationEvent,
+    context: InvalidationContext
+  ): string[] {
+    const { userId, courseId } = context;
+    const base = `ai:${userId}`;
+
+    switch (event) {
+      case 'assignment_created':
+      case 'assignment_updated':
+        return [
+          `${base}:next_action:*`,
+          `${base}:what_due_today:*`,
+          `${base}:what_due_this_week:*`,
+          `${base}:workload_forecast:*`
+        ];
+
+      case 'assignment_completed':
+        return [
+          `${base}:next_action:*`,
+          `${base}:what_due_today:*`,
+          `${base}:what_due_this_week:*`,
+          `${base}:workload_forecast:*`,
+          `${base}:study_suggestions:*`
+        ];
+
+      case 'syllabus_uploaded':
+        return [
+          `${base}:*`,  // Full clear for course context change
+        ];
+
+      case 'syllabus_updated':
+        const syllabusPatterns = [
+          `${base}:study_suggestions:*`
+        ];
+        if (courseId) {
+          syllabusPatterns.push(
+            `${base}:course_summary:*${courseId}*`,
+            `${base}:policy_highlight:*${courseId}*`,
+            `${base}:attendance_advice:*${courseId}*`
+          );
+        }
+        return syllabusPatterns;
+
+      case 'schedule_changed':
+        return [
+          `${base}:next_action:*`,
+          `${base}:attendance_advice:*`
+        ];
+
+      case 'class_attended':
+        return courseId
+          ? [`${base}:attendance_advice:*${courseId}*`]
+          : [`${base}:attendance_advice:*`];
+
+      case 'class_skipped':
+        const skipPatterns = [`${base}:next_action:*`];
+        if (courseId) {
+          skipPatterns.push(`${base}:attendance_advice:*${courseId}*`);
+        } else {
+          skipPatterns.push(`${base}:attendance_advice:*`);
+        }
+        return skipPatterns;
+
+      case 'canvas_sync':
+        return [
+          `${base}:next_action:*`,
+          `${base}:what_due_today:*`,
+          `${base}:what_due_this_week:*`,
+          `${base}:workload_forecast:*`
+        ];
+
+      case 'grade_received':
+        const gradePatterns = [`${base}:study_suggestions:*`];
+        if (courseId) {
+          gradePatterns.push(`${base}:course_summary:*${courseId}*`);
+        }
+        return gradePatterns;
+
+      case 'user_preference_changed':
+        return [`${base}:*`];
+
+      default:
+        this.logger.warn('Unknown invalidation event', { event });
+        return [];
+    }
+  }
+
+  private async trackInvalidation(
+    event: InvalidationEvent,
+    context: InvalidationContext,
+    count: number
+  ): Promise<void> {
+    // Telemetry for cache health monitoring
+    await this.analytics.track('ai_cache_invalidated', {
+      event,
+      userId: context.userId,
+      courseId: context.courseId,
+      keysInvalidated: count,
+      timestamp: new Date().toISOString()
+    });
+  }
+}
+```
+
+### Event Integration
+
+```typescript
+// Wire up invalidation to domain events
+
+// In assignment service
+class AssignmentService {
+  private cacheInvalidation: CacheInvalidationService;
+
+  async createAssignment(data: CreateAssignmentInput): Promise<Assignment> {
+    const assignment = await this.repo.create(data);
+
+    // Trigger cache invalidation
+    await this.cacheInvalidation.invalidate('assignment_created', {
+      userId: data.userId,
+      courseId: data.courseId,
+      assignmentId: assignment.id
+    });
+
+    return assignment;
+  }
+
+  async completeAssignment(assignmentId: string, userId: string): Promise<void> {
+    const assignment = await this.repo.complete(assignmentId);
+
+    await this.cacheInvalidation.invalidate('assignment_completed', {
+      userId,
+      courseId: assignment.courseId,
+      assignmentId
+    });
+  }
+}
+
+// In syllabus service
+class SyllabusService {
+  async uploadSyllabus(courseId: string, userId: string, file: File): Promise<Syllabus> {
+    const syllabus = await this.processor.process(file, courseId);
+
+    await this.cacheInvalidation.invalidate('syllabus_uploaded', {
+      userId,
+      courseId
+    });
+
+    return syllabus;
+  }
+}
+```
+
+---
+
+## Monitoring & Observability
+
+### Key Metrics
+
+| Metric | Description | Alert Threshold |
+|--------|-------------|-----------------|
+| `cache_hit_rate` | % of AI requests served from cache | < 30% in Green Mode |
+| `invalidation_rate` | Invalidations per minute per user | > 10/min (excessive) |
+| `stale_response_reported` | User reported outdated info | Any occurrence |
+| `cache_size_per_user` | Redis memory per user | > 10MB |
+
+### Dashboard Queries
+
+```sql
+-- Cache hit rate by prompt type (last 24h)
+SELECT
+  prompt_type,
+  COUNT(CASE WHEN from_cache THEN 1 END)::float / COUNT(*) as hit_rate,
+  COUNT(*) as total_requests
+FROM ai_request_logs
+WHERE created_at > NOW() - INTERVAL '24 hours'
+  AND green_mode = true
+GROUP BY prompt_type
+ORDER BY hit_rate DESC;
+
+-- Invalidation frequency by event type
+SELECT
+  event_type,
+  COUNT(*) as count,
+  COUNT(DISTINCT user_id) as unique_users
+FROM cache_invalidation_logs
+WHERE created_at > NOW() - INTERVAL '24 hours'
+GROUP BY event_type
+ORDER BY count DESC;
+```
+
+### Alerts
+
+```yaml
+# datadog/monitors.yaml
+- name: Low Cache Hit Rate (Green Mode)
+  query: avg(last_1h):ai.cache.hit_rate{green_mode:true} < 0.3
+  message: "Green Mode cache hit rate below 30%. Check invalidation patterns."
+
+- name: Excessive Invalidations
+  query: sum(last_5m):ai.cache.invalidations{*}.as_count() > 1000
+  message: "High cache invalidation rate. Possible invalidation storm."
+
+- name: Stale Response Reported
+  query: sum(last_1h):ai.stale_response.reported{*}.as_count() > 0
+  message: "User reported stale AI response. Review cache invalidation logic."
+```
+
+---
+
+## Optimization Strategies
+
+### Phase 1: Conservative (Launch)
+- Invalidate broadly on any change
+- Accept lower hit rates for correctness
+- Monitor for stale reports
+
+### Phase 2: Targeted (Post-Launch)
+- Analyze which invalidations actually prevent stale data
+- Tighten patterns based on telemetry
+- Add conditional invalidation (e.g., skip if due date > 2 weeks)
+
+### Phase 3: Smart Invalidation
+```typescript
+// Only invalidate if change is material
+async invalidateIfMaterial(
+  event: InvalidationEvent,
+  context: InvalidationContext,
+  change: ChangeDetails
+): Promise<void> {
+  // Example: Don't invalidate next_action for assignment due in 3 weeks
+  if (event === 'assignment_created' && change.dueDate) {
+    const daysUntilDue = differenceInDays(change.dueDate, new Date());
+    if (daysUntilDue > 14) {
+      // Skip next_action invalidation, keep workload_forecast
+      return this.invalidateSelective(context, ['workload_forecast']);
+    }
+  }
+
+  return this.invalidate(event, context);
+}
+```
+
+---
+
+## Testing Strategy
+
+### Unit Tests
+```typescript
+describe('CacheInvalidationService', () => {
+  it('invalidates correct keys for assignment_completed', async () => {
+    const patterns = service.getPatternsForEvent('assignment_completed', {
+      userId: 'user_123',
+      courseId: 'course_456'
+    });
+
+    expect(patterns).toContain('ai:user_123:next_action:*');
+    expect(patterns).toContain('ai:user_123:study_suggestions:*');
+    expect(patterns).not.toContain('ai:user_123:policy_highlight:*');
+  });
+
+  it('does full invalidation on syllabus_uploaded', async () => {
+    const patterns = service.getPatternsForEvent('syllabus_uploaded', {
+      userId: 'user_123',
+      courseId: 'course_456'
+    });
+
+    expect(patterns).toContain('ai:user_123:*');
+  });
+});
+```
+
+### Integration Tests
+```typescript
+describe('Cache Invalidation Integration', () => {
+  it('invalidates cache when assignment completed', async () => {
+    // Setup: cache a next_action response
+    await aiService.query({
+      promptType: 'next_action',
+      userId: 'user_123'
+    });
+
+    // Verify cached
+    const cached = await cache.get('ai:user_123:next_action:*');
+    expect(cached).toBeTruthy();
+
+    // Action: complete an assignment
+    await assignmentService.complete('assignment_789', 'user_123');
+
+    // Verify invalidated
+    const afterInvalidation = await cache.get('ai:user_123:next_action:*');
+    expect(afterInvalidation).toBeNull();
+  });
+});
+```
+
+---
+
+## Related Documents
+
+- [LockedIn-AI-Mode-System](/docs/product/design/lockedin-ai-mode-system) - AI mode system overview
+- [LockedIn-UX-Specification](/docs/product/design/lockedin-ux-specification) - Overall UX specification
+- [LockedIn-Navigation-Migration-Plan](/docs/plans/lockedin-navigation-migration-plan) - Phase 4 implementation details
+
+---
+
+**Document History:**
+- 2025-12-11: Initial cache invalidation patterns specification

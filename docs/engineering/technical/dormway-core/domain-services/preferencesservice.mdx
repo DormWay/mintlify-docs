@@ -1,0 +1,848 @@
+---
+title: "PreferencesService"
+description: "import { PreferencesService } from '@dormway/core'; import { getConnectionPool } from '@dormway/core/database'; import { getCacheAdapter } from '@dormway/cor..."
+---
+
+# PreferencesService
+
+## Overview
+
+**PreferencesService** manages user preferences with database persistence, Redis caching, and optional Clerk synchronization.
+
+**Purpose**: Centralized preference management for notifications, privacy, appearance, schedule, academic settings, and location.
+
+**Location**: `@dormway/core/domains/preferences`
+
+---
+
+## Installation
+
+```typescript
+import { PreferencesService } from '@dormway/core';
+import { getConnectionPool } from '@dormway/core/database';
+import { getCacheAdapter } from '@dormway/core/adapters/cache';
+import { createStructuredLogger } from '@dormway/core/logger';
+
+const pool = getConnectionPool();
+const cache = getCacheAdapter();
+const logger = createStructuredLogger({ service: 'api-router' });
+
+const preferences = new PreferencesService({
+  pool,
+  logger,
+  cacheAdapter: cache,
+  cacheTtl: 600, // 10 minutes
+  clerkSecretKey: process.env.CLERK_SECRET_KEY,
+});
+```
+
+---
+
+## Preference Categories
+
+**7 preference categories**:
+
+| Category | Description | Examples |
+|----------|-------------|----------|
+| `notifications` | Push, email, SMS settings | Quiet hours, notification types |
+| `privacy` | Location tracking, analytics | Profile visibility, schedule sharing |
+| `appearance` | UI theme, language, formats | Light/dark mode, time format |
+| `schedule` | Calendar view preferences | Default view, work hours |
+| `academic` | Study settings | Study time per credit, break reminders |
+| `location` | Campus and building preferences | Home campus, commute mode |
+| `general` | Other preferences | Extensible for custom settings |
+
+---
+
+## Methods
+
+### getPreferences
+
+Get user preferences with caching and defaults.
+
+**Signature**:
+```typescript
+getPreferences(options: GetPreferencesOptions): Promise<ServiceResult<UserPreferences>>
+```
+
+**Options**:
+```typescript
+interface GetPreferencesOptions {
+  userId: string;
+  category?: PreferenceCategory;     // Fetch specific category
+  includeDefaults?: boolean;         // Merge with defaults (default: true)
+}
+```
+
+**Examples**:
+
+**Get all preferences**:
+```typescript
+const result = await preferences.getPreferences({
+  userId: 'user-123',
+});
+
+if (result.success) {
+  console.log(result.data.notifications?.push_enabled); // true
+  console.log(result.data.appearance?.theme);           // 'auto'
+}
+```
+
+**Get specific category**:
+```typescript
+const result = await preferences.getPreferences({
+  userId: 'user-123',
+  category: 'notifications',
+});
+
+if (result.success) {
+  const notifs = result.data.notifications;
+  console.log(notifs?.quiet_hours?.enabled); // false
+}
+```
+
+**Get without defaults**:
+```typescript
+// Returns only user-set preferences
+const result = await preferences.getPreferences({
+  userId: 'user-123',
+  includeDefaults: false,
+});
+
+// Empty object if user has no custom preferences
+```
+
+---
+
+### updatePreferences
+
+Update user preferences with merge and Clerk sync.
+
+**Signature**:
+```typescript
+updatePreferences(options: UpdatePreferencesOptions): Promise<ServiceResult<UserPreferences>>
+```
+
+**Options**:
+```typescript
+interface UpdatePreferencesOptions {
+  userId: string;
+  category?: PreferenceCategory;     // Update specific category
+  preferences: Partial<UserPreferences>;
+  merge?: boolean;                   // Merge with existing (default: true)
+  syncToClerk?: boolean;             // Sync to Clerk metadata (default: true)
+}
+```
+
+**Examples**:
+
+**Update notifications**:
+```typescript
+const result = await preferences.updatePreferences({
+  userId: 'user-123',
+  category: 'notifications',
+  preferences: {
+    notifications: {
+      push_enabled: false,
+      quiet_hours: {
+        enabled: true,
+        start: '22:00',
+        end: '08:00',
+      },
+    },
+  },
+});
+```
+
+**Update appearance**:
+```typescript
+await preferences.updatePreferences({
+  userId: 'user-123',
+  category: 'appearance',
+  preferences: {
+    appearance: {
+      theme: 'dark',
+      time_format: '24h',
+    },
+  },
+});
+```
+
+**Replace all preferences** (no merge):
+```typescript
+await preferences.updatePreferences({
+  userId: 'user-123',
+  preferences: {
+    notifications: { push_enabled: true, email_enabled: false, sms_enabled: false },
+    appearance: { theme: 'light' },
+  },
+  merge: false, // Replaces all preferences
+});
+```
+
+**Update without Clerk sync**:
+```typescript
+await preferences.updatePreferences({
+  userId: 'user-123',
+  preferences: { privacy: { analytics_enabled: false } },
+  syncToClerk: false, // Don't sync to Clerk
+});
+```
+
+---
+
+### deletePreferenceCategory
+
+Delete specific preference category.
+
+**Signature**:
+```typescript
+deletePreferenceCategory(userId: string, category: PreferenceCategory): Promise<ServiceResult<void>>
+```
+
+**Example**:
+```typescript
+// Remove all notification preferences
+const result = await preferences.deletePreferenceCategory(
+  'user-123',
+  'notifications'
+);
+
+if (result.success) {
+  console.log('Notification preferences deleted');
+}
+```
+
+---
+
+### resetToDefaults
+
+Reset all preferences to system defaults.
+
+**Signature**:
+```typescript
+resetToDefaults(userId: string): Promise<ServiceResult<UserPreferences>>
+```
+
+**Example**:
+```typescript
+const result = await preferences.resetToDefaults('user-123');
+
+if (result.success) {
+  console.log('Preferences reset to defaults');
+  console.log(result.data.appearance?.theme); // 'auto'
+}
+```
+
+---
+
+### syncToClerk
+
+Sync preferences to Clerk user metadata.
+
+**Signature**:
+```typescript
+syncToClerk(userId: string): Promise<ServiceResult<void>>
+```
+
+**Example**:
+```typescript
+// Manually sync preferences to Clerk
+const result = await preferences.syncToClerk('user-123');
+
+if (!result.success) {
+  console.error('Failed to sync to Clerk:', result.error);
+}
+```
+
+**How it works**:
+1. Fetches user preferences from database
+2. Gets Clerk ID from accounts table
+3. Updates Clerk user's `public_metadata.preferences`
+4. Logs success/failure
+
+---
+
+### syncFromClerk
+
+Bulk sync preferences from Clerk (migration/recovery).
+
+**Signature**:
+```typescript
+syncFromClerk(userId: string): Promise<ServiceResult<UserPreferences>>
+```
+
+**Example**:
+```typescript
+// Restore preferences from Clerk
+const result = await preferences.syncFromClerk('user-123');
+
+if (result.success) {
+  console.log('Preferences restored from Clerk');
+  console.log(result.data);
+}
+```
+
+**Use cases**:
+- Migrating from Clerk-only storage to database
+- Recovering lost preferences
+- Syncing after database reset
+
+---
+
+### healthCheck
+
+Check database connectivity.
+
+**Signature**:
+```typescript
+healthCheck(): Promise<boolean>
+```
+
+**Example**:
+```typescript
+const healthy = await preferences.healthCheck();
+console.log('Preferences service healthy:', healthy);
+```
+
+---
+
+## Common Patterns
+
+### Pattern 1: User Onboarding
+
+```typescript
+import { PreferencesService, DEFAULT_PREFERENCES } from '@dormway/core';
+
+async function onboardUser(userId: string, campusId: string) {
+  const preferences = new PreferencesService({ pool, logger, cacheAdapter });
+
+  // Set initial preferences with campus
+  await preferences.updatePreferences({
+    userId,
+    preferences: {
+      ...DEFAULT_PREFERENCES,
+      location: {
+        home_campus_id: campusId,
+      },
+    },
+    merge: false, // Replace all
+    syncToClerk: true,
+  });
+
+  console.log('User preferences initialized');
+}
+```
+
+---
+
+### Pattern 2: Theme Switching
+
+```typescript
+async function updateTheme(userId: string, theme: 'light' | 'dark' | 'glass') {
+  const preferences = new PreferencesService({ pool, logger, cacheAdapter });
+
+  const result = await preferences.updatePreferences({
+    userId,
+    category: 'appearance',
+    preferences: {
+      appearance: { theme },
+    },
+  });
+
+  if (result.success) {
+    // Broadcast theme change via realtime
+    await realtime.publish(`user:${userId}:preferences`, {
+      type: 'theme_changed',
+      theme,
+    });
+  }
+}
+```
+
+---
+
+### Pattern 3: Notification Settings
+
+```typescript
+async function updateNotificationSettings(
+  userId: string,
+  settings: {
+    pushEnabled?: boolean;
+    emailEnabled?: boolean;
+    quietHours?: { enabled: boolean; start?: string; end?: string };
+  }
+) {
+  const preferences = new PreferencesService({ pool, logger, cacheAdapter });
+
+  // Get current preferences
+  const current = await preferences.getPreferences({
+    userId,
+    category: 'notifications',
+  });
+
+  if (!current.success) return current;
+
+  // Merge with new settings
+  const updated = await preferences.updatePreferences({
+    userId,
+    category: 'notifications',
+    preferences: {
+      notifications: {
+        push_enabled: settings.pushEnabled ?? current.data.notifications?.push_enabled,
+        email_enabled: settings.emailEnabled ?? current.data.notifications?.email_enabled,
+        quiet_hours: settings.quietHours ?? current.data.notifications?.quiet_hours,
+      },
+    },
+  });
+
+  return updated;
+}
+```
+
+---
+
+### Pattern 4: Privacy Controls
+
+```typescript
+async function updatePrivacy(
+  userId: string,
+  options: {
+    locationTracking?: boolean;
+    analytics?: boolean;
+    profileVisibility?: 'private' | 'campus' | 'public';
+    shareSchedule?: boolean;
+  }
+) {
+  const preferences = new PreferencesService({ pool, logger, cacheAdapter });
+
+  const result = await preferences.updatePreferences({
+    userId,
+    category: 'privacy',
+    preferences: {
+      privacy: {
+        location_tracking_enabled: options.locationTracking,
+        analytics_enabled: options.analytics,
+        profile_visibility: options.profileVisibility,
+        share_schedule: options.shareSchedule,
+      },
+    },
+  });
+
+  // If location tracking disabled, stop location services
+  if (options.locationTracking === false) {
+    await stopLocationTracking(userId);
+  }
+
+  return result;
+}
+```
+
+---
+
+### Pattern 5: Schedule Preferences
+
+```typescript
+async function updateSchedulePreferences(
+  userId: string,
+  schedulePrefs: {
+    defaultView?: 'day' | 'week' | 'month';
+    showWeekends?: boolean;
+    firstDayOfWeek?: number;
+    workHoursStart?: string;
+    workHoursEnd?: string;
+  }
+) {
+  const preferences = new PreferencesService({ pool, logger, cacheAdapter });
+
+  return preferences.updatePreferences({
+    userId,
+    category: 'schedule',
+    preferences: {
+      schedule: {
+        default_view: schedulePrefs.defaultView,
+        show_weekends: schedulePrefs.showWeekends,
+        first_day_of_week: schedulePrefs.firstDayOfWeek,
+        work_hours_start: schedulePrefs.workHoursStart,
+        work_hours_end: schedulePrefs.workHoursEnd,
+      },
+    },
+  });
+}
+```
+
+---
+
+### Pattern 6: Migration from Clerk
+
+```typescript
+async function migrateBulkUsersFromClerk(userIds: string[]) {
+  const preferences = new PreferencesService({ pool, logger, cacheAdapter });
+
+  const results = await Promise.allSettled(
+    userIds.map((userId) => preferences.syncFromClerk(userId))
+  );
+
+  const successful = results.filter((r) => r.status === 'fulfilled').length;
+  const failed = results.filter((r) => r.status === 'rejected').length;
+
+  console.log(`Migration complete: ${successful} succeeded, ${failed} failed`);
+}
+```
+
+---
+
+### Pattern 7: Preference Export
+
+```typescript
+async function exportUserPreferences(userId: string) {
+  const preferences = new PreferencesService({ pool, logger });
+
+  const result = await preferences.getPreferences({
+    userId,
+    includeDefaults: false, // Export only custom preferences
+  });
+
+  if (result.success) {
+    return {
+      userId,
+      preferences: result.data,
+      exportedAt: new Date().toISOString(),
+    };
+  }
+
+  return null;
+}
+```
+
+---
+
+### Pattern 8: Preference Validation
+
+```typescript
+import { PreferencesService } from '@dormway/core';
+
+async function validateAndUpdatePreferences(
+  userId: string,
+  preferences: Partial<UserPreferences>
+) {
+  const service = new PreferencesService({ pool, logger, cacheAdapter });
+
+  // Validate time format
+  if (preferences.appearance?.time_format) {
+    if (!['12h', '24h'].includes(preferences.appearance.time_format)) {
+      throw new Error('Invalid time format');
+    }
+  }
+
+  // Validate quiet hours
+  if (preferences.notifications?.quiet_hours?.enabled) {
+    const { start, end } = preferences.notifications.quiet_hours;
+    if (!start || !end) {
+      throw new Error('Quiet hours start and end required');
+    }
+    // Validate HH:mm format
+    if (!/^\d{2}:\d{2}$/.test(start) || !/^\d{2}:\d{2}$/.test(end)) {
+      throw new Error('Invalid time format (use HH:mm)');
+    }
+  }
+
+  // Update preferences
+  return service.updatePreferences({
+    userId,
+    preferences,
+  });
+}
+```
+
+---
+
+## Default Preferences
+
+**System defaults** (used when user has no custom preferences):
+
+```typescript
+{
+  notifications: {
+    push_enabled: true,
+    email_enabled: true,
+    sms_enabled: false,
+    notification_types: {
+      dayplan: true,
+      assignments: true,
+      events: true,
+      weather: true,
+      transit: true,
+    },
+    quiet_hours: {
+      enabled: false,
+    },
+  },
+  privacy: {
+    location_tracking_enabled: true,
+    analytics_enabled: true,
+    profile_visibility: 'campus',
+    share_schedule: false,
+  },
+  appearance: {
+    theme: 'auto',
+    language: 'en',
+    time_format: '12h',
+    date_format: 'MM/DD/YYYY',
+  },
+  schedule: {
+    default_view: 'week',
+    show_weekends: true,
+    first_day_of_week: 0, // Sunday
+    work_hours_start: '08:00',
+    work_hours_end: '18:00',
+  },
+  academic: {
+    study_time_per_credit: 2,
+    break_reminder_frequency: 50,
+    auto_parse_syllabus: true,
+  },
+}
+```
+
+---
+
+## Caching Behavior
+
+**Cache strategy**: Cache-aside pattern with Redis
+
+**Cache key format**: `preferences:{userId}` or `preferences:{userId}:{category}`
+
+**Cache TTL**: Default 600 seconds (10 minutes), configurable
+
+**Cache invalidation**:
+- On `updatePreferences()`
+- On `deletePreferenceCategory()`
+- On `resetToDefaults()`
+
+**Cache workflow**:
+```typescript
+// 1. Check cache
+const cached = await cache.get(`preferences:${userId}`);
+if (cached) return cached;
+
+// 2. Fetch from database
+const dbResult = await pool.query(...);
+
+// 3. Merge with defaults
+const preferences = mergeWithDefaults(dbResult);
+
+// 4. Cache result
+await cache.set(`preferences:${userId}`, preferences, { ttl: 600 });
+
+return preferences;
+```
+
+---
+
+## Clerk Integration
+
+**How Clerk sync works**:
+
+1. **Automatic sync** (default):
+   - On `updatePreferences()`, preferences automatically sync to Clerk
+   - Stored in Clerk's `public_metadata.preferences`
+   - Can disable with `syncToClerk: false`
+
+2. **Manual sync**:
+   - Use `syncToClerk(userId)` to manually sync
+   - Use `syncFromClerk(userId)` to restore from Clerk
+
+3. **Migration/recovery**:
+   - `syncFromClerk()` fetches preferences from Clerk API
+   - Merges with local preferences
+   - Updates database
+
+**Clerk API endpoints**:
+- `PATCH https://api.clerk.com/v1/users/{clerkId}` - Update metadata
+- `GET https://api.clerk.com/v1/users/{clerkId}` - Fetch user data
+
+**Authentication**: Uses `CLERK_SECRET_KEY` from environment
+
+---
+
+## Database Schema
+
+**Table**: `user_preferences`
+
+```sql
+CREATE TABLE user_preferences (
+  user_id UUID NOT NULL,
+  key TEXT NOT NULL,
+  value JSONB NOT NULL,
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  PRIMARY KEY (user_id, key)
+);
+```
+
+**Key**: Always `'preferences'` for PreferencesService
+
+**Value**: JSONB with all preference categories
+
+**Example row**:
+```json
+{
+  "user_id": "user-123",
+  "key": "preferences",
+  "value": {
+    "notifications": {
+      "push_enabled": false,
+      "quiet_hours": {
+        "enabled": true,
+        "start": "22:00",
+        "end": "08:00"
+      }
+    },
+    "appearance": {
+      "theme": "dark"
+    }
+  },
+  "updated_at": "2025-11-23T10:00:00Z"
+}
+```
+
+---
+
+## Best Practices
+
+### ✅ Do
+
+- **Use category filters** for partial updates (`category: 'notifications'`)
+- **Enable caching** for frequently accessed preferences
+- **Merge by default** to preserve existing settings
+- **Sync to Clerk** for backup and multi-device support
+- **Validate inputs** before updating preferences
+- **Use defaults** to ensure all preferences have values
+- **Handle errors gracefully** with fallback to defaults
+
+### ❌ Don't
+
+- **Don't skip caching** for performance-critical paths
+- **Don't replace all preferences** unless intentional (`merge: false`)
+- **Don't sync to Clerk** for every minor update (batching is better)
+- **Don't store sensitive data** in preferences (use encrypted storage)
+- **Don't forget to invalidate cache** after updates
+- **Don't hardcode defaults** in application code (use `DEFAULT_PREFERENCES`)
+
+---
+
+## Troubleshooting
+
+### Preferences not updating
+
+**Problem**: Updates don't appear in UI
+
+**Solution**:
+```typescript
+// 1. Check cache invalidation
+await cache.delete(`preferences:${userId}`);
+
+// 2. Force refresh from database
+const result = await preferences.getPreferences({
+  userId,
+  includeDefaults: false,
+});
+
+// 3. Verify database update
+const dbResult = await pool.query(
+  'SELECT value FROM user_preferences WHERE user_id = $1',
+  [userId]
+);
+console.log(dbResult.rows[0]?.value);
+```
+
+---
+
+### Clerk sync failing
+
+**Problem**: `syncToClerk()` returns error
+
+**Solution**:
+```typescript
+// 1. Check Clerk secret key
+console.log('CLERK_SECRET_KEY:', process.env.CLERK_SECRET_KEY?.slice(0, 10));
+
+// 2. Verify Clerk ID exists
+const clerkIdResult = await pool.query(
+  'SELECT clerk_id FROM accounts WHERE id = $1',
+  [userId]
+);
+console.log('Clerk ID:', clerkIdResult.rows[0]?.clerk_id);
+
+// 3. Test Clerk API directly
+const response = await fetch(`https://api.clerk.com/v1/users/${clerkId}`, {
+  headers: { 'Authorization': `Bearer ${clerkSecretKey}` },
+});
+console.log('Clerk API status:', response.status);
+```
+
+---
+
+### Merge not working as expected
+
+**Problem**: Preferences are replaced instead of merged
+
+**Solution**:
+```typescript
+// Ensure merge is enabled
+await preferences.updatePreferences({
+  userId,
+  preferences: { appearance: { theme: 'dark' } },
+  merge: true, // Explicitly enable merge
+});
+
+// Or use category filter for partial updates
+await preferences.updatePreferences({
+  userId,
+  category: 'appearance',
+  preferences: { appearance: { theme: 'dark' } },
+});
+```
+
+---
+
+### Performance issues
+
+**Problem**: Slow preference fetching
+
+**Solution**:
+```typescript
+// 1. Enable caching
+const service = new PreferencesService({
+  pool,
+  logger,
+  cacheAdapter: cache, // Add cache adapter
+  cacheTtl: 600,
+});
+
+// 2. Fetch only needed category
+const result = await service.getPreferences({
+  userId,
+  category: 'notifications', // Don't fetch all
+});
+
+// 3. Disable defaults if not needed
+const result = await service.getPreferences({
+  userId,
+  includeDefaults: false,
+});
+```
+
+---
+
+## Related Documentation
+
+- [DormWay Core Library (@dormway-core)](/docs/engineering/technical/dormway-core-library-dormway-core) - Main overview
+- [Cache Adapter](/docs/engineering/technical/dormway-core/adapters/cache-adapter) - Redis caching
+- [Structured Logger](/docs/engineering/technical/dormway-core/utilities/structured-logger) - Logging preferences operations
+- [Error Handling](/docs/engineering/technical/dormway-core/utilities/error-handling) - ServiceResult pattern
+
+---
+
+**Last Updated**: 2025-11-23
+**Maintainer**: Platform Team

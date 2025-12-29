@@ -1,0 +1,710 @@
+---
+title: "Migration Guide"
+description: "This guide shows how to refactor existing code to use @dormway/core services and utilities, improving maintainability, reducing duplication, and following be..."
+---
+
+# Migration Guide: Refactoring to @dormway/core
+
+## Overview
+
+This guide shows how to refactor existing code to use @dormway/core services and utilities, improving maintainability, reducing duplication, and following best practices.
+
+**Note (2025-11-25)**: The database is **Neon PostgreSQL** (not Aurora). The `auroraDb.ts` filename is legacy - it connects to Neon via standard PostgreSQL protocol using `DATABASE_URL` from Doppler. All references to "Aurora" in code examples are historical; the actual database is Neon.
+
+---
+
+## Table of Contents
+
+- [Quick Wins](#quick-wins)
+- [Database Access](#database-access)
+- [Temporal Client](#temporal-client)
+- [Structured Logging](#structured-logging)
+- [Error Handling](#error-handling)
+- [DayPlan Data Fetching](#dayplan-data-fetching)
+- [Campus Operations](#campus-operations)
+- [LLM Calls](#llm-calls)
+- [Cache Operations](#cache-operations)
+- [Complete Examples](#complete-examples)
+
+---
+
+## Quick Wins
+
+### 1. Install @dormway/core
+
+```bash
+cd services/api-router  # or engine, ably-relay, etc.
+npm install @dormway/core
+```
+
+### 2. Import from @dormway/core
+
+```typescript
+// ❌ Old (legacy Aurora naming - actually connects to Neon)
+import { getAuroraPool } from '../services/auroraDb';
+import { getLogger } from '../services/logger';
+import { getTemporalClient as getClient } from '../utils/temporal';
+
+// ✅ New (uses Neon PostgreSQL via @dormway/core)
+import { getConnectionPool } from '@dormway/core/database';
+import { createStructuredLogger } from '@dormway/core/logger';
+import { getTemporalClient } from '@dormway/core/adapters/temporal';
+```
+
+---
+
+## Database Access
+
+### Before: Custom Pool Management
+
+```typescript
+// ❌ Old - services/auroraDb.ts (legacy filename, connects to Neon)
+import { Pool } from 'pg';
+
+let pool: Pool | null = null;
+
+export function getAuroraPool(): Pool {
+  if (!pool) {
+    // Note: This connects to Neon PostgreSQL via DATABASE_URL, not Aurora
+    pool = new Pool({
+      connectionString: process.env.DATABASE_URL, // Neon connection string
+      max: 20,
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 2000,
+    });
+  }
+  return pool;
+}
+
+// Usage in activities
+import { getAuroraPool } from '../services/auroraDb';
+
+export async function myActivity() {
+  const pool = getAuroraPool();
+  const result = await pool.query('SELECT * FROM accounts WHERE id = $1', [userId]);
+  // ...
+}
+```
+
+### After: Use @dormway/core
+
+```typescript
+// ✅ New - No custom pool file needed!
+// Connects to Neon PostgreSQL via DATABASE_URL from Doppler
+
+// Usage in activities
+import { getConnectionPool } from '@dormway/core/database';
+
+export async function myActivity() {
+  const pool = getConnectionPool();
+  const result = await pool.query('SELECT * FROM accounts WHERE id = $1', [userId]);
+  // ...
+}
+```
+
+**Benefits**:
+- ✅ No custom pool management code
+- ✅ Consistent configuration across services
+- ✅ Automatic connection pooling (Neon has built-in pooling)
+- ✅ Better error handling
+- ✅ Works with Neon branch databases (dev branches)
+
+---
+
+## Temporal Client
+
+### Before: Custom Client Utility
+
+```typescript
+// ❌ Old - utils/temporal.ts
+import { Client, Connection } from '@temporalio/client';
+
+let client: Client | null = null;
+
+export async function getTemporalClient(): Promise<Client> {
+  if (!client) {
+    const connection = await Connection.connect({
+      address: process.env.TEMPORAL_ADDRESS || 'localhost:7233',
+    });
+    client = new Client({ connection, namespace: 'default' });
+  }
+  return client;
+}
+
+// Usage
+import { getTemporalClient as getClient } from '../utils/temporal';
+
+const client = await getClient();
+await client.workflow.start(...);
+```
+
+### After: Use @dormway/core
+
+```typescript
+// ✅ New - No custom temporal file needed!
+
+// Usage
+import { getTemporalClient } from '@dormway/core/adapters/temporal';
+
+const client = await getTemporalClient();
+await client.workflow.start(...);
+```
+
+**Benefits**:
+- ✅ No custom client code
+- ✅ Consistent across all services
+- ✅ TLS/mTLS support built-in
+- ✅ Better connection management
+
+---
+
+## Structured Logging
+
+### Before: Console.log or Custom Logger
+
+```typescript
+// ❌ Old
+console.log(`[INFO] Processing student ${studentId}`);
+console.error(`[ERROR] Failed to process student ${studentId}:`, error);
+
+// or custom logger
+import { getLogger } from '../services/logger';
+
+const logger = getLogger();
+logger.info(`Processing student ${studentId}`);
+logger.error(`Failed to process student ${studentId}`, { error });
+```
+
+### After: Use @dormway/core StructuredLogger
+
+```typescript
+// ✅ New
+import { createStructuredLogger } from '@dormway/core/logger';
+
+const logger = createStructuredLogger({
+  service: 'engine',
+  activity: { name: 'processStudent' },
+});
+
+logger.info('student.process.start', 'Processing student', {
+  metadata: { studentId },
+});
+
+logger.error('student.process.error', 'Failed to process student', {
+  error,
+  metadata: { studentId },
+});
+```
+
+**Benefits**:
+- ✅ Structured JSON logs (queryable)
+- ✅ Consistent event naming
+- ✅ Metadata support
+- ✅ OpenTelemetry integration
+- ✅ Better debugging
+
+---
+
+## Error Handling
+
+### Before: Throwing Generic Errors
+
+```typescript
+// ❌ Old
+if (!user) {
+  throw new Error('User not found');
+}
+
+if (!req.headers.authorization) {
+  throw new Error('Unauthorized');
+}
+
+// Inconsistent HTTP status codes
+res.status(500).json({ error: 'Something went wrong' });
+```
+
+### After: Use @dormway/core Error Classes
+
+```typescript
+// ✅ New
+import { NotFoundError, AuthenticationError } from '@dormway/core/errors';
+
+if (!user) {
+  throw new NotFoundError('User not found', { userId });
+}
+
+if (!req.headers.authorization) {
+  throw new AuthenticationError('Missing authorization header');
+}
+
+// Consistent HTTP status codes
+import { getErrorStatusCode, serializeError } from '@dormway/core/errors';
+
+try {
+  // ...
+} catch (error) {
+  const serialized = serializeError(error);
+  res.status(serialized.statusCode).json({
+    error: serialized.message,
+    details: serialized.details,
+  });
+}
+```
+
+**Benefits**:
+- ✅ Consistent error types
+- ✅ Automatic HTTP status codes
+- ✅ Error serialization
+- ✅ Better debugging
+
+---
+
+## DayPlan Data Fetching
+
+### Before: Manual SQL Queries
+
+```typescript
+// ❌ Old - Duplicated code in every activity
+export async function generateDayPlan(userId: string, date: string): Promise<DayPlan> {
+  const pool = getAuroraPool();
+
+  // Get student context
+  const contextQuery = `
+    SELECT c.id as campus_id, c.name as campus_name, city.id as city_id
+    FROM accounts a
+    JOIN contexts student_ctx ON student_ctx.user_id = a.id
+    JOIN contexts c ON c.id = student_ctx.parent_id
+    JOIN contexts city ON city.id = c.parent_id
+    WHERE a.id = $1
+  `;
+  const contextResult = await pool.query(contextQuery, [userId]);
+  const context = contextResult.rows[0];
+
+  // Get courses
+  const coursesQuery = `
+    SELECT course_ctx.*
+    FROM contexts student_ctx
+    JOIN context_dependencies cd ON cd.parent_context_id = student_ctx.id
+    JOIN contexts course_ctx ON course_ctx.id = cd.child_context_id
+    WHERE student_ctx.user_id = $1
+  `;
+  const coursesResult = await pool.query(coursesQuery, [userId]);
+  const courses = coursesResult.rows;
+
+  // Get weather
+  const weatherQuery = `
+    SELECT data FROM service_data
+    WHERE context_id = $1 AND method = 'fetch_weather'
+    ORDER BY fetched_at DESC LIMIT 1
+  `;
+  const weatherResult = await pool.query(weatherQuery, [context.campus_id]);
+  const weather = weatherResult.rows[0]?.data;
+
+  // ... 100+ lines of SQL queries
+}
+```
+
+### After: Use DayPlanDataService
+
+```typescript
+// ✅ New - Clean, maintainable
+import { DayPlanDataService } from '@dormway/core';
+import { getConnectionPool } from '@dormway/core/database';
+import { createStructuredLogger } from '@dormway/core/logger';
+
+export async function generateDayPlan(userId: string, date: string): Promise<DayPlan> {
+  const pool = getConnectionPool();
+  const logger = createStructuredLogger({ service: 'engine', activity: { name: 'generateDayPlan' } });
+
+  const service = new DayPlanDataService({ pool, logger });
+
+  // Fetch all data in parallel
+  const [context, courses, schedule, weather, preferences] = await Promise.all([
+    service.getStudentContext(userId),
+    service.getEnrolledCourses(userId),
+    service.getScheduleForStudent(userId, date),
+    service.getWeatherForStudent(userId, date),
+    service.getPreferencesForStudent(userId),
+  ]);
+
+  // Validate and use data
+  if (!context.success) {
+    throw new NotFoundError('Student context not found');
+  }
+
+  // Build dayplan
+  // ...
+}
+```
+
+**Benefits**:
+- ✅ 100+ lines → 20 lines
+- ✅ Tested, battle-hardened queries
+- ✅ Consistent error handling
+- ✅ Parallel fetching
+- ✅ Reusable across services
+
+---
+
+## Campus Operations
+
+### Before: Direct SQL
+
+```typescript
+// ❌ Old
+export async function getCampusWeather(campusId: string) {
+  const pool = getAuroraPool();
+
+  const query = `
+    SELECT data FROM service_data
+    WHERE context_id = $1
+      AND method LIKE 'weather:%'
+    ORDER BY fetched_at DESC
+    LIMIT 1
+  `;
+
+  const result = await pool.query(query, [campusId]);
+  return result.rows[0]?.data || null;
+}
+```
+
+### After: Use CampusService
+
+```typescript
+// ✅ New
+import { CampusService } from '@dormway/core';
+import { getConnectionPool } from '@dormway/core/database';
+import { createStructuredLogger } from '@dormway/core/logger';
+
+export async function getCampusWeather(campusId: string) {
+  const pool = getConnectionPool();
+  const logger = createStructuredLogger({ service: 'api-router' });
+
+  const service = new CampusService({ pool, logger });
+
+  const result = await service.getCampusWeather(campusId);
+
+  if (!result.success) {
+    logger.error('campus.weather.error', result.error!, { metadata: { campusId } });
+    return null;
+  }
+
+  return result.data;
+}
+```
+
+**Benefits**:
+- ✅ ServiceResult pattern
+- ✅ Structured logging
+- ✅ Correct weather query (prioritizes methods)
+- ✅ Consistent error handling
+
+---
+
+## LLM Calls
+
+### Before: Direct API Calls
+
+```typescript
+// ❌ Old
+import axios from 'axios';
+
+export async function generateDayPlan(prompt: string) {
+  const response = await axios.post('https://api.helicone.ai/v1/chat/completions', {
+    model: 'gpt-4o-mini',
+    messages: [
+      { role: 'system', content: 'You are a helpful assistant.' },
+      { role: 'user', content: prompt },
+    ],
+  }, {
+    headers: {
+      'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+      'Helicone-Auth': `Bearer ${process.env.HELICONE_API_KEY}`,
+    },
+  });
+
+  return response.data.choices[0].message.content;
+}
+```
+
+### After: Use @dormway/core LLM Utilities
+
+```typescript
+// ✅ New
+import { loadPrompt, callHelicone } from '@dormway/core/llm';
+
+export async function generateDayPlan(userId: string, date: string, promptData: any) {
+  // Load prompt from registry
+  const response = await callHelicone('dayplan-generation', {
+    USER_ID: userId,
+    DATE: date,
+    PROMPT_DATA: JSON.stringify(promptData),
+  });
+
+  return JSON.parse(response.choices[0].message.content);
+}
+```
+
+**Benefits**:
+- ✅ Centralized prompt management
+- ✅ Automatic Helicone logging
+- ✅ Prompt versioning
+- ✅ Metadata tracking
+
+---
+
+## Cache Operations
+
+### Before: Direct Redis Calls
+
+```typescript
+// ❌ Old
+import Redis from 'redis';
+
+const redis = Redis.createClient({ url: process.env.REDIS_URL });
+
+export async function getCachedData(key: string) {
+  const data = await redis.get(key);
+  return data ? JSON.parse(data) : null;
+}
+
+export async function setCachedData(key: string, data: any, ttl: number) {
+  await redis.set(key, JSON.stringify(data), { EX: ttl });
+}
+```
+
+### After: Use CacheAdapter
+
+```typescript
+// ✅ New
+import { getCacheAdapter } from '@dormway/core/adapters/cache';
+
+export async function getCachedData(key: string) {
+  const cache = getCacheAdapter();
+  return await cache.get(key);
+}
+
+export async function setCachedData(key: string, data: any, ttl: number) {
+  const cache = getCacheAdapter();
+  await cache.set(key, data, { ttl });
+}
+```
+
+**Benefits**:
+- ✅ Singleton connection
+- ✅ Automatic JSON serialization
+- ✅ TTL support
+- ✅ Pattern-based deletion
+
+---
+
+## Complete Examples
+
+### Example 1: Migrate Activity
+
+**Before** (150 lines):
+```typescript
+// activities/dayplan.activities.ts
+import { getAuroraPool } from '../services/auroraDb';
+
+export async function generateDayPlan(userId: string, date: string): Promise<DayPlan> {
+  const pool = getAuroraPool();
+
+  // 100+ lines of SQL queries
+  const contextQuery = `...`;
+  const contextResult = await pool.query(contextQuery, [userId]);
+
+  const coursesQuery = `...`;
+  const coursesResult = await pool.query(coursesQuery, [userId]);
+
+  const weatherQuery = `...`;
+  const weatherResult = await pool.query(weatherQuery, [campusId]);
+
+  // ... more queries
+
+  // Build dayplan
+  const prompt = buildPrompt(/* ... */);
+
+  const response = await axios.post('https://api.helicone.ai/...', /* ... */);
+
+  return parseDayPlan(response.data);
+}
+```
+
+**After** (40 lines):
+```typescript
+// activities/dayplan.activities.ts
+import { getConnectionPool } from '@dormway/core/database';
+import { createStructuredLogger } from '@dormway/core/logger';
+import { DayPlanDataService } from '@dormway/core';
+import { callHelicone } from '@dormway/core/llm';
+import { NotFoundError } from '@dormway/core/errors';
+
+export async function generateDayPlan(userId: string, date: string): Promise<DayPlan> {
+  const pool = getConnectionPool();
+  const logger = createStructuredLogger({
+    service: 'engine',
+    activity: { name: 'generateDayPlan' },
+  });
+
+  const service = new DayPlanDataService({ pool, logger });
+
+  // Fetch all data in parallel
+  const [context, courses, weather] = await Promise.all([
+    service.getStudentContext(userId),
+    service.getEnrolledCourses(userId),
+    service.getWeatherForStudent(userId, date),
+  ]);
+
+  if (!context.success) {
+    throw new NotFoundError('Student context not found');
+  }
+
+  // Build dayplan
+  const promptData = { context: context.data!, courses: courses.data || [], weather: weather.data };
+
+  const response = await callHelicone('dayplan-generation', {
+    USER_ID: userId,
+    DATE: date,
+    PROMPT_DATA: JSON.stringify(promptData),
+  });
+
+  return JSON.parse(response.choices[0].message.content);
+}
+```
+
+---
+
+### Example 2: Migrate Express Route
+
+**Before**:
+```typescript
+// routes/campus.routes.ts
+import express from 'express';
+import { getAuroraPool } from '../services/auroraDb';
+
+const router = express.Router();
+
+router.get('/campus/:campusId', async (req, res) => {
+  try {
+    const { campusId } = req.params;
+    const pool = getAuroraPool();
+
+    const query = 'SELECT * FROM campus_configs WHERE campus_id = $1';
+    const result = await pool.query(query, [campusId]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Campus not found' });
+    }
+
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+export default router;
+```
+
+**After**:
+```typescript
+// routes/campus.routes.ts
+import express from 'express';
+import { getConnectionPool } from '@dormway/core/database';
+import { createStructuredLogger } from '@dormway/core/logger';
+import { CampusService } from '@dormway/core';
+import { NotFoundError } from '@dormway/core/errors';
+
+const router = express.Router();
+const pool = getConnectionPool();
+const logger = createStructuredLogger({ service: 'api-router' });
+
+router.get('/campus/:campusId', async (req, res, next) => {
+  try {
+    const { campusId } = req.params;
+    const service = new CampusService({ pool, logger });
+
+    const result = await service.getCampusConfig(campusId);
+
+    if (!result.success || !result.data) {
+      throw new NotFoundError('Campus not found', { campusId });
+    }
+
+    res.json(result.data);
+  } catch (error) {
+    next(error);  // Let error middleware handle it
+  }
+});
+
+export default router;
+```
+
+---
+
+## Migration Checklist
+
+### Phase 1: Quick Wins (1-2 hours)
+- [ ] Install `@dormway/core` in all services
+- [ ] Replace `getAuroraPool()` with `getConnectionPool()`
+- [ ] Replace custom Temporal client with `getTemporalClient()`
+- [ ] Replace `console.log` with `createStructuredLogger()`
+
+### Phase 2: Domain Services (4-8 hours)
+- [ ] Refactor dayplan activities to use `DayPlanDataService`
+- [ ] Refactor campus operations to use `CampusService`
+- [ ] Refactor context queries to use `ContextsService`
+- [ ] Refactor service data queries to use `ServiceDataService`
+
+### Phase 3: Adapters & Utilities (2-4 hours)
+- [ ] Replace direct Redis calls with `CacheAdapter`
+- [ ] Replace direct Ably calls with `RealtimeAdapter`
+- [ ] Replace custom error handling with `@dormway/core/errors`
+- [ ] Replace direct LLM calls with `callHelicone()` or `callPortkeyPrompt()`
+
+### Phase 4: Testing & Cleanup (2-4 hours)
+- [ ] Update tests to mock @dormway/core services
+- [ ] Remove custom utility files (auroraDb.ts, temporal.ts, logger.ts)
+- [ ] Update documentation
+- [ ] Code review and merge
+
+---
+
+## Benefits Summary
+
+### Code Reduction
+- **Before**: 500+ lines of boilerplate per service
+- **After**: 50-100 lines using @dormway/core
+- **Savings**: 75-80% less code
+
+### Maintainability
+- ✅ Single source of truth
+- ✅ Consistent patterns
+- ✅ Easier onboarding
+- ✅ Centralized bug fixes
+
+### Performance
+- ✅ Connection pooling
+- ✅ Parallel data fetching
+- ✅ Caching support
+- ✅ Optimized queries
+
+### Quality
+- ✅ Type safety
+- ✅ Structured logging
+- ✅ Error handling
+- ✅ Testing support
+
+---
+
+## Related Documentation
+
+- [DormWay Core Library (@dormway-core)](/docs/engineering/technical/dormway-core-library-dormway-core) - Main overview
+- [DayPlanDataService](/docs/engineering/technical/dormway-core/domain-services/dayplandataservice) - DayPlan data fetching
+- [Temporal Adapter](/docs/engineering/technical/dormway-core/adapters/temporal-adapter) - Workflow client
+- [Structured Logger](/docs/engineering/technical/dormway-core/utilities/structured-logger) - Logging guide
+
+---
+
+**Last Updated**: 2025-11-23
+**Maintainer**: Platform Team

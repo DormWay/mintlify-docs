@@ -1,0 +1,71 @@
+---
+title: "Calendar, Time Blocks, Timezones"
+---
+
+# SoT - Calendar, Time Blocks, Timezones
+
+## Scope
+- Calendar event normalization and storage for student + context schedules.
+- Time block storage contracts (`time_blocks`, `student_time_blocks`) and API query paths.
+- Timezone handling for calendar ingestion and UTC storage.
+
+## Non-goals
+- DayPlan generation and StudentWatcher orchestration (see their SoT docs).
+- Planner/task scheduling logic (covered in SoT - Tasks, Assignments, Planner Blocks).
+- UI rendering and formatting details for calendar widgets or schedule pages.
+
+## Web Schedule Surface Alignment (Current vs Target)
+- Current: Web Schedule reads v2 range events for the main timeline; legacy/mobile endpoints remain only for secondary class-detail deadline lookups.
+- Target: Web Schedule uses a single v2 timeline source (calendar/time blocks) with composite legacy-only.
+- Plan: `services/dormway-lockedin/docs/LOCKEDIN_WEB_OS_CONSISTENCY_PLAN.md`.
+
+## Invariants & Contracts
+- `time_blocks` enforces exactly one owner: either `user_id` or `context_id` (check constraint in table DDL).
+- `time_blocks` deduplicates by `source_type + source_id + (user_id or context_id)` (unique index).
+- Calendar storage validates timezone strings and normalizes to UTC (`normalizeToProperUTC`); floating times without timezone are warned and treated as server-local.
+- `student_time_blocks` is a view alias to `v_student_calendar_events` in Neon migrations; API reads from `student_time_blocks` and filters by active lifecycle.
+- Storage routing rules:
+  - `schedule_import` and `ics_lms` with both `userId` + `contextId` write to `time_blocks` (context-level).
+  - `ics_lms` is additionally mirrored to `student_time_blocks` for now; `schedule_import` is not.
+  - User-only sources write to `student_time_blocks`; context-only sources write to `time_blocks`.
+
+## Key Flows (High-Level)
+- Schedule import: `scheduleImport.workflow` parses a schedule, then calls `normalizeAndStoreCalendarData` with campus timezone and `source='schedule_import'` to write context time blocks; reconciliation to student-facing blocks happens via schedule processing.
+- Schedule reconciliation: `scheduleProcessor` pulls Google/LMS/mobile/syllabus/enrolled course events, normalizes, consolidates, and stores them, then publishes an Ably dashboard update.
+- API reads:
+  - `GET /calendar/events` queries `student_time_blocks` for the authenticated user.
+  - `GET /calendar/master` joins student enrollments to `time_blocks` for course schedules.
+
+## Data Models / IDs / Terminology
+- Normalized calendar event: `NormalizedCalendarEvent` (source_id, source_type, event_type, start/end ISO, timezone metadata).
+- `time_blocks`: generic calendar table keyed by `source_type`/`source_id`, with `user_id` or `context_id`, and UTC `start_time`/`end_time`.
+- `student_time_blocks` view: `id`, `user_id`, `start_time`, `end_time`, `label`, `type`, `status`, `source`, `metadata`, `is_deadline`, timestamps.
+- Calendar sources include `google`, `ics_campus`, `ics_lms`, `ics_atlas`, `syllabus`, `academic`, `manual`, `schedule_import`, `canvas`, `system`.
+
+## Key Files (Code + Docs)
+- `services/engine/src/activities/calendar.activities.ts` (normalize + store calendar events; storage routing)
+- `services/engine/src/services/calendarNormalization.service.ts` (normalization contract + source/event enums)
+- `services/engine/src/activities/student.activities.ts` (legacy normalization in scheduleProcessor)
+- `services/engine/src/workflows/scheduleImport.workflow.ts` (schedule import → calendar normalization)
+- `services/engine/src/workflows/studentProcessor.workflow.ts` (`scheduleProcessor` orchestration)
+- `services/engine/src/utils/timezone.utils.ts` (UTC storage guidance + timezone helpers)
+- `services/engine/migrations/create_generic_time_blocks.sql` (`time_blocks` DDL + `v_student_calendar_events`)
+- `infrastructure/database/migrations/099_create_student_time_blocks_view.sql` (Neon alias view)
+- `infrastructure/database/migrations/20250820_fix_timezone_consistency.sql` (UTC timestamp guidance)
+- `services/api-router/src/routes/mobile-routes.ts` (calendar API queries)
+- `services/dormway-lockedin/src/hooks/useCampusCurrentTerm.ts`
+- `services/dormway-lockedin/src/app/dashboard/schedule/page.tsx`
+- `services/dormway-lockedin/docs/LOCKEDIN_WEB_OS_CONSISTENCY_PLAN.md`
+
+## Update Checklist
+- Adding a new calendar source: update `CalendarSourceType`, `normalizeCalendarData`, and storage mapping in `calendar.activities.ts`.
+- Changing timezone conversion: update `normalizeToProperUTC` and ensure callers pass `options.timezone`.
+- Changing `time_blocks` schema or constraints: update DDL migration and `v_student_calendar_events`/`student_time_blocks` views.
+- Changing calendar API filters: update `mobile-routes.ts` queries and any downstream consumers.
+
+## Recent Changes
+- 2025-12-28: Added v2 range calendar events endpoint for Schedule and removed composite dependency in LockedIn mainline.
+- 2025-12-27: Added a lightweight campus term hook to hydrate timezone without loading the full semester aggregate.
+- 2025-12-27: Schedule page beta framing now routes quick suggestions into Quick Add instead of placeholder toasts.
+- 2025-12-27: Added web Schedule alignment target and linked OS consistency plan.
+- 2025-12-22: Populated and verified against current engine, migrations, and API routes.

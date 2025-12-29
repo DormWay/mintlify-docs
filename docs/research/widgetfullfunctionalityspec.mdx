@@ -1,0 +1,962 @@
+---
+title: "Widget_Full_Functionality_Spec"
+description: "Currently, widgets show summaries but don't provide full access to all available information. This spec outlines how to make every widget a **complete inform..."
+---
+
+# Widget Full Functionality Specification
+
+**Date:** 2025-12-08  
+**Purpose:** Make every widget fully functional - users can access ALL information about assignments, courses, and academic data directly from widgets  
+**Goal:** Transform widgets from "display-only" to "complete information hubs"
+
+---
+
+## Executive Summary
+
+Currently, widgets show summaries but don't provide full access to all available information. This spec outlines how to make every widget a **complete information hub** where users can:
+
+1. **See everything** - All assignment details, course info, syllabus data
+2. **Do everything** - Complete tasks, view grades, ask Ace LLM questions
+3. **Navigate seamlessly** - Deep links between related information
+4. **Take action** - Mark complete, schedule, break down tasks, view in Canvas
+
+**Key Insight:** This spec is grounded in **actual available data** from existing APIs and database tables, building upon current implementations rather than assuming new infrastructure.
+
+---
+
+## Current State Analysis
+
+### What Data We Actually Have Access To
+
+Based on codebase analysis, here's what's **actually available**:
+
+#### Assignment Data (from Canvas sync)
+- **Source:** `canvas_assignments` table (synced from Canvas API)
+- **Available Fields:**
+  - `id`, `canvas_id`, `title`, `description`
+  - `due_at`, `points_possible`
+  - `submission_types`, `html_url` (Canvas link)
+  - `course_id` (links to `canvas_courses`)
+  - `is_active`, `created_at`, `updated_at`
+- **Completion Tracking:** `assignment_completion` table
+  - `is_completed`, `completed_at`, `started_at`
+  - `actual_minutes`, `difficulty_rating`, `notes`
+  - `dismissed`, `dismissed_at`
+- **API Endpoints:**
+  - `POST /api/academic/assignments/:id/complete` - Mark complete
+  - `POST /api/academic/assignments/:id/start` - Mark started
+  - `POST /api/academic/assignments/:id/dismiss` - Dismiss
+  - `GET /api/academic/assignments/completion-status?ids=...` - Bulk status
+
+#### Course Data
+- **Source:** `contexts` table (type='course') + `canvas_courses` table
+- **Available Fields:**
+  - `contextId`, `courseCode`, `courseName`
+  - `professor`, `semester`, `credits`, `department`
+  - `enrollmentType`, `status` (current/archived/dropped)
+- **Syllabus Data:** `service_data` table (method='processed_syllabus_crew')
+  - Full syllabus text, assignments, policies
+  - Grading breakdown, late policies, attendance policies
+  - Ace highlights, peak weeks, workload analysis
+- **API Endpoints:**
+  - `GET /api/student/courses` - List all courses with syllabus overlay
+  - Syllabus overlay includes: `mergedSyllabus`, `overlays`, `personalizedSyllabus`
+
+#### Task Data
+- **Source:** `tasks` table
+- **Available Fields:**
+  - `id`, `title`, `due_date`, `priority`
+  - `course_code`, `estimated_duration_minutes`
+  - `status` (pending/completed), `source` (canvas/personal/manual)
+  - `metadata` (JSONB)
+- **API Endpoints:**
+  - `POST /api/mobile/tasks` - Create task
+  - `GET /api/mobile/tasks` - List tasks
+  - `POST /api/mobile/tasks/:id/complete` - Complete task
+  - `DELETE /api/mobile/tasks/:id` - Delete task
+
+#### Ace LLM Integration
+- **API Endpoints:**
+  - `POST /api/search/query` - RAG search with scopes
+  - Scopes: `{ type: 'user'|'course'|'org', id: string }`
+  - Can query course-specific or user-specific knowledge base
+- **Available Context:**
+  - Course syllabi (indexed in Ragie)
+  - User documents (indexed in Ragie)
+  - Pre-filled context for course/assignment questions
+
+#### Dashboard Widget Data
+- **Source:** `GET /api/dashboard` - Returns aggregated widget data
+- **Current Widget Types:**
+  - `academic` - Assignment workload (from Canvas)
+  - `tasks` - Unified tasks (Canvas + personal)
+  - `courses` - Course list with metrics
+  - `dayplan` - Daily schedule
+  - `schedule` - Class schedule
+  - `study` - Study time tracking
+  - `attendance` - Attendance policies
+  - `syllabus` - Syllabus upload CTA
+  - `action_cta` - Next action suggestion
+
+### What's Currently Implemented
+
+#### Existing Detail Popovers
+1. **AcademicDetailPopover** (`AcademicWidget.tsx`)
+   - Shows: Title, course code, due date, Canvas link
+   - Missing: Description, points, submission info, grade, syllabus context
+
+2. **TaskDetailPopover** (`TasksWidget.tsx`)
+   - Shows: Title, due date, course code, priority, completion button
+   - Missing: Task breakdown, related assignment details, Ace Q&A
+
+3. **CourseDetailPopover** (`CoursesWidget.tsx`)
+   - Shows: Course code, name, metrics (overdue/due today/due this week), next due assignment
+   - Missing: Full syllabus, all assignments list, grades, Ace Q&A
+
+4. **ClassDetailPopover** (`ScheduleWidget.tsx`)
+   - Shows: Class time, location, course code
+   - Missing: Course details link, materials, attendance policy
+
+### What's Missing (Gaps to Fill)
+
+### What Widgets Currently Show
+
+| Widget | Current Info | Missing Info |
+|--------|-------------|--------------|
+| **Academic Widget** | Title, due date, course code, Canvas link | Description, points, rubric, submission info, grade, syllabus context, Ace Q&A |
+| **Tasks Widget** | Title, due date, course code, completion | Description, breakdown, related assignments, Ace Q&A |
+| **Courses Widget** | Course code, name, metrics, next due | Syllabus, all assignments, grades, policies, Ace Q&A, materials |
+| **Schedule Widget** | Time, location, event type | Class details, attendance policy, materials, office hours |
+| **DayPlan Widget** | Timeline of events | Full event details, related assignments |
+| **Study Widget** | Hours tracked, goals | Study sessions, recommendations, productivity insights |
+| **Attendance Widget** | Remaining absences | Policy details, grade impact, history |
+| **Syllabus Widget** | Upload CTA | Full syllabus viewer, Q&A, policies |
+
+---
+
+## Information Architecture: What We Actually Have vs. What We Show
+
+### Assignment Information
+
+| Field | Available? | Currently Shown? | Source |
+|-------|-----------|------------------|--------|
+| Title | ✅ Yes | ✅ Yes | `canvas_assignments.title` |
+| Description | ✅ Yes | ❌ No | `canvas_assignments.description` |
+| Due Date | ✅ Yes | ✅ Yes | `canvas_assignments.due_at` |
+| Points Possible | ✅ Yes | ❌ No | `canvas_assignments.points_possible` |
+| Points Earned | ⚠️ Partial | ❌ No | Need Canvas API call (not stored) |
+| Submission Type | ✅ Yes | ❌ No | `canvas_assignments.submission_types` |
+| Canvas Link | ✅ Yes | ✅ Yes | `canvas_assignments.html_url` |
+| Completion Status | ✅ Yes | ❌ No | `assignment_completion.is_completed` |
+| Started Status | ✅ Yes | ❌ No | `assignment_completion.started_at` |
+| Actual Minutes | ✅ Yes | ❌ No | `assignment_completion.actual_minutes` |
+| Difficulty Rating | ✅ Yes | ❌ No | `assignment_completion.difficulty_rating` |
+| Syllabus Context | ✅ Yes | ❌ No | `service_data` (processed_syllabus_crew) |
+| Ace Q&A | ✅ Yes | ❌ No | `/api/search/query` with course scope |
+
+**Note:** Grade/feedback data requires Canvas API call (not stored locally). We can add this as an enhancement.
+
+### Course Information
+
+| Field | Available? | Currently Shown? | Source |
+|-------|-----------|------------------|--------|
+| Course Code | ✅ Yes | ✅ Yes | `contexts.metadata.courseCode` |
+| Course Name | ✅ Yes | ✅ Yes | `contexts.name` |
+| Instructor | ✅ Yes | ❌ No | `contexts.metadata.instructor` |
+| Semester | ✅ Yes | ❌ No | `contexts.metadata.semester` |
+| Credits | ✅ Yes | ❌ No | `contexts.metadata.credits` |
+| Full Syllabus | ✅ Yes | ❌ No | `service_data.data` (mergedSyllabus) |
+| Syllabus Policies | ✅ Yes | ❌ No | Extracted from syllabus data |
+| All Assignments | ✅ Yes | ❌ No | `canvas_assignments` JOIN `canvas_courses` |
+| Assignment Metrics | ✅ Yes | ✅ Yes | Calculated from assignments |
+| Ace Q&A | ✅ Yes | ❌ No | `/api/search/query` with course scope |
+
+**Note:** Grades require Canvas API call (not stored). We can add grade tracking as enhancement.
+
+### Task Information
+
+| Field | Available? | Currently Shown? | Source |
+|-------|-----------|------------------|--------|
+| Title | ✅ Yes | ✅ Yes | `tasks.title` |
+| Due Date | ✅ Yes | ✅ Yes | `tasks.due_date` |
+| Priority | ✅ Yes | ✅ Yes | `tasks.priority` |
+| Status | ✅ Yes | ✅ Yes | `tasks.status` |
+| Course Code | ✅ Yes | ✅ Yes | `tasks.course_code` |
+| Estimated Duration | ✅ Yes | ❌ No | `tasks.estimated_duration_minutes` |
+| Source | ✅ Yes | ⚠️ Partial | `tasks.source` |
+| Related Assignment | ⚠️ Partial | ❌ No | Need to link via `htmlUrl` or `metadata` |
+| Task Breakdown | ❌ No | ❌ No | **To be implemented** (Goblin Tools style) |
+| Ace Q&A | ✅ Yes | ❌ No | `/api/search/query` with user scope |
+
+### What We Can Build Upon
+
+#### Existing Patterns to Reuse
+1. **Popover Pattern** - `AcademicDetailPopover`, `TaskDetailPopover`, `CourseDetailPopover` already exist
+2. **Completion Actions** - `POST /api/academic/assignments/:id/complete` already works
+3. **Ace LLM Integration** - `/api/search/query` endpoint exists with course/user scopes
+4. **Syllabus Access** - `GET /api/student/courses` returns `personalizedSyllabus` with full data
+5. **Course Colors** - `useCourseColors` hook provides consistent color theming
+
+---
+
+## Widget Enhancement Plan
+
+### 1. Academic Widget → Full Assignment Hub
+
+#### Current: AcademicDetailPopover
+**Shows:** Title, due date, course code, Canvas link
+
+#### Enhanced: AssignmentDetailView (Full Modal/Drawer)
+
+**Sections:**
+
+1. **Header**
+   - Assignment title
+   - Course code with color
+   - Status badge (Overdue, Due Today, Upcoming)
+   - Quick actions: Open Canvas, Mark Complete, Break Down Task
+
+2. **Overview Tab**
+   - **Due Date:** Full date/time with countdown
+   - **Points:** Possible / Earned (if graded)
+   - **Submission Type:** Online, file upload, etc.
+   - **Status:** Not started, In progress, Submitted, Graded
+   - **Description:** Full assignment description (if available)
+   - **Canvas Link:** Direct link to assignment
+
+3. **Grade Tab** (if graded)
+   - Points earned / possible
+   - Percentage
+   - Grade letter (if applicable)
+   - Feedback (if available)
+   - Rubric scores (if available)
+
+4. **Syllabus Context Tab**
+   - **Late Policy:** From syllabus
+   - **Grading Policy:** How this assignment fits into course grade
+   - **Related Policies:** Other relevant syllabus policies
+   - **Course Materials:** Related readings, resources
+
+5. **Task Breakdown Tab** (Goblin Tools style)
+   - AI-generated step-by-step breakdown
+   - Progress tracking
+   - Time estimates
+   - Schedule steps button
+
+6. **Ace Q&A Tab**
+   - Quick questions about this assignment
+   - Pre-filled context: "This assignment is for [course], due [date]"
+   - Common questions:
+     - "What's the late policy for this assignment?"
+     - "How many points is this worth?"
+     - "What should I focus on?"
+     - "Can you break this down into steps?"
+
+7. **Related Information**
+   - Other assignments in this course
+   - Similar assignments (by type)
+   - Course workload context
+
+**Actions:**
+- ✅ Mark as Complete
+- ✅ Break Down Task (Goblin Tools)
+- ✅ Schedule Steps
+- ✅ Open in Canvas
+- ✅ Ask Ace LLM
+- ✅ View Course Details
+- ✅ View Syllabus
+
+---
+
+### 2. Tasks Widget → Full Task Hub
+
+#### Current: TaskDetailPopover
+**Shows:** Title, due date, course code, completion button
+
+#### Enhanced: TaskDetailView (Full Modal/Drawer)
+
+**Sections:**
+
+1. **Header**
+   - Task title
+   - Course code (if applicable)
+   - Priority badge
+   - Status (Pending, In Progress, Completed)
+   - Quick actions: Complete, Break Down, Schedule
+
+2. **Overview Tab**
+   - **Due Date:** Full date/time
+   - **Description:** Task details
+   - **Source:** Canvas, Email, Manual, etc.
+   - **Related Assignment:** Link to assignment (if from Canvas)
+   - **Priority:** Urgent, High, Medium, Low
+
+3. **Task Breakdown Tab** (Goblin Tools style)
+   - AI-generated steps
+   - Progress: X of Y steps complete
+   - Time estimates
+   - Check off steps
+   - Regenerate breakdown
+
+4. **Schedule Tab**
+   - Suggested schedule for steps
+   - Add to DayPlan
+   - Time blocking suggestions
+
+5. **Related Information**
+   - Other tasks in same course
+   - Similar tasks
+   - Course context
+
+**Actions:**
+- ✅ Mark Complete
+- ✅ Break Down Task
+- ✅ Schedule Steps
+- ✅ Edit Task
+- ✅ Delete Task
+- ✅ View Related Assignment (if from Canvas)
+- ✅ Ask Ace LLM
+
+---
+
+### 3. Courses Widget → Full Course Hub
+
+#### Current: CourseDetailPopover
+**Shows:** Course code, name, metrics, next due assignment
+
+#### Enhanced: CourseDetailView (Full Modal/Drawer)
+
+**Sections:**
+
+1. **Header**
+   - Course code with color
+   - Course name
+   - Instructor name
+   - Enrollment type (Student, TA, etc.)
+   - Quick actions: View Syllabus, Ask Ace, View All Assignments
+
+2. **Overview Tab**
+   - **Course Info:** Code, name, instructor, term
+   - **Enrollment:** Type, credits
+   - **Metrics Dashboard:**
+     - Total assignments
+     - Pending, overdue, due today, due this week
+     - Average grade (if available)
+     - Completion rate
+
+3. **Assignments Tab**
+   - **All Assignments:** Complete list with filters
+   - **Grouped by:** Status (Overdue, Due Soon, Upcoming, Completed)
+   - **Filters:** By type, by status, by date range
+   - **Sort:** By due date, by points, by status
+   - Click any assignment → Opens AssignmentDetailView
+
+4. **Grades Tab**
+   - **Current Grade:** Overall course grade
+   - **Grade Breakdown:** By assignment type
+   - **Grade Projection:** "What-if" calculator
+   - **Grade History:** Trend over time
+   - **Grading Policy:** From syllabus
+
+5. **Syllabus Tab**
+   - **Full Syllabus Viewer:** Complete syllabus text
+   - **Key Policies:** Late policy, attendance, grading
+   - **Course Schedule:** Weekly breakdown
+   - **Materials:** Required readings, resources
+   - **Quick Q&A:** Ask Ace about syllabus
+
+6. **Attendance Tab** (if applicable)
+   - **Remaining Absences:** Per policy
+   - **Attendance History:** Past absences
+   - **Grade Impact:** How absences affect grade
+   - **"Can I Skip?"** Calculator
+
+7. **Ace Q&A Tab**
+   - Course-specific questions
+   - Pre-filled context: "This is [course code] - [course name]"
+   - Common questions:
+     - "What's the late policy?"
+     - "How is the grade calculated?"
+     - "What are the main assignments?"
+     - "What should I focus on?"
+
+8. **Resources Tab**
+   - Course materials
+   - Office hours
+   - Contact information
+   - Canvas course link
+
+**Actions:**
+- ✅ View Syllabus
+- ✅ View All Assignments
+- ✅ Ask Ace LLM
+- ✅ View Grades
+- ✅ Calculate Grade Projection
+- ✅ Open Canvas Course
+- ✅ View Attendance Policy
+
+---
+
+### 4. Schedule Widget → Full Schedule Hub
+
+#### Current: Shows events in timeline
+
+#### Enhanced: ClassDetailView (Full Modal/Drawer)
+
+**Sections:**
+
+1. **Header**
+   - Class name
+   - Course code
+   - Time and location
+   - Quick actions: View Course, Set Reminder
+
+2. **Overview Tab**
+   - **Time:** Start/end time, duration
+   - **Location:** Building, room, address
+   - **Type:** Class, Office Hours, Event, etc.
+   - **Recurrence:** Weekly, one-time, etc.
+
+3. **Course Context Tab**
+   - Link to full course details
+   - Today's materials/readings
+   - Upcoming assignments for this course
+   - Office hours (if applicable)
+
+4. **Attendance Tab** (for classes)
+   - Remaining absences
+   - "Can I skip?" calculator
+   - Attendance history for this class
+
+5. **Materials Tab**
+   - Pre-class readings
+   - Lecture slides
+   - Related assignments
+
+**Actions:**
+- ✅ View Course Details
+- ✅ View Today's Assignments
+- ✅ Set Reminder
+- ✅ Add to Calendar
+- ✅ Check Attendance Policy
+
+---
+
+### 5. DayPlan Widget → Full Day Hub
+
+#### Enhanced: DayPlanDetailView
+
+**Sections:**
+
+1. **Day Overview**
+   - Date
+   - Total events
+   - Total assignments due
+   - Workload summary
+
+2. **Timeline View**
+   - Full day timeline
+   - Events with details
+   - Assignment deadlines marked
+   - Available time blocks
+
+3. **Assignments Due Today**
+   - List of all assignments due
+   - Quick actions: View details, Mark complete
+
+4. **Schedule Actions**
+   - Add event
+   - Block study time
+   - Schedule task steps
+
+---
+
+### 6. Study Widget → Full Study Hub
+
+#### Enhanced: StudyDetailView
+
+**Sections:**
+
+1. **Overview**
+   - Weekly hours
+   - Daily breakdown
+   - Goal progress
+
+2. **Study Sessions**
+   - Logged sessions
+   - Time per course
+   - Productivity metrics
+
+3. **Recommendations**
+   - Study suggestions based on workload
+   - Break reminders
+   - Optimal study times
+
+4. **Analytics**
+   - Trends over time
+   - Course-by-course breakdown
+   - Productivity insights
+
+**Actions:**
+- ✅ Log Study Session
+- ✅ Set Study Goal
+- ✅ View Recommendations
+- ✅ Export Data
+
+---
+
+### 7. Attendance Widget → Full Attendance Hub
+
+#### Enhanced: AttendanceDetailView
+
+**Sections:**
+
+1. **Overview**
+   - Remaining absences per course
+   - Total absences used
+   - Risk level
+
+2. **By Course**
+   - Detailed breakdown per course
+   - Policy details
+   - Grade impact
+
+3. **History**
+   - Past absences
+   - Patterns
+   - Risk analysis
+
+4. **"Can I Skip?" Calculator**
+   - Input: Course, date
+   - Output: Risk level, grade impact, recommendation
+
+**Actions:**
+- ✅ Check if Can Skip
+- ✅ View Course Details
+- ✅ View Attendance History
+
+---
+
+### 8. Syllabus Widget → Full Syllabus Hub
+
+#### Enhanced: SyllabusDetailView
+
+**Sections:**
+
+1. **Syllabus Viewer**
+   - Full syllabus text
+   - Searchable
+   - Highlighted key sections
+
+2. **Key Information**
+   - Grading breakdown
+   - Late policies
+   - Attendance policies
+   - Important dates
+
+3. **Assignments**
+   - All assignments from syllabus
+   - Due dates
+   - Points/weights
+
+4. **Ace Q&A**
+   - Ask questions about syllabus
+   - Pre-filled context
+   - Common questions
+
+**Actions:**
+- ✅ Search Syllabus
+- ✅ Ask Ace LLM
+- ✅ View Assignments
+- ✅ Export Syllabus
+
+---
+
+## Navigation & Deep Linking
+
+### Cross-Widget Navigation
+
+**From Assignment → Course:**
+- Click course code → Opens CourseDetailView
+- "View Course" button → Opens CourseDetailView
+
+**From Course → Assignment:**
+- Click assignment → Opens AssignmentDetailView
+- "View All Assignments" → List with filters
+
+**From Task → Assignment:**
+- "View Related Assignment" → Opens AssignmentDetailView
+- If task is from Canvas, link to assignment
+
+**From Schedule → Course:**
+- Click course code → Opens CourseDetailView
+- "View Course" button → Opens CourseDetailView
+
+**From Any Widget → Ace LLM:**
+- "Ask Ace" button → Opens Ace chat with context pre-filled
+
+---
+
+## Information Completeness Checklist
+
+### Assignment Information (Must Show All)
+- [ ] Title and description
+- [ ] Due date and time (with countdown)
+- [ ] Points (possible and earned)
+- [ ] Submission type and status
+- [ ] Grade and feedback (if graded)
+- [ ] Rubric (if available)
+- [ ] Canvas link
+- [ ] Syllabus context (policies, late penalties)
+- [ ] Course materials
+- [ ] Related assignments
+- [ ] Task breakdown (Goblin Tools)
+- [ ] Ace LLM Q&A
+
+### Course Information (Must Show All)
+- [ ] Course code, name, instructor
+- [ ] Full syllabus
+- [ ] All assignments (with filters)
+- [ ] Grades (current, historical, projections)
+- [ ] Grading breakdown
+- [ ] Attendance policy and remaining absences
+- [ ] Course materials
+- [ ] Office hours
+- [ ] Ace LLM Q&A
+
+### Task Information (Must Show All)
+- [ ] Task details
+- [ ] Due date
+- [ ] Related assignment (if applicable)
+- [ ] Task breakdown (Goblin Tools)
+- [ ] Completion status
+- [ ] Scheduling information
+- [ ] Ace LLM Q&A
+
+---
+
+## Implementation Plan: Building Upon Existing Work
+
+### Phase 1: Enhance Existing Popovers (1-2 weeks) 🎯 **Start Here**
+
+**Build upon:** `AcademicDetailPopover`, `TaskDetailPopover`, `CourseDetailPopover`
+
+#### 1.1 Enhance AcademicDetailPopover
+- **Add missing fields** (data already available):
+  - Description from `canvas_assignments.description`
+  - Points possible from `canvas_assignments.points_possible`
+  - Submission type from `canvas_assignments.submission_types`
+  - Completion status from `assignment_completion` table
+  - Started status from `assignment_completion.started_at`
+- **Add new sections:**
+  - "Syllabus Context" tab - Query `service_data` for course syllabus, extract late policy
+  - "Completion" tab - Show `actual_minutes`, `difficulty_rating` if completed
+- **Actions:**
+  - "Mark Started" button (uses existing `POST /api/academic/assignments/:id/start`)
+  - "View Course" button → Opens CourseDetailPopover
+- **No new API needed** - All data available from existing endpoints
+
+#### 1.2 Enhance TaskDetailPopover
+- **Add missing fields:**
+  - Estimated duration from `tasks.estimated_duration_minutes`
+  - Source details from `tasks.source` and `tasks.metadata`
+- **Add "Related Assignment" section:**
+  - If `source === 'canvas'` and `htmlUrl` exists, fetch assignment details
+  - Link to AcademicDetailPopover
+- **Actions:**
+  - "Break Down Task" button (Phase 3)
+  - "Ask Ace" button (Phase 2)
+- **No new API needed** - Enhance existing popover
+
+#### 1.3 Enhance CourseDetailPopover
+- **Add "Assignments" tab:**
+  - Query `canvas_assignments` JOIN `canvas_courses` for all assignments
+  - Filter by status (overdue, due today, upcoming, completed)
+  - Click assignment → Opens AcademicDetailPopover
+- **Add "Syllabus" tab:**
+  - Display `personalizedSyllabus` from `/api/student/courses` response
+  - Extract and highlight: grading breakdown, late policy, attendance policy
+- **Add "Ace Q&A" tab:**
+  - Pre-filled scope: `{ type: 'course', id: courseContextId }`
+  - Quick questions: "What's the late policy?", "How is the grade calculated?"
+- **New API endpoint needed:**
+  ```
+  GET /api/student/courses/:contextId/assignments
+  ```
+  - Query `canvas_assignments` WHERE `course_id` matches course's Canvas course ID
+  - Include completion status from `assignment_completion`
+
+### Phase 2: Ace LLM Integration (1 week) 🎯 **Quick Win**
+
+**Build upon:** Existing `/api/search/query` endpoint
+
+#### 2.1 Add "Ask Ace" Button to All Popovers
+- **AcademicDetailPopover:**
+  - Scope: `{ type: 'course', id: assignment.courseContextId }`
+  - Pre-fill: "This assignment is [title] for [courseCode], due [date]"
+  - Quick questions: "What's the late policy?", "How many points is this worth?"
+- **TaskDetailPopover:**
+  - Scope: `{ type: 'user', id: userId }`
+  - Pre-fill: "This task is [title], due [date]"
+- **CourseDetailPopover:**
+  - Scope: `{ type: 'course', id: courseContextId }`
+  - Pre-fill: "This is [courseCode] - [courseName]"
+  - Quick questions: "What are the main assignments?", "What's the grading breakdown?"
+
+#### 2.2 Create AceChatModal Component
+- Reusable modal for Ace Q&A
+- Pre-fills context based on widget type
+- Shows conversation history
+- **No new API needed** - Uses existing `/api/search/query`
+
+### Phase 3: Task Breakdown (Goblin Tools Style) (2-3 weeks) 🆕 **New Feature**
+
+**Build upon:** Task breakdown spec already created (`Task_Breakdown_Feature_Spec.md`)
+
+#### 3.1 Database Migration
+- Create `task_breakdowns` table (see spec)
+- Store steps, progress, time estimates
+
+#### 3.2 API Endpoint
+```
+POST /api/mobile/tasks/:id/breakdown
+```
+- Uses Ace LLM with task context
+- Generates step-by-step breakdown
+- Stores in `task_breakdowns` table
+
+#### 3.3 UI Integration
+- Add "Break Down Task" button to TaskDetailPopover
+- Add "Break Down Task" button to AcademicDetailPopover (for assignments)
+- Show breakdown progress in widgets
+- Schedule steps integration with DayPlan
+
+### Phase 4: Assignment Details Endpoint (1 week) 🎯 **Enhancement**
+
+**Build upon:** Existing assignment completion endpoints
+
+#### 4.1 New Endpoint
+```
+GET /api/academic/assignments/:id
+```
+- Returns: Full assignment from `canvas_assignments`
+- Includes: Completion status, syllabus context, course info
+- **No new DB queries** - Just aggregates existing data
+
+#### 4.2 Use in Popovers
+- Fetch full assignment details when opening AcademicDetailPopover
+- Enables showing description, points, submission type
+- Enables syllabus context lookup
+
+### Phase 5: Course Assignments List (1 week) 🎯 **Enhancement**
+
+**Build upon:** Existing Canvas sync data
+
+#### 5.1 New Endpoint
+```
+GET /api/student/courses/:contextId/assignments
+```
+- Query `canvas_assignments` JOIN `canvas_courses`
+- Filter by status, due date
+- Include completion status
+
+#### 5.2 Use in CourseDetailPopover
+- "Assignments" tab shows all assignments
+- Filterable by status (overdue, due today, upcoming, completed)
+- Clickable → Opens AcademicDetailPopover
+
+### Phase 6: Grade Tracking (Future Enhancement) 📋 **Nice to Have**
+
+**Requires:** Canvas API integration for grades
+
+- Sync grades during Canvas sync
+- Store in new `canvas_grades` table
+- Display in AssignmentDetailPopover
+- Grade projections in CourseDetailPopover
+- "What-if" calculator
+
+**Note:** This is a larger feature requiring Canvas API integration. Can be Phase 6+.
+
+---
+
+## Realistic Implementation Order
+
+### Week 1-2: Quick Wins (Phase 1.1-1.2 + Phase 2)
+- Enhance existing popovers with available data
+- Add Ace LLM integration
+- **Impact:** Immediate value, no new infrastructure
+
+### Week 3: Assignment Details (Phase 4)
+- Create assignment details endpoint
+- Use in AcademicDetailPopover
+- **Impact:** Shows full assignment info
+
+### Week 4: Course Assignments (Phase 5)
+- Create course assignments endpoint
+- Add assignments tab to CourseDetailPopover
+- **Impact:** Complete course view
+
+### Week 5-7: Task Breakdown (Phase 3)
+- Database migration
+- Breakdown generation API
+- UI integration
+- **Impact:** New feature, high value
+
+### Future: Grade Tracking (Phase 6)
+- Canvas grade sync
+- Grade display and projections
+- **Impact:** Complete academic picture
+
+---
+
+## UI/UX Patterns
+
+### Modal/Drawer Pattern
+- **Small screens:** Full-screen drawer from bottom
+- **Large screens:** Centered modal (max-width: 800px)
+- **Tablet:** Side drawer (400px width)
+
+### Tab Navigation
+- Horizontal tabs for different sections
+- Sticky header with quick actions
+- Breadcrumb navigation for deep links
+
+### Information Density
+- **Compact view:** Key info only
+- **Standard view:** All info with tabs
+- **Expanded view:** Full details with all sections
+
+### Quick Actions
+- Always visible in header
+- Context-aware (different actions per widget)
+- Keyboard shortcuts (Cmd+K for actions)
+
+---
+
+## Data Requirements
+
+### API Endpoints We Already Have ✅
+
+1. **Assignment Completion**
+   - `POST /api/academic/assignments/:id/complete` ✅
+   - `POST /api/academic/assignments/:id/start` ✅
+   - `POST /api/academic/assignments/:id/dismiss` ✅
+   - `GET /api/academic/assignments/completion-status?ids=...` ✅
+
+2. **Course Data**
+   - `GET /api/student/courses` ✅ (includes syllabus overlay)
+   - Returns: `personalizedSyllabus`, `mergedSyllabus`, `overlays`
+
+3. **Task Management**
+   - `GET /api/mobile/tasks` ✅
+   - `POST /api/mobile/tasks` ✅
+   - `POST /api/mobile/tasks/:id/complete` ✅
+   - `DELETE /api/mobile/tasks/:id` ✅
+
+4. **Ace LLM**
+   - `POST /api/search/query` ✅
+   - Body: `{ q: string, scope: { type: 'course'|'user', id: string } }`
+
+5. **Canvas Data**
+   - `GET /canvas/stats` ✅ (courses/assignments count)
+   - Canvas assignments synced to `canvas_assignments` table ✅
+
+### API Endpoints We Need to Add 🆕
+
+1. **Assignment Details** (enhancement)
+   ```
+   GET /api/academic/assignments/:id
+   ```
+   Returns: Full assignment from `canvas_assignments` + completion status + syllabus context
+   - Can build from existing data (no new DB queries needed)
+   - Just needs aggregation endpoint
+
+2. **Course Assignments List** (enhancement)
+   ```
+   GET /api/student/courses/:contextId/assignments
+   ```
+   Returns: All assignments for a course with filters
+   - Can query `canvas_assignments` JOIN `canvas_courses`
+   - Filter by status, due date, etc.
+
+3. **Syllabus Policies** (enhancement)
+   ```
+   GET /api/student/courses/:contextId/policies
+   ```
+   Returns: Extracted policies from syllabus (late policy, attendance, grading)
+   - Can parse from existing `service_data.data` (syllabus already processed)
+   - Or extract on-demand from `mergedSyllabus`
+
+4. **Task Breakdown** (new feature)
+   ```
+   POST /api/mobile/tasks/:id/breakdown
+   ```
+   Returns: AI-generated step breakdown (Goblin Tools style)
+   - Uses Ace LLM with task context
+   - Stores in `task_breakdowns` table (needs migration)
+
+### Database Tables We Can Query
+
+1. **`canvas_assignments`** - All Canvas assignments
+2. **`canvas_courses`** - Canvas course info
+3. **`assignment_completion`** - Completion tracking
+4. **`tasks`** - Personal tasks
+5. **`contexts`** - Course contexts with metadata
+6. **`service_data`** - Syllabus data (method='processed_syllabus_crew')
+7. **`canvas_accounts`** - Canvas connection status
+
+### What We DON'T Have (and need to add)
+
+1. **Grade Data** - Not stored locally, requires Canvas API call
+   - Enhancement: Add grade sync to store grades locally
+   - Or: Make Canvas API call on-demand (slower but works)
+
+2. **Rubric Data** - Not stored, requires Canvas API call
+   - Enhancement: Sync rubrics during assignment sync
+   - Or: Fetch on-demand when viewing assignment
+
+3. **Task Breakdown Storage** - Doesn't exist yet
+   - Need: `task_breakdowns` table migration
+   - Need: Breakdown generation endpoint
+
+4. **Assignment Description in Widget Data** - Not included in dashboard response
+   - Enhancement: Include in dashboard widget data
+   - Or: Fetch on-demand when opening detail view
+
+---
+
+## Success Metrics
+
+### Information Access
+- % of users who open detail views
+- Average time spent in detail views
+- % of users who use Ace Q&A
+- % of users who use task breakdown
+
+### Completeness
+- % of assignments with full details shown
+- % of courses with full details shown
+- % of information available vs. displayed
+
+### User Satisfaction
+- "I can find everything I need" rating
+- "Widgets are helpful" rating
+- "I don't need to leave the dashboard" rating
+
+---
+
+## Conclusion
+
+Making widgets fully functional transforms the dashboard from a "summary view" into a **complete command center** where students can:
+
+1. **See everything** - All assignment, course, and task information
+2. **Do everything** - Complete tasks, ask questions, break down assignments
+3. **Navigate seamlessly** - Deep links between related information
+4. **Never leave** - Everything accessible from the dashboard
+
+This creates a true "Student OS" where the dashboard is the single source of truth for all academic information.
+
+---
+
+## Tags
+#widget-enhancement #full-functionality #information-architecture #user-experience #dashboard-improvement

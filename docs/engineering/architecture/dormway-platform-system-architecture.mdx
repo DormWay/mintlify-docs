@@ -1,0 +1,98 @@
+---
+title: "DormWay Platform – System Architecture"
+description: "graph TD %% --- Tiers --- subgraph Client_Tier A[iOS / watchOS App] B[Web & Retool Dashboards] end"
+---
+
+# DormWay Platform – System Architecture
+
+```mermaid
+graph TD
+    %% --- Tiers ---
+    subgraph Client_Tier
+        A[iOS / watchOS App]
+        B[Web & Retool Dashboards]
+    end
+
+    subgraph Edge_Tier
+        R[API Router\nNode / Express (Zuplo edge)]
+    end
+
+    subgraph Control_Tier
+        T[Temporal Engine]
+    end
+
+    subgraph Data_Tier
+        PG[(Neon Postgres + RLS)]
+        REDIS[(Redis Cache)]
+        S3[(S3 Object Storage)]
+    end
+
+    subgraph External_Services
+        EXT1((PortKey / OpenAI / Anthropic / Gemini))
+        EXT2((Google Calendar & Maps))
+        EXT3((APNs))
+        EXT4((Ably))
+        EXT5((Customer.io))
+        EXT6((Clerk Auth))
+        EXT7((Dash0 / Sentry))
+    end
+
+    %% --- Edges ---
+    A -->|HTTPS JSON| R
+    B -->|HTTPS JSON| R
+    R -->|Temporal client| T
+    R --> PG
+    R --> REDIS
+    R -->|Push via Customer.io| EXT5
+    R -->|Ably tokens| EXT4
+    R -->|Auth| EXT6
+    R -->|Push (rare)| EXT3
+    T --> PG
+    T --> REDIS
+    T --> S3
+    T --> EXT1
+    T --> EXT2
+    T -->|Events| EXT4
+    T -->|Push| EXT5
+    R -->|OTel| EXT7
+    T -->|OTel| EXT7
+```
+
+## Flow Narrative
+
+1. **Mobile/Web clients** authenticate via Clerk JWT; Zuplo forwards to **api-router** with gateway headers.
+2. Router validates auth (Clerk + Zuplo API key), reads/writes Postgres (Neon) with RLS via `dormway_api` role; Temporal client used for long-running work.
+3. **Engine (Temporal)** orchestrates workflows: Student, Campus, City, Building, Schedule, Syllabus; runs activities for data fetch, AI via PortKey (OpenAI/Anthropic/Gemini), and cascading updates.
+4. Derived contexts are persisted to Postgres; cache to Redis; blobs (ICS, uploads) in S3.
+5. Realtime via Ably; visible push/marketing via Customer.io; rare direct APNs.
+6. Observability: OTel traces/metrics to Dash0; errors/perf to Sentry.
+
+## Component Responsibilities
+
+| Layer | Major Repos | Highlights |
+| ----- | ----------- | ---------- |
+| Client | `/ios` | SwiftUI MVVM, context system, offline cache, device‑key auth |
+| Edge | `/dormway-api-router` | Express, JWT/device/API key auth, rate‑limit, Temporal proxy routes |
+| Control | `/engine` | Temporal Workers, AI activities, cascading data pipelines |
+| Data | Neon + Redis + S3 | Postgres RLS, caching, object storage |
+
+## Key Subsystems
+
+* **Context System**: The central intelligence layer detecting user situations across the platform
+  * iOS Context System: Client-side detection and adaptation
+  * Temporal Context Workflows: Server-side aggregation and signal processing
+
+## Cross‑Cutting Concerns
+
+* **Observability:** OTel → Dash0; Sentry for errors/perf; Temporal Web UI for workflows.
+* **Security:** Postgres RLS (`dormway_api`), Zuplo gateway auth + Clerk JWT, Doppler-managed secrets.
+* **CI/CD:** Current: GitHub Actions; deploys to running services (api-router/engine), TestFlight for iOS.
+
+---
+
+_Last updated: 2025‑12‑03_
+
+
+## 🔗 Related
+
+*Backlinks and related notes will appear here*

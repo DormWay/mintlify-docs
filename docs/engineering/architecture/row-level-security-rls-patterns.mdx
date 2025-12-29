@@ -1,0 +1,490 @@
+---
+title: "Row Level Security RLS Patterns"
+description: "Row-Level Security (RLS) is a PostgreSQL feature that restricts which rows users can access based on policies. For DormWay, RLS provides **defense in depth**..."
+---
+
+# Row-Level Security (RLS) Patterns
+
+> **Status**: Planning - Implementation tracked in DORM-680
+> **SOC2 Relevance**: CC6.1 (Logical Access Controls)
+
+## Overview
+
+Row-Level Security (RLS) is a PostgreSQL feature that restricts which rows users can access based on policies. For DormWay, RLS provides **defense in depth** - even if application code has bugs, the database enforces access control.
+
+## Why RLS for DormWay?
+
+1. **SOC2 Compliance**: Required for logical access controls
+2. **GraphQL Security**: pg_graphql exposes all tables - RLS restricts what's visible
+3. **Defense in Depth**: Database-level enforcement, not just application logic
+4. **Audit-Friendly**: Policies are declarative SQL, easy to review
+
+## Architecture: Session Variables (No Per-User DB Roles)
+
+DormWay does NOT create database users per application user. Instead, we use **session variables** set by the API before each query.
+
+### How It Works
+
+```
+┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+│   Client App    │────▶│   API Router    │────▶│    PostgreSQL   │
+│  (iOS/Web)      │     │  (Express)      │     │    (Neon)       │
+└─────────────────┘     └─────────────────┘     └─────────────────┘
+                              │                        │
+                              │ 1. Extract user        │
+                              │    from JWT            │
+                              │                        │
+                              │ 2. SET app.current_*   │
+                              │    session vars        │
+                              │─────────────────────▶ │
+                              │                        │
+                              │ 3. Execute query       │
+                              │    (RLS enforced)      │
+                              │─────────────────────▶ │
+```
+
+### Session Variables
+
+| Variable | Source | Purpose |
+|----------|--------|---------|
+| `app.current_user_id` | JWT `backend_user_id` or `x-user-id` header | Primary user filter |
+| `app.current_context_id` | Derived from user's student context | Context-scoped queries |
+| `app.current_role` | JWT roles claim | Admin bypass logic |
+
+### Setting Session Variables
+
+> **Important:** Use session scope (`is_local = false`) unless you wrap the entire request in an explicit transaction. Transaction-local settings (`true`) evaporate at the end of each statement in autocommit mode.
+
+```sql
+-- Preferred: set_config (session scope)
+SELECT set_config('app.current_user_id', '058d2a14-ab1a-49c0-aa67-0312fd87e342', false);
+SELECT set_config('app.current_context_id', 'abc123...', false);
+SELECT set_config('app.current_role', 'authenticated', false);  -- or 'admin', 'demo'
+
+-- SET also works if quoted (current_role is a keyword)
+SET "app.current_user_id" = '058d2a14-ab1a-49c0-aa67-0312fd87e342';
+SET "app.current_role" = 'authenticated';
+
+-- Then execute query (RLS applies automatically)
+SELECT * FROM accounts;  -- Only returns current user's row
+```
+
+**`set_config()` parameters:**
+- First: parameter name (string)
+- Second: value (string)
+- Third: `false` = session-scoped, `true` = transaction-scoped only
+
+**Combine in single call for efficiency:**
+```sql
+SELECT
+  set_config('app.current_user_id', $1, false),
+  set_config('app.current_role', $2, false);
+```
+
+## Helper Function
+
+Create a safe helper to retrieve the current user:
+
+```sql
+CREATE OR REPLACE FUNCTION app.current_user_id()
+RETURNS uuid AS $$
+BEGIN
+  RETURN NULLIF(current_setting('app.current_user_id', true), '')::uuid;
+EXCEPTION
+  WHEN others THEN RETURN NULL;
+END;
+$$ LANGUAGE plpgsql STABLE;
+```
+
+## Table Policies
+
+### accounts (User-Scoped)
+
+```sql
+-- Enable RLS
+ALTER TABLE accounts ENABLE ROW LEVEL SECURITY;
+
+-- Users can only see their own account
+CREATE POLICY "users_select_own" ON accounts
+  FOR SELECT
+  USING (id = app.current_user_id());
+
+-- Users can update their own account
+CREATE POLICY "users_update_own" ON accounts
+  FOR UPDATE
+  USING (id = app.current_user_id())
+  WITH CHECK (id = app.current_user_id());
+
+-- Users can insert only their own account
+CREATE POLICY "users_insert_own" ON accounts
+  FOR INSERT
+  WITH CHECK (id = app.current_user_id());
+
+-- Admin bypass
+CREATE POLICY "admin_all_access" ON accounts
+  FOR ALL
+  USING (current_setting('app.current_role', true) = 'admin');
+```
+
+### contexts (Mixed: Public + User-Scoped)
+
+```sql
+ALTER TABLE contexts ENABLE ROW LEVEL SECURITY;
+
+-- Public contexts: campus, city, course, building
+CREATE POLICY "public_contexts_select" ON contexts
+  FOR SELECT
+  USING (type IN ('campus', 'city', 'course', 'building', 'classroom'));
+
+-- Student contexts: only owner
+CREATE POLICY "student_contexts_select" ON contexts
+  FOR SELECT
+  USING (
+    type = 'student'
+    AND user_id = app.current_user_id()
+  );
+
+-- Student contexts: writes constrained to owner
+CREATE POLICY "student_contexts_write" ON contexts
+  FOR ALL
+  USING (
+    type = 'student'
+    AND user_id = app.current_user_id()
+  )
+  WITH CHECK (
+    type = 'student'
+    AND user_id = app.current_user_id()
+  );
+
+-- Admin bypass
+CREATE POLICY "admin_contexts_all" ON contexts
+  FOR ALL
+  USING (current_setting('app.current_role', true) = 'admin');
+```
+
+### service_data (User-Scoped, Partitioned)
+
+```sql
+-- Apply to parent table (inherits to partitions)
+ALTER TABLE service_data ENABLE ROW LEVEL SECURITY;
+
+-- Users see only their data
+CREATE POLICY "users_select_own_service_data" ON service_data
+  FOR SELECT
+  USING (user_id = app.current_user_id());
+
+-- Writes restricted to owner
+CREATE POLICY "users_write_own_service_data" ON service_data
+  FOR ALL
+  USING (user_id = app.current_user_id())
+  WITH CHECK (user_id = app.current_user_id());
+
+-- Context-based access (for course-level data)
+CREATE POLICY "context_service_data" ON service_data
+  FOR SELECT
+  USING (
+    context_id IN (
+      SELECT cd.child_context_id
+      FROM context_dependencies cd
+      JOIN contexts c ON c.id = cd.parent_context_id
+      WHERE c.user_id = app.current_user_id()
+        AND cd.dependency_type = 'enrolled_in'
+    )
+  );
+
+-- Admin bypass
+CREATE POLICY "admin_service_data_all" ON service_data
+  FOR ALL
+  USING (current_setting('app.current_role', true) = 'admin');
+```
+
+### context_dependencies (Via Ownership Chain)
+
+```sql
+ALTER TABLE context_dependencies ENABLE ROW LEVEL SECURITY;
+
+-- User can see dependencies where they own the parent context
+CREATE POLICY "owner_dependencies_select" ON context_dependencies
+  FOR SELECT
+  USING (
+    parent_context_id IN (
+      SELECT id FROM contexts WHERE user_id = app.current_user_id()
+    )
+    OR
+    child_context_id IN (
+      SELECT id FROM contexts WHERE user_id = app.current_user_id()
+    )
+  );
+
+-- Public dependencies (course prerequisites, etc.)
+CREATE POLICY "public_dependencies_select" ON context_dependencies
+  FOR SELECT
+  USING (
+    dependency_type IN ('prerequisite', 'corequisite')
+  );
+
+-- Writes follow ownership
+CREATE POLICY "owner_dependencies_write" ON context_dependencies
+  FOR ALL
+  USING (
+    parent_context_id IN (SELECT id FROM contexts WHERE user_id = app.current_user_id())
+    OR child_context_id IN (SELECT id FROM contexts WHERE user_id = app.current_user_id())
+  )
+  WITH CHECK (
+    parent_context_id IN (SELECT id FROM contexts WHERE user_id = app.current_user_id())
+    OR child_context_id IN (SELECT id FROM contexts WHERE user_id = app.current_user_id())
+  );
+```
+
+### Public Tables (No RLS)
+
+These tables remain fully readable:
+
+```sql
+-- Campus configs - needed for onboarding, location detection
+-- No RLS, or permissive SELECT policy
+ALTER TABLE campus_configs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "public_read" ON campus_configs FOR SELECT USING (true);
+
+-- City configs
+ALTER TABLE city_configs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "public_read" ON city_configs FOR SELECT USING (true);
+
+-- Campus registry (static reference)
+ALTER TABLE campus_registry ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "public_read" ON campus_registry FOR SELECT USING (true);
+
+-- If these tables must be writeable, add explicit WITH CHECK policies; otherwise
+-- keep writes blocked (no INSERT/UPDATE/DELETE policies).
+```
+
+## API Integration
+
+### Express Middleware Pattern
+
+```typescript
+// middleware/rls-context.ts
+export const setRLSContext = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+) => {
+  if (!req.user?.id) {
+    return next(); // Anonymous - no session vars set
+  }
+
+  const client = await pool.connect();
+  let cleaned = false;
+  const cleanup = async () => {
+    if (cleaned) return;
+    cleaned = true;
+    try {
+      await client.query(`RESET ALL`); // clear session vars before returning to pool
+    } finally {
+      client.release();
+    }
+  };
+  res.on('finish', cleanup);
+  res.on('close', cleanup);
+
+  try {
+    await client.query(`
+      SELECT
+        set_config('app.current_user_id', $1, false),
+        set_config('app.current_role', $2, false)
+    `, [req.user.id, req.user.role || 'authenticated']);
+
+    // Optionally set context_id
+    if (req.user.contextId) {
+      await client.query(
+        `SELECT set_config('app.current_context_id', $1, false)`,
+        [req.user.contextId]
+      );
+    }
+
+    // Store client for request lifecycle
+    req.dbClient = client;
+    next();
+  } catch (err) {
+    await cleanup();
+    next(err);
+  }
+};
+```
+
+> Pool hygiene: Downstream handlers must use `req.dbClient` (not `pool.query`) so they run inside the session with the correct settings. The `finish/close` cleanup keeps session variables from leaking to the next request.
+
+### GraphQL Endpoint
+
+```typescript
+app.post('/graphql', authMiddleware, setRLSContext, async (req, res) => {
+  const { query, variables } = req.body;
+
+  // RLS already set via middleware
+  const result = await req.dbClient.query(
+    `SELECT graphql.resolve($1)`,
+    [query]
+  );
+
+  res.json(JSON.parse(result.rows[0].resolve));
+});
+```
+
+## Testing RLS Policies
+
+### Unit Test Pattern
+
+```typescript
+describe('RLS: accounts table', () => {
+  it('user can only see own account', async () => {
+    // Set up as User A
+    await db.query(`SELECT set_config('app.current_user_id', $1, false)`, [userAId]);
+
+    // Query all accounts
+    const result = await db.query('SELECT * FROM accounts');
+
+    // Should only see User A's account
+    expect(result.rows).toHaveLength(1);
+    expect(result.rows[0].id).toBe(userAId);
+  });
+
+  it('user cannot see other users accounts', async () => {
+    await db.query(`SELECT set_config('app.current_user_id', $1, false)`, [userAId]);
+
+    const result = await db.query('SELECT * FROM accounts WHERE id = $1', [userBId]);
+
+    expect(result.rows).toHaveLength(0);
+  });
+
+  it('admin can see all accounts', async () => {
+    await db.query(`SELECT set_config('app.current_role', 'admin', false)`);
+
+    const result = await db.query('SELECT COUNT(*) FROM accounts');
+
+    expect(parseInt(result.rows[0].count)).toBeGreaterThan(1);
+  });
+});
+```
+
+### Manual Testing via psql
+
+```bash
+# Test as specific user
+doppler run -- bash -c 'psql "$DATABASE_URL" -c "
+  SELECT set_config('\''app.current_user_id'\'', '\''058d2a14-ab1a-49c0-aa67-0312fd87e342'\'', false);
+  SELECT id, email FROM accounts;
+"'
+
+# Test admin role bypass
+doppler run -- bash -c 'psql "$DATABASE_URL" -c "
+  SELECT set_config('\''app.current_role'\'', '\''admin'\'', false);
+  SELECT COUNT(*) FROM accounts;
+"'
+
+# Verify current settings
+doppler run -- bash -c 'psql "$DATABASE_URL" -c "
+  SELECT
+    current_setting('\''app.current_user_id'\'', true) as user_id,
+    current_setting('\''app.current_role'\'', true) as role;
+"'
+```
+
+## Migration Strategy
+
+### Phase 1: Enable RLS (No Breaking Changes)
+
+```sql
+-- Enable RLS but add permissive policy first
+ALTER TABLE accounts ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "temp_allow_all" ON accounts FOR ALL USING (true);
+
+-- Test that existing code still works
+```
+
+### Phase 2: Add Restrictive Policies
+
+```sql
+-- Add the real policy
+CREATE POLICY "users_select_own" ON accounts FOR SELECT
+  USING (id = app.current_user_id());
+
+-- Drop the temp policy
+DROP POLICY "temp_allow_all" ON accounts;
+```
+
+### Phase 3: Update Application Code
+
+- Add session variable setting to all database connections
+- Update connection pool management
+- Add RLS context middleware
+
+## Performance Considerations
+
+### Index Requirements
+
+RLS policies add WHERE conditions. Ensure indexes exist:
+
+```sql
+-- For user-scoped queries
+CREATE INDEX IF NOT EXISTS idx_contexts_user_id ON contexts(user_id);
+CREATE INDEX IF NOT EXISTS idx_service_data_user_id ON service_data(user_id);
+
+-- For context chain lookups
+CREATE INDEX IF NOT EXISTS idx_context_deps_parent ON context_dependencies(parent_context_id);
+CREATE INDEX IF NOT EXISTS idx_context_deps_child ON context_dependencies(child_context_id);
+```
+
+### Query Plan Verification
+
+```sql
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT * FROM accounts;  -- With RLS enabled
+
+-- Should show Index Scan on id = current_setting(...)
+```
+
+## Debugging RLS
+
+### Check Active Policies
+
+```sql
+SELECT
+  schemaname,
+  tablename,
+  policyname,
+  permissive,
+  roles,
+  cmd,
+  qual
+FROM pg_policies
+WHERE tablename = 'accounts';
+```
+
+### Check Current Session Variables
+
+```sql
+SELECT
+  current_setting('app.current_user_id', true) as user_id,
+  current_setting('app.current_context_id', true) as context_id,
+  current_setting('app.current_role', true) as role;
+```
+
+### Bypass RLS for Debugging (Superuser Only)
+
+```sql
+SET row_security = off;  -- Dangerous! Only for debugging
+SELECT * FROM accounts;
+SET row_security = on;
+```
+
+## Related Documentation
+
+- [GraphQL-pg_graphql-Setup](/docs/engineering/technical/graphql-pggraphql-setup) - GraphQL integration
+- Authentication-Architecture - How user identity flows
+- [Database-Access-Patterns](/docs/engineering/architecture/row-level-security-rls-patterns) - Current query patterns
+
+## References
+
+- [PostgreSQL RLS Documentation](https://www.postgresql.org/docs/current/ddl-rowsecurity.html)
+- [Neon RLS Guide](https://neon.tech/docs/guides/row-level-security)
+- Linear: DORM-680

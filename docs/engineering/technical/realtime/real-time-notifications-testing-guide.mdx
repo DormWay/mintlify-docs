@@ -1,0 +1,191 @@
+---
+title: "Real time Notifications   Testing Guide"
+description: "Create these empty push templates in Customer.io (API Triggered Broadcasts):"
+---
+
+# Real-time Notifications - Testing Guide
+
+## Prerequisites
+
+### 1. Customer.io Templates
+Create these empty push templates in Customer.io (API Triggered Broadcasts):
+- `realtime_library_arrival_push`
+- `realtime_study_break_push`
+- `realtime_study_encouragement_push`
+- `realtime_campus_arrival_push`
+- `realtime_deadline_urgent_push`
+- `realtime_class_cancelled_push`
+- `realtime_generic_push`
+
+### 2. Services Running
+```bash
+# Start all services
+pnpm run dev
+
+# Or individually:
+pnpm run start-engine
+pnpm run start-api
+```
+
+### 3. Test User Setup
+Ensure test user has:
+- Valid notification preferences
+- Push token registered
+- Some assignments/deadlines in system
+
+## Quick Test Commands
+
+### 1. Test Library Arrival
+```bash
+curl -X POST http://localhost:3001/api/events/location \
+  -H "Content-Type: application/json" \
+  -d '{
+    "userId": "bcb74531-18e4-48c0-91fb-927f211c43bb",
+    "coordinates": { "lat": 42.2761, "lng": -83.7382 },
+    "accuracy": 15,
+    "timestamp": "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'",
+    "source": "gps",
+    "metadata": {
+      "buildingId": "shapiro-library",
+      "floor": 2
+    }
+  }'
+```
+
+### 2. Test Long Study Session
+```bash
+curl -X POST http://localhost:3001/api/events/study-session \
+  -H "Content-Type: application/json" \
+  -d '{
+    "userId": "bcb74531-18e4-48c0-91fb-927f211c43bb",
+    "sessionId": "test-'$(date +%s)'",
+    "startTime": "'$(date -u -d '2 hours ago' +%Y-%m-%dT%H:%M:%SZ)'",
+    "duration": 120,
+    "location": "library",
+    "subject": "EECS 281",
+    "breaksTaken": 0
+  }'
+```
+
+### 3. Test Campus Arrival
+```bash
+curl -X POST http://localhost:3001/api/events/context \
+  -H "Content-Type: application/json" \
+  -d '{
+    "userId": "bcb74531-18e4-48c0-91fb-927f211c43bb",
+    "type": "arrived_campus",
+    "data": {
+      "previousContext": "off_campus",
+      "newContext": "campus",
+      "confidence": 0.95,
+      "location": "North Campus"
+    },
+    "timestamp": "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"
+  }'
+```
+
+## Automated Test Suite
+
+Run all tests:
+```bash
+cd /Users/ekaplan/Development/GitHub/dormway-dev-tools/dormway/engine
+./src/scripts/run-realtime-tests.sh
+```
+
+Or run individual test suites:
+```bash
+# API endpoint tests
+npx ts-node src/scripts/test-realtime-api-endpoints.ts
+
+# Workflow monitoring tests
+npx ts-node src/scripts/test-realtime-workflow-monitoring.ts
+
+# Edge case tests
+npx ts-node src/scripts/test-realtime-edge-cases.ts
+```
+
+## Verification Steps
+
+### 1. Check Temporal Workflows
+```bash
+# Open Temporal UI
+open http://localhost:8233
+
+# Look for workflows named:
+# contextual-{userId}-{eventType}-{timestamp}
+```
+
+### 2. Check Database Logs
+```sql
+-- Recent notification decisions
+SELECT * FROM notification_analytics 
+WHERE user_id = 'bcb74531-18e4-48c0-91fb-927f211c43bb'
+ORDER BY created_at DESC 
+LIMIT 10;
+
+-- Notification history
+SELECT * FROM engine_notification_history
+WHERE user_id = 'bcb74531-18e4-48c0-91fb-927f211c43bb'
+AND metadata->>'source' = 'realtime_event'
+ORDER BY created_at DESC
+LIMIT 10;
+```
+
+### 3. Check Customer.io
+1. Go to Customer.io dashboard
+2. Navigate to People → Find test user
+3. Check Activity Feed for push notifications
+4. Verify template IDs match expected values
+
+### 4. Check Logs
+```bash
+# Engine logs
+pm2 logs engine --nostream | grep -E "(contextual|realtime)"
+
+# API logs  
+pm2 logs api --nostream | grep -E "(events|context)"
+
+# Check for errors
+pm2 logs --nostream | grep -i error
+```
+
+## Common Issues
+
+### No Notification Sent
+1. Check user has notifications enabled
+2. Verify not in quiet hours
+3. Check rate limits (3/hour)
+4. Ensure user has context in database
+
+### Workflow Not Found
+1. Wait 2-3 seconds after sending event
+2. Check correct namespace in Temporal
+3. Verify engine service is running
+
+### Customer.io Issues
+1. Verify template IDs exist
+2. Check API credentials in Doppler
+3. Ensure user has valid push token
+
+## Testing Scenarios
+
+### Basic Flow Test
+1. Send library arrival event
+2. Wait for workflow completion
+3. Verify notification sent
+4. Check analytics logged
+
+### Rate Limit Test
+1. Send 4 events quickly
+2. Verify only 3 notifications sent
+3. 4th should be blocked
+
+### Quiet Hours Test
+1. Set user quiet hours to current time
+2. Send event
+3. Verify notification deferred
+
+### Edge Case Test
+1. Send event for non-existent user
+2. Verify graceful failure
+3. Check no crash in services

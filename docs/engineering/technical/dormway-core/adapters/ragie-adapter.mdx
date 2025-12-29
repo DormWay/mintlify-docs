@@ -1,0 +1,186 @@
+---
+title: "Ragie Adapter"
+description: "import { getRagieAdapter } from '@dormway/core/adapters/ragie';"
+---
+
+# Ragie Adapter
+
+## Overview
+
+**Ragie Adapter** provides Ragie integration for RAG (Retrieval-Augmented Generation) with document ingestion, semantic search, and embeddings.
+
+**Purpose**: Centralized RAG infrastructure for syllabus processing, course materials, and knowledge retrieval.
+
+**Location**: `@dormway/core/adapters/ragie`
+
+---
+
+## Installation
+
+```typescript
+import { getRagieAdapter } from '@dormway/core/adapters/ragie';
+
+const ragie = getRagieAdapter();
+```
+
+---
+
+## Configuration
+
+**Environment variables**:
+- `RAGIE_API_KEY` - Ragie API key
+
+---
+
+## Methods
+
+### ingestDocument
+
+Ingest document for semantic search (supports text and binary formats).
+
+**Signature**:
+```typescript
+ingestDocument(documentId: string, content: string | Buffer, metadata?: Record<string, any>): Promise<void>
+```
+
+**Supported formats**:
+- Text: Plain text, Markdown, JSON
+- Documents: PDF, DOCX, PPTX, XLSX
+- Images: PNG, JPG (with OCR)
+- Code: Source files with syntax awareness
+
+**Examples**:
+
+**Text content**:
+```typescript
+await ragie.ingestDocument('syllabus-cs101', syllabusText, {
+  courseCode: 'CS 101',
+  semester: 'Fall 2025',
+  campus: 'University of Michigan',
+});
+```
+
+**PDF binary**:
+```typescript
+const pdfBuffer = await fs.readFile('syllabus.pdf');
+await ragie.ingestDocument('syllabus-cs101', pdfBuffer, {
+  type: 'syllabus',
+  courseCode: 'CS 101',
+  format: 'pdf',
+});
+```
+
+**Image with OCR**:
+```typescript
+const imageBuffer = await fs.readFile('whiteboard.png');
+await ragie.ingestDocument('lecture-notes-1', imageBuffer, {
+  courseCode: 'MATH 215',
+  lectureNumber: 1,
+  format: 'image',
+});
+```
+
+---
+
+### search
+
+Semantic search across ingested documents.
+
+**Signature**:
+```typescript
+search(query: string, options?: { limit?: number; filter?: Record<string, any> }): Promise<SearchResult[]>
+```
+
+**Example**:
+```typescript
+const results = await ragie.search('assignment deadlines', {
+  limit: 5,
+  filter: { courseCode: 'CS 101' },
+});
+
+results.forEach((result) => {
+  console.log(result.content, result.score);
+});
+```
+
+---
+
+### deleteDocument
+
+Remove document from index.
+
+**Signature**:
+```typescript
+deleteDocument(documentId: string): Promise<void>
+```
+
+**Example**:
+```typescript
+await ragie.deleteDocument('syllabus-cs101');
+```
+
+---
+
+## Common Patterns
+
+### Pattern 1: Syllabus PDF Ingestion
+
+```typescript
+async function ingestSyllabusPDF(syllabusId: string, pdfBuffer: Buffer, metadata: any) {
+  await ragie.ingestDocument(syllabusId, pdfBuffer, {
+    type: 'syllabus',
+    courseCode: metadata.courseCode,
+    courseName: metadata.courseName,
+    semester: metadata.semester,
+    campus: metadata.campus,
+    format: 'pdf',
+  });
+}
+
+// Direct file upload
+async function uploadSyllabusFile(syllabusId: string, filePath: string, metadata: any) {
+  const fileBuffer = await fs.readFile(filePath);
+  await ragie.ingestDocument(syllabusId, fileBuffer, {
+    ...metadata,
+    fileName: path.basename(filePath),
+  });
+}
+```
+
+---
+
+### Pattern 2: Course Search
+
+```typescript
+async function searchCourseContent(query: string, courseCode: string) {
+  return ragie.search(query, {
+    limit: 10,
+    filter: { courseCode },
+  });
+}
+```
+
+---
+
+## Best Practices
+
+### ✅ Do
+- **Use native formats** (PDFs, DOCX, images) - Ragie handles extraction
+- **Include rich metadata** for filtering and context
+- **Use semantic search** for natural language queries
+- **Delete outdated documents** to keep index fresh
+- **Monitor API usage** and rate limits
+- **Leverage multimodal** (images, diagrams, charts with OCR)
+- **Add document type** in metadata for filtering
+
+### ❌ Don't
+- **Don't skip metadata** (essential for filtering and search quality)
+- **Don't expose API keys** in client code
+- **Don't forget error handling** for failed ingestion
+- **Don't re-ingest unchanged documents** (wastes quota)
+- **Don't mix unrelated content** in same document ID
+
+---
+
+**Last Updated**: 2025-11-23
+**Maintainer**: Platform Team

@@ -1,0 +1,341 @@
+---
+title: "2025 10 29 worker maintenance and clerk migration"
+description: "Fixed two critical bugs: worker-maintenance-workflow not detecting active students (showed 12 healthy workflows but none actually running), and completed the..."
+---
+
+# Worker Maintenance & Clerk Migration - DORM-453, DORM-454
+
+**Date**: October 29, 2025
+**Status**: ✅ Resolved
+**PR**: [#376](https://github.com/DormWay/dormway-platform/pull/376)
+**Issues**: DORM-453, DORM-454
+**Services**: engine, dormway-admin
+
+## Summary
+
+Fixed two critical bugs: worker-maintenance-workflow not detecting active students (showed 12 healthy workflows but none actually running), and completed the Auth0 to Clerk authentication migration across dormway-admin.
+
+## Issues Fixed
+
+### DORM-453: Worker Maintenance Not Finding Active Students
+
+**Symptoms**:
+- Admin dashboard showed "12 workflows, 12 healthy"
+- Reality: NO workflows were actually running in Temporal
+- Only 2 users getting workflows restarted (admin@dormway.app, demo@dormway.app)
+- 9 active students without workflows
+
+**Root Cause**:
+The worker maintenance activity was checking `auth0_id IS NOT NULL` to identify active users. However:
+- **The project uses Clerk for authentication, NOT Auth0** (explicitly documented in CLAUDE.md)
+- Only 2 legacy users had `auth0_id` populated from the migration
+- 9 active students using Clerk authentication were being excluded
+
+**Fix**:
+```sql
+-- BEFORE (services/engine/src/activities/workerMaintenance.activities.ts:84-89)
+let whereConditions = [
+  'a.auth0_id IS NOT NULL',  // ❌ WRONG - excludes Clerk users
+  `COALESCE(LOWER(a.onboarding_status), '') = ANY($1::text[])`
+];
+
+-- AFTER
+let whereConditions = [
+  `COALESCE(LOWER(a.onboarding_status), '') = ANY($1::text[])`
+];
+```
+
+Also reverted Temporal query to simple approach:
+```typescript
+// Query for RUNNING workflows only - missing ones are detected automatically
+for await (const workflow of client.list({
+  query: 'WorkflowType="studentWatcherWorkflow" AND ExecutionStatus="Running"'
+})) {
+  // ...
+}
+```
+
+**Test Results**:
+- ✅ Worker maintenance now finds all 11 active students
+- ✅ All 11 studentWatcher workflows started successfully
+- ✅ Dashboard: 11 total, 11 healthy, 0 unhealthy
+- ✅ Engine logs: "Found 11 students who should have workflows"
+
+### DORM-454: StudentWatcher Component Wrong Endpoints
+
+**Symptoms**:
+- StudentWatcher component making API calls that 404'd
+- Browser console showing "Auth0Provider was not found as an ancestor"
+
+**Root Causes**:
+1. API calls missing `/api` prefix: `/temporal/workflow/...` → should be `/api/temporal/workflow/...`
+2. Using Auth0 hooks (`useAuth0()`) instead of Clerk (`useAuth()`
+3. Wrong token retrieval method
+
+**Fix** (services/dormway-admin/src/components/StudentWatcher.tsx):
+```typescript
+// BEFORE
+import { useAuth0 } from '@auth0/auth0-react';
+const { getAccessTokenSilently } = useAuth0();
+await axios.get(`${apiUrl}/temporal/workflow/${workflowId}`)
+
+// AFTER
+import { useAuth } from '@clerk/clerk-react';
+const { getToken } = useAuth();
+await axios.get(`${apiUrl}/api/temporal/workflow/${workflowId}`)
+```
+
+Updated 6 endpoints:
+- GET `/api/temporal/workflow/:id`
+- POST `/api/temporal/workflow/:id/terminate`
+- POST `/api/temporal/workflow/:id/restart`
+- GET `/api/temporal/activity/:id`
+- POST `/api/temporal/activity/:id/terminate`
+- POST `/api/temporal/activity/:id/retry`
+
+## Complete Auth0 to Clerk Migration
+
+Found and fixed 5 dormway-admin pages still using Auth0 despite project-wide migration to Clerk.
+
+### Files Migrated
+
+#### 1. StudentWatcher.tsx
+- Migrated from `useAuth0()` to `useAuth()` from `@clerk/clerk-react`
+- Fixed token method: `getAccessTokenSilently() → getToken()`
+- Added `/api` prefix to all Temporal endpoints
+
+#### 2. ImprovedDashboard.tsx
+- Migrated to Clerk: `useAuth()` instead of `useAuth0()`
+- Variables: `isSignedIn, isLoaded` instead of `isAuthenticated, isLoading`
+- **Added null token check**:
+```typescript
+const token = await getToken();
+if (!token) {
+  throw new Error('Authentication token not available');
+}
+```
+- **Fixed stale dependency**: `useEffect` dependency array used `isAuthenticated` but variable was renamed to `isSignedIn`
+
+#### 3. plugins/index.tsx
+- Migrated to Clerk with proper variables
+- Fixed loading check: `!isLoaded` instead of `authLoading`
+- Fixed dependency array to use `isLoaded, isSignedIn`
+
+#### 4. portkey/index.tsx
+- Fixed axios interceptor to handle null tokens:
+```typescript
+const createApiClient = (getToken: () => Promise<string | null>) => {
+  client.interceptors.request.use(async (config) => {
+    const token = await getToken();
+    if (!token) {
+      throw new Error('Authentication token not available');
+    }
+    config.headers.Authorization = `Bearer ${token}`;
+  });
+};
+```
+
+#### 5. CampusDataManager.tsx
+- Added null checks for all 5 `getToken()` calls
+- Prevents `Authorization: Bearer null` headers
+
+### Additional Fixes (Post-Review)
+
+After Cursor bot flagged remaining issues:
+
+#### 6. StudentWatcher.tsx (Additional Null Checks)
+- Added null checks for 2 remaining `getToken()` calls in workflow query operations
+- Fixed Error icon naming conflict by renaming import to `ErrorIcon`
+- Prevents `Authorization: Bearer null` in workflow status and query requests
+
+**Error Icon Fix**:
+```typescript
+// BEFORE - Error from @mui/icons-material shadows global Error constructor
+import { Error } from '@mui/icons-material';
+throw new Error('...');  // ❌ TypeScript error: Error is not constructible
+
+// AFTER - Renamed to avoid conflict
+import { Error as ErrorIcon } from '@mui/icons-material';
+throw new Error('...');  // ✅ Uses global Error constructor
+return <ErrorIcon />;    // ✅ Uses MUI icon
+```
+
+#### 7. workerMaintenance.activities.ts (Query Filter Fix)
+- **REVERTED**: Removed `ExecutionStatus="Running"` filter from Temporal query
+- Now queries ALL studentWatcher workflows regardless of state
+- Enables status mapping logic to properly categorize workflows
+
+**Why This Matters**:
+```typescript
+// BEFORE - Only queried Running workflows
+query: 'WorkflowType="studentWatcherWorkflow" AND ExecutionStatus="Running"'
+// Result: Cancelled/failed/terminated workflows detected as "missing"
+// Status mapping logic (lines 150-180) was unreachable
+
+// AFTER - Query all workflows
+query: 'WorkflowType="studentWatcherWorkflow"'
+// Result: Workflows properly categorized by actual status
+// Restart logic (lines 268-272) can handle failed/terminated/cancelled states
+```
+
+The code has status mapping for 7 states:
+- `running`, `completed`, `failed`, `cancelled`, `terminated`, `timed_out`, `continued_as_new`
+
+And restart conditions specifically check for:
+```typescript
+if (health.status === 'failed' ||
+    health.status === 'terminated' ||
+    health.status === 'cancelled' ||
+    health.status === 'completed' ||
+    health.status === 'timed_out' ||
+    health.status === 'missing')
+```
+
+Without the filter, this logic now functions as designed, providing:
+- Better logging (actual status vs "missing")
+- More accurate health reporting
+- Proper categorization in dashboard metrics
+
+## Technical Details
+
+### Why Clerk's getToken() Returns null
+
+Clerk's `getToken()` returns `Promise<string | null>`:
+- Returns `null` when user is not authenticated
+- Returns `null` when token fetch fails
+- Returns `null` during initial load before auth state is ready
+
+Without null checks:
+```typescript
+// ❌ BAD - creates invalid header
+const token = await getToken(); // Could be null!
+config.headers.Authorization = `Bearer ${token}`; // "Bearer null"
+```
+
+With null checks:
+```typescript
+// ✅ GOOD - fails fast with clear error
+const token = await getToken();
+if (!token) {
+  throw new Error('Authentication token not available');
+}
+config.headers.Authorization = `Bearer ${token}`;
+```
+
+### Why isLoaded is Important
+
+Clerk provides `isLoaded` to prevent premature data fetching:
+```typescript
+const { isSignedIn, isLoaded } = useAuth();
+
+useEffect(() => {
+  // ❌ BAD - races with auth initialization
+  fetchData();
+}, []);
+
+// ✅ GOOD - waits for auth to be ready
+useEffect(() => {
+  if (isLoaded && isSignedIn) {
+    fetchData();
+  }
+}, [isLoaded, isSignedIn]);
+```
+
+## Lessons Learned
+
+### 1. Always Check CLAUDE.md First
+The project explicitly documents using **Clerk**, not Auth0. This was stated multiple times in CLAUDE.md but wasn't caught during initial implementation.
+
+### 2. Legacy Columns Can Be Misleading
+The `accounts.auth0_id` column still exists for migration support but should NOT be used for active user detection. Presence of a column doesn't mean it's current.
+
+### 3. Null Checks Are Critical for TypeScript Optional Returns
+When TypeScript says `Promise<string | null>`, that null case WILL happen. Don't skip the null check.
+
+### 4. Dependency Arrays Must Match Variables
+After renaming `isAuthenticated` to `isSignedIn`, all useEffect dependencies must be updated. TypeScript doesn't catch this because both are boolean variables.
+
+### 5. API Endpoint Consistency
+Frontend and backend must agree on:
+- Endpoint paths (with or without `/api` prefix)
+- Authentication methods (Clerk vs Auth0)
+- Token formats
+
+## Files Changed
+
+### Backend (engine)
+- `services/engine/src/activities/workerMaintenance.activities.ts`
+  - Removed `auth0_id IS NOT NULL` check
+  - Removed `ExecutionStatus="Running"` filter (enables full status mapping)
+  - Added debug logging
+  - Rebuilt workflow bundle
+
+### Frontend (dormway-admin)
+- `services/dormway-admin/src/components/StudentWatcher.tsx`
+  - Auth0 → Clerk migration
+  - Added `/api` prefix to all 6 endpoints
+  - Added 2 null token checks for workflow query operations
+  - Fixed Error icon naming conflict (`Error` → `ErrorIcon`)
+
+- `services/dormway-admin/src/pages/dashboard/ImprovedDashboard.tsx`
+  - Auth0 → Clerk migration
+  - Added null token check
+  - Fixed stale dependency (`isAuthenticated` → `isSignedIn`)
+
+- `services/dormway-admin/src/pages/plugins/index.tsx`
+  - Auth0 → Clerk migration
+  - Fixed loading variable references (`authLoading` → `!isLoaded`)
+
+- `services/dormway-admin/src/pages/portkey/index.tsx`
+  - Fixed axios interceptor null handling
+  - Proper error propagation on null tokens
+
+- `services/dormway-admin/src/pages/campus/CampusDataManager.tsx`
+  - Added 5 null token checks for all API operations
+
+## Testing
+
+### Build Verification
+```bash
+cd services/dormway-admin
+npm run build
+# ✅ SUCCESS: Built in 15.34s
+```
+
+### Worker Maintenance Testing
+```bash
+# Check Temporal workflows
+# Before: 0 running (but dashboard said "12 healthy")
+# After: 11 running (all active students)
+```
+
+### Engine Logs
+```
+[WorkerMaintenance] Found 11 students who should have workflows
+[WorkerMaintenance] Starting student-watcher workflow for user: ...
+[WorkerMaintenance] Successfully started 11 workflows
+```
+
+### Admin Dashboard
+- No Auth0Provider errors in console
+- All API calls succeed with proper `/api` prefix
+- Token headers properly formatted
+
+## Deployment Notes
+
+- ✅ No database migrations required
+- ✅ No environment variable changes
+- ✅ Both backend (engine) and frontend (dormway-admin) updated
+- ⚠️ Must restart engine service to apply worker maintenance fixes
+- ⚠️ Clear browser cache/localStorage to reset any cached Auth0 state
+
+## Related Documentation
+
+- CLAUDE.md - Documents Clerk as primary auth system
+- [Authentication System](/docs/engineering/technical/authentication/readme) - Architecture for Clerk integration
+- Temporal Workflows - Worker maintenance patterns
+- PR - Full PR with all changes
+
+## Tags
+
+#bugfix #authentication #clerk #temporal #worker-maintenance #migration #dorm-453 #dorm-454

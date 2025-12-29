@@ -1,0 +1,376 @@
+---
+title: "Web Dashboard Widget Data Contract"
+description: "TypeScript interfaces defining the exact data shape each frontend widget expects from the BFF adapter. This is the **contract** between frontend and backend..."
+---
+
+# Web Dashboard Widget Data Contract
+
+## Purpose
+
+TypeScript interfaces defining the exact data shape each frontend widget expects from the BFF adapter. This is the **contract** between frontend and backend teams.
+
+**Audience**: Backend engineers building widget data adapters in `dashboard-composite-transformer.ts`
+
+**Source of Truth**: `services/dormway-lockedin/src/app/dashboard/home-v2/widgets/types.ts`
+
+## Overview
+
+The frontend Elastic Widget System expects data delivered via `WidgetEnvelope` objects from the `/dashboard/v1/composite` endpoint.
+
+```typescript
+interface WidgetEnvelope {
+  id: string;                    // Unique identifier (e.g., "widget:academic")
+  type: string;                  // Widget type key (e.g., "academic", "attendance")
+  title?: string;                // Display title
+  priority?: number;             // Sort order (lower = higher priority)
+  content: {
+    displayType?: string;        // Layout hint (e.g., "summary", "list", "timeline")
+    data: WidgetSpecificData;    // The payload - varies by widget type
+  };
+  grid?: {
+    w?: number;                  // Preferred width in grid columns
+    h?: number;                  // Preferred height in grid rows
+    minW?: number;               // Minimum width
+    minH?: number;               // Minimum height
+  };
+}
+```
+
+## Widget Data Contracts
+
+### 1. Academic Widget (`type: "academic"`)
+
+**Status**: Exists (partial) - needs `htmlUrl` field added
+
+```typescript
+interface AcademicWidgetData {
+  /** Assignments due soon, sorted by urgency */
+  urgentAssignments?: AcademicAssignment[];
+
+  /** All assignments for expanded view */
+  allAssignments?: AcademicAssignment[];
+
+  /** Pre-computed counts for compact displays */
+  dueToday?: number;
+  dueThisWeek?: number;
+  overdue?: number;
+}
+
+interface AcademicAssignment {
+  id: string;
+  title: string;
+  dueAt?: string;              // ISO 8601 timestamp
+  dueDate?: string;            // ISO 8601 date (alternative)
+  courseCode?: string;         // e.g., "CS 3500"
+  courseContextId?: string;    // UUID linking to contexts table
+  status?: 'pending' | 'completed' | 'overdue';
+  priority?: 'low' | 'medium' | 'high' | 'urgent';
+  htmlUrl?: string;            // Canvas assignment URL (needed for "Open" button)
+}
+```
+
+**Backend Source**: `service_data` where `method = 'canvas_assignments'` or parsed syllabus dates
+
+---
+
+### 2. Attendance Widget (`type: "attendance"`)
+
+**Status**: NEW - needs backend adapter
+
+```typescript
+interface AttendanceWidgetData {
+  /** Attendance policies by course */
+  policies?: AttendancePolicy[];
+
+  /** Pre-computed summary stats */
+  totalRemaining?: number;     // Sum of remaining skips across all courses
+  hasRiskyCourse?: boolean;    // true if any course has 0 skips left
+}
+
+interface AttendancePolicy {
+  /** Course code (e.g., "CS 3500") */
+  courseCode: string;
+
+  /** Full course name */
+  courseName?: string;
+
+  /** Total allowed absences before penalty */
+  allowedSkips: number;
+
+  /** Number of absences already used */
+  usedSkips: number;
+
+  /** Penalty description from syllabus */
+  penalty: string;             // e.g., "-5% per absence after 3"
+
+  /** Original policy text from syllabus (for transparency) */
+  policyText?: string;
+
+  /** Date of last recorded absence */
+  lastAbsence?: string;        // ISO 8601 date
+
+  /** Course context ID for linking */
+  courseContextId?: string;
+}
+```
+
+**Backend Source**:
+- `service_data` where `method = 'processed_syllabus'`
+- Extract from `data.attendance_policy` or similar LLM-parsed field
+- `usedSkips` needs storage (new table or user_preferences JSONB)
+
+**Implementation Notes**:
+1. Parse syllabus JSONB for attendance policy text
+2. Use LLM to extract structured `allowedSkips` and `penalty`
+3. Store `usedSkips` in user-editable location (manual tracking)
+4. Calculate `totalRemaining` server-side
+
+---
+
+### 3. Tasks Widget (`type: "tasks"`)
+
+**Status**: Partial - dayplan widget exists, needs unification
+
+```typescript
+interface TasksWidgetData {
+  /** All task items sorted by due date */
+  items?: TaskItem[];
+
+  /** Pre-computed counts */
+  dueToday?: number;
+  overdue?: number;
+  total?: number;
+}
+
+interface TaskItem {
+  id: string;
+  title: string;
+  type: 'assignment' | 'exam' | 'personal' | 'event';
+  source: 'canvas' | 'syllabus' | 'user';
+  dueAt: string;               // ISO 8601 timestamp
+  priority: 'low' | 'medium' | 'high' | 'urgent';
+  courseCode?: string;
+  courseColor?: string;        // CSS variable or hex color
+  status: 'pending' | 'completed';
+}
+```
+
+**Backend Source**: Merge Canvas assignments, syllabus dates, user-created tasks
+
+---
+
+### 4. Schedule Widget (`type: "schedule"`)
+
+**Status**: Exists
+
+```typescript
+interface ScheduleWidgetData {
+  /** Timeline events for the day */
+  items?: TimelineEvent[];
+
+  /** Current/next class for compact display */
+  currentClass?: TimelineEvent;
+  nextClass?: TimelineEvent;
+}
+
+interface TimelineEvent {
+  id: string;
+  title: string;
+  startTime: string;           // ISO 8601 timestamp
+  endTime: string;             // ISO 8601 timestamp
+  type?: 'class' | 'event' | 'task' | 'free';
+  location?: string;
+  courseCode?: string;
+  source?: string;             // e.g., "google_calendar", "canvas"
+}
+```
+
+**Backend Source**: `service_data` where `method = 'calendar_events'`
+
+---
+
+### 5. Day Plan Widget (`type: "dayplan"`)
+
+**Status**: Exists
+
+```typescript
+interface DayPlanWidgetData {
+  /** Ordered timeline for the day */
+  timeline?: TimelineEvent[];
+
+  /** Date this plan is for */
+  date?: string;               // ISO 8601 date
+
+  /** When this plan was generated/updated */
+  lastUpdated?: string;        // ISO 8601 timestamp
+}
+```
+
+**Backend Source**: AI-generated from schedule + tasks, stored in `service_data`
+
+---
+
+### 6. Dining Widget (`type: "dining"`) - PLANNED
+
+**Status**: Does not exist
+
+```typescript
+interface DiningWidgetData {
+  /** Dining halls with current status */
+  halls?: DiningHall[];
+
+  /** User's preferred/nearest hall */
+  preferredHall?: DiningHall;
+}
+
+interface DiningHall {
+  id: string;
+  name: string;
+  status: 'open' | 'closed' | 'closing_soon';
+  closingTime?: string;        // e.g., "8:00 PM"
+  occupancy?: 'low' | 'medium' | 'high';
+  topItems?: string[];         // Featured menu items
+  distance?: number;           // Meters from user
+}
+```
+
+**Backend Source**: Campus dining API integration (varies by campus)
+
+---
+
+### 7. Laundry Widget (`type: "laundry"`) - PLANNED
+
+**Status**: Does not exist
+
+```typescript
+interface LaundryWidgetData {
+  /** Laundry room status */
+  room?: LaundryRoom;
+
+  /** User's active machines */
+  myMachines?: LaundryMachine[];
+}
+
+interface LaundryRoom {
+  id: string;
+  name?: string;
+  washers: { available: number; total: number };
+  dryers: { available: number; total: number };
+}
+
+interface LaundryMachine {
+  type: 'washer' | 'dryer';
+  id: string;
+  timeRemaining: number;       // Seconds
+  status: 'running' | 'done' | 'available';
+}
+```
+
+**Backend Source**: LaundryView API or campus-specific integration
+
+---
+
+### 8. Focus Timer Widget (`type: "focus"`) - PLANNED
+
+**Status**: Client-side only initially
+
+```typescript
+interface FocusWidgetData {
+  /** Active focus session (if any) */
+  session?: FocusSession;
+
+  /** Today's focus stats */
+  todayMinutes?: number;
+  sessionsCompleted?: number;
+}
+
+interface FocusSession {
+  isActive: boolean;
+  task?: TaskItem;
+  startTime?: string;
+  durationMinutes: number;
+  timeRemaining: number;       // Seconds
+  mode: 'pomodoro' | 'stopwatch';
+}
+```
+
+**Backend Source**: Initially client-side; later sync to backend for stats
+
+---
+
+## Display Types
+
+Widgets can specify a `displayType` to hint at preferred rendering:
+
+| displayType | Description | Use Case |
+|-------------|-------------|----------|
+| `summary` | Compact metrics | Small widgets (2x2) |
+| `list` | Scrollable list | Standard widgets |
+| `timeline` | Time-based view | Schedule/day plan |
+| `upcoming_class` | Next class focus | Schedule widget variant |
+| `ticker` | Horizontal scroll | Wide, short widgets (12x1) |
+
+---
+
+## Priority Guidelines
+
+Lower priority = higher visual priority (shown first/larger)
+
+| Priority | Widget Types | Rationale |
+|----------|--------------|-----------|
+| 1-10 | Action CTAs, Focus Timer | Immediate action |
+| 11-20 | Academic, Tasks | Core productivity |
+| 21-30 | Schedule, Day Plan | Time awareness |
+| 31-40 | Attendance, Dining | Daily utilities |
+| 41-50 | Laundry, Quick Links | Convenience |
+
+---
+
+## Caching Recommendations
+
+| Widget Type | TTL | Invalidation Trigger |
+|-------------|-----|---------------------|
+| `academic` | 5 min | Canvas sync, assignment completion |
+| `attendance` | 30 min | Manual absence log |
+| `schedule` | 5 min | Calendar sync |
+| `dayplan` | 15 min | AI regeneration |
+| `dining` | 10 min | Menu refresh |
+| `laundry` | 1 min | Machine status change |
+
+---
+
+## Implementation Checklist
+
+### Backend Tasks
+
+- [ ] **Attendance Adapter**: Extract attendance policies from `processed_syllabus` JSONB
+- [ ] **Academic Enhancement**: Add `htmlUrl` field to assignment transformation
+- [ ] **Tasks Unification**: Merge Canvas + syllabus + user tasks into single `TaskItem[]`
+- [ ] **Re-enable Redis**: Set `redisEnabled = true` in `dashboard-routes.ts`
+- [ ] **Dining Adapter**: Integrate campus dining API (campus-specific)
+- [ ] **Laundry Adapter**: Integrate LaundryView API (campus-specific)
+
+### Questions for Discussion
+
+1. **Attendance Storage**: Where should `usedSkips` be persisted?
+   - New `attendance_tracking` table
+   - `user_preferences` JSONB field
+   - `service_data` with `method = 'attendance_log'`
+
+2. **Syllabus Policy Parsing**: Is the LLM currently extracting structured attendance data?
+
+3. **Canvas htmlUrl**: Is this field available in the Canvas API response?
+
+4. **Redis Re-enablement**: Any blockers to enabling Redis caching?
+
+---
+
+## Related Documentation
+
+- [Web Dashboard Elastic Widget System](/docs/engineering/architecture/web-dashboard-elastic-widget-system) - Frontend architecture
+- Dashboard Backend-for-Frontend (BFF) - BFF endpoint details
+- Dashboard Context-Aware BFF - Context system integration
+
+---
+
+*Last updated: 2025-11-26*

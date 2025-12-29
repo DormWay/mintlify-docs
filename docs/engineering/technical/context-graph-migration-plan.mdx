@@ -1,0 +1,328 @@
+---
+title: "Context Graph Migration Plan"
+description: "All methods in `services/shared/dormway-core/src/domains/contexts/contexts.service.ts`:"
+---
+
+# Context Graph Migration Plan
+## Migrate Direct SQL to dormway-core ContextsService
+
+**Created**: 2025-11-23
+**Status**: Planning Phase
+**Goal**: Eliminate all direct SQL writes to `contexts` and `context_dependencies` tables outside of dormway-core
+
+**Note**: References to `auroraDb.ts` use legacy naming - this service connects to **Neon PostgreSQL** (not Aurora). The database migration from Aurora to Neon was completed Nov 2025.
+
+---
+
+## Executive Summary
+
+**Current State**:
+- ~40 files with direct SQL operations on context graph tables
+- Operations scattered across api-router and engine
+- No centralized validation or consistency checks
+- Risk of data inconsistencies
+
+**Target State**:
+- All context graph operations go through dormway-core's ContextsService
+- Centralized validation and business logic
+- Consistent error handling and logging
+- Easier to maintain and test
+
+**Estimated Effort**: 32-43 hours (excluding deprecated Auth0)
+
+---
+
+## Available dormway-core Methods
+
+All methods in `services/shared/dormway-core/src/domains/contexts/contexts.service.ts`:
+
+### Context Operations
+```typescript
+// Line 182
+async createContext(
+  type: ContextType,
+  name: string,
+  options?: {
+    parentId?: string;
+    userId?: string;
+    externalId?: string;
+    metadata?: Record<string, any>;
+    status?: string;
+    isActive?: boolean;
+  }
+): Promise<ServiceResult<ContextNode>>
+
+// Line 248
+async updateContext(
+  contextId: string,
+  updates: Partial<Omit<ContextNode, 'id' | 'created_at' | 'updated_at'>>
+): Promise<ServiceResult<ContextNode>>
+
+// Line 321
+async deleteContext(
+  contextId: string,
+  soft?: boolean
+): Promise<ServiceResult<void>>
+```
+
+### Dependency Operations
+```typescript
+// Line 460
+async createDependency(
+  parentContextId: string,
+  childContextId: string,
+  dependencyType: string,
+  metadata?: Record<string, any>
+): Promise<ServiceResult<ContextDependency>>
+
+// Line 530
+async deleteDependency(
+  parentContextId: string,
+  childContextId: string,
+  dependencyType: string
+): Promise<ServiceResult<void>>
+```
+
+---
+
+## Migration Priority Categories
+
+### 🔴 HIGH PRIORITY (8-10 hours)
+**Critical user-facing flows - migrate first**
+
+| File | Location | Hours | Notes |
+|------|----------|-------|-------|
+| clerk-routes.ts | api-router/routes/webhooks | 2h | Every user signup |
+| mobile-routes.ts | api-router/routes | 2h | Active mobile users |
+| plg-routes.ts | api-router/routes/admin | 2h | Product-led growth |
+| campus-routes.ts | api-router/routes | 1.5h | Campus infrastructure |
+
+**Total**: 4 files, 7.5-10 hours
+
+---
+
+### 🟡 MEDIUM PRIORITY - WRITES (8-10 hours)
+**Admin tools and maintenance**
+
+| File | Location | Hours | Notes |
+|------|----------|-------|-------|
+| syllabus-routes.ts | api-router/routes/admin | 2h | Syllabus processing |
+| accounts-routes.ts | api-router/routes/admin | 1.5h | User management |
+| syllabus-campus-routes.ts | api-router/routes/admin | 2h | Campus assignment |
+| onboarding-v2.ts | api-router/routes | 1h | User onboarding |
+| city-context-helper.ts | api-router/utils | 1h | City context utility |
+| campus-metadata-fetcher.ts | api-router/utils | 1h | Campus metadata |
+
+**Total**: 6 files, 8.5-10 hours
+
+---
+
+### 🟡 MEDIUM PRIORITY - READS (6-9 hours)
+**Service files using raw SQL instead of graph service**
+
+| File | Location | Hours | Notes |
+|------|----------|-------|-------|
+| receipts-service.ts | api-router/services | 1-2h | Student context reads |
+| user-campus-resolver.ts | api-router/services | 2-3h | Campus resolution |
+| context-service.ts | api-router/services | 3-4h | **Complex** - recursive CTE |
+
+**Total**: 3 files, 6-9 hours
+
+**Why migrate reads?**
+- Consistency: Use same service everywhere
+- Caching: ContextGraphService has built-in caching
+- Maintainability: Single source of truth
+
+---
+
+### 🟢 LOW PRIORITY (6-8 hours)
+**Background workers - migrate after high/medium**
+
+| File | Location | Hours | Notes |
+|------|----------|-------|-------|
+| student.activities.ts | engine/activities | 2h | Background sync |
+| braingains.activities.ts | engine/activities | 1.5h | AI processing |
+| graphCleanup.activities.ts | engine/activities | 2.5h | 13 writes! |
+| campusEnrichment.activities.ts | engine/activities | 0.5h | 2 writes |
+| campusOnboarding.activities.ts | engine/activities | 0.5h | 1 write |
+| campusGraphBulk.activities.ts | engine/activities | 0.5h | 2 writes |
+| cityCampusSync.activities.ts | engine/activities | 0.5h | 1 write |
+| auroraDb.ts | engine/services | 1h | Service layer |
+| campusDetection.ts | engine/utils | 1h | Utility |
+
+**Total**: 9 files, 6-8 hours
+
+---
+
+### ⚪ DEPRECATED - DO NOT MIGRATE
+
+| File | Reason |
+|------|--------|
+| **auth0-routes.ts** | **Auth0 is deprecated - project uses Clerk** |
+| test-account-claim-routes.ts | Test file |
+| All files in `*/scripts/*` | One-off utilities |
+
+---
+
+## Migration Patterns
+
+### Pattern 1: Simple Context Creation
+**Before**:
+```typescript
+const result = await pool.query(
+  `INSERT INTO contexts (type, user_id, name, is_active, status, metadata)
+   VALUES ($1, $2, $3, $4, $5, $6)
+   RETURNING id`,
+  ['student', userId, 'Student', true, 'active', JSON.stringify({})]
+);
+const studentContextId = result.rows[0].id;
+```
+
+**After**:
+```typescript
+import { ContextsServiceFactory } from '@dormway/core/database/context-graph';
+
+const contextsService = await ContextsServiceFactory.getInstance();
+const result = await contextsService.createContext('student', 'Student', {
+  userId,
+  metadata: {},
+  status: 'active',
+  isActive: true
+});
+
+if (!result.success) {
+  throw new Error(result.error || 'Failed to create student context');
+}
+
+const studentContextId = result.data!.id;
+```
+
+### Pattern 2: Read Student Context
+**Before** (receipts-service.ts):
+```typescript
+const studentContextResult = await auroraClient.querySingle(
+  `SELECT id FROM contexts WHERE user_id = $1 AND type = 'student' ORDER BY created_at DESC LIMIT 1`,
+  [userId]
+);
+const studentContextId = studentContextResult.data?.id;
+```
+
+**After**:
+```typescript
+import { getContextGraphService } from '@/services/context-graph';
+
+const graph = await getContextGraphService();
+const studentContext = await graph.getContextByUserId(userId, 'student');
+const studentContextId = studentContext?.id;
+```
+
+---
+
+## Potential ContextsService Enhancements
+
+Consider adding these methods based on common patterns:
+
+1. **`upsertDependency()`** - Handle ON CONFLICT DO UPDATE (very common)
+2. **`createContext()` with optional `id`** - Support pre-generated UUIDs
+3. **`bulkCreateDependencies()`** - Performance for batch operations
+4. **`deleteAllDependencies(contextId, direction)`** - Common cleanup pattern
+
+---
+
+## Testing Strategy
+
+For each migrated file:
+1. ✅ Write unit tests for ContextsService calls
+2. ✅ Smoke test the endpoint/workflow
+3. ✅ Verify database state matches (same data as before)
+4. ✅ Check error handling
+5. ✅ Performance test (no regression)
+
+### Testing Gaps to Address
+
+1. **Context Graph Traversal Tests**
+   - Unit tests for ContextGraphService
+   - Integration tests for multi-hop traversals
+   - Performance tests for large graphs
+
+2. **Context Graph Cache Tests**
+   - Verify cache invalidation on writes
+   - Verify cache hit rates
+   - Test expiration and refresh
+
+3. **Migration Regression Tests**
+   - Before/after comparison suite
+   - Verify same results from old SQL vs new service
+   - Performance benchmarks
+
+**Testing Time**: +8-12 hours
+
+---
+
+## Implementation Checklist
+
+### Phase 1: High Priority (Week 1)
+- [ ] clerk-routes.ts (webhooks)
+- [ ] mobile-routes.ts
+- [ ] plg-routes.ts
+- [ ] campus-routes.ts
+
+### Phase 2: Medium Priority Writes (Week 2)
+- [ ] syllabus-routes.ts
+- [ ] accounts-routes.ts
+- [ ] syllabus-campus-routes.ts
+- [ ] onboarding-v2.ts
+- [ ] city-context-helper.ts
+- [ ] campus-metadata-fetcher.ts
+
+### Phase 3: Medium Priority Reads (Week 2-3)
+- [ ] receipts-service.ts
+- [ ] user-campus-resolver.ts
+- [ ] context-service.ts (complex - recursive CTE)
+
+### Phase 4: Low Priority (Week 3)
+- [ ] Engine activities (9 files)
+
+### Post-Migration
+- [ ] Delete auth0-routes.ts (deprecated)
+- [ ] Run full test suite
+- [ ] Smoke test all high-priority endpoints
+- [ ] Monitor error rates
+- [ ] Update CLAUDE.md
+
+---
+
+## File Summary
+
+**Total Files**: 22 active files (excluding deprecated Auth0)
+- High Priority: 4 files (8-10 hours)
+- Medium Priority Writes: 6 files (8-10 hours)
+- Medium Priority Reads: 3 files (6-9 hours)
+- Low Priority: 9 files (6-8 hours)
+
+**Grand Total**: 32-43 hours
+**With Testing**: 40-55 hours
+
+---
+
+## Risk Mitigation
+
+1. **Data Inconsistency**: Migrate one file at a time, test thoroughly
+2. **Performance**: Profile before/after for high-traffic routes
+3. **Breaking Changes**: Keep old SQL as comments for easy rollback
+4. **Missing Features**: Enhance ContextsService first if needed
+
+---
+
+## Success Metrics
+
+- ✅ Zero direct SQL to context tables outside dormway-core
+- ✅ All tests passing
+- ✅ No production errors
+- ✅ Code duplication reduced
+- ✅ Easier to add new context types
+
+---
+
+## Tags
+#migration #context-graph #dormway-core #refactoring #technical-debt

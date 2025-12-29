@@ -1,0 +1,140 @@
+---
+title: "Calendar System"
+description: "The calendar synchronization system for [[DormWay]], enabling context-aware scheduling features."
+---
+
+# Calendar System
+
+The calendar synchronization system for [DormWay](/docs/operations/meta/obsidian-indexes/dormway), enabling context-aware scheduling features.
+
+## Status: ✅ Stable
+
+- ✅ [Calendar Selection](/docs/engineering/technical/calendar/calendar-selection-feature) UI implemented
+- ✅ Server-side filtering implemented
+- ✅ **Timezone Conversions** - Fixed with geo-tz library (2025-10-01)
+- ❌ [Event Lifecycle](/docs/engineering/technical/calendar/calendar-event-removal-and-lifecycle-management) needs soft deletion
+
+Part of [Journey 3: Calendar Connection](/docs/plans/planning/5-core-user-journeys).
+
+## Architecture
+
+### iOS Components
+- **[EventKit Integration](/docs/engineering/technical/ios/ios-calendar-sync-system)** - Apple's calendar framework
+- **[CalendarDataCollector](/docs/engineering/technical/calendar/calendar-selection-feature)** - Telemetry collection
+- **[CalendarSelectionManager](/docs/engineering/technical/calendar/calendar-selection-feature)** - UI state management
+- **CalendarSelectionView** - SwiftUI interface
+
+### Backend Components
+- **Calendar Normalization** - Unified event format
+- **Calendar Preferences** - User selections stored in Supabase
+- **[Time Blocks](/docs/engineering/technical/calendar/schedules-time-blocks-and-reconciliation)** - Normalized calendar data
+- **Temporal Workflows** - Sync orchestration
+
+## Data Flow
+
+```
+iOS EventKit → CalendarDataCollector → Telemetry
+     ↓
+[Ably](/docs/engineering/technical/integrations/ably-integration) → [Making of DormWay - Obsidian Real-Time Collaboration Engine](/docs/product/go-to-market/making-of-dormway-obsidian-real-time-collaboration-engine) → Calendar Normalization
+     ↓
+Supabase ← Time Blocks → API Router → iOS
+```
+
+## Current Issues
+
+1. **gRPC Message Size Limits** (#critical) - DORM-442
+   - Capped at 500 events TOTAL to avoid 4MB gRPC limit (hotfix in place)
+   - Need store-first architecture for unlimited events
+   - See pending work below
+
+2. **[Event Lifecycle](/docs/engineering/technical/calendar/calendar-event-removal-and-lifecycle-management)** (#enhancement)
+   - Need soft deletion for removed events
+   - Prevents orphaned data
+
+3. **Word Document Extraction** (#feature)
+   - Some syllabi have calendar data
+   - Would enhance Syllabus Loading
+
+## Pending Work (DORM-442)
+
+### Phase 1: Store-First Architecture (High Priority)
+- [ ] Create `fetchAndStoreGoogleCalendar` activity (stores in DB, returns metadata)
+- [ ] Update `processSingleStudent` to use new activity
+- [ ] Update `scheduleProcessor` to read from DB instead of passing events through workflow
+- [ ] Remove 500 event cap once implemented
+
+### Phase 2: Delta Sync (High Priority)
+- [ ] Design `calendar_sync_state` table (store sync tokens per calendar)
+- [ ] Implement Google Calendar API delta sync using `syncToken`
+- [ ] Handle full sync fallback when sync token invalid
+- [ ] **Expected improvement:** 95% reduction in API calls for incremental syncs
+
+### Phase 3: Calendar Selection UI (Medium Priority)
+- [ ] Add calendar selection settings in LockedIn web app
+- [ ] Store user preferences for which calendars to sync
+- [ ] Update sync logic to filter by selected calendars
+- [ ] iOS app integration
+
+**Reference:** https://developers.google.com/calendar/api/guides/sync
+
+## Related Systems
+
+- [Context System](/docs/engineering/architecture/sot-context-system) - Uses calendar for predictions
+- Push Notifications - Triggered by calendar events
+- BrainGains - Considers academic calendar
+- Engineering/Technical/Widget System - Display upcoming events
+
+## Implementation History
+
+- **2025-10-27** - **Google Calendar gRPC Limit Hotfix** 🔴 **CRITICAL**
+  - **Problem:** Multi-calendar sync exceeded Temporal's 4MB gRPC message size limit
+    - Initial fix (PR #340) capped at 500 events PER calendar
+    - Users with 3 calendars × 500 = 1500 events = 8MB ❌ Still failed
+    - Error: "Complete result exceeds size limit"
+  - **Solution:** Cap at 500 events TOTAL across ALL calendars (PR #341)
+    - `MAX_TOTAL_EVENTS = 500` enforced across all calendars
+    - Stop processing calendars when total limit reached
+    - Truncate events to fit within remaining capacity
+    - Enhanced logging to track which calendars were skipped
+  - **Impact:**
+    - Before: ❌ Users with multiple calendars still failed
+    - After: ✅ Works for any number of calendars (max 500 events total)
+  - **Files:** `services/engine/src/activities/student.activities.ts`
+  - **Commits:** `fb337cf2` (per-calendar cap), `f8c9c3f1` (total cap fix)
+  - **PRs:** [#340](https://github.com/DormWay/dormway-platform/pull/340) (merged, incomplete), [#341](https://github.com/DormWay/dormway-platform/pull/341) (critical fix)
+  - **Linear:** DORM-442 tracks long-term solution (delta sync + store-first architecture)
+  - **Note:** This is a temporary hotfix. Proper solution requires store-first architecture to support unlimited events.
+
+- **2025-10-27** - **Google Calendar Multi-Calendar Sync (DORM-441)** ✅
+  - **Problem:** Only synced from primary calendar with 30-day window restriction
+  - **Solution:** Fetch all user calendars (primary + secondary + subscribed)
+  - Removed 30-day time restriction (`timeMin`/`timeMax` filters)
+  - Removed `eventTypes=default` filter to include all event types
+  - **Implemented pagination** to handle calendars with >250 events (API limit)
+    - Google Calendar API returns max 250 events per page
+    - Loop through all pages using `nextPageToken` until exhausted
+    - Enhanced logging shows page count and events per page
+  - Added resilient error handling (continues if one calendar fails)
+  - Tags each event with `calendarId` for source tracking
+  - Fixed `mergeOverlappingEvents` crash with optional chaining for missing labels
+  - Added "Sync Schedule" button to admin users page
+  - **Result:** Successfully synced 613 events from 3 calendars (primary + holidays + secondary)
+  - **Files:** `services/engine/src/activities/student.activities.ts`, `services/engine/src/workflows/studentProcessor.workflow.ts`, `services/dormway-admin/src/pages/users/index.tsx`
+  - **Commits:** `3bfab7ff`, `331139a5`
+  - **PR:** [#338](https://github.com/DormWay/dormway-platform/pull/338)
+- **2025-10-01** - **Timezone System Overhaul** ✅
+  - Implemented `geo-tz` library for accurate coordinate-to-timezone resolution
+  - Created centralized timezone utility service
+  - Built campus timezone backfill script
+  - Added admin timezone audit endpoints
+  - Fixed schedule import to use campus geographic timezone
+  - All campuses now have accurate IANA timezone metadata
+- 2025-07-10 Calendar Selection Implementation - UI complete
+- 2025-07-09 Server-Side Calendar Filtering - Backend filtering
+- 2025-07-06 Calendar Normalization System - Core architecture
+
+---
+
+*Tags: #feature #calendar #integration #stable*
+*Priority: Medium (timezone issues resolved)*
+*Last Updated: 2025-10-27*

@@ -1,0 +1,129 @@
+---
+title: "AceLLM Ragie Implementation Report"
+description: "This document captures the current end-to-end Ragie integration across DormWay's Ace surfaces and services as of **10 Oct 2025**. It covers the production co..."
+---
+
+# Scope
+
+This document captures the current end-to-end Ragie integration across DormWay's Ace surfaces and services as of **10 Oct 2025**. It covers the production code that ships in:
+
+- `dormway-platform/services/dormway-lockedin` (Next.js dashboard)
+- `dormway-platform/services/api-router` (Express gateway)
+- `dormway-platform/services/engine` (Temporal workflows)
+
+# Key Findings
+
+- **Fully cut over to Ragie for AceLLM**: Client, router, and engine all resolve document search, ingestion, and chat context through Ragie. Vectara code paths remain only for legacy fallbacks in router naming and Supabase column reuse (`vectara_*`).
+- **Consistent partitioning model**: Every layer derives Ragie partitions via `user_<id>` with optional course/org partitions, defaulting missing `courseContextId` to `'none'`.
+- **Upload pipeline aligned**: Dashboard uploads hit `/api/search/documents`, which streams binaries to S3, indexes in Ragie via `ragieService.indexFile`, and fans out to Temporal workflows with Ragie document metadata.
+- **Query pipeline stabilized**: Ace chat requests proxy to `aceLLMService.query`, which pulls Ragie retrieval results (`ragieService.query`), applies recency re-ranking, then composes Portkey/OpenAI completions using the retrieved snippets.
+- **Temporal workflows keep Ragie authoritative**: `storeDocumentInRagie` activities update Supabase with Ragie IDs, sync course insights, and publish Ably progress events on success/failure.
+- **Realtime + webhook feedback loops**: Router verifies Ragie webhooks under `/webhooks/s3/ragie`, signaling `studentWatcher`; the dashboard listens for `ragie` status keywords to refresh document tables immediately.
+- **Graphlit offers a graph-native alternative**: Graphlit ships Azure-hosted, connector-rich RAG with knowledge-graph enrichment, MCP tooling, and credit-based pricing that could augment DormWay's roadmap scenarios requiring deeper relationship reasoning or broader SaaS coverage.citeturn1search10turn0search0turn4search3turn5search0turn1search8
+
+# Service Walkthroughs
+
+## dormway-lockedin (Next.js dashboard)
+
+- **Document manager UI** (`src/app/dashboard/documents/page.tsx`):
+  - Lists documents by calling `GET /api/search/documents` and falls back to the legacy Braingains endpoint if Ragie returns an error.
+  - Watches Ably realtime events and triggers reloads whenever event types include `ragie`, `file.indexed`, `file.updated`, `file.deleted`, or `document processed successfully`, ensuring newly indexed Ragie content surfaces quickly.
+  - Surfaced actions: download original via `/api/search/documents/source-binary`, fetch summaries through `/api/proxy/search/documents/summary`, and delete with `DELETE /api/search/documents/:id`, reflecting Ragie-backed REST endpoints.
+  - Upload handler posts multipart payloads to `/api/search/documents`, bubbles status messages (including Ragie responses), and auto-refreshes on completion.
+- **Ace chat helpers** (`src/lib/ace.ts` & `/app/dashboard/ace/page.tsx`):
+  - `chatOnce` and `chatStream` call router endpoints (`/api/search/chat`, `/api/search/chat/start`) and rely on Ragie-backed context generation. Scope selection includes user/course combos; filters pass straight through to Ragie.
+  - Ably-backed streaming path maintains long-lived connections while server generates completions with Ragie snippets.
+
+## api-router (Express gateway)
+
+- **Ragie service abstraction** (`src/services/ragie-service.ts`):
+  - Wraps the official `ragie` SDK with robust REST fallbacks for retrievals, indexing (raw + files), deletes, listings, summaries, and source fetches.
+  - Enforces metadata cleanliness by injecting `courseContextId: 'none'` when missing, deduplicates sources across multi-partition queries, and optionally applies recency re-ranking based on timestamps.
+  - Builds auth headers compatible with both `Authorization: Bearer` and `X-API-Key` conventions for varied Ragie deployments.
+- **AceLLM orchestration** (`src/services/ace-llm.ts`):
+  - Translates scopes into partition lists, defaulting `user_me` to the requesting user.
+  - Calls `ragieService.query` for retrieval, composes Portkey chat completions over the retrieved snippets, and returns structured responses (answer text, sources, scope label, snippet cache).
+  - `ensureUserPartition`, `indexDocument`, `deleteDocument`, and `listMyDocuments` expose Ragie CRUD through a consistent interface.
+- **Ingestion routes** (`src/routes/ace-llm-routes.ts` & `src/routes/braingains-routes.ts`):
+  - `/api/search/documents` accepts uploads, persists originals to the Braingains S3 bucket, determines partition strategies (fast/hi_res/all) based on MIME, and calls `ragieService.indexFile` before dispatching Temporal workflows with `{ ragie: { partitionKey, documentId } }`.
+  - `/api/search/documents/text` indexes preprocessed text directly via `ragieService.indexDocument`.
+  - Legacy Braingains routes now prefer Ragie indexing first; Supabase records receive Ragie IDs even while columns retain `vectara_*` names.
+- **Chat pipelines** (`src/routes/ace-llm-chat-routes.ts`, `src/routes/braingains-chat-routes.ts`):
+  - Both streaming and non-streaming chat flows call `aceLLMService.query` or `ragieService.query`, respectively, then stream completions via Portkey or respond synchronously when SSE is unnecessary.
+  - Includes timeout guards and logging to prevent hung Ragie queries.
+- **Webhook + raw-body setup** (`src/server.ts`, `src/routes/webhook-routes-s3.ts`):
+  - Registers raw-body middleware exclusively for `/webhooks/s3/ragie` so HMAC verification can hash the unparsed payload (`x-ragie-signature`).
+  - Webhook handler extracts `userId` from partitions/metadata, updates local document status, and signals `studentWatcher` with `ragie.{event}` payloads.
+- **Configuration** (`src/config/index.ts`):
+  - Defaults `ACE_LLM_PROVIDER` to `ragie` and exposes toggles for Ragie paths, base URL, recency bias, and Connect path placeholders.
+
+## engine (Temporal workflows)
+
+- **Ragie service wrapper** (`src/services/ragie.service.ts`):
+  - Mirrors router capabilities with additional heuristics: `choosePartitionStrategy` picks ingestion modes per MIME (audio/video/image vs text) and supports uploading via URL, buffer, or raw text.
+  - Uses the SDK when available, falling back to REST endpoints and multipart uploads when needed.
+- **Activities** (`src/activities/ragie.activities.ts`, `src/activities/braingains.activities.ts`):
+  - `storeDocumentInRagie` receives deterministic document IDs, checks for pre-indexed Ragie metadata, and otherwise uploads via URL or buffer. On success it writes `vectara_corpus_key` / `vectara_document_id` (aliased to Ragie IDs) and marks Supabase documents as indexed.
+  - Insight documents (course details, assignments, policies, etc.) are generated and indexed individually, inheriting Ragie metadata to support filtered queries.
+  - Activities guard against Ragie outages by logging errors, updating Supabase error fields, and returning best-effort partition/doc IDs to keep workflows progressing.
+- **Workflows**:
+  - `syncNoteToRagieWorkflow` and `deleteNoteFromRagieWorkflow` (under `src/workflows`) proxy Ragie activities to keep personal notes synchronized or removed on demand.
+  - `syllabusProcessor.workflow.ts` stores both crew-processed JSON and raw syllabus text into Ragie, mirrors insights as separate partitions, and records progress via Ably.
+
+# Data & Metadata Conventions
+
+- **Partition scheme**: `user_<id>`, `course_<id>`, `org_<id>`; clients often query both user and course partitions to merge personal notes with course materials.
+- **Metadata normalization**:
+  - Enforced keys: `courseContextId` (default `'none'`), `course_code`, `course_name`, `professor`, `semester`, `document_type`, `content_type`, `insight_type`, `filename`, `uploadedAt`.
+  - Additional flags (`source`, `tags`, `parent_document_id`, `ragie.partitionKey`) move between router and engine to avoid re-uploading.
+- **Supabase storage**: Ragie IDs persist in `vectara_corpus_key` and `vectara_document_id` columns pending schema rename, ensuring legacy readers remain compatible.
+
+# End-to-End Flow (Upload → Retrieval)
+
+1. **Upload**: Dashboard posts file via `/api/search/documents`. Router saves to S3, indexes Ragie, audits the ingestion, and kicks off Temporal workflows with Ragie metadata.
+2. **Processing**: Temporal workflows transform content (crew processing, insights, note sync) and call Ragie activities for final indexing; workflows publish Ably progress updates.
+3. **Webhooks**: Ragie events land on `/webhooks/s3/ragie`, update status tables, and signal `studentWatcher` to refresh derived data.
+4. **Client refresh**: Dashboard listens for `ragie` keywords on Ably, refetches document lists, and exposes summary/source endpoints backed by router Ragie APIs.
+5. **Query**: Ace chat and document lookup call `aceLLMService.query` / `ragieService.query`, fetch snippets, compose LLM completions via Portkey, and stream answers back to the UI.
+
+# Observability & Resilience
+
+- Extensive logging across router and engine call paths gives Sumo/Sentry visibility into Ragie interactions.
+- Router implements timeout guards (roughly 8–10 seconds) and retriers over multiple Ragie REST path variants to survive API drift.
+- Engine workflows publish Ably status updates so the UI can display progress and error toasts without polling.
+- Usage tracking keeps counting document pages/queries even if Ragie ingestion fails, by recording events in Supabase.
+
+# Graphlit Platform Evaluation
+
+- **Connector coverage**: Managed feeds span cloud storage, messaging, project trackers, and SaaS systems (Google Drive, OneDrive, Slack, Teams, SharePoint, Jira, Linear, GitHub, etc.), with roadmap support for additional enterprise sources.citeturn1search10
+- **Knowledge graph orientation**: Graphlit automatically builds entity and relationship graphs from ingested content using Azure Cognitive Services and LLM extraction, enabling multi-hop reasoning and visualization.citeturn4search3
+- **Agent and MCP tooling**: Official MCP server and agent tools expose ingestion, retrieval, and publishing endpoints to Claude Desktop, Cursor, Goose, and other MCP-aware clients without custom adapters.citeturn0search0turn5search0
+- **Infrastructure posture**: Runs on Azure with encrypted blob storage, HTTPS enforcement, and compliance alignment (SOC 2, GDPR, HIPAA) inherited from Microsoft's platform.citeturn5search1turn5search0
+- **Pricing and scale**: Usage-based credits layered on tiered subscriptions (Free → Hobby → Starter → Growth), trading predictable Ragie page quotas for elastic multimodal workloads.citeturn1search8
+
+# Ragie vs Graphlit Applicability Summary
+
+| Requirement | Ragie (current implementation) | Graphlit (evaluation) |
+| --- | --- | --- |
+| **DormWay Ace ingestion** | Proven upload → S3 → Ragie index flow with deterministic IDs powering syllabus and insight workflows (`dormway-platform/services/api-router/src/routes/ace-llm-routes.ts:360`, `dormway-platform/services/engine/src/activities/braingains.activities.ts:2630`). | Feeds can ingest Google Drive, SharePoint, Slack, Teams, GitHub, Jira, Linear, and more, reducing custom pipelines when DormWay expands beyond manual uploads.citeturn1search10 |
+| **Realtime feedback** | Ably events trigger UI reloads on Ragie webhook signals (`dormway-platform/services/dormway-lockedin/src/app/dashboard/documents/page.tsx:150`). | MCP server and agent tools emit status via MCP-compatible clients; DormWay would need to adapt event plumbing.citeturn0search0turn5search0 |
+| **Multimodal RAG** | Native audio/video retrieval with clip streaming and right-to-left support announced during Ragie's 2025 launch weeks.citeturn0search1turn3search5 | Credits cover audio/video transcription and embeddings; multimodal ingestion available through feeds and agent tooling.citeturn5search0turn1search10 |
+| **Agentic workflows** | Agent Ready launch adds MCP server, agentic retrieval, and compliance upgrades (SOC 2 Type II, GDPR, HIPAA).citeturn2search0turn3search0 | MCP server plus CrewAI toolkit already available; accelerates IDE and agent integrations.citeturn0search0turn5search0 |
+| **Compliance posture** | SOC 2 Type II, GDPR, HIPAA announced Oct 2025, aligning with DormWay's partition model.citeturn2search0turn3search4 | Azure-native encryption with stated compliance readiness (SOC 2, GDPR, HIPAA) via Microsoft's shared responsibility model.citeturn5search0turn5search1 |
+| **Cost model** | Page-based tiers with connector add-ons; predictable for syllabus documents.citeturn3search3 | Credits ($0.10–$0.08) plus storage quotas; better for mixed media but needs usage governance.citeturn1search8 |
+
+# Known Gaps & Risks
+
+- **Naming drift**: Logs and Supabase fields still reference "Vectara" (`vectara_corpus_key`, `vectaraDocId`), which can confuse future migrations; plan Phase 4 cleanup to rename columns and logs.
+- **Text fallback disabled for large uploads**: Engine skips plain-text uploads when no `content_url` exists to avoid timeouts; ensure upstream persists source binaries before insights are generated.
+- **Connectors not wired yet**: Router exposes Ragie Connect paths, but DormWay has not enabled Gmail/Drive OAuth; white-label flows announced during Agent Ready need implementation.citeturn3search0
+- **Metadata duplication risk**: Router and engine each mutate metadata; coordination needed to avoid conflicting values (especially around `courseContextId` defaults).
+- **Graphlit pilot unknowns**: Credit consumption, latency, and Supabase schema mapping are untested; must sandbox before considering production dual-provider support.
+
+# Action Items
+
+1. Rename legacy Vectara identifiers in code and database once backfill completes, so Ragie metrics are clear platform-wide.
+2. Build automated smoke tests against Ragie staging (upload, query, delete) to catch API regressions before deploys.
+3. Expand webhook handling to surface sync progress in-app (for example, include connector successes/failures once Connect rolls out).
+4. Document Ragie credential management (rotation procedure, environment variable ownership) alongside this report in the ops runbook.
+5. Stand up a controlled Graphlit pilot (sandbox project plus credit tracking) to validate ingestion latency, cost per syllabus pack, and feasibility of dual-provider abstractions before any production switch.

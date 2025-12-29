@@ -1,0 +1,1114 @@
+---
+title: "DayPlan V2 Implementation Plan"
+description: "Refactor DayPlan from a \"micromanaging scheduler\" to a **priority-first daily brief** that tells students what matters today without being overbearing. This..."
+---
+
+# DayPlan Priority-First Redesign - Implementation Plan
+
+## Overview
+
+Refactor DayPlan from a "micromanaging scheduler" to a **priority-first daily brief** that tells students what matters today without being overbearing. This is backend-focused; Riley is handling the frontend dashboard separately.
+
+---
+
+## Critical Design Decisions
+
+### 1. Versioning & Rollout Strategy
+- **Version tagging**: All newly generated plans get `version: 2` explicitly set
+- **Existing plans**: Plans without `version` field treated as v1 (backward compatible)
+- **Feature flag**: `DAYPLAN_V2_ENABLED` env var gates new generation logic per-deployment
+- **Per-user rollout**: Optional `dayplan_v2_enabled` flag in user preferences for gradual rollout
+
+### 2. Persistence & Idempotency (5am → 8am Split)
+- **Storage**: Plan stored in `service_data` with `method: 'dayplan'` immediately after generation
+- **8am retrieval**: Email trigger re-fetches plan from DB by `planId`, never relies on in-memory state
+- **Idempotency**: `planId` + `date` combination prevents duplicate generation
+- **Locking**: Check `lastPlanGeneratedDate` before generation to prevent race conditions
+- **Timezone/pref changes**: If prefs change between 5-8am, email uses prefs at send time (not generation time)
+
+### 3. Events Array Compatibility
+- **Keep `events` populated**: Even in v2, populate `events` from calendar/schedule data for:
+  - Push notification conflict detection
+  - Analytics pipelines
+  - Legacy dashboard consumers
+  - Widget data
+- **New fields are display-layer**: `dueToday`, `hardCommitments`, `suggestedBlocks` are for email/UI rendering
+- **`events` remains source of truth** for raw schedule data
+
+### 4. Template Fallback Strategy
+- **Guard clause**: If `CUSTOMERIO_DAYPLAN_V2_EMAIL_TEMPLATE_ID` is missing, fall back to v1 template
+- **Version-based selection**: Use v2 template only when `plan.version >= 2` AND env var exists
+- **Rollback switch**: Set env var to empty string to force v1 templates globally
+
+---
+
+## Current State Summary
+
+### Architecture (Already Compatible)
+- **Temporal Workflow**: `studentWatcher.simplified.workflow.ts` triggers DayPlan at 5 AM user time
+- **Generation**: `dayplan.activities.ts` calls Gemini 2.5 Flash Lite with structured prompts
+- **Storage**: `service_data` table (JSONB) via `ServiceDataService`
+- **Email Delivery**: Customer.io with template IDs, data passed as template variables
+- **Preferences**: `accounts.metadata.preferences` (JSONB) via `PreferencesService`
+- **Shared Library**: `dormway-core` provides services, adapters, and utilities
+
+### Current DayPlan Schema (Excerpt)
+```typescript
+interface DayPlan {
+  events: TimelineEvent[];           // All day events including meals, free time
+  actions: ScheduledAction[];        // Notifications
+  dayFlow: DayFlow;                  // Energy curves, stress points
+  notificationContent?: {            // LLM-generated personalized content
+    pushNotification: { title, body, emoji };
+    emailContent?: { subjectLine, greeting, daySummary, keyMoments, etc };
+  };
+}
+```
+
+### What Needs to Change
+1. **Schema Evolution**: Add priority-first fields (`dueToday`, `hardCommitments`, `conflicts`, `suggestedBlocks`)
+2. **LLM Prompt**: Stop generating meals, routines, "free time" blocks by default
+3. **Email Content**: Restructure to prioritize deadlines and conflicts
+4. **Timing**: Generate at 5 AM, email at 8 AM (decoupled)
+5. **Preferences**: Add `dayPlan` mode/toggles for customization
+6. **Conditional Sending**: Skip email on light days (optional)
+
+---
+
+## Decisions Made
+
+| Question | Decision | Rationale |
+|----------|----------|-----------|
+| Email Timing | Generate 5 AM, Email 8 AM | Data ready early for widgets/web; email at reasonable hour |
+| Dashboard API | New `/today` endpoint | Clean separation, Riley can define exact needs |
+| Rollout | Gradual with feature flags | `DAYPLAN_V2_ENABLED` env var + per-user `v2Enabled` flag in preferences |
+| Email Templates | New template IDs | Allows A/B testing and easy rollback |
+
+---
+
+## Implementation Plan
+
+### Phase 1: Schema & Type Evolution
+
+**Files to Modify:**
+- `services/engine/src/types/dayplan.types.ts` (or wherever DayPlan interface lives)
+- `services/shared/dormway-core/src/domains/day-plan-data/` (if types exist here)
+
+**Changes:**
+1. Bump `version` field semantics (add version 2 support)
+2. Add new fields to `DayPlan` interface:
+
+```typescript
+interface DayPlan {
+  // Existing fields (keep for backwards compatibility)
+  planId: string;
+  studentId: string;
+  date: string;
+  version: number;  // Bump to 2 for new schema
+  timezone: string;
+  events: TimelineEvent[];      // KEEP POPULATED for analytics/widgets
+  actions: ScheduledAction[];
+  dayFlow: DayFlow;
+  notificationContent?: NotificationContent;
+
+  // NEW: Priority-first fields (v2) - display layer only
+  dueToday?: AssignmentItem[];        // Assignments/assessments due today
+  hardCommitments?: TimelineEvent[];  // Classes, exams, fixed events only
+  conflicts?: ConflictAlert[];        // Schedule conflicts (only if present)
+  suggestedBlocks?: SuggestedBlock[]; // Optional work suggestions
+  nearFuture?: AssignmentItem[];      // Next 2-3 days preview
+
+  summary?: {
+    load: 'light' | 'moderate' | 'heavy';
+    mainPriority?: string;
+    bestWorkWindow?: { start: string; end: string };
+  };
+}
+
+interface AssignmentItem {
+  id: string;
+  title: string;
+  courseName: string;
+  dueTime: string;           // ISO timestamp
+  submissionStatus?: 'not_started' | 'in_progress' | 'submitted';
+  estimatedMinutes?: number;
+  priority?: 'normal' | 'high' | 'critical';
+}
+
+interface ConflictAlert {
+  id: string;
+  description: string;
+  conflictingEvents: string[];  // Event IDs
+  severity: 'low' | 'medium' | 'high';
+  suggestion?: string;
+}
+
+interface SuggestedBlock {
+  id: string;
+  startTime: string;
+  endTime: string;
+  title: string;
+  reason: string;
+  relatedAssignment?: string;  // Link to dueToday item
+}
+```
+
+**Backward Compatibility:**
+- All new fields are optional
+- Email builder handles both v1 and v2 gracefully
+- v1 plans continue to work (fallback to `events` array)
+- `events` array always populated for downstream consumers
+
+---
+
+### Phase 2: User Preferences Extension
+
+**Files to Modify:**
+- `services/shared/dormway-core/src/domains/preferences/` (types and defaults)
+- `services/engine/src/activities/dayplan.activities.ts` (read preferences)
+
+**Add to Preferences Schema:**
+```typescript
+interface UserPreferences {
+  // ... existing ...
+  dayPlan?: {
+    mode: 'minimal' | 'focused' | 'coach';  // Default: 'minimal'
+    includeMeals: boolean;                   // Default: false
+    includeWellness: boolean;                // Default: false
+    includeStudySuggestions: boolean;        // Default: true
+    emailTiming: 'morning' | 'night_before' | 'deadlines_only' | 'never';  // Default: 'morning'
+    skipLightDays: boolean;                  // Default: false
+    v2Enabled?: boolean;                     // Per-user feature flag
+  };
+}
+```
+
+**Default Values Function:**
+```typescript
+function getDayPlanPreferencesWithDefaults(prefs: UserPreferences): DayPlanPreferences {
+  return {
+    mode: prefs.dayPlan?.mode ?? 'minimal',
+    includeMeals: prefs.dayPlan?.includeMeals ?? false,
+    includeWellness: prefs.dayPlan?.includeWellness ?? false,
+    includeStudySuggestions: prefs.dayPlan?.includeStudySuggestions ?? true,
+    emailTiming: prefs.dayPlan?.emailTiming ?? 'morning',
+    skipLightDays: prefs.dayPlan?.skipLightDays ?? false,
+    v2Enabled: prefs.dayPlan?.v2Enabled ?? false,
+  };
+}
+```
+
+**Validation:**
+- Validate enum values (`mode`, `emailTiming`)
+- Validate boolean types
+- Handle missing `dayPlan` key gracefully (return defaults)
+
+---
+
+### Phase 3: LLM Prompt Refactor
+
+**Files to Modify:**
+- `services/engine/src/activities/dayplan.activities.ts` - `buildDayPlanPrompt()` function
+
+**System Prompt Changes:**
+```
+You are a precise day planning assistant for college students.
+Your job is to create a PRIORITY-FIRST daily brief, not a micromanaged schedule.
+
+KEY PRINCIPLES:
+1. Emphasize what's DUE TODAY and where they MUST BE (hard commitments)
+2. Call out CONFLICTS and risks they might not notice
+3. Suggest 1-2 smart work windows (optional, clearly labeled as suggestions)
+4. NEVER schedule meals, "wind down routines", "free time", or generic wellness activities
+5. Be concise and specific - students want 10-second comprehension
+6. ALWAYS populate the events array with raw calendar/schedule data (for analytics)
+```
+
+**User Prompt Output Schema (enforce new structure):**
+```json
+{
+  "events": [...],             // REQUIRED: Raw schedule data for analytics
+  "dueToday": [...],           // REQUIRED: Assignments due today
+  "hardCommitments": [...],    // REQUIRED: Classes, exams, fixed events
+  "conflicts": [...],          // Only if conflicts exist
+  "suggestedBlocks": [...],    // Only if includeStudySuggestions=true
+  "nearFuture": [...],         // Next 2-3 days
+  "summary": {
+    "load": "light|moderate|heavy",
+    "mainPriority": "One sentence",
+    "bestWorkWindow": { "start": "...", "end": "..." }
+  },
+  "notificationContent": {
+    "pushNotification": { ... },
+    "emailContent": { ... }
+  }
+}
+```
+
+**Conditional Sections Based on Preferences:**
+- `includeMeals: true` → Allow meal events in `events` array
+- `includeWellness: true` → Allow wellness tips in email
+- `mode: 'coach'` → Include more detailed `suggestedBlocks`
+- `mode: 'minimal'` → No `suggestedBlocks`, bare essentials only
+
+**Anti-Hallucination Rules (keep existing):**
+- Only include events explicitly provided in input data
+- All times use timezone offset
+- No overlapping events
+- Label source of every event (calendar, prediction, etc.)
+
+---
+
+### Phase 4: Email Builder Refactor
+
+**Files to Modify:**
+- `services/engine/src/activities/dayplan-email-personalization.ts`
+- `services/engine/src/activities/notificationDeliveryActivities.ts`
+
+**New Email Structure:**
+```typescript
+interface DayPlanEmailData {
+  // Header
+  date: string;                    // "Tuesday, November 18"
+  greeting: string;                // "Hey Riley"
+  vibeTag: string;                 // "Light day" | "Steady day" | "Big day"
+  oneLiner: string;                // "Big day: COMM quiz due tonight and back-to-back classes"
+
+  // Sections (order matters)
+  dueToday?: {
+    items: Array<{
+      course: string;
+      title: string;
+      dueTime: string;
+      status: string;
+      priority?: string;
+    }>;
+  };
+
+  classes?: {
+    items: Array<{
+      time: string;              // "11:30-12:50"
+      course: string;
+      location: string;
+    }>;
+  };
+
+  headsUp?: {
+    items: Array<{
+      description: string;
+    }>;
+  };
+
+  suggestedMoves?: {
+    items: Array<{
+      time: string;
+      title: string;
+      reason: string;
+    }>;
+  };
+
+  comingUp?: {
+    items: Array<{
+      day: string;              // "Tomorrow"
+      course: string;
+      title: string;
+      dueTime: string;
+    }>;
+  };
+
+  // CTA
+  viewTodayUrl: string;
+}
+```
+
+**Subject Line Logic:**
+```typescript
+function generateSubjectLine(plan: DayPlan): string {
+  if (plan.dueToday?.length > 0) {
+    const topItem = plan.dueToday[0];
+    return `Due today: ${topItem.courseName} ${topItem.title} at ${formatTime(topItem.dueTime)}`;
+  }
+
+  const classCount = plan.hardCommitments?.filter(e => e.type === 'class').length ?? 0;
+  const load = plan.summary?.load ?? 'moderate';
+  return `${classCount} classes today, ${load} schedule`;
+}
+```
+
+**Backward Compatibility Handler:**
+```typescript
+function prepareDayPlanEmailData(plan: DayPlan, prefs: DayPlanPreferences): DayPlanEmailData {
+  // Check version
+  if (plan.version >= 2 && plan.dueToday) {
+    return buildV2EmailData(plan, prefs);
+  }
+  // Fallback to legacy: derive from events array
+  return buildLegacyEmailData(plan, prefs);
+}
+```
+
+**Template Selection with Fallback:**
+```typescript
+function getEmailTemplateId(plan: DayPlan): string {
+  const v2TemplateId = process.env.CUSTOMERIO_DAYPLAN_V2_EMAIL_TEMPLATE_ID;
+
+  // Use v2 template only if: version >= 2 AND env var exists and is non-empty
+  if (plan.version >= 2 && v2TemplateId) {
+    return v2TemplateId;
+  }
+
+  // Fallback to v1 template
+  return process.env.CUSTOMERIO_DAYPLAN_EMAIL_TEMPLATE_ID;
+}
+```
+
+**Section Visibility Rules:**
+| Section | Minimal Mode | Focused Mode | Coach Mode |
+|---------|--------------|--------------|------------|
+| Due Today | Always | Always | Always |
+| Classes | Always | Always | Always |
+| Heads Up | Critical only | Always | Always |
+| Suggested Moves | Never | If enabled | Always |
+| Coming Up | Always | Always | Always |
+
+---
+
+### Phase 5: Workflow Timing Changes
+
+**Files to Modify:**
+- `services/engine/src/workflows/studentWatcher.simplified.workflow.ts`
+
+**Decision: Generate at 5 AM, Email at 8 AM (for `morning` mode)**
+
+This ensures plan data is ready early for widgets/web view, but email arrives at a reasonable hour.
+
+---
+
+#### State Persistence Model
+
+**Where state lives:** All tracking state is stored as **Temporal workflow variables** within the StudentWatcher workflow. These persist across workflow ticks and survive restarts (Temporal durability).
+
+```typescript
+// Workflow-level state variables (persisted by Temporal)
+let lastGeneratedPlanId: string | null = null;      // planId from most recent generation
+let lastPlanGeneratedDate: string | null = null;    // ISO date string (YYYY-MM-DD)
+let lastEmailSentDate: string | null = null;        // ISO date string (YYYY-MM-DD)
+let lastNightBeforeEmailDate: string | null = null; // For night_before mode tracking
+let isPlanGenerationInProgress: boolean = false;    // Lock to prevent concurrent generation
+```
+
+**Why not DB?** Temporal workflows already provide durable state with replay guarantees. Adding DB round-trips for these simple flags would add latency and complexity. The `service_data` table stores the actual plan content; workflow variables track "has this happened today?"
+
+---
+
+#### DST Helper (Used in All Conditions)
+
+```typescript
+// Handle DST transitions where 5am or 8am might not exist or repeat
+function getSafeHourCheck(userHour: number, targetHour: number, timezone: string): boolean {
+  // If DST causes hour skip (2am→3am), check if we're in the target window
+  // If DST causes hour repeat, use idempotency checks to prevent duplicates
+  return userHour === targetHour ||
+         (isDSTTransitionDay(timezone) && Math.abs(userHour - targetHour) === 1);
+}
+
+function isDSTTransitionDay(timezone: string): boolean {
+  const now = new Date();
+  const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+
+  const nowOffset = getTimezoneOffset(now, timezone);
+  const yesterdayOffset = getTimezoneOffset(yesterday, timezone);
+
+  return nowOffset !== yesterdayOffset;
+}
+```
+
+---
+
+#### 5 AM: Generate Plan (All emailTiming Modes)
+
+```typescript
+// 5 AM: Generate plan - runs regardless of emailTiming mode
+// (plan is needed for widgets, API, even if email is disabled)
+const is5amWindow = getSafeHourCheck(userHour, 5, timezone) && userMinute < 5;
+
+if (is5amWindow && lastPlanGeneratedDate !== today && !isPlanGenerationInProgress) {
+  log.debug(`[StudentWatcher] 5am ${timezone} - Generating DayPlan for ${studentId}`);
+
+  // Check feature flag (env var OR per-user)
+  const useV2 = process.env.DAYPLAN_V2_ENABLED === 'true' ||
+                userPreferences?.dayPlan?.v2Enabled === true;
+
+  isPlanGenerationInProgress = true;
+  try {
+    const result = await generateMorningPlan(
+      studentId,
+      timezone,
+      false,              // forceRegenerate
+      userPreferences,
+      false,              // sendNotifications = FALSE (just generate)
+      { version: useV2 ? 2 : 1 }
+    );
+
+    // Plan is saved to service_data inside generateMorningPlan
+    // Store planId for later lookup (Temporal workflow state)
+    lastGeneratedPlanId = result.plan.planId;
+    lastPlanGeneratedDate = today;
+  } finally {
+    isPlanGenerationInProgress = false;
+  }
+}
+```
+
+---
+
+#### 8 AM: Send Email (emailTiming === 'morning' or 'deadlines_only')
+
+```typescript
+const is8amWindow = getSafeHourCheck(userHour, 8, timezone) && userMinute < 5;
+
+if (is8amWindow && lastPlanGeneratedDate === today && lastEmailSentDate !== today) {
+  // Get FRESH preferences at send time (may have changed since 5am)
+  const freshPrefs = await getStudentPreferences(studentId);
+  const dayPlanPrefs = getDayPlanPreferencesWithDefaults(freshPrefs);
+
+  // Early exit for 'never' mode - mark as handled to prevent retry
+  if (dayPlanPrefs.emailTiming === 'never') {
+    log.info(`[StudentWatcher] 8am: Email disabled by preference`, { studentId });
+    lastEmailSentDate = today;
+    return;
+  }
+
+  // Re-fetch plan from DB using planId (not just date)
+  const storedPlan = lastGeneratedPlanId
+    ? await getDayPlanByPlanId(studentId, lastGeneratedPlanId)
+    : await getDayPlanFromDB(studentId, today);  // Fallback if planId missing
+
+  if (!storedPlan) {
+    log.warn(`[StudentWatcher] No plan found for 8am email send`, { studentId, lastGeneratedPlanId, today });
+    return; // Skip email, plan generation may have failed
+  }
+
+  let shouldSendEmail = false;
+
+  // Handle 'morning' mode
+  if (dayPlanPrefs.emailTiming === 'morning') {
+    shouldSendEmail = true;
+
+    // Skip light days if preference enabled
+    if (dayPlanPrefs.skipLightDays && storedPlan.summary?.load === 'light') {
+      const hasDueToday = (storedPlan.dueToday?.length ?? 0) > 0;
+      if (!hasDueToday) {
+        shouldSendEmail = false;
+        log.info(`[StudentWatcher] Skipping email - light day with no deadlines`);
+      }
+    }
+  }
+
+  // Handle 'deadlines_only' mode
+  if (dayPlanPrefs.emailTiming === 'deadlines_only') {
+    const hasDueToday = (storedPlan.dueToday?.length ?? 0) > 0;
+    if (hasDueToday) {
+      shouldSendEmail = true;
+      log.info(`[StudentWatcher] deadlines_only: ${storedPlan.dueToday.length} items due, sending email`);
+    } else {
+      log.info(`[StudentWatcher] deadlines_only: no items due today, skipping email`);
+    }
+  }
+
+  // 'night_before' mode is handled at 9pm, not 8am - skip here
+  if (dayPlanPrefs.emailTiming === 'night_before') {
+    log.debug(`[StudentWatcher] 8am: night_before mode, email sent at 9pm instead`);
+    // Don't mark lastEmailSentDate - that's for night_before tracking
+    return;
+  }
+
+  if (shouldSendEmail) {
+    const useV2Template = storedPlan.version >= 2 &&
+                          !!process.env.CUSTOMERIO_DAYPLAN_V2_EMAIL_TEMPLATE_ID;
+    await sendDayPlanNotification(storedPlan, dayPlanPrefs, { useV2Template });
+  }
+
+  lastEmailSentDate = today;
+}
+```
+
+---
+
+#### 9 PM (Night Before): Send Tomorrow's Preview (emailTiming === 'night_before')
+
+```typescript
+const is9pmWindow = getSafeHourCheck(userHour, 21, timezone) && userMinute < 5;
+const tomorrow = getTomorrowDateString(timezone);
+
+if (is9pmWindow && lastNightBeforeEmailDate !== today) {
+  const freshPrefs = await getStudentPreferences(studentId);
+  const dayPlanPrefs = getDayPlanPreferencesWithDefaults(freshPrefs);
+
+  // Early exit for 'never' mode
+  if (dayPlanPrefs.emailTiming === 'never') {
+    log.info(`[StudentWatcher] 9pm: Email disabled by preference`, { studentId });
+    lastNightBeforeEmailDate = today; // Mark as handled
+    return;
+  }
+
+  if (dayPlanPrefs.emailTiming !== 'night_before') {
+    return; // Not opted into night_before mode (but don't mark as handled - morning might apply)
+  }
+
+  // Respect v2 feature flags for night-before generation
+  const useV2 = process.env.DAYPLAN_V2_ENABLED === 'true' ||
+                freshPrefs?.dayPlan?.v2Enabled === true;
+
+  // Generate tomorrow's plan preview (doesn't affect morning generation)
+  const tomorrowPlan = await generateMorningPlan(
+    studentId,
+    timezone,
+    false,
+    freshPrefs,
+    false,  // Don't send yet
+    { version: useV2 ? 2 : 1, targetDate: tomorrow }
+  );
+
+  if (tomorrowPlan.plan) {
+    // Save tomorrow's plan to DB (won't conflict with today's plan)
+    await saveDayPlanToDB(studentId, tomorrow, tomorrowPlan.plan);
+
+    // Send "tomorrow's preview" email with appropriate template
+    const useV2Template = tomorrowPlan.plan.version >= 2 &&
+                          !!process.env.CUSTOMERIO_DAYPLAN_V2_EMAIL_TEMPLATE_ID;
+    await sendNightBeforeNotification(tomorrowPlan.plan, dayPlanPrefs, { useV2Template });
+    lastNightBeforeEmailDate = today;
+  }
+}
+```
+
+---
+
+#### Summary: emailTiming Mode Behavior
+
+| Mode | Generation Time | Email Time | Condition |
+|------|-----------------|------------|-----------|
+| `morning` | 5 AM | 8 AM | Always (unless skipLightDays) |
+| `night_before` | 5 AM (today) + 9 PM (tomorrow preview) | 9 PM | Preview of next day |
+| `deadlines_only` | 5 AM | 8 AM | Only if `dueToday.length > 0` |
+| `never` | 5 AM | Never | Plan generated for API/widgets only |
+
+---
+
+#### Failure Recovery
+
+- If 5am generation fails: `lastPlanGeneratedDate` not set, 8am email skipped, next day retries
+- If 8am send fails: `lastEmailSentDate` not set, can retry in next workflow tick (within 8:00-8:05 window)
+- If plan missing at 8am: Log warning, skip email, don't mark as sent
+- If workflow restarts between 5am-8am: `lastGeneratedPlanId` restored from Temporal, plan re-fetched from DB
+
+---
+
+#### Benefits
+
+- Plan ready at 5 AM for widgets and web view
+- Email arrives at user-preferred time
+- All four emailTiming modes fully implemented
+- DST helper prevents missed or duplicate triggers
+- planId lookup ensures correct plan even if multiple exist
+- Temporal state persistence survives workflow restarts
+
+---
+
+### Phase 6: Testing Strategy
+
+**Unit Tests:**
+1. `dayplan.types.test.ts` - Schema validation for v1 and v2
+2. `dayplan-email-personalization.test.ts` - Email builder handles both versions
+3. `dayplan.activities.test.ts` - LLM output parsing with new fields
+4. `preferences.test.ts` - DayPlan preferences defaults and validation
+
+**Integration Tests:**
+1. Given: 2 classes, 1 assignment due today, minimal mode
+   - Then: `dueToday` has assignment, `hardCommitments` has 2 classes, no `suggestedBlocks`
+   - Then: `events` array still populated for analytics/widgets
+
+2. Given: No deadlines, light schedule, `skipLightDays: true`
+   - Then: Plan generated and stored, email NOT sent
+
+3. Given: Coach mode enabled, `includeStudySuggestions: true`
+   - Then: `suggestedBlocks` present with work windows
+
+4. Given: v1 plan in DB (no version field)
+   - Then: Email uses v1 template, no errors thrown
+
+5. Given: `CUSTOMERIO_DAYPLAN_V2_EMAIL_TEMPLATE_ID` env var missing
+   - Then: Falls back to v1 template even for v2 plans
+
+**Edge Case Tests (Critical):**
+
+6. **DST Transition Tests:**
+   - Given: User in `America/New_York`, DST spring forward (2am→3am skips)
+   - Then: 5am generation still triggers (not skipped)
+   - Then: 8am email still triggers (not duplicated)
+
+7. **DST Fall Back Tests:**
+   - Given: User in `America/New_York`, DST fall back (2am repeats)
+   - Then: `lastPlanGeneratedDate` prevents duplicate generation
+   - Then: `lastEmailSentDate` prevents duplicate email
+
+8. **Preference Change Between 5am-8am:**
+   - Given: User has `emailTiming: 'morning'` at 5am generation
+   - When: User changes to `emailTiming: 'never'` at 7am
+   - Then: 8am email trigger reads fresh prefs and skips email
+
+9. **Template ID Missing/Invalid:**
+   - Given: `CUSTOMERIO_DAYPLAN_V2_EMAIL_TEMPLATE_ID` = '' or undefined
+   - When: v2 plan generated
+   - Then: Falls back to v1 template without error
+
+10. **Plan Generation Failure:**
+    - Given: LLM call fails at 5am
+    - Then: `lastPlanGeneratedDate` not set
+    - Then: 8am email trigger skipped gracefully
+    - Then: Next day 5am retries generation
+
+11. **Workflow Restart Between 5am-8am:**
+    - Given: Plan generated at 5am, workflow restarts at 6am
+    - When: 8am arrives
+    - Then: Plan re-fetched from DB (not in-memory)
+    - Then: Email sent successfully
+
+12. **API /today Edge Cases:**
+    - Given: Request before 5am (no plan exists)
+    - Then: 404 with `NO_PLAN` code and `retryAfter: 300`
+
+    - Given: Request during plan generation
+    - Then: 202 with `PLAN_GENERATING` code and `retryAfter: 30`
+
+    - Given: Yesterday's plan in DB (stale)
+    - Then: 200 with `isStale: true` flag
+
+    - Given: ETag matches current plan
+    - Then: 304 Not Modified (no body)
+
+**Manual Testing:**
+- Trigger DayPlan for test user at various hours
+- Verify Customer.io receives correct template variables
+- Check email renders correctly with new sections
+- Test /today endpoint with various plan states
+- Verify feature flag toggles work correctly
+
+---
+
+### Phase 7: New `/today` API Endpoint
+
+**Files to Create/Modify:**
+- `services/api-router/src/routes/dayplan/today.routes.ts` (new)
+- `services/api-router/src/routes/index.ts` (register route)
+
+**Endpoint Design:**
+```typescript
+// GET /api/v1/dayplan/today
+// Auth: Required (JWT via Zuplo gateway)
+// Returns: DayPlan v2 structure optimized for Today web view
+
+interface TodayResponse {
+  success: boolean;
+  data: {
+    // Header
+    date: string;
+    greeting: string;
+    vibeTag: 'light' | 'steady' | 'big';
+    summary: string;
+
+    // Core sections
+    dueToday: AssignmentItem[];
+    classes: ClassEvent[];
+    headsUp: ConflictAlert[];
+    suggestedMoves: SuggestedBlock[];
+    comingUp: AssignmentItem[];
+
+    // Metadata
+    generatedAt: string;
+    planId: string;
+    version: number;
+    isStale: boolean;  // True if plan is from previous day or > 12 hours old
+  };
+  meta?: {
+    cacheHit: boolean;
+    planAge: number;  // Minutes since generation
+  };
+}
+
+// Error responses
+interface TodayErrorResponse {
+  success: false;
+  error: {
+    code: 'NO_PLAN' | 'PLAN_GENERATING' | 'UNAUTHORIZED' | 'SERVER_ERROR';
+    message: string;
+    retryAfter?: number;  // Seconds to wait before retry
+  };
+}
+```
+
+**Implementation:**
+```typescript
+router.get('/today', authMiddleware, async (req, res) => {
+  const userId = req.user.id;
+  const userTimezone = req.user.timezone || 'America/New_York';
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: userTimezone });
+
+  try {
+    // 1. Fetch latest plan from service_data
+    const plan = await getDayPlanFromDB(userId, today);
+
+    // 2. Handle "no plan yet" case
+    if (!plan) {
+      // Check if plan is currently generating (workflow state)
+      const isGenerating = await checkPlanGenerationInProgress(userId);
+
+      if (isGenerating) {
+        return res.status(202).json({
+          success: false,
+          error: {
+            code: 'PLAN_GENERATING',
+            message: 'Your daily plan is being generated',
+            retryAfter: 30
+          }
+        });
+      }
+
+      // No plan and not generating - might be before 5am or generation failed
+      return res.status(404).json({
+        success: false,
+        error: {
+          code: 'NO_PLAN',
+          message: 'No plan available for today yet',
+          retryAfter: 300  // Retry in 5 minutes
+        }
+      });
+    }
+
+    // 3. Check staleness (plan from different day or very old)
+    const planAge = (Date.now() - new Date(plan.generatedAt).getTime()) / 60000;
+    const isStale = plan.date !== today || planAge > 720; // 12 hours
+
+    // 4. Get user preferences for filtering
+    const prefs = await getStudentPreferences(userId);
+    const dayPlanPrefs = getDayPlanPreferencesWithDefaults(prefs);
+
+    // 5. Transform to frontend structure with preference filtering
+    const responseData = transformPlanForFrontend(plan, dayPlanPrefs);
+
+    // 6. Generate ETag from planId + version
+    const etag = `"${plan.planId}-${plan.version}"`;
+
+    // 7. Check If-None-Match for caching
+    if (req.headers['if-none-match'] === etag) {
+      return res.status(304).end();
+    }
+
+    // 8. Set caching headers
+    res.set({
+      'ETag': etag,
+      'Cache-Control': 'private, max-age=300',  // 5 min cache
+      'X-Plan-Generated-At': plan.generatedAt,
+      'X-Plan-Version': plan.version
+    });
+
+    return res.json({
+      success: true,
+      data: {
+        ...responseData,
+        isStale,
+        generatedAt: plan.generatedAt,
+        planId: plan.planId,
+        version: plan.version
+      },
+      meta: {
+        cacheHit: false,
+        planAge: Math.round(planAge)
+      }
+    });
+
+  } catch (error) {
+    logger.error('[/today] Error fetching plan', { userId, error });
+    return res.status(500).json({
+      success: false,
+      error: {
+        code: 'SERVER_ERROR',
+        message: 'Failed to fetch daily plan'
+      }
+    });
+  }
+});
+```
+
+**Caching Strategy:**
+- **ETag**: Based on `planId-version`, enables 304 responses
+- **Cache-Control**: `private, max-age=300` (5 minutes)
+- **Stale data handling**: After 8am regeneration, old ETags invalidated automatically
+- **Pre-8am requests**: Return plan if exists, otherwise 404 with retry hint
+
+**Rate Limiting:**
+- Standard API rate limits apply (via Zuplo gateway)
+- No special rate limiting for this endpoint
+
+---
+
+## Linear Task Breakdown
+
+### Epic: DayPlan Priority-First Redesign
+
+#### 1. Schema & Types (Backend Foundation)
+| Task | Description | Estimate |
+|------|-------------|----------|
+| Add v2 DayPlan interfaces | Add `dueToday`, `hardCommitments`, `conflicts`, `suggestedBlocks`, `summary` to DayPlan type | S |
+| Add supporting types | Create `AssignmentItem`, `ConflictAlert`, `SuggestedBlock` interfaces | S |
+| Version detection utility | Add `isDayPlanV2()` helper for backward compatibility | XS |
+| Keep events array populated | Ensure `events` still populated from calendar data for analytics/widgets/conflict detection | S |
+| Add DAYPLAN_V2_ENABLED feature flag | Environment variable to gate v2 generation globally | XS |
+
+#### 2. User Preferences
+| Task | Description | Estimate |
+|------|-------------|----------|
+| Add dayPlan preferences schema | Add `dayPlan.mode`, `includeMeals`, `includeWellness`, `includeStudySuggestions`, `emailTiming`, `skipLightDays`, `v2Enabled` | S |
+| Create defaults utility | Implement `getDayPlanPreferencesWithDefaults()` function | XS |
+| Cache invalidation | Ensure dayPlan preference changes invalidate plan cache in engine | XS |
+| Add validation for new prefs | Validate enum values, boolean types in PreferencesService | S |
+| Handle existing users | Ensure missing `dayPlan` key returns defaults without error | XS |
+
+#### 3. LLM Prompt Refactor
+| Task | Description | Estimate |
+|------|-------------|----------|
+| Rewrite system prompt | Priority-first philosophy: no meals, routines, free time by default | M |
+| Update output schema | Require `dueToday`, `hardCommitments`, `summary` in LLM output | M |
+| Preference-conditional prompts | Conditionally include meals/wellness/suggestions based on prefs | S |
+| Update response parsing | Extract new v2 fields from LLM response | S |
+| Add field validation | Validate required v2 fields, fallback gracefully | S |
+
+#### 4. Email Builder
+| Task | Description | Estimate |
+|------|-------------|----------|
+| Create DayPlanEmailData interface | New section structure: dueToday, classes, headsUp, suggestedMoves, comingUp | S |
+| Implement buildV2EmailData() | Transform v2 DayPlan to email template variables | M |
+| Implement buildLegacyEmailData() | Fallback for v1 plans (derive from events array) | S |
+| Subject line logic | Dynamic subject based on deadlines vs light day | S |
+| Section visibility rules | Mode-based filtering (minimal/focused/coach) | S |
+
+#### 5. Customer.io Templates (NEW)
+| Task | Description | Estimate |
+|------|-------------|----------|
+| Create new email template | New template ID for v2 DayPlan structure | M |
+| Configure template variables | Map DayPlanEmailData fields to template | S |
+| Update env vars | Add new `CUSTOMERIO_DAYPLAN_V2_EMAIL_TEMPLATE_ID` | XS |
+| Wire up template selection | Use v2 template when DayPlan version >= 2 AND env var exists | S |
+
+#### 6. Workflow Timing
+| Task | Description | Estimate |
+|------|-------------|----------|
+| Add state variables | Define `lastGeneratedPlanId`, `lastPlanGeneratedDate`, `lastEmailSentDate`, `lastNightBeforeEmailDate` in workflow | S |
+| Separate generation from email | Generate at 5 AM, defer email to 8 AM trigger | M |
+| Add DST helper functions | Implement `getSafeHourCheck()` and `isDSTTransitionDay()` | S |
+| Wire DST helper into conditions | Use `getSafeHourCheck()` in all time-based conditionals | S |
+| Add 8 AM email trigger (morning) | `emailTiming === 'morning'` sends at 8am | S |
+| Add 9 PM trigger (night_before) | `emailTiming === 'night_before'` generates tomorrow preview at 9pm | M |
+| Add deadlines_only logic | `emailTiming === 'deadlines_only'` only sends if `dueToday.length > 0` | S |
+| Add never mode handling | `emailTiming === 'never'` skips all email triggers | XS |
+| Re-fetch plan by planId at 8 AM | Use `getDayPlanByPlanId()` not just date lookup | S |
+| Re-fetch fresh prefs at send time | Get updated preferences at send time (may have changed) | S |
+| Conditional email skip | Skip email on light days if `skipLightDays` enabled | S |
+| Idempotency/locking | Use `planId` + `date` to prevent duplicate generation | S |
+
+#### 7. API Endpoint for Dashboard (NEW)
+| Task | Description | Estimate |
+|------|-------------|----------|
+| Create /today endpoint | `GET /api/v1/dayplan/today` returning v2 structure | M |
+| Transform DayPlan for frontend | Convert stored DayPlan to TodayResponse shape | S |
+| Add caching headers | ETag and 5-min cache for performance | S |
+| Handle NO_PLAN case | Return 404 with retryAfter when no plan exists | S |
+| Handle PLAN_GENERATING case | Return 202 when plan is actively being generated | S |
+| Handle stale plan case | Return 200 with `isStale: true` for old plans | S |
+| Add error response types | Define `TodayErrorResponse` interface | XS |
+| Coordinate with Riley | Ensure endpoint meets dashboard needs | S |
+
+#### 8. Testing
+| Task | Description | Estimate |
+|------|-------------|----------|
+| Unit tests: v2 schema | Test parsing and validation of new fields | S |
+| Unit tests: email builder | Test both v1 and v2 code paths | S |
+| Integration tests: preferences | Test mode-based behavior changes | M |
+| DST/timezone edge case tests | Test 5am/8am/9pm triggers across DST transitions | M |
+| Template fallback tests | Test missing/invalid template ID scenarios | S |
+| Pref change 5am-8am tests | Test preference changes between generation and send | S |
+| emailTiming mode tests | Test all 4 modes: morning, night_before, deadlines_only, never | M |
+| night_before mode tests | Test 9pm trigger, tomorrow plan generation, separate template | S |
+| deadlines_only mode tests | Test email only when `dueToday.length > 0` | S |
+| planId lookup tests | Test `getDayPlanByPlanId()` vs date-only lookup | S |
+| API /today edge case tests | Test NO_PLAN, PLAN_GENERATING, stale, ETag scenarios | M |
+| Workflow restart recovery tests | Test plan re-fetch after workflow restart, state restoration | S |
+| Manual QA | Test with real user accounts, verify email rendering | M |
+
+#### 9. Documentation & Cleanup
+| Task | Description | Estimate |
+|------|-------------|----------|
+| Update CLAUDE.md | Document v2 schema and new preferences | S |
+| Update Obsidian docs | Architecture changes, new endpoint | S |
+| Deprecation cleanup | Remove old prompt sections after v2 stable | S |
+
+---
+
+### Suggested Linear Structure
+
+**Epic:** DayPlan Priority-First Redesign
+
+**Sub-issues (Parent → Children):**
+
+1. **[Parent] Backend Schema & Types**
+   - Add v2 DayPlan interfaces
+   - Add supporting types
+   - Version detection utility
+   - Keep events array populated
+   - Add DAYPLAN_V2_ENABLED feature flag
+
+2. **[Parent] User Preferences**
+   - Add dayPlan preferences schema
+   - Create defaults utility
+   - Cache invalidation
+   - Add validation for new prefs
+   - Handle existing users
+
+3. **[Parent] LLM Prompt Refactor**
+   - Rewrite system prompt
+   - Update output schema
+   - Preference-conditional prompts
+   - Update response parsing
+   - Add field validation
+
+4. **[Parent] Email System**
+   - Create DayPlanEmailData interface
+   - Implement buildV2EmailData()
+   - Implement buildLegacyEmailData()
+   - Subject line logic
+   - Section visibility rules
+
+5. **[Parent] Customer.io v2 Templates**
+   - Create new email template
+   - Configure template variables
+   - Update env vars
+   - Wire up template selection with fallback
+
+6. **[Parent] Workflow Timing**
+   - Add state variables (Temporal workflow state)
+   - Separate generation from email
+   - Add DST helper functions (`getSafeHourCheck`, `isDSTTransitionDay`)
+   - Wire DST helper into all time conditions
+   - Add 8 AM email trigger (morning mode)
+   - Add 9 PM trigger (night_before mode)
+   - Add deadlines_only logic
+   - Add never mode handling
+   - Re-fetch plan by planId at 8 AM
+   - Re-fetch fresh prefs at send time
+   - Conditional email skip (skipLightDays)
+   - Idempotency/locking
+
+7. **[Parent] /today API Endpoint**
+   - Create /today endpoint
+   - Transform DayPlan for frontend
+   - Add caching headers
+   - Handle NO_PLAN case
+   - Handle PLAN_GENERATING case
+   - Handle stale plan case
+   - Add error response types
+   - Coordinate with Riley
+
+8. **[Parent] Testing**
+   - Unit tests: v2 schema
+   - Unit tests: email builder
+   - Integration tests: preferences
+   - DST/timezone edge case tests (5am/8am/9pm)
+   - Template fallback tests
+   - Pref change 5am-8am tests
+   - emailTiming mode tests (all 4 modes)
+   - night_before mode tests
+   - deadlines_only mode tests
+   - planId lookup tests
+   - API /today edge case tests
+   - Workflow restart recovery tests
+   - Manual QA
+
+9. **[Parent] Documentation**
+   - Update CLAUDE.md
+   - Update Obsidian docs
+   - Deprecation cleanup
+
+---
+
+## Critical Files Reference
+
+| File | Purpose | Priority |
+|------|---------|----------|
+| `services/engine/src/activities/dayplan.activities.ts` | Main generation logic, LLM prompts | P0 |
+| `services/engine/src/workflows/studentWatcher.simplified.workflow.ts` | Trigger timing, email send decision | P0 |
+| `services/engine/src/activities/dayplan-email-personalization.ts` | Email data preparation | P0 |
+| `services/engine/src/types/dayplan.types.ts` | Schema/interfaces | P0 |
+| `services/shared/dormway-core/src/domains/preferences/` | Preference types and service | P1 |
+| `services/engine/src/activities/notificationDeliveryActivities.ts` | Customer.io delivery | P1 |
+| `services/api-router/src/routes/dayplan/today.routes.ts` | NEW: /today endpoint for dashboard | P1 |
+| `services/api-router/src/routes/index.ts` | Route registration | P2 |
+
+---
+
+## Related Documents
+
+- [DayPlan Plan](/docs/plans/dayplan-plan) - Original product spec and UX design
+- DormWay Platform Architecture - System overview
+- Engine Workflow DAG Analysis - Temporal workflow documentation
+- [Web Dashboard Widget Data Contract](/docs/engineering/architecture/web-dashboard-widget-data-contract) - Riley's widget data contract spec (dayplan widget type exists)
+
+---
+
+## Integration with Dashboard Widget System
+
+**Important**: Riley's dashboard already has a `dayplan` widget type defined in the Widget Data Contract. Our `/today` endpoint should complement this.
+
+### Existing DayPlan Widget Contract (from Riley's spec)
+
+```typescript
+interface DayPlanWidgetData {
+  timeline?: TimelineEvent[];
+  date?: string;
+  lastUpdated?: string;
+}
+```
+
+**Backend Source**: AI-generated from schedule + tasks, stored in `service_data`
+
+### Alignment Strategy
+
+1. **`/dashboard/v1/composite` (existing BFF)**
+   - Continues serving `dayplan` widget data via `WidgetEnvelope`
+   - Uses `timeline` (same as `events` array in our schema)
+   - Widget displays compact day overview
+
+2. **`/api/v1/dayplan/today` (NEW - this plan)**
+   - Full DayPlan v2 structure for dedicated Today page
+   - Contains all fields: `dueToday`, `hardCommitments`, `conflicts`, etc.
+   - Richer data for full-page experience
+
+### Data Flow
+
+```
+service_data (stored plan)
+       │
+       ├──► BFF /composite → dayplan widget (timeline only)
+       │
+       └──► /dayplan/today → full v2 structure (all fields)
+```
+
+Both endpoints read from the same `service_data` record but return different shapes:
+- BFF extracts just `timeline` (alias of `events`) for widget
+- `/today` returns full v2 schema for Today page
+
+### No Breaking Changes
+
+- Keep `events` array populated (used by dayplan widget via BFF)
+- Widget system continues working unchanged
+- New `/today` endpoint is additive

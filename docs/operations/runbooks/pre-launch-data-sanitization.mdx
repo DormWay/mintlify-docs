@@ -1,0 +1,116 @@
+---
+title: "Pre Launch Data Sanitization"
+description: "Goal: ensure consistent course/campus linkage, populated course names, versioned syllabus processing, and reprocess stale items before launch."
+---
+
+# Pre-Launch Data Sanitization & Reprocessing
+
+Goal: ensure consistent course/campus linkage, populated course names, versioned syllabus processing, and reprocess stale items before launch.
+
+## Verification Needed
+- Confirm `script:backfill-course-names` and `src/scripts/backfill-course-names.ts` still exist.
+- Confirm admin endpoints for bulk reprocess and their expected payloads.
+- Confirm table/column names against current Neon schema.
+
+## 0) Engine Version Tagging (forward)
+- Set environment for engine deployment:
+  - `SYLLABUS_CREW_VERSION` = e.g., `v2025.09.13`
+  - `GIT_COMMIT` = current commit SHA
+- Engine now persists these under `service_data.data.crew_metadata` when saving `processed_syllabus_crew`.
+
+## 1) Backfill Course Names
+- Many course contexts have placeholder names (e.g., `-`) despite metadata or service_data containing course code/title.
+- Script (dry run):
+  - `cd .repos/dormway-platform/services/engine`
+  - `npm run script:backfill-course-names`
+- Live run (no dry run):
+  - `ts-node src/scripts/backfill-course-names.ts --limit=5000`
+
+## 2) Course/Campus Integrity Checks (psql)
+
+Run these queries against the Neon database (use the connection string from Doppler).
+- Courses linked to campus via parent_id:
+```
+SELECT c.id, c.name, camp.name AS campus, c.parent_id IS NOT NULL AS has_campus
+FROM contexts c
+LEFT JOIN contexts camp ON camp.id = c.parent_id AND camp.type='campus'
+WHERE c.type='course'
+ORDER BY has_campus ASC, c.updated_at DESC
+LIMIT 100;
+```
+- Courses without campus (fix via Campus Linker reassignment):
+```
+SELECT c.id, c.name
+FROM contexts c
+WHERE c.type='course' AND c.parent_id IS NULL
+LIMIT 100;
+```
+- service_data that points to non-course contexts (should be zero):
+```
+SELECT sd.id, sd.context_id, c.type
+FROM service_data sd
+LEFT JOIN contexts c ON c.id=sd.context_id
+WHERE sd.method='processed_syllabus_crew' AND (c.type IS NULL OR c.type <> 'course')
+LIMIT 100;
+```
+
+## 3) Duplicate Courses Under a Campus
+- By external_id heuristic (preferred):
+```
+SELECT parent_id AS campus_id, external_id, COUNT(*)
+FROM contexts
+WHERE type='course'
+GROUP BY parent_id, external_id
+HAVING COUNT(*) > 1
+ORDER BY COUNT(*) DESC;
+```
+- By name/code (looser):
+```
+SELECT parent_id AS campus_id, LOWER(COALESCE(metadata->>'courseCode', name)) AS key, COUNT(*)
+FROM contexts
+WHERE type='course'
+GROUP BY parent_id, key
+HAVING COUNT(*) > 1
+ORDER BY COUNT(*) DESC;
+```
+
+## 4) Stale Syllabi Reprocessing
+- On Syllabus Viewer (admin), set “Stale before” and optionally “Crew contains” to queue reprocessing for visible items.
+- API bulk window with optional version filters:
+```
+curl -X POST "$API/admin/syllabus/bulk-reprocess" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "start":"2025-08-01T00:00:00Z",
+    "end":"2025-09-01T00:00:00Z",
+    "limit":500,
+    "versionContains":"v2025.08",
+    "noVersionOnly": false
+  }'
+```
+- To target items missing version tags:
+```
+{"start":"...","end":"...","noVersionOnly": true}
+```
+
+## 5) File Presence Audit
+- Verify processed syllabi have a known file (braingains_documents or URLs in service_data):
+```
+SELECT sd.id,
+  EXISTS (
+    SELECT 1 FROM braingains_documents bd
+    WHERE bd.id::text = sd.id::text
+       OR bd.metadata->>'contextId' = sd.context_id::text
+       OR bd.user_id::text = sd.user_id::text
+  ) AS has_document
+FROM service_data sd
+WHERE sd.method='processed_syllabus_crew'
+ORDER BY sd.fetched_at DESC
+LIMIT 100;
+```
+
+## 6) Campus Registry Note
+- Creation of new campuses from registry is deprecated. Use existing contexts only.
+
+*Last updated: 2025-12-21*

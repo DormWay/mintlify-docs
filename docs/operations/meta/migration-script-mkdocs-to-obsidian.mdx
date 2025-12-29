@@ -1,0 +1,188 @@
+---
+title: "Migration Script   MkDocs to Obsidian"
+description: "Save this as `migrate-to-obsidian.py` and run from the dormway-dev-tools root:"
+---
+
+# Migration Script - MkDocs to Obsidian
+
+## 🎯 Quick Conversion Script
+
+Save this as `migrate-to-obsidian.py` and run from the dormway-dev-tools root:
+
+```python
+#!/usr/bin/env python3
+import os
+import re
+import shutil
+from pathlib import Path
+from datetime import datetime
+
+# Configuration
+MKDOCS_PATH = "dormway/docs/docs"
+OBSIDIAN_PATH = "dormway/obsidian/DormWay"
+
+# Folder mappings
+FOLDER_MAP = {
+    "worklogs": "Daily Notes",
+    "features/ideation": "Features/Ideation",
+    "features/implementation": "Features/Implementation",
+    "architecture": "Architecture",
+    "backend": "Technical/Backend",
+    "mobile": "Technical/Mobile",
+    "meetings": "Meetings",
+    "processing": "Technical/Processing"
+}
+
+def convert_links(content):
+    """Convert MkDocs links to Obsidian format"""
+    # Internal markdown links
+    # [text](../category/file.md) → text
+    def replace_md_link(match):
+        text = match.group(1)
+        path = match.group(2)
+        # Remove .md extension and ../ prefixes
+        path = path.replace('.md', '').replace('../', '')
+        # Get just the filename for display
+        filename = os.path.basename(path)
+        return f"{text}" if text != filename else f"{path}"
+    
+    content = re.sub(r'\[([^\]]+)\]\(([^)]+\.md)\)', replace_md_link, content)
+    
+    # Fix image paths if needed
+    content = content.replace('](../assets/', '](Attachments/')
+    
+    return content
+
+def convert_frontmatter(content):
+    """Convert MkDocs frontmatter to Obsidian format"""
+    # Simple conversion - Obsidian uses the same YAML format
+    # But we might want to add/modify fields
+    
+    if content.startswith('---'):
+        parts = content.split('---', 2)
+        if len(parts) >= 3:
+            frontmatter = parts[1]
+            body = parts[2]
+            
+            # Add migration metadata
+            frontmatter += f"\nmigrated: {datetime.now().strftime('%Y-%m-%d')}\n"
+            
+            return f"---{frontmatter}---{body}"
+    
+    return content
+
+def migrate_file(src_path, dest_path):
+    """Migrate a single file"""
+    print(f"Migrating: {src_path} → {dest_path}")
+    
+    # Read content
+    with open(src_path, 'r', encoding='utf-8') as f:
+        content = f.read()
+    
+    # Convert content
+    content = convert_frontmatter(content)
+    content = convert_links(content)
+    
+    # Ensure destination directory exists
+    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+    
+    # Write converted content
+    with open(dest_path, 'w', encoding='utf-8') as f:
+        f.write(content)
+
+def main():
+    """Run the migration"""
+    migrated_count = 0
+    
+    # Walk through MkDocs structure
+    for root, dirs, files in os.walk(MKDOCS_PATH):
+        for file in files:
+            if file.endswith('.md'):
+                src_file = os.path.join(root, file)
+                
+                # Determine destination based on folder mapping
+                rel_path = os.path.relpath(src_file, MKDOCS_PATH)
+                dest_folder = None
+                
+                for mk_folder, obs_folder in FOLDER_MAP.items():
+                    if rel_path.startswith(mk_folder):
+                        rel_file = rel_path[len(mk_folder):].lstrip('/')
+                        dest_file = os.path.join(OBSIDIAN_PATH, obs_folder, rel_file)
+                        migrate_file(src_file, dest_file)
+                        migrated_count += 1
+                        break
+                else:
+                    # Default: maintain structure
+                    dest_file = os.path.join(OBSIDIAN_PATH, "Imported", rel_path)
+                    migrate_file(src_file, dest_file)
+                    migrated_count += 1
+    
+    print(f"\n✅ Migration complete! Migrated {migrated_count} files")
+    print(f"📁 Files are in: {OBSIDIAN_PATH}")
+
+if __name__ == "__main__":
+    main()
+```
+
+## 🚀 Usage
+
+1. Save the script in the dormway-dev-tools root
+2. Run: `python3 migrate-to-obsidian.py`
+3. Review migrated files in Obsidian
+4. Commit changes to Git
+
+## 🔧 Customization
+
+### Add more folder mappings:
+```python
+FOLDER_MAP = {
+    "your-mkdocs-folder": "Your/Obsidian/Folder",
+    # Add more...
+}
+```
+
+### Customize link conversion:
+```python
+# Add to convert_links() function
+# Handle special link patterns
+content = content.replace('[DOR-', '[[Linear/DOR-')
+```
+
+### Add metadata during migration:
+```python
+# In convert_frontmatter()
+frontmatter += f"\ntags: #migrated #{category}\n"
+frontmatter += f"\nsource: mkdocs\n"
+```
+
+## 📋 Post-Migration Checklist
+
+After running the script:
+
+1. **Verify in Obsidian**
+   - [ ] Open vault and check structure
+   - [ ] Test some internal links
+   - [ ] Check images display correctly
+
+2. **Clean up**
+   - [ ] Remove any duplicate files
+   - [ ] Fix any broken links
+   - [ ] Add missing connections
+
+3. **Enhance**
+   - [ ] Add tags to imported files
+   - [ ] Create index notes for categories
+   - [ ] Build Dataview queries
+
+4. **Commit**
+   ```bash
+   cd dormway/obsidian
+   git add .
+   git commit -m "Migrate documentation from MkDocs to Obsidian"
+   git push
+   ```
+
+---
+
+*Tags: #meta #migration #scripts*
+*Related: [Documentation Migration Plan](/docs/plans/planning/documentation-migration-plan)*

@@ -1,0 +1,385 @@
+---
+title: "DayPlan V2 Architecture"
+description: "DayPlan V2 is a priority-first daily briefing system that generates personalized morning and evening emails for students. It focuses on what matters most:"
+---
+
+# DayPlan V2 Architecture
+
+## Overview
+
+DayPlan V2 is a priority-first daily briefing system that generates personalized morning and evening emails for students. It focuses on what matters most:
+
+1. **DUE TODAY** - Assignments and deadlines due today (the "hero" section)
+2. **HARD COMMITMENTS** - Fixed events like classes, exams, meetings
+3. **CONFLICTS** - Detected scheduling conflicts
+4. **SUGGESTIONS** - Recommended study blocks based on free time
+5. **COMING UP** - Preview of next 2-7 days (nearFuture)
+
+## Environment Variables
+
+### Core Feature Flag
+
+| Variable | Values | Default | Description |
+|----------|--------|---------|-------------|
+| `DAYPLAN_V2_ENABLED` | `true`, `1`, `false`, `0` | `false` | Enables V2 priority-first generation. When false, uses V1 legacy behavior. |
+
+### Email Configuration
+
+| Variable | Values | Default | Description |
+|----------|--------|---------|-------------|
+| `CUSTOMER_IO_MORNING_BRIEFING_V2_ID` | string | `dayplan_v2` | Customer.io template ID for morning briefing emails |
+| `CUSTOMER_IO_EVENING_BRIEFING_V2_ID` | string | `evening_dayplan` | Customer.io template ID for evening briefing emails |
+
+### Timing Configuration
+
+These are currently hardcoded but documented for future configurability:
+
+| Constant | Value | Location | Description |
+|----------|-------|----------|-------------|
+| `V2_DEFAULT_EMAIL_HOUR` | `8` | `email-timing.ts` | Default hour for morning email (8 AM local time) |
+| `V2_DEFAULT_EMAIL_MINUTE` | `0` | `email-timing.ts` | Default minute for morning email |
+
+### V2 Generation Configuration
+
+Hardcoded defaults in `v2-strategy.ts`:
+
+```typescript
+const DEFAULT_V2_CONFIG = {
+  lookaheadDays: 7,        // Days to look ahead for nearFuture assignments
+  minFreeSlotMinutes: 30,  // Minimum free slot to suggest study time
+  maxSuggestedBlocks: 3,   // Maximum study block suggestions
+  coachingLevel: 'focused' // Default coaching personality
+};
+```
+
+## Architecture
+
+### Strategy Pattern
+
+DayPlan uses a strategy pattern to switch between V1 and V2:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                   generateDayPlan()                          │
+│                          │                                   │
+│            ┌─────────────┴─────────────┐                    │
+│            ▼                           ▼                    │
+│    isDayPlanV2Enabled()         isDayPlanV2Enabled()        │
+│       = false                      = true                   │
+│            │                           │                    │
+│            ▼                           ▼                    │
+│    DayPlanV1Strategy           DayPlanV2Strategy            │
+│    (legacy behavior)           (priority-first)             │
+│            │                           │                    │
+│            ▼                           ▼                    │
+│    V1EmailBuilder              V2EmailBuilder               │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Key Files
+
+```
+services/engine/src/activities/dayplan/
+├── strategy-factory.ts      # isDayPlanV2Enabled(), factory singleton
+├── v1-strategy.ts           # Legacy V1 generation
+├── v2-strategy.ts           # Priority-first V2 generation
+├── v1-email-builder.ts      # V1 email formatting
+├── v2-email-builder.ts      # V2 email formatting (priority sections)
+├── email-timing.ts          # V1 vs V2 email timing logic
+├── evening-briefing-v2.ts   # Evening briefing with "This Week" section
+└── types.ts                 # Shared type definitions
+```
+
+### Data Flow
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                      DayPlanDataService                           │
+│                    (@dormway/core)                                │
+│                          │                                        │
+│    ┌─────────────────────┼─────────────────────┐                 │
+│    ▼                     ▼                     ▼                 │
+│ getTimeBlocks()   getCalendarEvents()   getAssignments()         │
+│    │                     │                     │                 │
+│    │                     │                     │                 │
+│    │                     │            ┌────────┴────────┐        │
+│    │                     │            │                 │        │
+│    │                     │    student_time_blocks       │        │
+│    │                     │    (type='assignment')       │        │
+│    │                     │    (lifecycle_status='active')        │
+│    │                     │                                       │
+│    └─────────────────────┴─────────────────────┘                 │
+│                          │                                        │
+│                          ▼                                        │
+│               getDayPlanInputs()                                  │
+│                          │                                        │
+│                          ▼                                        │
+│              { timeBlocks, calendarEvents,                        │
+│                assignments, preferences,                          │
+│                weather, campusContext, ... }                      │
+└──────────────────────────────────────────────────────────────────┘
+                           │
+                           ▼
+┌──────────────────────────────────────────────────────────────────┐
+│                    DayPlanV2Strategy                              │
+│                          │                                        │
+│    buildV2ContextFromRawData()                                   │
+│    ├── Filter dueToday (timezone-aware)                          │
+│    ├── Filter nearFuture (next N days)                           │
+│    ├── Extract hardCommitments (classes)                         │
+│    ├── Detect conflicts                                          │
+│    └── Find free slots                                           │
+│                          │                                        │
+│    appendV2Instructions()                                        │
+│    ├── Add priority-first output requirements                    │
+│    ├── Format dueToday section                                   │
+│    ├── Format hardCommitments section                            │
+│    ├── Format conflicts section                                  │
+│    └── Format nearFuture section                                 │
+│                          │                                        │
+│    callLLMDirect() → GPT-4o-mini                                 │
+│                          │                                        │
+│    parseLLMDayPlanResponse()                                     │
+│    (Zod schema validation)                                       │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+## Assignment Fetching
+
+### Query Details
+
+Assignments are fetched from `student_time_blocks` table:
+
+```sql
+SELECT
+  stb.id,
+  stb.label as title,
+  stb.source,
+  stb.start_time as due_date,
+  stb.metadata->>'course_code' as course_code,
+  stb.metadata->>'course_context_id' as course_id,
+  stb.metadata->>'description' as description,
+  stb.metadata->>'assignment_type' as submission_type,
+  stb.metadata->>'points_possible' as points_possible,
+  stb.metadata->>'is_submitted' as is_submitted
+FROM student_time_blocks stb
+WHERE stb.user_id = $1
+  AND stb.type = 'assignment'
+  AND stb.lifecycle_status = 'active'
+  AND stb.start_time >= $2::timestamp
+  AND stb.start_time <= $3::timestamp
+ORDER BY stb.start_time ASC
+```
+
+### Date Range
+
+- **Start**: Current date at 00:00:00Z
+- **End**: Current date + 7 days at 23:59:59Z (lookaheadDays)
+
+This 7-day window allows V2Strategy to populate both:
+- `dueToday` - Assignments due on the current day
+- `nearFuture` - Assignments due in the next 1-7 days
+
+## Email Timing
+
+### V1 Behavior
+- Emails sent immediately after generation (5 AM workflow)
+
+### V2 Behavior
+- Plan generated at 5 AM
+- Email sent at 8 AM (or user-preferred time)
+- Supports preferences:
+  - `morning` - Send at preferred time (default 8 AM)
+  - `night_before` - Send evening before
+  - `deadlines_only` - Only send if assignments due today
+  - `never` - Disable emails
+
+## User Preferences
+
+Stored in `user_preferences` table under `dayplan` category:
+
+```typescript
+interface DayPlanPreferences {
+  mode?: 'focused' | 'detailed' | 'minimal';
+  show_due_today?: boolean;
+  show_classes?: boolean;
+  show_suggestions?: boolean;
+  show_wellness?: boolean;
+  show_coming_up?: boolean;
+  email_on_light_days?: boolean;
+  emailTiming?: 'morning' | 'night_before' | 'deadlines_only' | 'never';
+  preferredEmailTime?: string; // HH:MM format
+}
+```
+
+## API Endpoints
+
+DayPlan V2 exposes three REST endpoints in `api-router`:
+
+### GET /dayplan/today
+
+Get today's complete priority-first daily brief.
+
+**Authentication**: Required (JWT via `authMiddleware`)
+**Roles**: `user`, `authenticated`
+
+**Response Fields**:
+| Field | Type | Description |
+|-------|------|-------------|
+| `date` | string | Today's date (YYYY-MM-DD) in user's timezone |
+| `timezone` | string | User's timezone |
+| `version` | number | DayPlan version (1 or 2) |
+| `dueToday` | array | Assignments due today (V2 only) |
+| `hardCommitments` | array | Fixed events like classes (V2 only) |
+| `conflicts` | array | Detected scheduling conflicts (V2 only) |
+| `suggestedBlocks` | array | Recommended study blocks (V2 only) |
+| `nearFuture` | array | Assignments due in next 7 days (V2 only) |
+| `summary` | object | Day summary with highlights |
+| `events` | array | Timeline events (V1 compatibility) |
+| `dayFlow` | object | Day characteristics (pace, energy) |
+| `weather` | object | Weather data |
+| `planId` | string | Unique plan identifier |
+| `metrics` | object | Generation metrics |
+| `fetchedAt` | timestamp | When plan was generated |
+
+**Caching**: Supports ETag headers. Returns `304 Not Modified` if `If-None-Match` header matches.
+
+**Example Request**:
+```bash
+curl -X GET "http://localhost:3001/dayplan/today" \
+  -H "Authorization: Bearer <JWT_TOKEN>"
+```
+
+**Example Response**:
+```json
+{
+  "date": "2025-11-29",
+  "timezone": "America/New_York",
+  "version": 2,
+  "dueToday": [
+    {
+      "id": "abc123",
+      "title": "Reading Response 13",
+      "courseName": "DIGITAL 202",
+      "dueTime": "2025-11-29T23:59:00Z",
+      "priority": "high"
+    }
+  ],
+  "nearFuture": [
+    {
+      "id": "def456",
+      "title": "Homework Set 6",
+      "courseName": "ASTRO 104",
+      "dueTime": "2025-12-03T00:00:00Z",
+      "priority": "normal"
+    }
+  ],
+  "hardCommitments": [],
+  "conflicts": [],
+  "suggestedBlocks": [...],
+  "events": [...],
+  "planId": "plan-uuid",
+  "fetchedAt": "2025-11-29T10:00:00Z"
+}
+```
+
+### GET /dayplan/today/summary
+
+Get a lightweight summary for quick dashboard loading.
+
+**Authentication**: Required (JWT via `authMiddleware`)
+**Roles**: `user`, `authenticated`
+
+**Response Fields**:
+| Field | Type | Description |
+|-------|------|-------------|
+| `date` | string | Today's date |
+| `timezone` | string | User's timezone |
+| `planId` | string | Plan identifier |
+| `version` | number | DayPlan version |
+| `summary` | object | Day summary |
+| `counts.dueToday` | number | Count of items due today |
+| `counts.commitments` | number | Count of hard commitments |
+| `counts.conflicts` | number | Count of conflicts |
+| `fetchedAt` | timestamp | When plan was generated |
+
+**Example Request**:
+```bash
+curl -X GET "http://localhost:3001/dayplan/today/summary" \
+  -H "Authorization: Bearer <JWT_TOKEN>"
+```
+
+### GET /dayplan/latest
+
+Get the most recent DayPlan regardless of date (for debugging/fallback).
+
+**Authentication**: Required (JWT via `authMiddleware`)
+**Roles**: `user`, `authenticated`
+
+**Response**: Returns full `dayPlan` object and `fetchedAt` timestamp.
+
+### Deep Links
+
+Mobile apps can open specific days using deep links:
+- `dormway://today?date=2025-11-29` - Open specific date
+- Generated in email templates for "View in App" buttons
+
+## Evening Briefing
+
+The evening briefing (`generateEveningBriefing`) includes:
+
+1. **Day Recap** - Summary of what happened today
+2. **Tomorrow Preview** - What's coming tomorrow
+3. **This Week** - nearFuture assignments (coming days)
+
+The "This Week" section uses the same `nearFuture` array populated from assignments.
+
+## Troubleshooting
+
+### Assignments Not Appearing
+
+1. **Check lifecycle_status**: Assignments must have `lifecycle_status = 'active'`
+2. **Check date range**: Assignment `start_time` must be within the query window
+3. **Check user_id**: Ensure correct user ID is being queried
+4. **Check type**: Must be `type = 'assignment'` in student_time_blocks
+
+### Debug Query
+
+```bash
+doppler run -- psql "$DATABASE_URL" -c "
+SELECT id, label, start_time, lifecycle_status
+FROM student_time_blocks
+WHERE user_id = 'YOUR_USER_ID'
+  AND type = 'assignment'
+  AND lifecycle_status = 'active'
+ORDER BY start_time ASC;
+"
+```
+
+### Key Log Events
+
+| Log Pattern | Description |
+|-------------|-------------|
+| `[DAYPLAN] Raw data from DayPlanDataService` | Shows assignment count from service |
+| `[DAYPLAN-V2] Starting priority-first generation` | V2 entry point with data counts |
+| `dayplan.assignments.fetched` | Successful assignment query |
+| `dayplan.assignments.error` | Assignment query failed |
+
+## Recent Changes
+
+### 2025-11-29: Fixed Missing Assignments Regression
+
+**Issue**: Assignments were not appearing in DayPlan/evening briefings (nearFuture = [])
+
+**Root Cause**: Commit `a1f7aa5f` introduced a broken `canvas_submissions` join that referenced a non-existent column (`cs.canvas_assignment_id`).
+
+**Fix**: Simplified `getAssignments()` query to directly query `student_time_blocks` without the broken join.
+
+**Commit**: `2837f66c` - "fix: simplify getAssignments query to fix missing assignments regression"
+
+## Related Documentation
+
+- DayPlan V1 Architecture - Legacy implementation
+- Student Time Blocks - Unified assignment/schedule storage
+- Preferences Service - User preference management
+- Customer.io Integration - Email delivery

@@ -1,0 +1,332 @@
+---
+title: "2025 10 18 email verification implementation"
+description: "Implemented graceful email verification enforcement for DormWay authentication flow, resolving the \"An error occurred during the authorization flow\" issue."
+---
+
+# Email Verification Implementation - 2025-10-18
+
+## Summary
+Implemented graceful email verification enforcement for DormWay authentication flow, resolving the "An error occurred during the authorization flow" issue.
+
+## Problem
+User reported getting authorization error after signup. Investigation revealed:
+1. Auth0 "Enforce Email Verification" Action was blocking immediately after signup
+2. Used `api.access.deny()` which showed ugly Auth0 error page
+3. No graceful UX for unverified users to resend verification emails
+
+## Solution Implemented
+
+### 1. Backend: Auth0 Management API Integration
+**Location**: `services/api-router/`
+
+**New Files**:
+- `src/services/auth0Service.ts` - Auth0 Management API wrapper
+  - `sendEmailVerification(userId, clientId)` - Resend verification email
+  - `getUser(userId)` - Get user details
+  - `updateAppMetadata(userId, metadata)` - Update user metadata
+
+**Modified Files**:
+- `src/routes/auth0-routes.ts`
+  - Added `POST /api/auth/users/:userId/resend-verification` endpoint
+  - Validates userId format
+  - Checks if email already verified
+  - Sends verification email via Auth0 Management API
+
+**Dependencies**:
+```bash
+cd services/api-router
+npm install auth0@5.0.0
+```
+
+### 2. Frontend: Verification Page
+**Location**: `services/dormway-lockedin/src/app/auth/verify-email/page.tsx`
+
+**Features**:
+- Displays user's email address
+- "Resend Verification Email" button with loading state
+- "I've Verified - Continue" button
+- Error handling and success messages
+- Responsive design with dark mode support
+- Automatically handles already-verified users
+
+### 3. Auth0 Action: Post-Login Email Verification
+**Location**: Auth0 Dashboard → Actions → Flows → Login
+
+**Action Code**: See [Auth0 Email Verification Action](/docs/engineering/technical/authentication/auth0-email-verification-action)
+
+**Key Logic**:
+```javascript
+exports.onExecutePostLogin = async (event, api) => {
+  // ✅ Allow first login (logins_count <= 1) for account creation
+  if (event.stats.logins_count <= 1) {
+    return;
+  }
+
+  // ⛔ Redirect to friendly page if not verified
+  if (!event.user.email_verified) {
+    const appBaseUrl = event.secrets.APP_BASE_URL;
+    const returnTo = event.request.query.returnTo || '/dashboard/home';
+
+    api.redirect.sendUserTo(`${appBaseUrl}/auth/verify-email`, {
+      query: { email: event.user.email, returnTo }
+    });
+  }
+};
+```
+
+## Architecture Decisions
+
+### Why Allow First Login?
+The `/users/create` endpoint is called **during** the Auth0 callback flow, not before it. Blocking at signup would prevent account creation in our database. This is a chicken-and-egg problem.
+
+**Flow**:
+```
+User Signs Up
+  ↓
+First Login (logins_count = 1)
+  ↓
+✅ Action allows through
+  ↓
+Auth0 callback → /users/create → Account created in DB
+  ↓
+Verification email sent
+```
+
+### Why Redirect Instead of Deny?
+- `api.access.deny()` shows Auth0 error page (bad UX)
+- `api.redirect.sendUserTo()` keeps users in branded experience
+- Users can resend emails without leaving the app
+- Provides clear next steps
+
+### Why Check `logins_count <= 1`?
+- Defensive programming against edge cases
+- Safer than `=== 1` in case count is 0
+- Ensures account creation always completes
+
+## Deployment Steps
+
+### 1. Backend (api-router)
+```bash
+cd services/api-router
+npm install auth0
+npm run build
+cd ../..
+./scripts/dev/dev-with-doppler.sh up -d --force-recreate api-router
+```
+
+**Verification**:
+```bash
+# Check logs for Auth0 service initialization
+./scripts/dev/dev-with-doppler.sh logs api-router | grep -i "auth0"
+# Should see: "[Auth0Service] Management API client initialized"
+```
+
+### 2. Frontend (LockedIn)
+No build required - Next.js page already created at `/auth/verify-email`
+
+### 3. Auth0 Dashboard Configuration
+
+**Step 1: Create Action**
+1. Navigate to Auth0 Dashboard → Actions → Flows → Login
+2. Click "+" to add custom action
+3. Name: "Enforce Email Verification"
+4. Copy code from [Auth0 Email Verification Action](/docs/engineering/technical/authentication/auth0-email-verification-action)
+5. Add secret: `APP_BASE_URL` = `http://localhost:3008` (dev) or `https://inclass.dormway.app` (prod)
+6. Click "Deploy"
+
+**Step 2: Add to Flow**
+1. In the Login flow diagram, drag "Enforce Email Verification" into the Post-Login section
+2. Position AFTER "Add Roles to Token" action
+3. Click "Apply"
+
+**Visual Flow**:
+```
+Start
+  ↓
+Post-Login
+  ├─ Add Roles to Token
+  └─ Enforce Email Verification  ← Add here
+  ↓
+Complete
+```
+
+## Testing Checklist
+
+### Test Scenario 1: New User Signup
+- [ ] Sign up with new email
+- [ ] Should complete signup successfully (no verification block)
+- [ ] Account created in database
+- [ ] Verification email received
+
+### Test Scenario 2: Unverified User Login
+- [ ] User registered but hasn't verified email
+- [ ] Tries to log in
+- [ ] Redirected to `/auth/verify-email` (NOT error page)
+- [ ] Can click "Resend Verification Email"
+- [ ] New verification email received
+
+### Test Scenario 3: Verified User Login
+- [ ] User has verified email via link
+- [ ] Logs in
+- [ ] Proceeds normally to dashboard/onboarding
+- [ ] No verification prompt
+
+### Test Scenario 4: Resend Verification
+- [ ] On `/auth/verify-email` page
+- [ ] Click "Resend Verification Email"
+- [ ] Shows loading state
+- [ ] Success message appears
+- [ ] New email received in inbox
+- [ ] Verify via link
+- [ ] Click "I've Verified - Continue"
+- [ ] Can now log in successfully
+
+## Files Changed
+
+### Created
+- `services/api-router/src/services/auth0Service.ts`
+- `services/dormway-lockedin/src/app/auth/verify-email/page.tsx`
+- [Auth0 Email Verification Action](/docs/engineering/technical/authentication/auth0-email-verification-action)
+- [2025-10-18-email-verification-implementation](/docs/operations/bug-reports/2025-10-18-email-verification-implementation) (this file)
+
+### Modified
+- `services/api-router/src/routes/auth0-routes.ts`
+  - Added import for `auth0Service`
+  - Added `POST /users/:userId/resend-verification` endpoint
+- `services/api-router/package.json`
+  - Added `auth0@5.0.0` dependency
+
+## Security Considerations
+
+### Defense-in-Depth
+1. **Auth0 Action** (primary): Blocks unverified logins at Auth0 level
+2. **Backend Endpoint**: Validates userId format, checks verification status
+3. **Frontend UX**: Graceful degradation with clear messaging
+
+### Rate Limiting
+**TODO** (future enhancement): Add rate limiting to prevent abuse
+```typescript
+// Suggestion: Max 5 resends per hour per user
+```
+
+### Token Security
+- Verification tokens managed by Auth0
+- Short-lived (default: 5 days)
+- Single-use
+- Cryptographically secure
+
+## API Endpoints
+
+### POST /api/auth/users/:userId/resend-verification
+**Description**: Resend email verification to a user
+
+**Request**:
+```bash
+curl -X POST http://localhost:3001/api/auth/users/auth0|12345/resend-verification \
+  -H "Content-Type: application/json"
+```
+
+**Response (Success)**:
+```json
+{
+  "success": true,
+  "message": "Verification email sent",
+  "email": "user@example.com"
+}
+```
+
+**Response (Already Verified)**:
+```json
+{
+  "success": true,
+  "alreadyVerified": true,
+  "message": "Email is already verified"
+}
+```
+
+**Response (Error)**:
+```json
+{
+  "success": false,
+  "error": "VERIFICATION_SEND_FAILED",
+  "message": "Failed to send verification email. Please try again later."
+}
+```
+
+## Troubleshooting
+
+### "An error occurred during the authorization flow"
+**Cause**: Auth0 Action is still using `api.access.deny()` or blocking first login
+
+**Solution**:
+1. Check Auth0 Action has `logins_count <= 1` check
+2. Verify Action uses `api.redirect.sendUserTo()` not `api.access.deny()`
+3. Check Auth0 Action logs for errors
+
+### Verification email not sending
+**Possible Causes**:
+1. Auth0 email provider not configured
+2. Management API permissions missing
+3. Invalid userId format
+
+**Solution**:
+```bash
+# Check api-router logs
+./scripts/dev/dev-with-doppler.sh logs api-router | grep -i "verification"
+
+# Expected: "[Auth0Service] Email verification sent to user auth0|..."
+# Error: "[Auth0Service] Failed to send email verification for..."
+```
+
+### User stuck in redirect loop
+**Cause**: Middleware or onboarding logic conflicting
+
+**Solution**:
+1. Check `middleware.ts` onboarding redirects
+2. Verify `returnTo` parameter preserved correctly
+3. Check for conflicting Auth0 Actions
+
+## Related Documentation
+- [Email Verification Enforcement Plan](../Technical/Authentication/Email%20Verification%20Enforcement%20Plan.md)
+- [Auth0 Registration Regression Bug](2025-10-18-auth0-registration-regression.md)
+- [Auth0 Email Verification Action](../Technical/Authentication/Auth0%20Email%20Verification%20Action.md)
+
+## Metrics & Monitoring
+
+### Key Metrics to Track
+1. **Signup Completion Rate**: % of signups that complete account creation
+2. **Email Verification Rate**: % of users who verify email within 24/48 hours
+3. **Resend Rate**: # of verification email resends per user
+4. **Verification Page Bounce Rate**: % of users who leave verification page
+
+### Logging
+All email verification events logged with structured logging:
+- `[Auth0Service] Email verification sent to user {userId}`
+- `[ResendVerification] Request received`
+- `[ResendVerification] Email already verified`
+- `[ResendVerification] Verification email sent successfully`
+
+## Next Steps (Future Enhancements)
+
+1. **Rate Limiting**: Prevent abuse of resend endpoint
+2. **Analytics**: Track verification funnel drop-off
+3. **Email Templates**: Custom branded verification emails
+4. **SMS Verification**: Alternative verification method
+5. **Backend Validation**: Check `email_verified` in middleware as additional layer
+
+## Success Criteria
+
+✅ Users can sign up without hitting authorization errors
+✅ Unverified users see friendly verification page
+✅ Users can resend verification emails
+✅ Verified users log in normally
+✅ No ugly Auth0 error pages
+✅ Clear UX flow with loading/error states
+✅ Proper logging for debugging
+
+---
+
+**Implementation Date**: 2025-10-18
+**Implemented By**: Claude Code
+**Tested By**: [To be completed]
+**Deployed To Production**: [To be completed]

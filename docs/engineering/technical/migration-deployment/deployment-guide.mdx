@@ -1,0 +1,496 @@
+---
+title: "Deployment Guide"
+description: "This guide covers the deployment process for the DormWay platform, including CI/CD pipelines, manual deployments, and rollback procedures."
+---
+
+# Deployment Guide
+
+## Overview
+
+This guide covers the deployment process for the DormWay platform, including CI/CD pipelines, manual deployments, and rollback procedures.
+
+## Deployment Architecture
+
+```
+Developer → GitHub → GitHub Actions → ECR → ECS
+                ↓
+          Branch Protection
+                ↓
+            PR Checks
+                ↓
+         Merge to Main
+                ↓
+        Auto-Deploy to AWS
+```
+
+## Automated Deployment (CI/CD)
+
+### Pull Request Flow
+
+1. **Create Feature Branch**
+   ```bash
+   git checkout -b feature/your-feature
+   ```
+
+2. **Push Changes**
+   ```bash
+   git push -u origin feature/your-feature
+   ```
+
+3. **Create Pull Request**
+   ```bash
+   gh pr create --title "feat: your feature" --body "Description"
+   ```
+
+4. **Automated Checks Run**
+   - Linting (ESLint)
+   - Type checking (TypeScript)
+   - Unit tests
+   - Docker build verification
+   - Security scanning (Trivy)
+
+5. **Review & Approval**
+   - Wait for code review
+   - Address feedback
+   - Get approval from code owner
+
+6. **Merge to Main**
+   - Squash and merge recommended
+   - Auto-deployment triggers
+
+### Main Branch Deployment
+
+When code is merged to main:
+
+1. **GitHub Actions Triggered**
+   - Detects changed services
+   - Builds Docker images
+   - Pushes to ECR
+   - Updates ECS services
+
+2. **Deployment Process**
+   - Build: ~2-3 minutes per service
+   - Push to ECR: ~1 minute
+   - ECS update: ~3-5 minutes
+   - Total: ~6-9 minutes
+
+3. **Notifications**
+   - Success/failure status in GitHub
+   - Optional Slack notifications
+
+## Manual Deployment
+
+### Deploy Single Service
+
+```bash
+# Deploy api-router to ECR
+./scripts/deploy-to-ecr.sh api-router
+
+# Deploy and update ECS
+./scripts/deploy-to-ecr.sh api-router --update-ecs
+```
+
+### Deploy All Services
+
+```bash
+# Deploy all services
+./scripts/deploy-to-ecr.sh
+
+# Deploy all and update ECS
+./scripts/deploy-to-ecr.sh --update-ecs
+```
+
+### Check Deployment Status
+
+```bash
+# Check all services
+./scripts/check-deployment-status.sh
+
+# Check specific service
+./scripts/check-deployment-status.sh api-router
+
+# Watch mode (continuous monitoring)
+./scripts/check-deployment-status.sh --watch
+
+# Show detailed task info
+./scripts/check-deployment-status.sh --tasks
+
+# Show ECR images
+./scripts/check-deployment-status.sh --images
+```
+
+## Service Configuration
+
+### Service Mapping
+
+| Service | ECR Repository | ECS Service | Port |
+|---------|---------------|-------------|------|
+| api-router | dormway-api-router | dormway-api-router-service | 3001 |
+| engine | dormway-engine | dormway-engine-service | 3002 |
+| ably-relay | dormway-ably-relay | dormway-ably-relay-service | 3003 |
+| dormway-crews | dormway-dormway-crews | dormway-crews-service | 3004 |
+| syllabus-webviewer | dormway-syllabus-webviewer | dormway-syllabus-webviewer-service | 3005 |
+
+### Environment Variables
+
+Environment variables are managed through Doppler:
+
+```bash
+# View current config
+doppler secrets
+
+# Update a secret
+doppler secrets set KEY=value
+
+# Sync to ECS
+# ECS tasks automatically pull from Doppler on startup
+```
+
+## Rollback Procedures
+
+### Quick Rollback (Previous Image)
+
+```bash
+# 1. Find previous image tag
+aws ecr describe-images \
+  --repository-name dormway-api-router \
+  --query 'imageDetails[*].[imageTags[0],imagePushedAt]' \
+  --output table
+
+# 2. Update ECS service with previous image
+aws ecs update-service \
+  --cluster dormway-cluster \
+  --service dormway-api-router-service \
+  --task-definition dormway-api-router:previous-version \
+  --force-new-deployment
+```
+
+### Git Revert Rollback
+
+```bash
+# 1. Create revert PR
+git checkout main
+git pull
+git revert HEAD
+git push -u origin revert-latest
+
+# 2. Create PR
+gh pr create --title "HOTFIX: Revert latest deployment" --label hotfix
+
+# 3. Get expedited review and merge
+# 4. Auto-deployment will roll back
+```
+
+### Emergency Rollback Script
+
+```bash
+#!/bin/bash
+# emergency-rollback.sh
+
+SERVICE=$1
+PREVIOUS_TAG=$2
+
+# Update task definition
+aws ecs update-service \
+  --cluster dormway-cluster \
+  --service dormway-${SERVICE}-service \
+  --task-definition dormway-${SERVICE}:${PREVIOUS_TAG} \
+  --force-new-deployment
+
+# Wait for stability
+aws ecs wait services-stable \
+  --cluster dormway-cluster \
+  --services dormway-${SERVICE}-service
+```
+
+## Monitoring Deployments
+
+### CloudWatch Logs
+
+```bash
+# View recent logs
+aws logs tail /ecs/dormway/api-router --follow
+
+# Search logs
+aws logs filter-log-events \
+  --log-group-name /ecs/dormway/api-router \
+  --filter-pattern "ERROR"
+```
+
+### ECS Console
+
+1. Go to [ECS Console](https://console.aws.amazon.com/ecs)
+2. Select `dormway-cluster`
+3. View services and tasks
+4. Check deployment events
+
+### Health Checks
+
+```bash
+# Check service health
+curl https://api.dormway.com/health
+
+# Check specific service
+curl https://api.dormway.com/api-router/health
+```
+
+## Troubleshooting
+
+### Common Issues
+
+#### 1. Deployment Stuck in PENDING
+
+**Symptoms**: Tasks stay in PENDING state
+
+**Solutions**:
+- Check cluster capacity
+- Review task definition memory/CPU
+- Check subnet availability
+- Review security groups
+
+```bash
+# Check why task can't be placed
+aws ecs describe-services \
+  --cluster dormway-cluster \
+  --services dormway-api-router-service \
+  --query 'services[0].events[:5]'
+```
+
+#### 2. Health Check Failures
+
+**Symptoms**: Tasks start but fail health checks
+
+**Solutions**:
+- Verify health check endpoint
+- Check application startup time
+- Review container logs
+- Increase health check grace period
+
+```bash
+# View container logs
+aws logs get-log-events \
+  --log-group-name /ecs/dormway/api-router \
+  --log-stream-name <task-id>
+```
+
+#### 3. Image Pull Errors
+
+**Symptoms**: "CannotPullContainerError"
+
+**Solutions**:
+- Verify ECR permissions
+- Check image exists
+- Verify task execution role
+
+```bash
+# Check if image exists
+aws ecr describe-images \
+  --repository-name dormway-api-router \
+  --image-ids imageTag=latest
+```
+
+#### 4. Out of Memory
+
+**Symptoms**: Tasks killed with OOM
+
+**Solutions**:
+- Increase task memory
+- Check for memory leaks
+- Review application metrics
+
+```bash
+# Update task definition with more memory
+aws ecs register-task-definition \
+  --family dormway-api-router \
+  --memory 1024
+```
+
+### Debug Commands
+
+```bash
+# Get service events
+aws ecs describe-services \
+  --cluster dormway-cluster \
+  --services dormway-api-router-service \
+  --query 'services[0].events[:10]'
+
+# Get task status
+aws ecs describe-tasks \
+  --cluster dormway-cluster \
+  --tasks <task-arn>
+
+# SSH into container (requires ECS Exec)
+aws ecs execute-command \
+  --cluster dormway-cluster \
+  --task <task-arn> \
+  --container api-router \
+  --interactive \
+  --command "/bin/bash"
+```
+
+## Best Practices
+
+### Pre-Deployment Checklist
+
+- [ ] All tests passing locally
+- [ ] Doppler secrets updated if needed
+- [ ] Database migrations ready
+- [ ] Feature flags configured
+- [ ] Monitoring alerts configured
+- [ ] Rollback plan documented
+
+### Deployment Windows
+
+- **Preferred**: Tuesday-Thursday, 10am-3pm EST
+- **Avoid**: Friday deployments
+- **Never**: During high traffic events
+
+### Deployment Communication
+
+1. **Before Deployment**
+   - Post in #deployments Slack channel
+   - Include: services, changes, risks
+
+2. **During Deployment**
+   - Monitor deployment progress
+   - Watch error rates and latency
+
+3. **After Deployment**
+   - Verify functionality
+   - Monitor for 30 minutes
+   - Post success/issues
+
+### Gradual Rollout
+
+For high-risk changes:
+
+```bash
+# Deploy to canary (10% traffic)
+aws ecs update-service \
+  --cluster dormway-cluster \
+  --service dormway-api-router-service \
+  --deployment-configuration \
+    maximumPercent=110 \
+    minimumHealthyPercent=90
+
+# Monitor, then full deploy
+aws ecs update-service \
+  --cluster dormway-cluster \
+  --service dormway-api-router-service \
+  --deployment-configuration \
+    maximumPercent=200 \
+    minimumHealthyPercent=100
+```
+
+## Security Considerations
+
+### Secret Management
+
+- Never commit secrets to git
+- Use Doppler for all secrets
+- Rotate secrets regularly
+- Audit secret access
+
+### Image Scanning
+
+All images are scanned for vulnerabilities:
+
+```bash
+# Manual scan
+aws ecr start-image-scan \
+  --repository-name dormway-api-router \
+  --image-id imageTag=latest
+
+# Get scan results
+aws ecr describe-image-scan-findings \
+  --repository-name dormway-api-router \
+  --image-id imageTag=latest
+```
+
+### Access Control
+
+- Use IAM roles for service access
+- Implement least privilege
+- Enable MFA for production access
+- Audit trail with CloudTrail
+
+## Cost Optimization
+
+### Image Cleanup
+
+```bash
+# Delete untagged images
+aws ecr list-images \
+  --repository-name dormway-api-router \
+  --filter tagStatus=UNTAGGED \
+  --query 'imageIds[*]' \
+  | xargs -I {} aws ecr batch-delete-image \
+    --repository-name dormway-api-router \
+    --image-ids '{}'
+```
+
+### Lifecycle Policies
+
+ECR lifecycle policies automatically clean old images:
+
+```json
+{
+  "rules": [
+    {
+      "rulePriority": 1,
+      "description": "Keep last 10 images",
+      "selection": {
+        "tagStatus": "any",
+        "countType": "imageCountMoreThan",
+        "countNumber": 10
+      },
+      "action": {
+        "type": "expire"
+      }
+    }
+  ]
+}
+```
+
+## Appendix
+
+### Required AWS Permissions
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "ecr:GetAuthorizationToken",
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:GetDownloadUrlForLayer",
+        "ecr:PutImage",
+        "ecr:InitiateLayerUpload",
+        "ecr:UploadLayerPart",
+        "ecr:CompleteLayerUpload",
+        "ecs:UpdateService",
+        "ecs:DescribeServices",
+        "ecs:DescribeTasks",
+        "ecs:ListTasks"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
+```
+
+### GitHub Secrets Required
+
+- `AWS_ACCESS_KEY_ID`
+- `AWS_SECRET_ACCESS_KEY`
+- `DOPPLER_TOKEN` (CI service token)
+- `SLACK_WEBHOOK_URL` (optional)
+
+### Support
+
+- **Slack**: #platform-support
+- **On-call**: See PagerDuty schedule
+- **Documentation**: This guide + AWS docs
+- **Emergency**: Follow incident response procedure

@@ -1,0 +1,38 @@
+---
+title: "Theme System Hardening"
+description: "1. `pnpm vitest run src/lib/theme-dom.test.ts` 2. Browser manual run: clear `localStorage`, hard refresh `/`, confirm Navbar background tokens render dark im..."
+---
+
+# Theme System Hardening (Nov 2025)
+
+## Overview
+- All theme mutations now flow through `src/lib/theme-dom.ts` (new helper that applies classes, CSS variables, accent metadata, and meta theme color in one place).
+- `ThemeContext` syncs `theme`, `fontSize`, `sidebarCollapsed`, **and the new `accentColor` preference** with persistence + backend writes.
+- The inline hydration script in `src/app/layout.tsx` serializes `THEME_CONFIGS`, `ACCENT_PRESETS`, `DESIGN_TOKENS`, and `FONT_SIZES` from TypeScript so the server + client use identical data. No more duplicated literals.
+- Logout / demo transitions call the shared DOM helper via `clearThemePreferencesAndForceDark`, guaranteeing consistent tokens after storage wipes.
+
+## Key Files
+| File | Purpose |
+| --- | --- |
+| `src/lib/theme-dom.ts` | Centralized DOM applier (class batching, reduced motion guard, accent dataset). |
+| `src/contexts/ThemeContext.tsx` | Tracks accent state, exposes `updateAccentColor`, and always executes `applyTheme` on first paint + subsequent preference changes. |
+| `src/app/layout.tsx` | Inline hydration now imports serialized configs and calls the same semantics as runtime. |
+| `src/lib/theme-config.ts` | Adds `ACCENT_PRESETS`, including gradient start/end tokens + btn premium gradients, and extends `DEFAULT_PREFERENCES`. |
+| `src/app/dashboard/preferences/page.tsx` | Appearance tab writes accent choice instantly and persists on save. |
+| `src/lib/theme-dom.test.ts` + `vitest.config.ts` | Regression test ensures `applyTheme` writes the expected CSS tokens/metadata. |
+
+## Behaviour Notes
+- First paint: `ThemeContext` checks the inline-applied dataset values, calls `applyTheme(..., { isInitialLoad: true })`, and avoids double flashes while still forcing CSS tokens to match React state.
+- Glass mode: Treated as a resolved theme; still respects system preference for `system` mode but does not get overridden when hydration reports `glass`.
+- Accent handling: `data-theme-accent` attribute + `accent-*` classes allow CSS to hook into the currently selected accent without rerendering components.
+- Storage Sanitizer: now validates `appBehavior.accentColor` so bad blobs are wiped before React runs.
+
+## Testing / Verification
+1. `pnpm vitest run src/lib/theme-dom.test.ts`
+2. Browser manual run: clear `localStorage`, hard refresh `/`, confirm Navbar background tokens render dark immediately, toggle through light/dark/glass/system + accent colors via Settings → Appearance.
+3. Logout flow: confirm landing page stays dark without requiring a theme toggle.
+
+## Follow-ups / Ideas
+- Wire other components (e.g., NavBar CTA, hero buttons) to accent classes rather than fixed hex codes.
+- Consider persisting `accentColor` server-side in `patchPreferences` response to avoid needing a manual `updateAccentColor` call after save.
+- Snapshot test the inline theme bootstrap once we move to a shared import or Next.js middleware for initial styling.

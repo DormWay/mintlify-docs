@@ -1,0 +1,170 @@
+---
+title: "Demo Read Only Guard"
+description: "Creates a middleware that blocks write operations (POST, PUT, PATCH, DELETE) for demo users while allowing read operations (GET, HEAD, OPTIONS)."
+---
+
+# Demo Read-Only Guard
+
+## Overview
+
+Creates a middleware that blocks write operations (POST, PUT, PATCH, DELETE) for demo users while allowing read operations (GET, HEAD, OPTIONS).
+
+## Factory Signature
+
+```typescript
+createDemoReadOnlyGuard(options: {
+  logger: Logger;
+  enabled?: boolean;
+  allowedPaths?: string[];
+}): RequestHandler
+```
+
+## Parameters
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `logger` | `Logger` | Yes | - | Logger instance |
+| `enabled` | `boolean` | No | `true` | Enable/disable the guard |
+| `allowedPaths` | `string[]` | No | `[]` | Paths that demo users can write to |
+
+## Usage
+
+### Basic Usage
+
+```typescript
+import { createDemoReadOnlyGuard } from '@dormway/core/middleware';
+import { logger } from './utils/logger';
+
+app.use(createDemoReadOnlyGuard({ logger }));
+
+// Demo users can GET this
+app.get('/api/data', (req, res) => { /* ... */ });
+
+// Demo users BLOCKED from POSTing this
+app.post('/api/data', (req, res) => { /* ... */ });
+```
+
+### With Allowed Paths
+
+```typescript
+app.use(createDemoReadOnlyGuard({
+  logger,
+  enabled: process.env.DEMO_ENABLED !== 'false',
+  allowedPaths: [
+    '/dashboard/preferences',  // Allow saving UI preferences
+    '/api/preferences',        // Allow saving user preferences
+    '/api/theme'               // Allow theme changes
+  ]
+}));
+```
+
+## Behavior
+
+### Allowed Operations (Demo Users)
+
+| Method | Allowed | Reason |
+|--------|---------|--------|
+| GET | Yes | Read operations |
+| HEAD | Yes | Read operations |
+| OPTIONS | Yes | CORS preflight |
+
+### Blocked Operations (Demo Users)
+
+| Method | Blocked | Response |
+|--------|---------|----------|
+| POST | Yes | 403 Forbidden |
+| PUT | Yes | 403 Forbidden |
+| PATCH | Yes | 403 Forbidden |
+| DELETE | Yes | 403 Forbidden |
+
+### Exceptions
+
+1. **Paths in `allowedPaths`**: Demo users can write
+2. **Non-demo users**: All operations allowed
+3. **Guard disabled**: All operations allowed
+
+## Error Response
+
+```json
+{
+  "error": "Forbidden",
+  "statusCode": 403,
+  "message": "Demo accounts cannot perform write operations"
+}
+```
+
+## Complete Example
+
+```typescript
+import express from 'express';
+import {
+  createAuthMiddleware,
+  createDemoReadOnlyGuard,
+  createErrorHandler
+} from '@dormway/core/middleware';
+import { logger } from './utils/logger';
+
+const app = express();
+
+// 1. Authenticate user
+app.use(createAuthMiddleware({
+  logger,
+  clerkClient
+}));
+
+// 2. Apply demo guard
+app.use(createDemoReadOnlyGuard({
+  logger,
+  enabled: true,
+  allowedPaths: [
+    '/dashboard/preferences',
+    '/api/preferences',
+    '/api/ui-settings'
+  ]
+}));
+
+// 3. Routes
+// Demo users CAN read
+app.get('/api/courses', listCourses);
+app.get('/api/schedule', getSchedule);
+
+// Demo users CANNOT write (blocked by guard)
+app.post('/api/courses', createCourse);
+app.delete('/api/courses/:id', deleteCourse);
+
+// Demo users CAN write (in allowedPaths)
+app.put('/api/preferences', updatePreferences);
+app.post('/dashboard/preferences', saveUIPreferences);
+
+// 4. Error handler
+app.use(createErrorHandler({ logger }));
+```
+
+## Use Cases
+
+1. **Demo accounts for sales**: Show full functionality without allowing data changes
+2. **Public demos**: Allow exploration without affecting real data
+3. **Training environments**: Let users practice without consequences
+
+## Detecting Demo Users
+
+The guard checks `req.user.role === 'demo'`:
+
+```typescript
+// Set by authentication middleware
+req.user = {
+  id: 'demo-user',
+  role: 'demo',  // This triggers the guard
+  source: 'demo-token'
+};
+```
+
+## Related
+
+- [Middleware Factory Pattern](/docs/engineering/technical/dormway-core/middleware/middleware-factory-pattern) - Overview of factory pattern
+- [Role Check Middleware](/docs/engineering/technical/dormway-core/middleware/role-check-middleware) - Role-based access control
+- [Authentication Middleware](/docs/engineering/technical/dormway-core/middleware/authentication-middleware) - User authentication
+
+---
+
+**Last Updated**: 2025-11-26

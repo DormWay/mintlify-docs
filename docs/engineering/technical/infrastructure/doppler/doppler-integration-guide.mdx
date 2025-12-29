@@ -1,0 +1,121 @@
+---
+title: "Doppler Integration Guide"
+description: "All DormWay services in the monorepo use Doppler for centralized secret management. Environment variables are injected at runtime into each Docker container,..."
+---
+
+# Doppler Integration Guide
+
+## Overview
+
+All DormWay services in the monorepo use Doppler for centralized secret management. Environment variables are injected at runtime into each Docker container, ensuring consistency and security across all environments.
+
+## How It Works
+
+1. **Doppler CLI in Containers**: Each service's `Dockerfile.dev` includes the Doppler CLI installation
+2. **Token Injection**: The `DOPPLER_TOKEN` environment variable is passed to each container
+3. **Runtime Injection**: Services start with `doppler run --` prefix, which fetches and injects secrets
+4. **Automatic Management**: The `dev-with-doppler.sh` script handles token generation and cleanup
+
+## Quick Start
+
+```bash
+# Start all services with Doppler (default)
+make dev
+
+# Stop services
+make stop
+
+# View logs
+make logs
+
+# Check status
+make status
+```
+
+## Service Configuration
+
+Each service's Dockerfile.dev is configured with:
+
+```dockerfile
+# Install Doppler CLI
+RUN wget -q -t3 'https://packages.doppler.com/public/cli/rsa.8004D9FF50437357.key' -O /etc/apk/keys/cli@doppler-8004D9FF50437357.rsa.pub && \
+    echo 'https://packages.doppler.com/public/cli/alpine/any-version/main' | tee -a /etc/apk/repositories && \
+    apk add doppler
+
+# Start with Doppler
+CMD ["doppler", "run", "--", "npm", "run", "dev"]
+```
+
+## Docker Compose Integration
+
+The `docker-compose.local-dev.yml` file passes `DOPPLER_TOKEN` to each service:
+
+```yaml
+services:
+  api-router:
+    environment:
+      DOPPLER_TOKEN: ${DOPPLER_TOKEN}
+      # Service-specific overrides...
+```
+
+## Environment Precedence
+
+1. **Doppler Secrets** (highest priority) - Fetched at runtime
+2. **Docker Compose Environment** - Service-specific overrides (ports, hostnames)
+3. **Dockerfile ENV** - Default values
+
+## Local Development Flow
+
+1. Developer runs `make dev`
+2. Script generates temporary Doppler service token
+3. Token is exported as `DOPPLER_TOKEN` environment variable
+4. Docker Compose receives token and passes to containers
+5. Each container fetches its secrets from Doppler on startup
+6. Services run with full environment configuration
+
+## Doppler Configuration
+
+- **Project**: `dormway`
+- **Config**: `dev_ethan` (default for local development)
+- **Token Lifetime**: 24 hours (for development)
+
+## Manual Commands
+
+If you need to run commands manually:
+
+```bash
+# Generate a Doppler token
+export DOPPLER_TOKEN=$(doppler configs tokens create docker-dev-$(date +%s) --plain --config dev_ethan --max-age 24h)
+
+# Run docker-compose with the token
+DOPPLER_TOKEN="$DOPPLER_TOKEN" docker-compose -f infrastructure/docker/docker-compose.local-dev.yml up
+```
+
+## Troubleshooting
+
+### Check if Doppler is configured
+```bash
+doppler secrets get --plain SUPABASE_URL
+```
+
+### Verify token is being passed
+```bash
+docker-compose -f infrastructure/docker/docker-compose.local-dev.yml config | grep DOPPLER_TOKEN
+```
+
+### Check container environment
+```bash
+docker exec <container-name> env | grep DOPPLER
+```
+
+### View Doppler logs in container
+```bash
+docker exec <container-name> doppler secrets get --plain --silent
+```
+
+## Security Notes
+
+- Tokens are temporary and expire after 24 hours
+- Never commit tokens to version control
+- Production uses long-lived service tokens configured in AWS
+- Local development tokens are scoped to specific configs

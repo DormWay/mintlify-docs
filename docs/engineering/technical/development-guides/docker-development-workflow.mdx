@@ -1,0 +1,325 @@
+---
+title: "Docker Development Workflow"
+description: "This guide covers the complete Docker-based development workflow for DormWay, including local development with Docker Compose and deployment to AWS ECS/Fargate."
+---
+
+# Docker Development Workflow
+
+## Overview
+This guide covers the complete Docker-based development workflow for DormWay, including local development with Docker Compose and deployment to AWS ECS/Fargate.
+
+## Architecture
+
+### Local Development Stack
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Docker Compose Environment                 │
+├─────────────────────────────────────────────────────────────┤
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐ │
+│  │   Engine    │  │ API Router  │  │   Ably Relay      │ │
+│  │  (Port 3030)│  │ (Port 3001) │  │   (Port 3032)     │ │
+│  └─────────────┘  └─────────────┘  └─────────────────────┘ │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐ │
+│  │ICS Uploader │  │   Crews     │  │ Syllabus Viewer   │ │
+│  │ (Port 3000) │  │ (Port 8000) │  │   (Port 3002)     │ │
+│  └─────────────┘  └─────────────┘  └─────────────────────┘ │
+│  ┌─────────────┐  ┌─────────────┐                          │
+│  │    Nginx    │  │    Redis    │                          │
+│  │  (Port 80)  │  │ (Port 6379) │                          │
+│  └─────────────┘  └─────────────┘                          │
+├─────────────────────────────────────────────────────────────┤
+│                    Observability Stack                        │
+├─────────────────────────────────────────────────────────────┤
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐ │
+│  │   Grafana   │  │    Loki     │  │      Tempo        │ │
+│  │ (Port 3334) │  │ (Port 3100) │  │   (Port 3200)     │ │
+│  └─────────────┘  └─────────────┘  └─────────────────────┘ │
+│  ┌─────────────┐  ┌─────────────┐                          │
+│  │ Prometheus  │  │  Promtail   │                          │
+│  │ (Port 9090) │  │ (Log Agent) │                          │
+│  └─────────────┘  └─────────────┘                          │
+└─────────────────────────────────────────────────────────────┘
+```
+
+## Getting Started
+
+### Prerequisites
+1. Docker Desktop installed
+2. Doppler CLI configured
+3. Access to DormWay Doppler project
+
+### Initial Setup
+```bash
+# Clone the repository
+git clone https://github.com/dormway/dormway-dev-tools
+cd dormway-dev-tools/dormway-aws-infrastructure
+
+# Configure Doppler
+doppler setup --project dormway --config dev_ethan
+
+# Start all services with observability
+make obs-full
+```
+
+## Development Workflow
+
+### 1. Starting Services
+```bash
+# Start all services with observability
+make obs-full
+
+# Start specific services
+doppler run -- docker-compose -f docker-compose.doppler.yml up -d engine api-router
+
+# Start without observability
+make doppler-up-d
+```
+
+### 2. Viewing Logs
+```bash
+# Terminal logs
+docker logs dormway-aws-infrastructure-engine-1 -f
+
+# Grafana (recommended)
+open http://localhost:3334
+# Login: admin/admin
+# Navigate to Explore → Loki
+# Query: {service="engine"} |= "error"
+```
+
+### 3. Making Code Changes
+Services are configured with hot reloading:
+- **Node.js services**: Automatically restart on file changes
+- **Python services**: Use --reload flag for auto-restart
+- **No rebuild needed** for code changes (only for dependency changes)
+
+### 4. Debugging Services
+
+#### Check Service Health
+```bash
+# View all services status
+docker ps --format "table {{.Names}}\t{{.Status}}"
+
+# Check specific service health
+curl http://localhost:3030/health  # Engine
+curl http://localhost:3001/health  # API Router
+```
+
+#### Access Service Shell
+```bash
+# Engine
+docker exec -it dormway-aws-infrastructure-engine-1 sh
+
+# API Router
+docker exec -it dormway-aws-infrastructure-api-router-1 sh
+
+# Crews (Python)
+docker exec -it dormway-aws-infrastructure-dormway-crews-1 bash
+```
+
+#### View Environment Variables
+```bash
+docker exec dormway-aws-infrastructure-engine-1 env | grep TEMPORAL
+```
+
+### 5. Testing Changes
+```bash
+# Run tests in containers
+docker exec dormway-aws-infrastructure-engine-1 npm test
+docker exec dormway-aws-infrastructure-api-router-1 npm test
+
+# Integration testing
+# Use the exposed ports to test APIs locally
+curl http://localhost:3001/api/health
+```
+
+## Observability Features
+
+### Grafana Dashboards
+1. **Service Overview**: CPU, memory, restart counts
+2. **Logs Explorer**: Search and filter logs from all services
+3. **Traces**: View distributed traces across services
+4. **Metrics**: Prometheus metrics from all services
+
+### Useful Queries
+
+#### Loki (Logs)
+```logql
+# All errors
+{service=~".*"} |= "error"
+
+# Engine worker issues
+{service="engine"} |= "worker"
+
+# API authentication failures
+{service="api-router"} |= "401"
+
+# Slow queries
+{service=~".*"} |= "slow" |= "query"
+```
+
+#### Prometheus (Metrics)
+```promql
+# Container CPU usage
+rate(container_cpu_usage_seconds_total[5m])
+
+# Memory usage by service
+container_memory_usage_bytes{name=~"dormway.*"}
+
+# Redis operations/sec
+redis_commands_processed_total
+```
+
+## Troubleshooting
+
+### Common Issues
+
+#### 1. Service Won't Start
+```bash
+# Check logs
+docker logs dormway-aws-infrastructure-<service>-1
+
+# Check Doppler config
+doppler run -- env | grep <REQUIRED_VAR>
+
+# Rebuild if dependencies changed
+docker-compose -f docker-compose.doppler.yml build <service>
+```
+
+#### 2. Port Conflicts
+```bash
+# Find what's using a port
+lsof -i :3000
+
+# Change port in docker-compose.doppler.yml
+# Then restart services
+```
+
+#### 3. NativeCertsNotFound Error
+This is fixed in our Dockerfiles, but if it occurs:
+- Ensure Dockerfile includes: `RUN apt-get install -y ca-certificates`
+- Rebuild the image
+
+#### 4. Missing Environment Variables
+```bash
+# Check Doppler is working
+doppler run -- env | grep SUPABASE
+
+# Restart with Doppler
+make obs-full
+```
+
+## Service-Specific Notes
+
+### Engine (Temporal Worker)
+- Connects to cloud Temporal service
+- Requires CA certificates for TLS
+- Health check endpoint: http://localhost:3030/health
+- Runs multiple worker queues
+
+### API Router
+- Express.js REST API
+- Requires Supabase, Auth0 configurations
+- Health check: http://localhost:3001/health
+- Swagger docs: http://localhost:3001/api-docs
+
+### Ably Relay
+- Real-time messaging bridge
+- Requires Ably API key
+- WebSocket connections on port 3032
+
+### Crews (Python)
+- FastAPI service
+- Runs CrewAI agents
+- API docs: http://localhost:8000/docs
+
+## Deployment to AWS
+
+### Building for Production
+```bash
+# Build production images
+cd dormway-aws-infrastructure
+./scripts/deployment/push-to-ecr.sh
+
+# Images are tagged and pushed to ECR
+```
+
+### Deployment Process
+```bash
+# Deploy with Terraform
+cd terraform
+terraform apply -var="image_tag=latest"
+
+# Or use GitHub Actions (automatic on main branch)
+```
+
+## CI/CD Integration
+
+### Local to AWS Pipeline
+1. **Local Development**: Docker Compose with hot reload
+2. **Testing**: Run tests in Docker containers
+3. **Build**: Production Dockerfiles (optimized)
+4. **Push**: Images to AWS ECR
+5. **Deploy**: ECS Fargate via Terraform
+
+### GitHub Actions Workflow
+- Triggers on push to main
+- Builds all service images
+- Runs tests in containers
+- Pushes to ECR
+- Updates ECS services
+
+## Best Practices
+
+### 1. Development
+- Always use Doppler for secrets
+- Check logs in Grafana for better filtering
+- Use health endpoints for debugging
+- Keep containers running for hot reload
+
+### 2. Testing
+- Write tests that work in containers
+- Use service names for internal communication
+- Mock external services when needed
+
+### 3. Debugging
+- Use Grafana for log correlation
+- Check Tempo for request traces
+- Monitor Prometheus metrics
+- Use docker exec for debugging
+
+### 4. Performance
+- Monitor memory usage in Grafana
+- Set resource limits in docker-compose
+- Use Redis for caching
+- Profile slow endpoints
+
+## Migration from PM2
+
+### Key Differences
+| PM2 | Docker |
+|-----|--------|
+| `pm2 start` | `make obs-full` |
+| `pm2 logs` | `docker logs` or Grafana |
+| `pm2 restart` | `docker-compose restart` |
+| `pm2 monit` | Grafana dashboards |
+
+### Advantages of Docker
+- Consistent environment
+- Better isolation
+- Full observability stack
+- Easier onboarding
+- Production parity
+
+## Next Steps
+1. Explore Grafana dashboards
+2. Set up custom alerts
+3. Add integration tests
+4. Configure CI/CD pipeline
+5. Add more services
+
+## Related Documentation
+- [AWS Infrastructure Setup](/docs/engineering/technical/migration-deployment/ci-cd-pipeline-docker-to-aws)
+- Temporal Development Guide
+- API Development Guide
+- Observability Guide

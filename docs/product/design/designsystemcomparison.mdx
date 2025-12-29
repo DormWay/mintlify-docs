@@ -1,0 +1,682 @@
+---
+title: "DESIGN_SYSTEM_COMPARISON"
+description: "The two design systems serve different platforms with distinct implementation philosophies:"
+---
+
+# Design System Comparison: iOS (DWDesign) vs LockedIn Web (dormway-lockedin)
+
+## Executive Summary
+
+The two design systems serve different platforms with distinct implementation philosophies:
+- **iOS/DWDesign**: Generated token-based system with Swift/SwiftUI, AI-informed naming, comprehensive semantic coverage
+- **Web/LockedIn**: CSS custom properties with Tailwind CSS, theme-aware, simplified for web consumption
+
+Both systems have solid foundations but operate at different abstraction levels and need coordination.
+
+---
+
+## 1. COLOR SYSTEMS
+
+### iOS (DWDesign)
+
+**Structure**: Multi-layer nested namespace system
+```
+DS.Color
+├── Palette (raw colors)
+│   ├── Brand (primary, primaryLg, primaryMd, secondaryAccent, socialCoral, academicBlue, eveningPrimary, eveningDark)
+│   ├── Neutral (black, grey200, grey400, grey600, grey700, grey800, grey900, white)
+│   ├── SurfaceTones
+│   ├── Glow
+│   └── State
+├── Semantic (role-based)
+│   ├── Text (primary, secondary, tertiary, onBrand)
+│   ├── Background (base, surfacePrimary, surfaceSecondary, surfaceTertiary)
+│   ├── Border (default)
+│   ├── FocusRing
+│   └── [More semantic groups]
+└── Surface
+```
+
+**Token Naming**: Semantic names with context
+- Primary brand: `academicBlue`, `primary` (vibrant purple), `primaryLg` (deep), `primaryMd` (bright)
+- Evening mode: `eveningPrimary`, `eveningDark`, `eveningGlow`
+- Status: `success`, `warning`, `error`, `info`
+- Neutrals: `grey200` through `grey900`
+
+**Key Colors**:
+- Primary: `#8B5CF6` (vibrant purple)
+- Secondary Accent: `#F97316` (social coral/orange)
+- Success: Green tones
+- Error: Red tones
+- Info: Blue tones
+- Academic Blue: `#3B82F6` (used for academic content context)
+
+**Dark/Light Support**: Built-in light/dark mode handling via ColorAsset with resolvedColor computed property
+
+**Approach**: Each color is a static `SwiftUI.Color` defined with sRGB values (8 decimal places precision)
+
+### Web (LockedIn)
+
+**Structure**: CSS Custom Properties hierarchy
+```css
+-- Core design tokens (light/dark/glass theme-agnostic)
+   --ds-primary-brand: #6366f1
+   --ds-primary-soft: #818cf8
+   --ds-primary-deep: #4f46e5
+
+-- Theme-specific tokens (dark/light/glass themes)
+   UNIFIED_THEME_TOKENS: {
+     dark: { --ds-surface-0 through --ds-overlay-bg }
+     light: { similar structure }
+     glass: { similar with transparency }
+   }
+   
+-- THEME_CONFIGS maps themes to:
+   - CSS classes (e.g., ['dark'])
+   - colorScheme preference (e.g., 'dark')
+   - Color properties object
+```
+
+**Token Naming**: CSS variable convention
+- Surfaces: `--ds-surface-0` (transparent/base), `-1`, `-2`, `-3` (increasing opaqueness)
+- Semantic roles: `--ds-text-primary`, `--ds-border-subtle`, `--ds-shadow-lg`
+- Status: `--ds-status-success`, `--ds-status-error` with `-soft` variants
+- Buttons: `--ds-button-bg`, `--ds-button-hover-bg`, `--ds-button-active-bg`
+- Legacy aliases: `--bg-primary`, `--fg`, `--fg-muted`
+
+**Key Colors** (same brand, different representation):
+- Primary: `#6366f1` (indigo, slightly different from iOS purple)
+- Secondary: No secondary, uses accent system
+- Status colors: Success `#10b981`, Error `#ef4444`, Warning `#f59e0b`, Info `#3b82f6`
+
+**Dark/Light/Glass Support**: Three complete theme configurations with surface-based layering
+
+**Approach**: CSS custom properties applied to document root based on active theme mode
+
+### Alignment & Gaps
+
+| Aspect | iOS | Web | Gap |
+|--------|-----|-----|-----|
+| Primary Color | `#8B5CF6` (purple) | `#6366f1` (indigo) | Different hex values - not 1:1 mappable |
+| Secondary | Social Coral `#F97316` | No secondary (uses accent) | Web lacks secondary accent concept |
+| Semantic Text | 4 levels (primary, secondary, tertiary, onBrand) | 5 levels (primary, secondary, tertiary, muted, accent) | Different granularity |
+| Surface System | Generic semantic background | 4-layer surface depth (0-3) | iOS more abstract, Web more concrete |
+| Color Naming | Palette + Semantic separation | All CSS variables, single namespace | Different organization philosophy |
+| Generation | Generated from token source | Hand-maintained TypeScript | Different authoring approach |
+
+---
+
+## 2. TYPOGRAPHY
+
+### iOS (DWDesign)
+
+**Structure**: Generated DSTypographyValue struct
+```swift
+DS.Typography.Heading: h1, h2, h3
+DS.Typography.Body: default, large, small, caption
+DS.Typography.Label: small
+DS.Typography.Button: large
+```
+
+**Font Stack**: System fonts (SF Pro) with rounded variant support
+- `SF Pro Text` (default)
+- `SF Pro Rounded` (when isRounded = true)
+- Custom font families supported
+
+**Font Weights**: 
+- Mapped to UIKit.UIFont.Weight (ultraLight, thin, light, regular, medium, semibold, bold, heavy, black)
+- SwiftUI equivalent weights
+
+**Properties per Style**:
+- `fontFamily`: PostScript name (e.g., "SFProText-Regular")
+- `fontSize`: CGFloat in points
+- `fontWeight`: SwiftUI.Font.Weight
+- `lineHeight`: CGFloat (optional, absolute)
+- `letterSpacing`: CGFloat (optional, tracking in points)
+- `swiftUITextStyle`: For Dynamic Type scaling (e.g., .body, .headline)
+- `uiKitTextStyle`: UIFont.TextStyle for backward compatibility
+- `isRounded`: Boolean flag
+
+**Dynamic Type Support**: Yes - scales with system settings via swiftUITextStyle
+
+**Usage**: `.dsTypography(DS.Typography.Body.default)` modifier on Text views
+
+### Web (LockedIn)
+
+**Structure**: Font size scale (not full typography system yet)
+```typescript
+export const FONT_SIZES = {
+  // Legacy presets
+  small: '0.875rem',
+  medium: '1rem',
+  large: '1.125rem',
+  
+  // Granular scale (1.25 ratio)
+  xs: '0.75rem',      // 12px
+  sm: '0.875rem',     // 14px
+  base: '1rem',       // 16px
+  lg: '1.125rem',     // 18px
+  xl: '1.25rem',      // 20px
+  '2xl': '1.5rem',    // 24px
+  '3xl': '1.875rem',  // 30px
+  '4xl': '2.25rem',   // 36px
+  '5xl': '3rem',      // 48px
+}
+```
+
+**Font Stack (CSS variables)**:
+```css
+--ds-font-family-sans: -apple-system, BlinkMacSystemFont, "Inter", "SF Pro Display", system-ui, sans-serif
+--ds-font-family-mono: "SF Mono", "JetBrains Mono", "Fira Code", "Consolas", monospace
+--ds-font-family-display: -apple-system, BlinkMacSystemFont, "SF Pro Display", system-ui, sans-serif
+```
+
+**Font Weights**: Not explicitly defined in design tokens - delegated to Tailwind (100-900) and component usage
+
+**Line Heights**: Not in FONT_SIZES - would need to be added (currently missing)
+
+**Usage**: Tailwind classes like `text-lg`, or apply font size directly via `text-[var(--ds-heading-3)]`
+
+**Note**: Full typography system (weights, line-heights, letter-spacing) would need to be defined in Tailwind theme or as new CSS variables
+
+### Alignment & Gaps
+
+| Aspect | iOS | Web | Gap |
+|--------|-----|-----|-----|
+| Completeness | Full (family, size, weight, line-height, letter-spacing) | Partial (size only) | Web missing weight, line-height, letter-spacing definitions |
+| Dynamic Type | Supported via swiftUITextStyle | Would need CSS `font-size-adjust` or JS logic | Web doesn't scale with user preferences |
+| Font Stack | Centralized, platform-aware | Centralized but generic | Could align more |
+| Scale Ratio | Non-uniform | 1.25 ratio (major third) | Could use consistent approach |
+| Weight Naming | SwiftUI.Font.Weight enum | CSS weight values (100-900) | Different systems, both valid |
+
+---
+
+## 3. SPACING & LAYOUT
+
+### iOS (DWDesign)
+
+**Spacing Scale**:
+```swift
+DS.Spacing.none: 0.0
+DS.Spacing.xs: 4.0
+DS.Spacing.sm: 8.0
+DS.Spacing.md: 16.0
+DS.Spacing.lg: 24.0
+DS.Spacing.xl: 32.0
+DS.Spacing.xxl: 48.0
+DS.Spacing.xxxl: 64.0
+
+// Component-specific
+DS.Spacing.cardInternal: 20.0
+DS.Spacing.cardGap: 12.0
+DS.Spacing.sectionGap: 28.0
+DS.Spacing.contentMargin: 20.0
+```
+
+**Grid System**: 4px base unit (xs=4, sm=8, md=16, lg=24, xl=32, xxl=48, xxxl=64)
+
+**Convenience Extensions**:
+```swift
+view.dsPadding(.md)
+view.dsPadding(.horizontal, dsSpacing: .sm)
+view.dsHorizontalPadding(.md)
+view.dsVerticalPadding(.lg)
+```
+
+**No breakpoints defined** - iOS uses dynamic layouts with constraints/GeometryReader
+
+### Web (LockedIn)
+
+**Spacing Scale (rem-based)**:
+```typescript
+--ds-spacing-xs: 0.25rem    // 4px
+--ds-spacing-sm: 0.5rem     // 8px
+--ds-spacing-md: 1rem       // 16px
+--ds-spacing-lg: 1.5rem     // 24px
+--ds-spacing-xl: 2rem       // 32px
+--ds-spacing-2xl: 3rem      // 48px
+--ds-spacing-3xl: 4rem      // 64px
+
+// Layout-specific
+--ds-layout-gap-hero: 2rem
+--ds-layout-gap-section: 3rem
+--ds-layout-gap-stack: 1.5rem
+```
+
+**Border Radius Scale**:
+```typescript
+--ds-radius-sm: 0.5rem      // 8px
+--ds-radius-md: 0.75rem     // 12px
+--ds-radius-lg: 1rem        // 16px
+--ds-radius-xl: 1.5rem      // 24px
+--ds-radius-2xl: 2rem       // 32px
+--ds-card-radius: 1.5rem
+--ds-chip-radius: 9999px
+```
+
+**Grid System**: None explicitly - uses Tailwind's responsive prefixes
+- Base, sm, md, lg, xl, 2xl
+- Custom: xs, narrow, half-sm, half-lg, half-xl
+
+**Breakpoints**:
+```typescript
+xs: 375px
+sm: 640px
+md: 768px
+lg: 1024px
+xl: 1280px
+2xl: 1536px
+narrow: 450px
+half-sm: 600px
+half-lg: 720px
+half-xl: 900px
+```
+
+### Alignment & Gaps
+
+| Aspect | iOS | Web | Gap |
+|--------|-----|-----|-----|
+| Base Unit | 4px | 4px (same) | Aligned |
+| Spacing Scale | xs-xxxl (8 steps) | xs-3xl (7 steps) | iOS has one more level, slightly different |
+| Component Spacing | Semantic (cardInternal, sectionGap) | Generic (layout-gap-hero) | iOS more semantic, Web more generic |
+| Radius Scale | 6 values (none-full) | 5 values (sm-2xl) + semantic | Both similar, iOS slightly more complete |
+| Breakpoints | None (iOS) | 11 breakpoints | Platform difference, valid |
+| Responsive Helpers | dsPadding modifiers | Tailwind classes | Different paradigms |
+
+---
+
+## 4. COMPONENT PATTERNS
+
+### iOS (DWDesign)
+
+**Button Component (DSButton)**:
+- Multiple variants (primary, secondary, tertiary, etc.)
+- Size variants (small, medium, large)
+- States (enabled, disabled, loading)
+- Icon support
+- Accessibility first (WCAG AA compliance testing)
+
+**Card Component (DWTileView/DWInfoCard)**:
+- Background blur/glass morphism support
+- Border and shadow configurations
+- Semantic styling
+- Density options
+
+**Semantic Components**:
+- `DSTag` - Flexible tag/label component
+- `DSBadge` - Status indicators
+- `DSAvatar` - User avatars
+- `DSTooltip` - Contextual help
+- `DSSegmentedButton` - Segmented control
+
+**Pattern**: Each component has modifiers, state management, and semantic options
+
+### Web (LockedIn)
+
+**Card Component**:
+```typescript
+<Card 
+  hover3D={true}              // 3D tilt effect
+  hover3DIntensity={0.8}
+  density="default"           // compact | default | spacious
+  intent="primary"            // primary | info | alert | progress
+  variant="secondary"         // primary | secondary | tertiary
+  interactive={true}
+/>
+```
+
+**Sub-components**:
+- CardHeader, CardTitle, CardDescription
+- CardContent, CardFooter, CardActions
+- CardBody, CardMeta, CardBadge
+- CardDivider, CardList, CardListItem
+- CardLoading, CardEmpty, CardError
+
+**3D Effects**: Sophisticated hover-based 3D transformation with:
+- Mouse position tracking
+- Dynamic perspective based on card size
+- Accessibility: Respects prefers-reduced-motion
+- Touch device detection with auto-disable
+
+**Composition Pattern**: Compound components using cn() utility for class merging
+
+### Alignment & Gaps
+
+| Aspect | iOS | Web | Gap |
+|--------|-----|-----|-----|
+| Button Variants | Full set (primary, secondary, tertiary, etc.) | Not visible in Card - separate component | Both have, different organization |
+| Card 3D Effects | No 3D hover | Sophisticated 3D perspective transforms | Web is more advanced |
+| Density Options | Possible via modifiers | Explicit density prop (compact/default/spacious) | Web more explicit, iOS implicit |
+| Loading States | Built into component states | CardLoading sub-component | Both supported, different approaches |
+| Accessibility | WCAG AA testing in tests | prefers-reduced-motion, keyboard nav | Both considerate, different focuses |
+
+---
+
+## 5. THEMING APPROACH
+
+### iOS (DWDesign)
+
+**Theme Structure**: Implicit in color assets with light/dark mode ColorAsset support
+```swift
+struct ColorAsset {
+    let lightModeColor: SwiftUI.Color
+    let darkModeColor: SwiftUI.Color?
+    
+    var resolvedColor: SwiftUI.Color {
+        if UITraitCollection.current.userInterfaceStyle == .dark {
+            return darkModeColor ?? lightModeColor
+        }
+        return lightModeColor
+    }
+}
+```
+
+**Theme Switching**: Uses SwiftUI's native `.preferredColorScheme()` modifier or UITraitCollection detection
+
+**Themes Supported**: 
+- Light mode
+- Dark mode
+- (No explicit "glass" or other variants in current design)
+
+**Application**: Colors automatically resolve based on system trait collection
+
+### Web (LockedIn)
+
+**Theme Types**: 4 complete themes defined in THEME_CONFIGS
+1. **Dark** (default for many users)
+2. **Light** (bright theme)
+3. **Glass** (glassmorphic with transparency)
+4. (Paper and Calm themes mentioned in theme-utils but not in config shown)
+
+**Theme Definition**:
+```typescript
+THEME_CONFIGS: Record<ResolvedThemeMode, ThemeConfig> = {
+  dark: { classes: ['dark'], colorScheme: 'dark', colors: { ...UNIFIED_THEME_TOKENS.dark } },
+  light: { classes: ['light'], colorScheme: 'light', colors: { ...UNIFIED_THEME_TOKENS.light } },
+  glass: { classes: ['dark', 'glass'], colorScheme: 'dark', colors: { ...UNIFIED_THEME_TOKENS.glass } },
+}
+```
+
+**Theme Switching**:
+1. CSS class applied to document.documentElement
+2. CSS custom properties updated via style attribute or separate stylesheet
+3. colorScheme set for native browser elements
+4. Persisted to localStorage
+
+**Storage**: Preferences stored in localStorage with structured format:
+```typescript
+{
+  appBehavior: {
+    theme: 'dark' | 'light' | 'glass' | 'system',
+    fontSize: 'small' | 'medium' | 'large',
+    sidebarCollapsed: boolean
+  }
+}
+```
+
+**System Integration**: `getSystemTheme()` detects prefers-color-scheme
+
+### Alignment & Gaps
+
+| Aspect | iOS | Web | Gap |
+|--------|-----|-----|-----|
+| Theme Count | 2 (light/dark) | 4 (light/dark/glass/system) | Web more variety |
+| Switching Mechanism | SwiftUI built-in | CSS classes + properties | Platform-appropriate, not unified |
+| Persistence | iOS app preferences | localStorage | Different mechanisms |
+| Glass Morphism | Not implemented | Fully supported | Web is more advanced |
+| System Integration | Native trait collection | matchMedia() + localStorage fallback | Both respect system preferences |
+
+---
+
+## 6. DESIGN TOKENS MANAGEMENT
+
+### iOS (DWDesign)
+
+**Token Definition**: Generated from Style Dictionary (JSON tokens → Swift code)
+- **Source**: External tokens file (JSON)
+- **Process**: Automated code generation with formatters
+- **Formatters**:
+  - `swift_color_formatter.js`
+  - `swift_typography_formatter.js`
+  - `swift_shadow_formatter.js`
+  - `swift_border_formatter_optimized.js`
+  - `swift_motion_formatter.js`
+
+**Output**: Generated files in `/Foundations/Generated/`
+- DS+Color.swift
+- DS+Typography.swift
+- DS+Spacing.swift
+- DS+Radius.swift
+- DS+Shadow.swift
+- DS+Border.swift
+- DS+Motion.swift
+- DS+Material.swift
+- DS+Opacity.swift
+- DS+Blur.swift
+
+**Maintenance**: 
+- Token source is single source of truth
+- Generated code regenerated on changes
+- Last generated: 2025-09-12T16:39:04.171Z
+
+**Organization**:
+- Shells (nested structs) define structure
+- Extensions provide actual token values
+- Namespaced under `DormWayDesignSystem` (aliased as `DS`)
+
+### Web (LockedIn)
+
+**Token Definition**: Hand-maintained TypeScript files
+- **Source Files**:
+  - `src/lib/theme-config.ts` (primary)
+  - `src/lib/theme-utils.ts` (utilities)
+
+**Structure**:
+1. Core design tokens (global): DESIGN_TOKENS
+2. Theme-specific tokens: UNIFIED_THEME_TOKENS
+3. Theme configs: THEME_CONFIGS
+4. Accent colors: ACCENT_COLOR
+5. Font sizes: FONT_SIZES
+
+**Implementation**:
+- TypeScript objects exported as const
+- CSS variables extracted and applied at runtime
+- No code generation - direct maintenance
+
+**Maintenance**:
+- Manual updates to TypeScript objects
+- Need to sync theme-config changes across multiple places
+- CSS variables must be manually crafted for each theme
+
+### Alignment & Gaps
+
+| Aspect | iOS | Web | Gap |
+|--------|-----|-----|-----|
+| Source of Truth | External tokens (JSON) | TypeScript code | iOS more scalable, Web more immediate |
+| Generation | Automated via Style Dictionary | None (hand-coded) | iOS more maintainable at scale |
+| Consistency | Guaranteed by generation | Manual syncing required | iOS prevents drift, Web prone to divergence |
+| Flexibility | Limited by formatters | Full TypeScript flexibility | Web more flexible, iOS more consistent |
+| Version Control | Tokens + generated code | Only TypeScript files | Both valid, iOS requires commit both |
+| Tooling | Style Dictionary setup required | Just TypeScript | Web simpler, iOS requires setup |
+
+---
+
+## 7. ALIGNMENT & UNIFICATION OPPORTUNITIES
+
+### Strong Alignments
+
+1. **Spacing Scale**: Both use 4px base grid with similar progression
+   - iOS: xs(4) sm(8) md(16) lg(24) xl(32) xxl(48) xxxl(64)
+   - Web: xs(4) sm(8) md(16) lg(24) xl(32) 2xl(48) 3xl(64)
+   - **Can be unified**: Rename Web's naming to match iOS
+
+2. **Border Radius**: Similar scale
+   - iOS: none(0) xs(4) sm(8) md(12) lg(20) xl(24) full(9999)
+   - Web: sm(8) md(12) lg(16) xl(24) 2xl(32) + semantic
+   - **Can be aligned**: Add iOS xl/full to Web, adjust Web naming
+
+3. **Component Structure**: Both use hierarchical organization
+   - iOS: Shells (structs) with nested namespaces
+   - Web: CSS variable prefixes with naming convention
+   - **Can be aligned**: Create shared component API documentation
+
+4. **Semantic Colors**: Both include status colors (success, error, warning, info)
+   - Same intent: success=green, error=red, warning=orange, info=blue
+   - **Can be unified**: Normalize hex values across platforms
+
+### Key Gaps to Address
+
+1. **Primary Color Mismatch**
+   - iOS primary: `#8B5CF6` (RGB: 139, 92, 246) - vibrant purple
+   - Web primary: `#6366f1` (RGB: 99, 102, 241) - deeper indigo
+   - **Action**: Decide on canonical primary color, update both platforms
+   - **Impact**: Visual consistency across products
+
+2. **Typography System**
+   - iOS: Complete with weights, line-height, letter-spacing, Dynamic Type
+   - Web: Font sizes only - missing weights, line-heights, letter-spacing
+   - **Action**: Extend Web typography tokens to match iOS completeness
+   - **Impact**: Better text hierarchy and readability control
+
+3. **Theme Variety**
+   - iOS: Light + Dark (plus implicit theme variations)
+   - Web: Light + Dark + Glass (+ Paper/Calm mentioned but not shown)
+   - **Action**: Decide on official theme set, implement on iOS
+   - **Impact**: Visual variety options for users
+
+4. **Token Generation**
+   - iOS: Generated from JSON (Style Dictionary)
+   - Web: Hand-maintained TypeScript
+   - **Action**: Consider Style Dictionary for Web, or create shared tokens approach
+   - **Impact**: Single source of truth, reduced maintenance burden
+
+5. **Font Stack Differences**
+   - iOS: SF Pro (native system font)
+   - Web: includes Inter, SF Pro Display, system stack
+   - **Action**: Align on unified font stack recommendation
+   - **Impact**: More consistent typography across platforms
+
+### Recommended Unification Strategy
+
+**Phase 1: Colors**
+- Audit visual difference between iOS `#8B5CF6` and Web `#6366f1`
+- Create approved color palette with hex values for both platforms
+- Create design decision document explaining rationale
+
+**Phase 2: Typography**
+- Expand Web typography tokens to include weights, line-heights, letter-spacing
+- Create shared font size scale using 1.25 ratio (currently just Web)
+- Document Dynamic Type approach for iOS vs CSS `font-size-adjust` for Web
+
+**Phase 3: Tokens Architecture**
+- Implement Style Dictionary for both platforms OR
+- Create shared TypeScript tokens module that generates both Swift and CSS
+- Establish tokens governance process
+
+**Phase 4: Theme System**
+- Decide on official theme set (light, dark, glass, paper, calm)
+- Implement selected themes on both platforms
+- Create theme switching documentation
+
+**Phase 5: Component Parity**
+- Create shared component specification document
+- Identify core components that exist on both platforms
+- Document variations and platform-specific adaptations
+- Create Figma file as design source of truth (if not already exists)
+
+---
+
+## 8. PLATFORM-SPECIFIC CONSIDERATIONS
+
+### Why Differences Are Valid
+
+**iOS Specificity**:
+1. **Dynamic Type**: Built-in accessibility requirement for font scaling
+2. **Native Themes**: Light/Dark are OS-level decisions, not app-specific
+3. **SwiftUI ViewModifier**: Natural way to apply tokens via `.dsTypography()`
+4. **Trait Collection**: System integration requires ColorAsset approach
+5. **Component Density**: Physical space constraints on mobile devices
+
+**Web Specificity**:
+1. **CSS Flexibility**: CSS variables enable dynamic theming without code changes
+2. **Multiple Themes**: Can support more themes easily (glass, paper, calm)
+3. **3D Effects**: CSS transforms provide sophisticated hover effects
+4. **Responsive Design**: Breakpoints and media queries native to web
+5. **Browser Support**: Must consider user preference APIs (prefers-color-scheme)
+
+### Not Worth Unifying
+
+1. **Modifier APIs**: SwiftUI `.dsTypography()` vs CSS classes - platform differences are appropriate
+2. **Dynamic Type System**: iOS-specific accessibility feature
+3. **3D Effects**: CSS 3D transforms not relevant to iOS
+4. **Breakpoint System**: Mobile layouts defined via constraints, not breakpoints
+5. **Theme Switching Implementation**: Native preferences vs localStorage
+
+---
+
+## Recommendations
+
+### Immediate Actions (High Priority)
+
+1. **Color Alignment Meeting**
+   - Decide on canonical primary color (#8B5CF6 or #6366f1)
+   - Create Figma design file as single source of truth
+   - Document decision and reasoning
+
+2. **Typography Extension (Web)**
+   - Add font-weight scales to theme-config.ts
+   - Add line-height scales to theme-config.ts
+   - Add letter-spacing/tracking scales
+   - Create TypeScript types for typography tokens
+
+3. **Naming Consistency**
+   - Document why iOS has `eveningPrimary` and Web doesn't
+   - Create shared naming conventions for semantic tokens
+   - Update any divergent naming (e.g., Web's spacing-2xl vs iOS's xxl)
+
+### Medium-term Actions
+
+1. **Token Architecture Decision**
+   - Choose: Style Dictionary for both, OR shared TypeScript module, OR keep separate
+   - Document governance process for token changes
+   - Set up CI checks to prevent drift
+
+2. **Comprehensive Typography System**
+   - Create complete Web typography token system
+   - Create comprehensive iOS typography documentation
+   - Add Dynamic Type guidance to Web (research `font-size-adjust`)
+
+3. **Theme Documentation**
+   - Decide on official theme set
+   - Implement missing themes (glass on iOS, paper/calm on Web)
+   - Create theme switching integration documentation
+
+### Long-term Initiatives
+
+1. **Design Token Platform**
+   - Consider design token management platform (e.g., Tokens Studio)
+   - Integrate with Figma for token source control
+   - Auto-generate tokens for multiple platforms
+
+2. **Component Library Parity**
+   - Create shared component specifications
+   - Establish minimum component set for both platforms
+   - Document where platform-specific variants are appropriate
+
+3. **Accessibility Standards**
+   - Establish shared WCAG compliance targets
+   - Document accessibility patterns for each platform
+   - Regular audits across both platforms
+
+---
+
+## Conclusion
+
+Both design systems are well-structured and intentional in their implementation. The differences reflect platform realities and design philosophies rather than oversights. The key to better alignment is:
+
+1. **Clear governance**: Who decides on tokens and themes
+2. **Shared source of truth**: Colors, typography scales, spacing
+3. **Platform flexibility**: Allow platform-specific implementation while maintaining visual consistency
+4. **Regular sync**: Quarterly review of design system alignment and drift
+
+The systems are complementary rather than competing - iOS DWDesign's generation approach and Web LockedIn's CSS flexibility both have merit. The goal should be consistency at the token level while allowing platform-appropriate implementation.

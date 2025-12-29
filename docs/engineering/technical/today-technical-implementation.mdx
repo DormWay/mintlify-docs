@@ -1,0 +1,385 @@
+---
+title: "today technical implementation"
+description: "status: spec last_reviewed: 2025-09-27 owner: engineering implementation_status: pending related_feature: today-vertical-slice"
+---
+
+# Today Vertical Slice - Technical Implementation
+
+---
+status: spec
+last_reviewed: 2025-09-27
+owner: engineering
+implementation_status: pending
+related_feature: today-vertical-slice
+---
+
+## Architecture Overview
+
+The Today vertical slice extends existing schedule infrastructure with:
+- Timeline component for day visualization
+- Task bank with drag/drop interaction
+- Provenance tracking system
+- Inline expansion patterns
+- Workspace preset management
+
+## Core Components
+
+### TimelineGrid Component
+```typescript
+interface TimelineGridProps {
+  date: Date;
+  events: ScheduleEvent[];
+  workBlocks: WorkBlock[];
+  onBlockCreate: (task: Task, slot: TimeSlot) => void;
+  onBlockUpdate: (blockId: string, updates: Partial<WorkBlock>) => void;
+}
+```
+
+**Responsibilities:**
+- Render hour-based grid (06:00-24:00 with smart bounds)
+- Display Now line with real-time updates
+- Handle drop zones for task placement
+- Manage collision detection and snapping
+- Responsive layout for mobile/desktop
+
+### TaskBank Component
+```typescript
+interface TaskBankProps {
+  tasks: Task[];
+  sections: TaskSection[];
+  onTaskDrag: (task: Task) => void;
+  onTaskSelect: (task: Task) => void;
+}
+
+interface TaskSection {
+  id: string;
+  title: string;
+  tasks: Task[];
+  collapsed?: boolean;
+}
+```
+
+**Responsibilities:**
+- Organize tasks by due date and priority
+- Provide drag handles for timeline interaction
+- Support keyboard-only task placement
+- Collapsible sections for focus
+
+### ProvenancePanel Component
+```typescript
+interface ProvenancePanelProps {
+  claim: string;
+  sources: ProvenanceSource[];
+  confidence: number;
+  lastChecked: Date;
+  onRescan: () => Promise<void>;
+  onReportIssue: (issue: string) => void;
+}
+```
+
+**Responsibilities:**
+- Display source chips with status indicators
+- Show confidence scoring and gap analysis
+- Trigger re-scan operations
+- Handle mismatch reporting
+
+### EventDeepCard Component
+```typescript
+interface EventDeepCardProps {
+  event: ScheduleEvent;
+  position: 'inline' | 'popover' | 'drawer';
+  onAction: (action: EventAction) => void;
+  onClose: () => void;
+}
+
+type EventAction =
+  | { type: 'open_notes'; courseId: string }
+  | { type: 'open_map'; location: string }
+  | { type: 'email_instructor'; instructorId: string }
+  | { type: 'view_syllabus'; sectionId: string };
+```
+
+**Responsibilities:**
+- Render contextual event information
+- Provide quick action buttons
+- Handle keyboard navigation
+- Responsive positioning
+
+## Data Layer
+
+### Extended Types
+
+```typescript
+// Extend existing ScheduleEvent
+interface ScheduleEvent {
+  // ... existing fields
+  provenance: ProvenanceSource[];
+  requirements?: string[];
+  overrides?: EventOverride[];
+  confidence?: number;
+}
+
+interface WorkBlock {
+  id: string;
+  taskId?: string;
+  start: Date;
+  end: Date;
+  title: string;
+  courseContext?: string;
+  createdBy: string;
+  updatedAt: Date;
+}
+
+interface ProvenanceSource {
+  type: 'Canvas' | 'Syllabus' | 'Calendar' | 'Email' | 'Manual';
+  status: 'ok' | 'stale' | 'error' | 'partial';
+  lastSyncAt: Date;
+  entityId: string;
+  url?: string;
+  summary: string;
+  confidence: number;
+}
+
+interface Task {
+  id: string;
+  title: string;
+  source: 'LMS' | 'Syllabus' | 'Manual';
+  dueAt?: Date;
+  estMins?: number;
+  priority: 'high' | 'medium' | 'low';
+  courseContext?: string;
+  provenance: ProvenanceSource[];
+}
+```
+
+### State Management
+
+```typescript
+// Today page state
+interface TodayState {
+  date: Date;
+  events: ScheduleEvent[];
+  tasks: Task[];
+  workBlocks: WorkBlock[];
+  provenanceClaims: Map<string, ProvenanceData>;
+  activeCard?: string;
+  dragState?: DragState;
+}
+
+// Actions
+type TodayAction =
+  | { type: 'SET_DATE'; date: Date }
+  | { type: 'CREATE_WORK_BLOCK'; task: Task; slot: TimeSlot }
+  | { type: 'UPDATE_WORK_BLOCK'; blockId: string; updates: Partial<WorkBlock> }
+  | { type: 'DELETE_WORK_BLOCK'; blockId: string }
+  | { type: 'OPEN_PROVENANCE'; claimId: string }
+  | { type: 'RESCAN_SOURCES'; sources: string[] }
+  | { type: 'OPEN_EVENT_CARD'; eventId: string };
+```
+
+### API Endpoints
+
+```typescript
+// New endpoints needed
+GET /api/v1/today/:date
+  → { events, tasks, workBlocks, provenance }
+
+POST /api/v1/work-blocks
+  body: { taskId?, start, end, title, courseContext? }
+  → WorkBlock
+
+PUT /api/v1/work-blocks/:id
+  body: Partial<WorkBlock>
+  → WorkBlock
+
+DELETE /api/v1/work-blocks/:id
+  → { success: boolean }
+
+POST /api/v1/provenance/rescan
+  body: { sources: string[], scope?: string }
+  → { updated: ProvenanceSource[] }
+
+GET /api/v1/syllabus-assertions/:courseId/:date
+  → { requirements: string[], overrides: EventOverride[] }
+```
+
+## Interaction Patterns
+
+### Drag and Drop Implementation
+```typescript
+// Use react-dnd or custom implementation
+const [{ isDragging }, drag] = useDrag({
+  type: 'TASK',
+  item: { task },
+  collect: (monitor) => ({
+    isDragging: monitor.isDragging(),
+  }),
+});
+
+const [{ canDrop, isOver }, drop] = useDrop({
+  accept: 'TASK',
+  drop: (item: { task: Task }, monitor) => {
+    const timeSlot = calculateTimeSlot(monitor.getClientOffset());
+    onBlockCreate(item.task, timeSlot);
+  },
+  collect: (monitor) => ({
+    isOver: monitor.isOver(),
+    canDrop: monitor.canDrop(),
+  }),
+});
+```
+
+### Keyboard Accessibility
+```typescript
+// Alternative to drag/drop for keyboard users
+const TaskPlacementModal = ({ task, onPlace, onCancel }) => {
+  const [startTime, setStartTime] = useState('09:00');
+  const [duration, setDuration] = useState(50);
+
+  return (
+    <Modal>
+      <TimeInput value={startTime} onChange={setStartTime} />
+      <DurationSelector value={duration} onChange={setDuration} />
+      <Button onClick={() => onPlace(task, { startTime, duration })}>
+        Place Task
+      </Button>
+    </Modal>
+  );
+};
+```
+
+### Real-time Updates
+```typescript
+// Subscribe to work block changes
+useEffect(() => {
+  const unsubscribe = subscribeToWorkBlocks(date, (blocks) => {
+    dispatch({ type: 'SET_WORK_BLOCKS', blocks });
+  });
+
+  return unsubscribe;
+}, [date]);
+
+// Optimistic updates for better UX
+const handleBlockUpdate = async (blockId: string, updates: Partial<WorkBlock>) => {
+  // Optimistic update
+  dispatch({ type: 'UPDATE_WORK_BLOCK', blockId, updates });
+
+  try {
+    await updateWorkBlock(blockId, updates);
+  } catch (error) {
+    // Revert on error
+    dispatch({ type: 'REVERT_WORK_BLOCK', blockId });
+    showError('Failed to update block');
+  }
+};
+```
+
+## Performance Considerations
+
+### Virtualization
+- Implement virtual scrolling for long task lists
+- Lazy load provenance data
+- Debounce drag operations
+
+### Caching Strategy
+```typescript
+// Cache work blocks by date
+const workBlockCache = new Map<string, WorkBlock[]>();
+
+// Prefetch adjacent days
+useEffect(() => {
+  const prefetchDates = [
+    addDays(date, -1),
+    addDays(date, 1),
+  ];
+
+  prefetchDates.forEach(prefetchWorkBlocks);
+}, [date]);
+```
+
+### Bundle Optimization
+- Code split timeline components
+- Lazy load provenance panel
+- Tree shake unused drag/drop utilities
+
+## Testing Strategy
+
+### Unit Tests
+- TimeSlot calculation utilities
+- Collision detection algorithms
+- Provenance confidence scoring
+- Drag/drop state management
+
+### Integration Tests
+- Timeline rendering with events + blocks
+- Task bank drag operations
+- Provenance panel data flow
+- Event card quick actions
+
+### E2E Tests
+- Complete planning workflow
+- Trust surface interactions
+- Cross-device synchronization
+- Accessibility compliance
+
+## Migration & Rollout
+
+### Phase 1: Core Timeline
+- Deploy timeline grid component
+- Implement basic work block CRUD
+- Add task bank without drag/drop
+
+### Phase 2: Interactions
+- Enable drag/drop functionality
+- Add keyboard alternatives
+- Implement collision handling
+
+### Phase 3: Trust Surfaces
+- Deploy provenance tracking
+- Add "Really?" buttons to existing claims
+- Implement re-scan functionality
+
+### Phase 4: Deep Cards
+- Replace existing event modals
+- Add quick action buttons
+- Implement keyboard shortcuts
+
+### Feature Flags
+```typescript
+interface TodayFeatureFlags {
+  enableTimeline: boolean;
+  enableDragDrop: boolean;
+  enableProvenance: boolean;
+  enableDeepCards: boolean;
+  enableWorkspacePresets: boolean;
+}
+```
+
+## Monitoring & Observability
+
+### Key Metrics
+- Timeline rendering performance
+- Drag/drop success rate
+- Provenance panel engagement
+- Work block completion rate
+- Deep card action usage
+
+### Error Tracking
+- Drag/drop failures
+- API timeout handling
+- Optimistic update rollbacks
+- Provenance fetch errors
+
+### Performance Monitoring
+- Component render times
+- Bundle size impact
+- Memory usage patterns
+- Cache hit rates
+
+## Security Considerations
+
+- Validate work block ownership
+- Sanitize task titles and descriptions
+- Rate limit provenance re-scan requests
+- Protect syllabus assertion data
+- Audit workspace preset changes

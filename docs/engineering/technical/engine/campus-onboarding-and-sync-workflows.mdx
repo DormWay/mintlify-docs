@@ -1,0 +1,109 @@
+---
+title: "Campus Onboarding and Sync Workflows"
+description: "Last updated: 2025-12-03"
+---
+
+# Campus Onboarding and Sync Workflows
+
+Last updated: 2025-12-03
+
+## Campus Onboarding
+```mermaid
+sequenceDiagram
+  participant WF as campusOnboarding.workflow
+  participant Acts as campusOnboarding.activities
+  participant Proc as campusProcessor.workflow
+
+  WF->>Acts: getCampusesForOnboarding(mode, limit)
+  loop Batches (size N)
+    WF->>Acts: ensureCampusConfig(campusId,campusName,...)
+    par Process Campus
+      WF->>Proc: executeChild(campusProcessor, { campusId, forceRefresh })
+    and Update Status
+      WF->>Acts: updateOnboardingStatus(campusId, partial/complete)
+    end
+    WF->>Acts: recordOnboardingMetrics(...)
+  end
+  opt Large sets
+    WF->>WF: continueAsNew()
+  end
+```
+
+## City Processing
+```mermaid
+flowchart LR
+  W[processSingleCity] --> F1[fetchCityContext]
+  W --> F2[fetchCityFeatureFlags]
+  W -->|if flags| D1[fetchCityWeather+Forecast]
+  W -->|if flags| D2[fetchNews]
+  W -->|if flags| D3[fetchTransit]
+  D1 --> P1{Crew or Legacy}
+  P1 -->|Crew| C1[processCityContextWithCrew]
+  P1 -->|Legacy| C2[processCityWeatherContext]
+  P1 -->|Legacy| C3[processCityNewsContext]
+  C1 --> S1[saveCityContext]
+  C2 --> S2[saveCityWeatherContext]
+  C3 --> S3[saveCityNewsContext]
+  S1 & S2 & S3 --> N[notifyCompletion + signalCityStudentWatchers]
+```
+
+## City→Campus Relationship Sync (cityCampusSync.workflow)
+```mermaid
+sequenceDiagram
+  participant WF as cityCampusSync.workflow
+  participant Acts as cityCampusSync.activities
+  participant DB as Aurora (contexts, city_configs)
+
+  WF->>Acts: removeStateLevelCityConfigs()
+  Acts-->>WF: statesRemoved
+  WF->>Acts: findCampusesNeedingCities(mode)
+  Acts-->>WF: {campuses, orphaned, withStates}
+  loop Batches
+    WF->>Acts: extractCityFromCampus(campus)
+    alt No parent or parent is state
+      WF->>Acts: createCityContextForCampus({campus, city, state})
+      Acts-->>WF: cityId
+      WF->>Acts: fixCampusParentRelationship(campusId, cityId)
+      WF->>Acts: syncCityConfigFromContext(cityId)
+    else Has proper city parent
+      WF->>Acts: logSyncProgress("ok")
+    end
+  end
+  WF->>Acts: getCitySyncStats()
+  Acts-->>WF: {totals}
+```
+
+## Campus Processor (campusProcessor.workflow)
+```mermaid
+flowchart TD
+  A[Start] --> B[fetchCampusDetails]
+  B --> C[getCampusWorkflowConfig]
+  C -->|missing| D[ensureCampusConfig]
+  C --> E{hasCustomWorkflow?}
+  E -->|Yes| F[executeChild(custom workflow)]
+  F --> G[save custom data to service_data]
+  E -->|No| H[processCampusEvents]
+  H --> I[saveCampusEventsContext]
+  H --> J[processParkingLots]
+  J --> K[saveParkingContext]
+  I & K & G --> L[updateTaskStatus]
+  L --> M[End]
+```
+
+## Orchestrated Syncs
+```mermaid
+sequenceDiagram
+  participant Admin
+  participant API as /api/admin/sync/orchestrate
+  participant DB as Aurora
+  participant TMP as Temporal
+
+  Admin->>API: GET orchestrate?mode=auto&limit=10
+  API->>DB: SELECT candidates (priority, hours_since_sync)
+  API->>API: Evaluate limits + priority
+  API->>TMP: start processSingleCity/processSingleCampus
+  TMP-->>API: handles
+  API->>DB: UPDATE tracking (last_sync_at/next_sync_at)
+```
+
+See also: [Multi-Institution Architecture Upgrade](/docs/engineering/technical/implementation-patterns/multi-institution-architecture-upgrade), Engineering/Technical/Engine/Engine Workflow DAG Analysis.

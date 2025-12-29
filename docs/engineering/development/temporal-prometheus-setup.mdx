@@ -1,0 +1,165 @@
+---
+title: "Temporal Prometheus Setup"
+description: "Temporal Cloud doesn't provide a direct REST API for metrics. We need to set up Prometheus to scrape metrics from Temporal Cloud and then query Prometheus fr..."
+---
+
+# Temporal Cloud Prometheus Setup
+
+## Overview
+Temporal Cloud doesn't provide a direct REST API for metrics. We need to set up Prometheus to scrape metrics from Temporal Cloud and then query Prometheus from our admin dashboard.
+
+## Setup Steps Required
+
+### 1. Enable Metrics Export in Temporal Cloud
+- [ ] Contact Temporal Cloud support to enable Prometheus endpoint
+- [ ] Get the metrics endpoint URL (usually `<namespace>.tmprl.cloud:443/prometheus`)
+- [ ] Obtain mTLS certificates for authentication
+- [ ] Get bearer token for API access
+
+### 2. Set Up Prometheus Server
+
+#### Docker Compose Configuration
+```yaml
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: dormway-prometheus
+    ports:
+      - "9091:9090"  # Avoid conflict with local Temporal metrics
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./prometheus/certs:/etc/prometheus/certs:ro
+      - ./prometheus/token:/etc/prometheus/token:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    networks:
+      - dormway-network
+
+volumes:
+  prometheus_data:
+```
+
+#### Prometheus Configuration (prometheus.yml)
+```yaml
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: 'temporal-cloud'
+    scheme: https
+    metrics_path: /prometheus
+    static_configs:
+      - targets: ['<namespace>.tmprl.cloud:443']
+    tls_config:
+      cert_file: /etc/prometheus/certs/client.crt
+      key_file: /etc/prometheus/certs/client.key
+      ca_file: /etc/prometheus/certs/ca.crt
+    bearer_token_file: /etc/prometheus/token/temporal-cloud-token
+
+  - job_name: 'temporal-workers'
+    static_configs:
+      - targets: ['host.docker.internal:9090']
+```
+
+### 3. Create API Endpoint to Query Prometheus
+
+#### New Route: `/admin/temporal/metrics`
+```typescript
+// dormway-api-router/src/routes/admin/temporal-routes.ts
+import { Router } from 'express';
+import axios from 'axios';
+
+const router = Router();
+const PROMETHEUS_URL = process.env.PROMETHEUS_URL || 'http://prometheus:9090';
+
+router.get('/temporal/metrics', async (req, res) => {
+  try {
+    // Query Prometheus for Temporal metrics
+    const queries = {
+      activeWorkflows: 'sum(temporal_workflow_active)',
+      completedToday: 'sum(increase(temporal_workflow_completed[24h]))',
+      failedToday: 'sum(increase(temporal_workflow_failed[24h]))',
+      avgDuration: 'avg(temporal_workflow_execution_time_seconds)',
+      workerCount: 'count(up{job="temporal-workers"})'
+    };
+
+    const results = await Promise.all(
+      Object.entries(queries).map(async ([key, query]) => {
+        const response = await axios.get(`${PROMETHEUS_URL}/api/v1/query`, {
+          params: { query }
+        });
+        return { [key]: response.data.data.result[0]?.value[1] || 0 };
+      })
+    );
+
+    res.json({
+      success: true,
+      data: Object.assign({}, ...results)
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch Temporal metrics' });
+  }
+});
+```
+
+### 4. Update Dashboard to Use Real Metrics
+
+```typescript
+// In fetchMetrics function
+const temporal = await apiClient.get('/admin/temporal/metrics')
+  .catch(() => ({ data: { data: {} } }));
+```
+
+## Key Temporal Metrics to Track
+
+### Workflow Metrics
+- `temporal_workflow_active` - Currently running workflows
+- `temporal_workflow_completed` - Successfully completed workflows  
+- `temporal_workflow_failed` - Failed workflows
+- `temporal_workflow_execution_time_seconds` - Workflow duration
+- `temporal_workflow_task_queue_poll_success` - Task queue health
+
+### Worker Metrics
+- `temporal_worker_task_slots_used` - Worker utilization
+- `temporal_worker_activities_per_second` - Activity throughput
+- `temporal_sticky_cache_hit` - Cache efficiency
+- `temporal_long_request` - Long-running requests
+
+### System Metrics
+- `temporal_cloud_grpc_request_duration` - API latency
+- `temporal_cloud_grpc_request_rate` - Request rate
+- `temporal_cloud_grpc_error_rate` - Error rate
+
+## Alternative: Temporal SDK Metrics
+
+If we can't get Temporal Cloud Prometheus access, we can collect metrics from our workers:
+
+```typescript
+// In worker code
+import { Runtime } from '@temporalio/worker';
+
+Runtime.install({
+  telemetryOptions: {
+    metrics: {
+      prometheus: {
+        bindAddress: '0.0.0.0:9090',
+      },
+    },
+  },
+});
+```
+
+## Resources
+- [Temporal Cloud Observability Docs](https://docs.temporal.io/cloud/observability)
+- [Prometheus Temporal Metrics](https://docs.temporal.io/references/sdk-metrics)
+- [Grafana Dashboard Templates](https://github.com/temporalio/dashboards)
+
+## Status
+**Not Started** - Need Temporal Cloud credentials and access before proceeding.
+
+For now, focusing on easier integrations like ECS metrics which we can get directly from AWS APIs.

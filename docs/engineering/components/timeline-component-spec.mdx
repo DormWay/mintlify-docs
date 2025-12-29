@@ -1,0 +1,696 @@
+---
+title: "timeline component spec"
+description: "status: spec last_reviewed: 2025-09-27 owner: engineering implementation_status: pending related_feature: today-vertical-slice component_type: core_ui"
+---
+
+# Timeline Component - Specification
+
+---
+status: spec
+last_reviewed: 2025-09-27
+owner: engineering
+implementation_status: pending
+related_feature: today-vertical-slice
+component_type: core_ui
+---
+
+## Overview
+
+The Timeline component renders a vertical day view with hour-based grid, displaying fixed events and draggable work blocks. Supports drag/drop interaction, collision detection, and responsive layouts.
+
+## Core Component
+
+### TimelineGrid
+**Purpose**: Main timeline visualization and interaction surface
+
+```typescript
+interface TimelineGridProps {
+  date: Date;
+  events: ScheduleEvent[];
+  workBlocks: WorkBlock[];
+  bounds?: { start: number; end: number }; // Hours (0-23)
+  snapInterval?: number; // Minutes (default: 15)
+  showNowLine?: boolean;
+  onBlockCreate: (task: Task, slot: TimeSlot) => void;
+  onBlockUpdate: (blockId: string, updates: Partial<WorkBlock>) => void;
+  onBlockDelete: (blockId: string) => void;
+  onEventClick: (event: ScheduleEvent) => void;
+  className?: string;
+}
+
+interface TimeSlot {
+  start: Date;
+  end: Date;
+  duration: number; // Minutes
+}
+```
+
+**Key Features**:
+- Hour-based grid layout with configurable bounds
+- Real-time "Now" line with automatic updates
+- Drag/drop zones for task placement
+- Collision detection and visual warnings
+- Responsive touch interactions
+
+### Timeline Layout Structure
+```typescript
+const TimelineGrid: React.FC<TimelineGridProps> = ({
+  date,
+  events,
+  workBlocks,
+  bounds = { start: 6, end: 24 },
+  snapInterval = 15,
+  showNowLine = true,
+  ...handlers
+}) => {
+  const hours = generateHourRange(bounds.start, bounds.end);
+  const nowLine = useNowLine(date, bounds);
+
+  return (
+    <div className="timeline-grid">
+      <div className="hour-labels">
+        {hours.map(hour => (
+          <HourLabel key={hour} hour={hour} />
+        ))}
+      </div>
+
+      <div className="timeline-content">
+        {showNowLine && nowLine.visible && (
+          <NowLine position={nowLine.position} />
+        )}
+
+        <EventLayer events={events} onEventClick={handlers.onEventClick} />
+        <WorkBlockLayer
+          blocks={workBlocks}
+          onUpdate={handlers.onBlockUpdate}
+          onDelete={handlers.onBlockDelete}
+        />
+        <DropZoneLayer
+          snapInterval={snapInterval}
+          onDrop={handlers.onBlockCreate}
+        />
+      </div>
+    </div>
+  );
+};
+```
+
+## Sub-Components
+
+### HourLabel
+```typescript
+interface HourLabelProps {
+  hour: number;
+  format?: '12h' | '24h';
+  className?: string;
+}
+
+const HourLabel: React.FC<HourLabelProps> = ({
+  hour,
+  format = '12h'
+}) => {
+  const timeStr = formatHour(hour, format);
+
+  return (
+    <div className="hour-label" data-hour={hour}>
+      <span className="hour-text">{timeStr}</span>
+    </div>
+  );
+};
+```
+
+### NowLine
+```typescript
+interface NowLineProps {
+  position: number; // Percentage from top
+  animated?: boolean;
+}
+
+const NowLine: React.FC<NowLineProps> = ({
+  position,
+  animated = true
+}) => {
+  return (
+    <div
+      className={cn("now-line", { animated })}
+      style={{ top: `${position}%` }}
+    >
+      <div className="now-indicator" />
+      <div className="now-label">
+        {new Date().toLocaleTimeString([], {
+          hour: '2-digit',
+          minute: '2-digit'
+        })}
+      </div>
+    </div>
+  );
+};
+```
+
+### EventBlock
+```typescript
+interface EventBlockProps {
+  event: ScheduleEvent;
+  onClick: (event: ScheduleEvent) => void;
+  style?: React.CSSProperties;
+}
+
+const EventBlock: React.FC<EventBlockProps> = ({
+  event,
+  onClick,
+  style
+}) => {
+  const duration = getDurationMinutes(event.startTime, event.endTime);
+  const courseColor = getCourseColor(event.courseId);
+
+  return (
+    <div
+      className="event-block"
+      style={{
+        ...style,
+        backgroundColor: courseColor.bg,
+        borderColor: courseColor.border,
+      }}
+      onClick={() => onClick(event)}
+      role="button"
+      tabIndex={0}
+    >
+      <div className="event-title">{event.title}</div>
+      <div className="event-details">
+        <span className="event-time">
+          {formatTimeRange(event.startTime, event.endTime)}
+        </span>
+        {event.location && (
+          <span className="event-location">{event.location}</span>
+        )}
+      </div>
+    </div>
+  );
+};
+```
+
+### WorkBlock
+```typescript
+interface WorkBlockProps {
+  block: WorkBlock;
+  onUpdate: (blockId: string, updates: Partial<WorkBlock>) => void;
+  onDelete: (blockId: string) => void;
+  isEditing?: boolean;
+}
+
+const WorkBlock: React.FC<WorkBlockProps> = ({
+  block,
+  onUpdate,
+  onDelete,
+  isEditing = false,
+}) => {
+  const [localTitle, setLocalTitle] = useState(block.title);
+  const { isDragging, drag } = useWorkBlockDrag(block);
+  const { resizeHandlers } = useWorkBlockResize(block, onUpdate);
+
+  const handleTitleSave = () => {
+    if (localTitle !== block.title) {
+      onUpdate(block.id, { title: localTitle });
+    }
+  };
+
+  return (
+    <div
+      ref={drag}
+      className={cn("work-block", {
+        dragging: isDragging,
+        editing: isEditing,
+        completed: block.completed,
+      })}
+    >
+      {isEditing ? (
+        <input
+          value={localTitle}
+          onChange={(e) => setLocalTitle(e.target.value)}
+          onBlur={handleTitleSave}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') handleTitleSave();
+            if (e.key === 'Escape') setLocalTitle(block.title);
+          }}
+          className="block-title-input"
+          autoFocus
+        />
+      ) : (
+        <div className="block-title">{block.title}</div>
+      )}
+
+      <div className="block-actions">
+        <button
+          onClick={() => onUpdate(block.id, { completed: !block.completed })}
+          className="complete-button"
+        >
+          {block.completed ? '✓' : '○'}
+        </button>
+        <button
+          onClick={() => onDelete(block.id)}
+          className="delete-button"
+        >
+          ×
+        </button>
+      </div>
+
+      {/* Resize handles */}
+      <div {...resizeHandlers.top} className="resize-handle resize-top" />
+      <div {...resizeHandlers.bottom} className="resize-handle resize-bottom" />
+    </div>
+  );
+};
+```
+
+### DropZone
+```typescript
+interface DropZoneProps {
+  timeSlot: TimeSlot;
+  isActive?: boolean;
+  hasConflict?: boolean;
+  onDrop: (task: Task, slot: TimeSlot) => void;
+}
+
+const DropZone: React.FC<DropZoneProps> = ({
+  timeSlot,
+  isActive = false,
+  hasConflict = false,
+  onDrop,
+}) => {
+  const [{ isOver, canDrop }, drop] = useDrop({
+    accept: 'TASK',
+    drop: (item: { task: Task }) => onDrop(item.task, timeSlot),
+    collect: (monitor) => ({
+      isOver: monitor.isOver(),
+      canDrop: monitor.canDrop(),
+    }),
+  });
+
+  return (
+    <div
+      ref={drop}
+      className={cn("drop-zone", {
+        active: isActive,
+        "drop-target": isOver && canDrop,
+        conflict: hasConflict,
+      })}
+      data-time-slot={timeSlot.start.toISOString()}
+    >
+      {isOver && canDrop && (
+        <div className="drop-indicator">
+          Drop to create {timeSlot.duration}min block
+        </div>
+      )}
+    </div>
+  );
+};
+```
+
+## Custom Hooks
+
+### useNowLine
+```typescript
+const useNowLine = (date: Date, bounds: { start: number; end: number }) => {
+  const [position, setPosition] = useState(0);
+  const [visible, setVisible] = useState(false);
+
+  useEffect(() => {
+    const updatePosition = () => {
+      const now = new Date();
+
+      // Only show if viewing today
+      if (!isSameDay(now, date)) {
+        setVisible(false);
+        return;
+      }
+
+      const currentHour = now.getHours() + now.getMinutes() / 60;
+      const inBounds = currentHour >= bounds.start && currentHour <= bounds.end;
+
+      setVisible(inBounds);
+
+      if (inBounds) {
+        const percentage = ((currentHour - bounds.start) / (bounds.end - bounds.start)) * 100;
+        setPosition(percentage);
+      }
+    };
+
+    updatePosition();
+    const interval = setInterval(updatePosition, 60000); // Update every minute
+
+    return () => clearInterval(interval);
+  }, [date, bounds]);
+
+  return { position, visible };
+};
+```
+
+### useWorkBlockDrag
+```typescript
+const useWorkBlockDrag = (block: WorkBlock) => {
+  const [{ isDragging }, drag] = useDrag({
+    type: 'WORK_BLOCK',
+    item: { block },
+    collect: (monitor) => ({
+      isDragging: monitor.isDragging(),
+    }),
+  });
+
+  return { isDragging, drag };
+};
+```
+
+### useCollisionDetection
+```typescript
+const useCollisionDetection = (
+  events: ScheduleEvent[],
+  workBlocks: WorkBlock[]
+) => {
+  const checkCollision = useCallback((
+    timeSlot: TimeSlot
+  ): { hasCollision: boolean; conflicts: Array<ScheduleEvent | WorkBlock> } => {
+    const conflicts: Array<ScheduleEvent | WorkBlock> = [];
+
+    // Check events
+    events.forEach(event => {
+      if (timeSlotOverlaps(timeSlot, event)) {
+        conflicts.push(event);
+      }
+    });
+
+    // Check work blocks
+    workBlocks.forEach(block => {
+      if (timeSlotOverlaps(timeSlot, block)) {
+        conflicts.push(block);
+      }
+    });
+
+    return {
+      hasCollision: conflicts.length > 0,
+      conflicts,
+    };
+  }, [events, workBlocks]);
+
+  return { checkCollision };
+};
+```
+
+## Responsive Behavior
+
+### Desktop (≥1024px)
+- Full timeline with side-by-side task bank
+- Precise drag/drop with pixel-perfect positioning
+- Hover states and resize handles
+- Keyboard shortcuts enabled
+
+### Tablet (768-1023px)
+- Stacked layout with collapsible task bank
+- Larger touch targets (min 44px)
+- Simplified drag interactions
+- Swipe gestures for block actions
+
+### Mobile (≤767px)
+- Tab-based interface (Timeline | Tasks | Focus)
+- Tap-to-place instead of drag/drop
+- Bottom sheet for block editing
+- Reduced visual complexity
+
+## Styling System
+
+### CSS Variables
+```css
+:root {
+  --timeline-hour-height: 60px;
+  --timeline-gutter-width: 60px;
+  --timeline-border-color: rgb(229 231 235);
+  --timeline-now-line-color: rgb(239 68 68);
+  --timeline-drop-zone-color: rgb(34 197 94);
+  --timeline-conflict-color: rgb(245 158 11);
+}
+```
+
+### Component Classes
+```css
+.timeline-grid {
+  display: grid;
+  grid-template-columns: var(--timeline-gutter-width) 1fr;
+  position: relative;
+  height: calc(var(--timeline-hour-height) * var(--visible-hours));
+}
+
+.hour-label {
+  height: var(--timeline-hour-height);
+  border-bottom: 1px solid var(--timeline-border-color);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.75rem;
+  color: rgb(107 114 128);
+}
+
+.event-block {
+  position: absolute;
+  left: 4px;
+  right: 4px;
+  border-radius: 6px;
+  border: 1px solid;
+  padding: 8px;
+  cursor: pointer;
+  transition: transform 0.1s ease;
+}
+
+.event-block:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);
+}
+
+.work-block {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  background: rgb(239 246 255);
+  border: 1px solid rgb(147 197 253);
+  border-radius: 6px;
+  padding: 8px;
+  cursor: move;
+}
+
+.work-block.dragging {
+  opacity: 0.7;
+  transform: scale(1.02);
+  z-index: 50;
+}
+
+.now-line {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--timeline-now-line-color);
+  z-index: 30;
+}
+
+.now-line.animated {
+  transition: top 0.3s ease;
+}
+
+.drop-zone {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: var(--timeline-hour-height);
+  border: 2px dashed transparent;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.drop-zone.drop-target {
+  border-color: var(--timeline-drop-zone-color);
+  background: rgb(240 253 244);
+}
+
+.drop-zone.conflict {
+  border-color: var(--timeline-conflict-color);
+  background: rgb(254 252 232);
+}
+```
+
+## Performance Optimizations
+
+### Virtual Scrolling (Large Time Ranges)
+```typescript
+const VirtualizedTimeline = ({
+  startHour,
+  endHour,
+  visibleHours = 12
+}) => {
+  const [scrollTop, setScrollTop] = useState(0);
+  const containerHeight = visibleHours * HOUR_HEIGHT;
+
+  const visibleRange = useMemo(() => {
+    const startIndex = Math.floor(scrollTop / HOUR_HEIGHT);
+    const endIndex = startIndex + visibleHours + 1;
+    return { startIndex, endIndex };
+  }, [scrollTop, visibleHours]);
+
+  // Only render visible hours
+  const visibleHours = hours.slice(
+    visibleRange.startIndex,
+    visibleRange.endIndex
+  );
+
+  return (
+    <div
+      className="timeline-viewport"
+      style={{ height: containerHeight }}
+      onScroll={(e) => setScrollTop(e.target.scrollTop)}
+    >
+      {/* Render only visible content */}
+    </div>
+  );
+};
+```
+
+### Memoization
+```typescript
+const MemoizedEventBlock = React.memo(EventBlock, (prev, next) => {
+  return (
+    prev.event.id === next.event.id &&
+    prev.event.startTime === next.event.startTime &&
+    prev.event.endTime === next.event.endTime &&
+    prev.event.title === next.event.title
+  );
+});
+
+const MemoizedWorkBlock = React.memo(WorkBlock, (prev, next) => {
+  return (
+    prev.block.id === next.block.id &&
+    prev.block.title === next.block.title &&
+    prev.block.start === next.block.start &&
+    prev.block.end === next.block.end &&
+    prev.block.completed === next.block.completed
+  );
+});
+```
+
+## Accessibility Features
+
+### ARIA Labels and Roles
+```typescript
+<div
+  role="grid"
+  aria-label={`Schedule for ${format(date, 'EEEE, MMMM d, yyyy')}`}
+  className="timeline-grid"
+>
+  <div role="rowheader" className="hour-labels">
+    {hours.map(hour => (
+      <div
+        key={hour}
+        role="columnheader"
+        aria-label={`${formatHour(hour)} hour`}
+      >
+        {formatHour(hour)}
+      </div>
+    ))}
+  </div>
+</div>
+```
+
+### Keyboard Navigation
+```typescript
+const useTimelineKeyboard = (
+  events: ScheduleEvent[],
+  workBlocks: WorkBlock[],
+  onEventSelect: (event: ScheduleEvent) => void,
+  onBlockSelect: (block: WorkBlock) => void
+) => {
+  const [focusedIndex, setFocusedIndex] = useState(0);
+  const allItems = [...events, ...workBlocks].sort(byStartTime);
+
+  const handleKeyDown = useCallback((e: KeyboardEvent) => {
+    switch (e.key) {
+      case 'ArrowUp':
+        e.preventDefault();
+        setFocusedIndex(Math.max(0, focusedIndex - 1));
+        break;
+      case 'ArrowDown':
+        e.preventDefault();
+        setFocusedIndex(Math.min(allItems.length - 1, focusedIndex + 1));
+        break;
+      case 'Enter':
+      case ' ':
+        e.preventDefault();
+        const item = allItems[focusedIndex];
+        if ('courseId' in item) {
+          onEventSelect(item);
+        } else {
+          onBlockSelect(item);
+        }
+        break;
+    }
+  }, [focusedIndex, allItems, onEventSelect, onBlockSelect]);
+
+  return { focusedIndex, handleKeyDown };
+};
+```
+
+## Testing Strategies
+
+### Unit Tests
+- Time slot calculations
+- Collision detection logic
+- Drag/drop state management
+- Responsive breakpoint behavior
+
+### Integration Tests
+- Event rendering with real data
+- Work block CRUD operations
+- Now line positioning accuracy
+- Keyboard navigation flows
+
+### Visual Regression Tests
+- Timeline layout across breakpoints
+- Event/block positioning accuracy
+- Drag state visual feedback
+- Color scheme consistency
+
+## Error Boundaries
+
+```typescript
+class TimelineErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  { hasError: boolean; error?: Error }
+> {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false };
+  }
+
+  static getDerivedStateFromError(error: Error) {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
+    console.error('Timeline error:', error, errorInfo);
+    // Report to monitoring service
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="timeline-error">
+          <h3>Timeline temporarily unavailable</h3>
+          <p>Please refresh the page to try again.</p>
+          <button onClick={() => window.location.reload()}>
+            Refresh Page
+          </button>
+        </div>
+      );
+    }
+
+    return this.props.children;
+  }
+}
+```

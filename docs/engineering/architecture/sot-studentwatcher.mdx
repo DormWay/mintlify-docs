@@ -1,0 +1,56 @@
+---
+title: "StudentWatcher"
+---
+
+# SoT - StudentWatcher
+
+## Scope
+- Temporal `studentWatcherWorkflow` digital twin (signals, schedule loop, auto-sync triggers).
+- StudentWatcher start/stop and signal entry points (engine + API router).
+- Workflow state persistence and timezone selection.
+
+## Non-goals
+- DayPlan generation internals (see `dayplan.activities.ts`).
+- Calendar ingestion/normalization or schedule import (covered in calendar SoT).
+- UI implementations (admin panel, web widgets, iOS views).
+
+## Invariants & Contracts
+- Workflow type is `studentWatcherWorkflow` (used in Temporal queries and start calls).
+- Canonical workflow ID is `student-watcher-${userId}` when started by engine activities and onboarding flows.
+- Supported signals: `daily_plan`, `context_update`, `generate_plan`, `preferences_update`, `trigger_calendar_sync`, `trigger_canvas_sync`, `send_evening_briefing`, `generate_feed_cards`.
+- Workflow loop runs every 5 minutes (288 checks/day); `continueAsNew` triggers at midnight in the user’s timezone.
+- Daily plan generation runs at 5 AM user time when the plan date changes; evening briefing runs at configured hour (default 20:00).
+- Auto-sync cadence: calendar + Canvas sync are evaluated hourly and fire when last sync is ≥ 6 hours old.
+
+## Key Flows (High-Level)
+- Start on onboarding: `studentProcessor.workflow` calls `startStudentWatcher`, which resolves timezone and starts `studentWatcherWorkflow`.
+- Start on Clerk signup: `clerk-routes` attempts `startWorkflow('studentWatcherWorkflow')` with default timezone; failures are logged but do not block signup.
+- Admin-driven signals: `dayplan-admin-actions` uses `generate_plan` for regeneration/email; `preferences-routes` signals `preferences_update`.
+- Runtime loop: handles `context_update` signals, regenerates plans on calendar/syllabus/enrollment changes, runs schedule/Canvas auto-syncs, and saves state to `student_watcher_state`.
+
+## Known Discrepancies / Risks
+- Workflow ID mismatch: `preferences-routes` uses `studentWatcher-${userId}` while canonical IDs use `student-watcher-${userId}`; signals from this route may miss the active workflow. (`services/api-router/src/routes/admin/preferences-routes.ts`)
+
+## Data Models / IDs / Terminology
+- `ContextUpdateSignal.type`: `location`, `activity`, `calendar`, `preference`, `syllabus_update`, `syllabus_added`, `course_enrollment_changed`.
+- `WorkflowState`: persisted in `student_watcher_state` (last email/push, last plan generation, state data).
+- `WorkflowStatus` query returns `studentId`, `currentPlanId`, `lastPlanGeneration`, and `dayPlanVersion`.
+
+## Key Files (Code + Docs)
+- `services/engine/src/workflows/studentWatcher.simplified.workflow.ts` (signals, scheduling loop, auto-sync)
+- `services/engine/src/activities/student.activities.ts` (start workflow + timezone lookup)
+- `services/engine/src/activities/workflowState.activities.ts` (load/save workflow state)
+- `services/engine/src/types/dayplan.types.ts` (signal payload types)
+- `services/engine/src/workflows/studentProcessor.workflow.ts` (onboarding start + broadcast signals)
+- `services/api-router/src/routes/webhooks/clerk-routes.ts` (signup start)
+- `services/api-router/src/routes/admin/dayplan-admin-actions.ts` (manual regenerate/email signals)
+- `services/api-router/src/routes/admin/preferences-routes.ts` (preferences update signal)
+
+## Update Checklist
+- Changing workflow ID or task queue: update start points in `student.activities.ts`, `studentProcessor.workflow.ts`, and webhook/admin routes.
+- Changing signal names/payloads: update `dayplan.types.ts` and every caller that signals StudentWatcher.
+- Adjusting schedule or sync cadence: update constants in `studentWatcher.simplified.workflow.ts` and any test scripts.
+- Adding new context update types: update `ContextUpdateSignal` and handler logic.
+
+## Recent Changes
+- 2025-12-22: Populated and verified against current workflow + API entry points.

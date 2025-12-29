@@ -1,0 +1,294 @@
+---
+title: "Empty Dayplan Generation   Baseline LLM Returns Zero Events"
+description: "Users with only Canvas ICS sync receive completely empty dayplans (0 events, 0 actions) instead of placeholder/generic events when they have a free day or th..."
+---
+
+# Empty Dayplan Generation Bug - Baseline LLM Path Returns 0 Events
+
+## Priority
+**High** - Affects users with Canvas ICS-only sync on days with no events
+
+## Summary
+Users with only Canvas ICS sync receive completely empty dayplans (0 events, 0 actions) instead of placeholder/generic events when they have a free day or their assignments fall on different dates due to timezone conversion.
+
+## Affected User Example
+- User ID: `a8f8ac77-93cb-4221-a97d-1d39f70c0432`
+- Email: `bpdoles@umich.edu`
+- Date: October 31, 2025
+- Campus: University of Michigan (America/Detroit timezone)
+- Sync: Canvas ICS only
+
+## Root Cause
+
+### Issue #1: Empty LLM Response Not Validated
+**File**: `services/engine/src/activities/dayplan.activities.ts`
+**Line**: 1037-1073
+
+When the baseline LLM path is used:
+1. LLM receives empty schedule/calendar data (due to timezone filtering issue)
+2. LLM follows anti-hallucination rules and returns `{}`
+3. Code parses this as valid and creates plan with 0 events
+4. **Bug**: No validation that plan contains useful content
+5. Empty plan is saved and returned immediately at line 1073
+6. Never falls back to `createColdStartDayPlan()` which would create placeholder events
+
+```typescript
+// Line 1037 - THE BUG
+const planData = JSON.parse(typeof messageContent === 'string' ? messageContent : '{}');
+
+// No validation here! Should check if empty before proceeding
+const dayPlan: DayPlan = {
+  planId: uuidv4(),
+  studentId: input.studentId,
+  date: input.date,
+  timezone,
+  version: 1,
+  generatedAt: new Date().toISOString(),
+  lastUpdated: new Date().toISOString(),
+  events: transformToTimelineEvents(planData.events || [], input.date), // Empty array!
+  actions: transformToScheduledActions(planData.actions || [], input.date), // Empty array!
+  // ...
+};
+
+await saveDayPlanToDB(dayPlan);
+logger.info('[DAYPLAN] Baseline via LLM path used', { studentId: input.studentId });
+return dayPlan; // Returns empty plan, exits function
+```
+
+### Issue #2: Wrong Timezone Used (Contributing Factor)
+**File**: `services/engine/src/activities/dayplan.activities.ts`
+**Line**: 1690-1749 (`getStudentTimezone()`)
+
+The 5 AM dayplan for this user used `America/New_York` instead of `America/Detroit`:
+- User's campus timezone in DB: `America/Detroit`
+- Actual timezone used: `America/New_York`
+- This caused the Canvas assignment "Online lecture notes 10.30" (due `2025-10-31 01:00:00 UTC`) to be filtered out
+  - In `America/Detroit`: Oct 30, 9:00 PM (previous day, filtered out)
+  - Should have been recognized as Oct 31 item
+
+**Evidence**:
+```sql
+-- From service_data dayplan at 2025-10-31 05:01:19 Eastern:
+timezone: "America/New_York"  -- WRONG
+event_count: 0
+```
+
+### Issue #3: No Email Sent for Empty Plan
+**File**: `services/engine/src/activities/dayplan.activities.ts`
+**Line**: 4531-4580
+
+Email sending either:
+1. Failed silently (empty plan rejected by Customer.io or missing required fields)
+2. Was never called due to empty notification content
+
+The catch block at line 4579 swallows all errors without alerting the workflow:
+```typescript
+} catch (error) {
+  logger.error('[DAYPLAN-EMAIL] Failed to send DayPlan email', {...});
+  // Don't throw - email failures shouldn't break the workflow
+}
+```
+
+## Why Other Users Get Placeholder Events
+
+Other users successfully get placeholder events (breakfast, study time, etc.) when:
+
+1. **No baseline template exists** - Falls through to main generation path
+2. **LLM throws exception** - Caught at line 1075, falls back to deterministic cold-start
+3. **Baseline LLM disabled** - `DAYPLAN_BASELINE_VIA_LLM='false'` env var
+4. **Forced deterministic** - `DAYPLAN_COLDSTART_FORCE='true'` env var
+5. **Main generation fails** - Exception caught at line 1267, calls `createFallbackDayPlan()`
+
+This user's case was unique: LLM **succeeded** but returned empty data, bypassing all fallback mechanisms.
+
+## Data Flow That Caused Empty Plan
+
+1. **5:01 AM Eastern** - Student watcher triggers dayplan generation
+2. **Timezone resolution** - Returns `America/New_York` (should be `America/Detroit`)
+3. **getCalendarEvents()** - Filters time blocks by date using wrong timezone
+4. **Canvas assignment filtered out** - `2025-10-31 01:00:00 UTC` → `2025-10-30 21:00:00 EDT` (wrong day)
+5. **LLM receives**:
+   ```
+   schedule: []
+   calendar: []
+
+   ## CRITICAL INSTRUCTIONS - ANTI-HALLUCINATION RULES
+   1. ONLY use events and information explicitly provided below
+   2. DO NOT invent, assume, or generate ANY events not listed
+
+   ### CLASSES: NONE SCHEDULED - DO NOT ADD ANY
+   ```
+6. **LLM returns**: `{}`
+7. **Code creates plan** with 0 events, 0 actions, 0% completeness
+8. **Saves and returns** - Never reaches `createColdStartDayPlan()`
+9. **Email fails** - Empty plan has no notification content or fails validation
+
+## The Fix
+
+### Primary Fix: Validate LLM Response Before Using
+**File**: `services/engine/src/activities/dayplan.activities.ts`
+**Line**: After 1037
+
+```typescript
+const planData = JSON.parse(typeof messageContent === 'string' ? messageContent : '{}');
+
+// NEW: Validate LLM returned useful content
+if (!planData.events || planData.events.length === 0) {
+  logger.warn('[DAYPLAN] LLM returned empty plan, forcing fallback to cold-start', {
+    studentId: input.studentId,
+    profile,
+    hadSchedule: dataQuality.hasSchedule,
+    hadCalendar: dataQuality.hasCalendar
+  });
+
+  // Throw to trigger catch block and fall through to deterministic cold-start
+  throw new Error('LLM returned empty plan - no events generated');
+}
+
+const dayPlan: DayPlan = {
+  // ... rest of code
+```
+
+This will:
+1. Catch at line 1075: `catch (e) { logger.warn('Baseline LLM path failed, falling back...') }`
+2. Fall through to line 1080-1266 (main generation path with anti-hallucination prompt)
+3. If that also returns empty, catch at line 1267 calls `createFallbackDayPlan()`
+4. `createFallbackDayPlan()` → `createColdStartDayPlan()` → Creates placeholder events
+
+### Secondary Fix: Improve Timezone Resolution
+**File**: `services/engine/src/activities/timezone-helpers.ts`
+**Line**: 19-155
+
+Investigate why campus timezone wasn't used:
+- User's campus context shows: `campus_timezone: "America/Detroit"`
+- Should have been Priority 2 in fallback chain
+- May need to debug the query or add logging
+
+### Tertiary Fix: Email Handling for Empty Plans
+**File**: `services/engine/src/activities/dayplan.activities.ts`
+**Line**: 4531-4580
+
+Either:
+1. **Option A**: Don't attempt to send email if plan has 0 events (early return)
+2. **Option B**: Send a special "free day" email template
+3. **Option C**: Return error to workflow so it retries with cold-start
+
+## Steps to Reproduce
+
+1. Create a user with:
+   - Only Canvas ICS sync configured
+   - Campus timezone different from `America/New_York`
+   - One assignment due at UTC midnight (will shift to previous day in local time)
+2. Ensure baseline template exists in `prompt_templates` table
+3. Ensure env vars:
+   - `DAYPLAN_BASELINE_VIA_LLM` not set to `'false'`
+   - `DAYPLAN_COLDSTART_FORCE` not set to `'true'`
+4. Wait for 5 AM trigger or manually trigger dayplan generation for a date
+5. Observe:
+   - ❌ Plan has 0 events, 0 actions
+   - ❌ Wrong timezone used
+   - ❌ No email sent
+
+## Expected Behavior
+
+**For a user with no events scheduled:**
+1. LLM should receive empty schedule
+2. LLM returns empty or minimal response
+3. Code validates response is empty
+4. Falls back to `createColdStartDayPlan()`
+5. Creates placeholder events:
+   - Morning routine and breakfast (7:30-9:00)
+   - Study time / free time blocks
+   - Lunch
+   - Social activities
+   - Dinner
+   - Evening wind-down
+6. Sends email with generic encouragement for the day
+7. Plan visible in admin dashboard
+
+## Actual Behavior
+
+1. ✅ LLM receives empty schedule
+2. ✅ LLM returns `{}`
+3. ❌ No validation - proceeds with empty plan
+4. ❌ Saves empty plan (0 events, 0 actions)
+5. ❌ Returns immediately, skips fallback
+6. ❌ Email not sent (or fails silently)
+7. ❌ Plan not visible in admin dashboard
+
+## Test Cases to Add
+
+```typescript
+describe('Dayplan Generation - Empty LLM Response', () => {
+  it('should fall back to cold-start when LLM returns empty events', async () => {
+    // Mock LLM to return {}
+    // Call generateDayPlan()
+    // Assert plan.events.length > 0
+    // Assert used createColdStartDayPlan path
+  });
+
+  it('should use correct timezone for campus', async () => {
+    // User at UMich with America/Detroit campus
+    // Assert timezone resolved to America/Detroit, not America/New_York
+  });
+
+  it('should send email even for empty schedules', async () => {
+    // User with 0 events scheduled
+    // Assert email sent with generic/free day content
+  });
+});
+```
+
+## Database Evidence
+
+```sql
+-- Empty plan from 5 AM generation
+SELECT
+  data->>'planId',
+  data->>'timezone',
+  jsonb_array_length(data->'events') as events,
+  jsonb_array_length(data->'actions') as actions,
+  data->'metrics'->>'completeness'
+FROM service_data
+WHERE user_id = 'a8f8ac77-93cb-4221-a97d-1d39f70c0432'
+  AND method = 'dayplan'
+  AND fetched_at AT TIME ZONE 'America/Detroit' >= '2025-10-31 05:00:00'
+  AND fetched_at AT TIME ZONE 'America/Detroit' < '2025-10-31 05:05:00';
+
+-- Result:
+-- plan_id: 29e9b11f-a724-47a4-949f-c81c006f4945
+-- timezone: America/New_York (WRONG)
+-- events: 0
+-- actions: 0
+-- completeness: 0
+```
+
+## Related Files
+
+- `services/engine/src/activities/dayplan.activities.ts` (Lines 973-1078, 1151, 1267-1275, 3698-3900)
+- `services/engine/src/activities/timezone-helpers.ts` (Lines 19-155)
+- `services/engine/src/workflows/studentWatcher.simplified.workflow.ts` (Lines 714-757, 1232-1234)
+
+## Acceptance Criteria
+
+- [ ] Empty LLM responses trigger fallback to cold-start plan
+- [ ] Cold-start plan creates minimum 5 placeholder events for free days
+- [ ] Timezone correctly resolves to campus timezone (`America/Detroit` for UMich)
+- [ ] Email sent successfully even for users with empty schedules
+- [ ] All users receive dayplan at 5 AM regardless of event count
+- [ ] Empty plans visible in admin dashboard
+- [ ] Logs clearly indicate when fallback paths are used
+- [ ] Unit tests added for empty LLM response handling
+
+## Estimated Effort
+
+**2-4 hours** for primary fix + testing
+- 1 hour: Implement validation and fallback logic
+- 1 hour: Test with affected user
+- 1-2 hours: Add unit tests and verify edge cases
+
+## Tags
+#bug #dayplan #llm #timezone #canvas-ics #baseline-generation
+
+## Date
+2025-10-31

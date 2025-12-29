@@ -1,0 +1,113 @@
+---
+title: "Production Operations"
+description: "_Last updated: 2025-12-21_"
+---
+
+# Production Operations Runbook
+
+_Last updated: 2025-12-21_
+
+This runbook summarizes the operational dependencies and recurring tasks required to keep DormWay running in production. It complements existing references such as [Sync Orchestration & Priority (Current)](/docs/engineering/technical/infrastructure/sync/sync-orchestration-priority-current), [Worker Maintenance System](/docs/engineering/technical/engine/worker-maintenance-system), and [Update My Term Follow-ups](/docs/product/features/note-taking/update-my-term-follow-ups).
+
+## Platform Prerequisites
+
+| Component | Purpose | Notes |
+| --- | --- | --- |
+| Temporal Cloud (`dormway` namespace) | Orchestrates StudentWatcher, semester processing, sync workflows. | Engine workers must connect to queues defined in `.repos/dormway-platform/services/engine/src/config.ts` (student, semester, campus, city, notifications, etc.). |
+| Neon Postgres | Source of truth for contexts, service_data, overlays. | Configured via `DATABASE_URL` and `DATABASE_URL_ADMIN` (Doppler-managed). |
+| Redis | Session/cache for API router. | Ensure cluster availability prior to deploys. |
+| Ably Realtime | Publishes dashboard deltas (DayPlan, semester progress). | Credentials populated by Doppler. |
+| Object storage (ingestion buckets) | Stores syllabi and audit payloads for reprocessing. | Uses `S3_BUCKET_NAME`, `S3_SYLLABUS_BUCKET`, `S3_BRAINGAINS_BUCKET`, `S3_CLASS_WRAPPED_BUCKET` (Doppler-managed). |
+| Doppler | Centralized secret distribution. | Run `make doppler-setup && doppler setup` per host/service. |
+
+## Sync & Data Refresh Schedule
+
+Sync orchestration now runs via **Temporal schedules** in the engine, which call the cron route in API Router. Admin endpoints remain available for manual runs.
+
+| Schedule ID | Cadence | Mode | Purpose |
+| --- | --- | --- | --- |
+| `sync-hourly-smart` | Every 1 hour | `auto` | Opportunistic sync for stale contexts. |
+| `sync-city-4h` | Every 4 hours | `cities_only` | Refresh city context (weather, news, transit); cascades to campuses with students. |
+| `sync-daily-force` | Daily at 04:00 | `auto` + `force=true` | Force high-priority contexts. |
+| `sync-term-data-enrichment` | Daily at 05:00 | `campuses_missing_term_data` | Enrich campuses missing term data. |
+
+Manual incident response remains available via:
+- `GET /api/admin/sync/orchestrate?...` (admin)
+- `POST /api/admin/sync/trigger-immediate`
+
+Prioritization, cascading, and rate limits are detailed in [Sync Orchestration & Priority (Current)](/docs/engineering/technical/infrastructure/sync/sync-orchestration-priority-current).
+
+## Student Workflows & DayPlan Pipeline
+
+1. **Schedule reconciliation** – StudentWatcher executes `scheduleProcessor` before each plan.
+2. **Semester refresh (2025-09 update)** – StudentWatcher now calls `processSemester` with resolved term/year before generating DayPlan, ensuring overlays and semester aggregates are current.
+3. **Deviation ingest** – Context signals (location/calendar/app state) feed deviation storage for next-day planning.
+4. **Plan generation window** – DayPlans generate at **05:00 campus local time**; workflow respects notification preferences.
+   - Email via `sendDayPlanEmail` when permitted.
+   - Push notifications once per plan (`lastPushSentDate` guard).
+   - Manual regenerations skip email but persist plan state.
+
+## Semester Processing
+
+| Trigger | Workflow | Notes |
+| --- | --- | --- |
+| Pre-DayPlan | `processSemester` child workflow | Automatically refreshes semester insights during StudentWatcher runs. |
+| Admin | `POST /api/semester/process` | Manual run for specific user/term. |
+| Cascade | Campus sync workflows | Triggered when campus data refresh completes. |
+
+Outputs written to `service_data` methods: `semester_summary`, `semester_planning_crew`, `braingains_*` (workload, conflicts, early warnings).
+
+## Additional Recurring Jobs
+
+| Task | Frequency | Reference |
+| --- | --- | --- |
+| Worker maintenance / PM2 health checks | Weekly or on demand | [Worker Maintenance System](/docs/engineering/technical/engine/worker-maintenance-system) |
+| EventTracker flush | Hourly | Ensures Customer.io/Amp queues drain. |
+| Weather refresh | Pulled on DayPlan generation; stay within API quotas (1K/day). |
+
+## Monitoring & Alerts
+
+- **API Router:** `/api/admin/sync/status`, `/api/admin/sync/orchestrate?dry_run=true` for sync health.
+- **Temporal UI:** Monitor queues `student-worker`, `semester-processor`, `campus-worker`, `city-worker`, `notifications`.
+- **Logs:** Use `make logs s=engine` or centralized log aggregator for engines, API router, ably-relay.
+- **Telemetry events:** `dayplan_generated`, `dayplan_email_sent`, `semester_processed_before_dayplan`, etc., surface via Customer.io / analytics dashboards.
+- **Alerting suggestions:**
+  - Sync failure rate >10%
+  - DayPlan generation missing by 05:30 local
+  - `processSemester` failures or child workflow retries
+  - Worker PM2 process offline
+
+## Operational Checklists
+
+### Environment Bring-Up
+
+1. Configure Doppler for API router, engine, ably-relay.
+2. Ensure Temporal workers running for all queues (PM2 scripts or systemd).
+3. Validate Ably credentials + channel rules.
+4. Verify sync cron/EventBridge entries (Section 2).
+5. Confirm Neon connectivity (`psql` with the Neon connection string).
+6. Execute worker maintenance baseline script for health.
+
+### New Campus/Term Launch
+
+1. Refresh campus metadata via admin route (`fetchAndUpdateCampusMetadata`).
+2. Confirm `current_term_data` in `campus_configs` accurate (start/end dates).
+3. Manually run `processSemester` for pilot students if needed.
+4. Trigger city/campus syncs post metadata update.
+5. Verify StudentWatcher workflows exist and DayPlan will run next morning.
+
+### Incident Response (DayPlan/Semester)
+
+1. Inspect StudentWatcher & `processSemester` workflow histories (Temporal UI).
+2. If data stale, re-run `/api/admin/sync/orchestrate?mode=auto&force=true`.
+3. For plan gaps, manually trigger DayPlan regeneration (admin tooling) after resolving precursor issues.
+4. Review Ably errors if dashboard does not update.
+
+## References
+
+- [Sync Orchestration & Priority (Current)](/docs/engineering/technical/infrastructure/sync/sync-orchestration-priority-current)
+- [Worker Maintenance System](/docs/engineering/technical/engine/worker-maintenance-system)
+- [Update My Term Follow-ups](/docs/product/features/note-taking/update-my-term-follow-ups)
+- Temporal task queue configuration (`.repos/dormway-platform/services/engine/src/config.ts`)
+
+Keep this runbook current with infra or workflow changes; update the “Last updated” date when modifications are made.

@@ -1,0 +1,370 @@
+---
+title: "DORM 761 City Context Cards"
+description: "The city context endpoint (`/v2/cities/:id/context`) returns rich, AI-processed data that is currently underutilized. This plan adds new feed cards to surfac..."
+---
+
+# DORM-761: City Context Cards Implementation Plan
+
+**Created:** 2025-12-18
+**Updated:** 2025-12-19
+**Status:** ✅ COMPLETE
+**Owner:** Platform Team
+
+---
+
+## Overview
+
+The city context endpoint (`/v2/cities/:id/context`) returns rich, AI-processed data that is currently underutilized. This plan adds new feed cards to surface this valuable intelligence to students.
+
+## City Context Data Structure
+
+```json
+{
+  "city_overview": {
+    "priority_alerts": ["Road closures..."],
+    "planning_horizon": "Plan for a rainy day...",
+    "conditions_summary": "Cool and overcast...",
+    "student_impact_score": 7,
+    "activity_optimization": ["indoor", "social"],
+    "mobility_recommendation": "transit"
+  },
+  "local_intelligence": {
+    "local_summary": "...",
+    "opportunities": [
+      {
+        "type": "job|event",
+        "title": "Internship at Local Startups",
+        "value_prop": "Gain experience...",
+        "student_benefit": "Build your resume...",
+        "date": "Ongoing"
+      }
+    ],
+    "community_pulse": {
+      "job_market": "...",
+      "cultural_scene": "...",
+      "housing_market": "...",
+      "economic_context": "..."
+    },
+    "awareness_alerts": [
+      {
+        "type": "traffic",
+        "impact": "First & Miller closed",
+        "duration": "Ongoing",
+        "workaround": "Use alternate routes"
+      }
+    ]
+  },
+  "mobility_intelligence": {
+    "cost_analysis": {
+      "transit": { "cost": 1.5, "time_factor": 1 },
+      "driving": { "cost": 5, "time_factor": 1.5 },
+      "biking": { "cost": 0, "time_factor": 0.6 },
+      "walking": { "cost": 0, "time_factor": 1 }
+    },
+    "mobility_summary": "Transit reliable, road closures affect driving",
+    "mode_recommendations": {
+      "primary_recommendation": "transit",
+      "reasoning": "Reliable, avoids closures",
+      "alternatives": [
+        { "mode": "walking", "pros": [...], "cons": [...], "best_for": "..." }
+      ]
+    },
+    "transportation_status": {
+      "public_transit": { "reliability_score": 9, "student_impact": "..." },
+      "traffic_conditions": { "driving_difficulty": 6, "problem_areas": [...] }
+    }
+  },
+  "environmental_context": {
+    "planning_insights": {
+      "week_trend": "Temps dropping to 20s by weekend",
+      "tomorrow_preview": "50°F, high chance of rain",
+      "preparation_needed": ["Bring umbrella", "Wear layers"]
+    },
+    "current_conditions": {
+      "visibility": "good",
+      "wind_impact": "noticeable",
+      "temperature_comfort": "cool",
+      "precipitation_status": "none"
+    },
+    "activity_recommendations": {
+      "biking": { "feasibility_score": 5, "optimal_times": [...], "recommendations": [...] },
+      "walking": { "feasibility_score": 6, ... },
+      "outdoor_activities": { "feasibility_score": 4, ... }
+    }
+  },
+  "contextual_insights": {
+    "risk_mitigation": ["Plan indoor activities..."],
+    "cross_domain_patterns": ["Weather may increase transit usage..."],
+    "opportunity_maximization": ["Take advantage of internships..."],
+    "optimization_recommendations": ["Use public transit..."]
+  }
+}
+```
+
+---
+
+## New Cards to Implement
+
+### Phase 1: High-Value Cards
+
+| # | CardType | Source | Priority | Est. |
+|---|----------|--------|----------|------|
+| 1 | `MobilityInsight` | mobility_intelligence | 55 | 2h |
+| 2 | `DayConditions` | city_overview + environmental | 60 | 2h |
+| 3 | `LocalOpportunity` | local_intelligence.opportunities | 45 | 1.5h |
+
+### Phase 2: Alert Cards
+
+| # | CardType | Source | Priority | Est. |
+|---|----------|--------|----------|------|
+| 4 | `TrafficAlert` | awareness_alerts + priority_alerts | 70 | 1h |
+| 5 | `ActivityTiming` | activity_recommendations | 40 | 1.5h |
+
+### Phase 3: Planning Cards
+
+| # | CardType | Source | Priority | Est. |
+|---|----------|--------|----------|------|
+| 6 | `WeekOutlook` | planning_insights.week_trend | 35 | 1h |
+| 7 | `CommunityPulse` | community_pulse | 25 | 1h |
+
+---
+
+## Implementation Pattern (Per Card)
+
+### Step 1: Backend - types.ts
+```typescript
+// Add to CardType enum
+MobilityInsight = 'mobility_insight',
+
+// Add to BASE_PRIORITY_BY_TYPE
+[CardType.MobilityInsight]: 55,
+
+// Add to CATEGORY_BY_TYPE
+[CardType.MobilityInsight]: CardCategory.City,
+
+// Add to CONTEXT_MODIFIERS (boost during commuting)
+commuting: {
+  boost: [..., CardType.MobilityInsight],
+}
+```
+
+### Step 2: Backend - transforms.ts
+```typescript
+// Add transform function
+export function transformCityContext(cityContext: any): CityContextData {
+  // Extract and normalize city context fields
+}
+```
+
+### Step 3: Backend - generator.ts
+```typescript
+// Add data interface
+interface MobilityInsightData {
+  primaryMode: string;
+  reasoning: string;
+  costAnalysis: { mode: string; cost: number; timeFactor: number }[];
+  alternatives: { mode: string; pros: string[]; cons: string[]; bestFor: string }[];
+}
+
+// Add generator function
+function createMobilityInsightCard(data: MobilityInsightData, ...): FeedCard {
+  return {
+    id: generateCardId(CardType.MobilityInsight, date),
+    type: CardType.MobilityInsight,
+    // ...
+  };
+}
+
+// Wire into generateFeedCards()
+if (options.cityContext?.mobility_intelligence) {
+  const card = createMobilityInsightCard(...);
+  if (card) cards.push(card);
+}
+```
+
+### Step 4: iOS - FeedModels.swift
+```swift
+// Add to FeedCardType enum
+case mobilityInsight = "mobility_insight"
+```
+
+### Step 5: Build & Test
+```bash
+# Rebuild dormway-core
+cd services/shared/dormway-core && npm run build
+
+# Test feed endpoint
+curl -s "http://localhost:3001/api/v2/students/me/feed?refresh=true" \
+  -H "x-user-id: USER_ID" -H "x-user-role: admin" | jq '.data.cards[] | {type, title}'
+```
+
+---
+
+## Card Designs
+
+### 1. MobilityInsight
+```
+┌─────────────────────────────────────┐
+│ 🚌 BEST WAY TO GET AROUND          │
+│ ─────────────────────────────────  │
+│ Take Transit Today                  │
+│ Reliable + avoids road closures     │
+│                                     │
+│ [Reveal: Cost comparison + alts]    │
+└─────────────────────────────────────┘
+```
+
+### 2. DayConditions
+```
+┌─────────────────────────────────────┐
+│ 🌤️ TODAY'S CONDITIONS              │
+│ ─────────────────────────────────  │
+│ Cool & Humid • Indoor Day           │
+│ Student Impact: 7/10                │
+│                                     │
+│ [Reveal: Prep needed + activities]  │
+└─────────────────────────────────────┘
+```
+
+### 3. LocalOpportunity
+```
+┌─────────────────────────────────────┐
+│ 💼 OPPORTUNITY                      │
+│ ─────────────────────────────────  │
+│ Internship: Local Tech Startups     │
+│ Build your resume while studying    │
+│                                     │
+│ [Action: Learn More]                │
+└─────────────────────────────────────┘
+```
+
+### 4. TrafficAlert
+```
+┌─────────────────────────────────────┐
+│ 🚧 TRAFFIC ALERT                    │
+│ ─────────────────────────────────  │
+│ First & Miller closed               │
+│ Use alternate routes                │
+│                                     │
+│ [Reveal: Duration + workaround]     │
+└─────────────────────────────────────┘
+```
+
+### 5. ActivityTiming
+```
+┌─────────────────────────────────────┐
+│ 🚴 ACTIVITY TIMING                  │
+│ ─────────────────────────────────  │
+│ Biking: Fair before 5 PM            │
+│ Walking: Good until 7 PM            │
+│                                     │
+│ [Reveal: Full recommendations]      │
+└─────────────────────────────────────┘
+```
+
+### 6. WeekOutlook
+```
+┌─────────────────────────────────────┐
+│ 📅 WEEK OUTLOOK                     │
+│ ─────────────────────────────────  │
+│ Temps dropping to 20s this weekend  │
+│ Tomorrow: 50°F with rain            │
+│                                     │
+│ [Reveal: Full week + prep needed]   │
+└─────────────────────────────────────┘
+```
+
+### 7. CommunityPulse
+```
+┌─────────────────────────────────────┐
+│ 🏙️ AROUND TOWN                     │
+│ ─────────────────────────────────  │
+│ Job Market: Competitive             │
+│ Internships in tech available       │
+│                                     │
+│ [Reveal: Housing, events, economy]  │
+└─────────────────────────────────────┘
+```
+
+---
+
+## Data Flow
+
+```
+City Entity (Postgres)
+    ↓
+getProcessedContext() → service_data (processed_city_context)
+    ↓
+Student Feed Request
+    ↓
+generateFeedCardsWithEntities()
+    ↓
+Get city from student.campus.city
+    ↓
+city.getProcessedContext()
+    ↓
+transformCityContext() → normalized data
+    ↓
+createMobilityInsightCard(), createDayConditionsCard(), etc.
+    ↓
+FeedCard[] → API Response
+```
+
+---
+
+## Progress Tracker
+
+> **✅ ALL COMPLETE** - Verified Dec 19, 2025. All 7 City Context cards are implemented in `generator.ts` with types, priorities, and categories defined.
+
+- [x] Phase 1: MobilityInsight ✅
+  - [x] types.ts - CardType.MobilityInsight, priority 55, category City
+  - [x] generator.ts - `createMobilityInsightCard()` (line 2595)
+  - [x] Wired in main generation function (line 3271)
+
+- [x] Phase 1: DayConditions ✅
+  - [x] types.ts - CardType.DayConditions, priority 60, category Weather
+  - [x] generator.ts - `createDayConditionsCard()` (line 2656)
+
+- [x] Phase 1: LocalOpportunity ✅
+  - [x] types.ts - CardType.LocalOpportunity, priority 45, category City
+  - [x] generator.ts - `createLocalOpportunityCard()` (line 2705)
+
+- [x] Phase 2: TrafficAlert ✅
+  - [x] types.ts - CardType.TrafficAlert, priority 72, category Alert
+  - [x] generator.ts - `createTrafficAlertCard()` (line 2739)
+
+- [x] Phase 2: ActivityTiming ✅
+  - [x] types.ts - CardType.ActivityTiming, priority 40, category City
+  - [x] generator.ts - `createActivityTimingCard()` (line 2777)
+
+- [x] Phase 3: WeekOutlook ✅
+  - [x] types.ts - CardType.WeekOutlook, priority 35, category Weather
+  - [x] generator.ts - `createWeekOutlookCard()` (line 2832)
+
+- [x] Phase 3: CommunityPulse ✅
+  - [x] types.ts - CardType.CommunityPulse, priority 25, category City
+  - [x] generator.ts - `createCommunityPulseCard()` (line 2869)
+
+---
+
+## Testing
+
+```bash
+# Verify city context data is available
+curl -s "http://localhost:3001/api/v2/cities/6c6cfcab-391f-4168-aed9-9ebe25293a46/context" \
+  -H "x-user-id: admin" -H "x-user-role: admin" | jq '.data | keys'
+
+# Test feed with new cards
+curl -s "http://localhost:3001/api/v2/students/me/feed?refresh=true" \
+  -H "x-user-id: 058d2a14-ab1a-49c0-aa67-0312fd87e342" \
+  -H "x-user-role: admin" | jq '.data.cards[] | select(.type | startswith("mobility") or startswith("day_") or startswith("local_") or startswith("traffic_"))'
+```
+
+---
+
+## Notes
+
+- City context is processed by AI crews and cached in service_data
+- Data freshness tracked in metadata.data_freshness
+- Priority scores should boost commuting-related cards during peak travel times
+- Consider time_relevance from widget metadata for scoring

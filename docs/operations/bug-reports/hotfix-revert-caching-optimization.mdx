@@ -1,0 +1,256 @@
+---
+title: "HOTFIX   Revert Caching Optimization"
+description: "After deploying the caching optimization to production, **Windows Chrome users still see \"Log In\" placeholder in Task Bank** even though the backend filterin..."
+---
+
+# HOTFIX: Revert Caching Optimization
+
+**Date**: 2025-10-29
+**Status**: 🚨 HOTFIX APPLIED
+**Severity**: High
+**Environment**: Production
+
+---
+
+## Problem
+
+After deploying the caching optimization to production, **Windows Chrome users still see "Log In" placeholder in Task Bank** even though the backend filtering bug was fixed.
+
+**Root Cause**: Chrome aggressively cached the OLD buggy API response (before placeholder filtering fix) and continued serving it from cache with the new `cache: 'default'` policy.
+
+---
+
+## What Went Wrong
+
+### Timeline
+
+1. **Original Bug**: `pushItem` function didn't filter placeholders → "Log In" shown to users
+2. **Fix Deployed**: Added placeholder filtering to `pushItem` ✅
+3. **Optimization Deployed**: Changed `cache: 'no-store'` → `cache: 'default'` ❌
+4. **Chrome Cached Old Response**: Before the fix was deployed
+5. **Result**: Chrome serves stale cache with "Log In" even though backend is fixed
+
+### The Premature Optimization
+
+```typescript
+// BEFORE (safe but inefficient):
+cache: 'no-store',  // Never use cache
+staleTime: 0,       // Always fetch fresh
+
+// AFTER (efficient but broke Chrome users):
+cache: 'default',   // Allow browser caching
+staleTime: 30 * 1000, // Cache for 30 seconds
+```
+
+**Why this broke**:
+- Chrome had already cached the buggy response (with "Log In")
+- `cache: 'default'` respects HTTP cache
+- Chrome continued serving the stale cached response
+- Other browsers either didn't cache it or had different cache behavior
+
+---
+
+## Hotfix Applied
+
+**File**: `services/dormway-lockedin/src/hooks/home/useDashboardComposite.ts`
+
+### Reverted Changes
+
+```typescript
+// HOTFIX: Revert to aggressive cache bypass
+const response = await authorizedFetch(url, {
+  cache: 'no-store', // NEVER cache - force fresh fetch
+});
+
+// React Query config
+staleTime: 0,              // Always stale
+gcTime: 1000,              // Clear after 1s
+refetchOnWindowFocus: true, // Refetch on tab switch
+refetchOnMount: true,      // Always refetch on mount
+// NO placeholderData
+```
+
+### Impact
+
+**Good**:
+- ✅ Forces Chrome to fetch fresh data (without "Log In")
+- ✅ Immediately fixes the issue for all users
+- ✅ No user action required (just reload page)
+
+**Bad**:
+- ❌ Back to excessive API calls (~50/min per user)
+- ❌ Increased server load
+- ❌ More loading spinners for users
+- ❌ Lost performance optimization
+
+---
+
+## Deployment
+
+### Immediate Steps
+
+```bash
+# 1. Code already reverted above
+# 2. Build production bundle
+cd services/dormway-lockedin
+npm run build
+
+# 3. Deploy to production
+# (follow normal deployment process)
+
+# 4. Monitor
+# - Check for "Log In" disappearing from Chrome users
+# - Monitor API call volume (should increase temporarily)
+```
+
+### User Impact
+
+**Before Hotfix**:
+- Windows Chrome: "Log In" visible ❌
+- Other browsers: Clean ✅
+
+**After Hotfix** (within 1 page reload):
+- All browsers: Clean ✅
+- All browsers: More API calls (temporary trade-off)
+
+---
+
+## Lessons Learned
+
+### Mistake #1: Deployed Two Changes Together
+
+We deployed both:
+1. Placeholder filtering fix (backend)
+2. Caching optimization (frontend)
+
+**Should have done**:
+1. Deploy placeholder fix → Wait 48 hours → Verify
+2. Deploy caching optimization → Monitor closely
+
+### Mistake #2: Didn't Consider Existing Cache
+
+Chrome users who loaded the page BEFORE the fix had the buggy response cached. Enabling caching served them the stale data.
+
+**Should have done**:
+- Add cache-busting query param: `?v=2`
+- Or wait for natural cache expiration (48-72 hours)
+- Or add `Cache-Control: no-cache` header for first deploy
+
+### Mistake #3: No Gradual Rollout
+
+Deployed caching optimization to 100% of users immediately.
+
+**Should have done**:
+- Feature flag: Enable for 10% → 50% → 100%
+- Monitor error rates and user complaints
+- Quick rollback if issues detected
+
+---
+
+## Path Forward
+
+### Short-term (This Week)
+
+- [x] Revert caching optimization (HOTFIX)
+- [ ] Deploy to production
+- [ ] Monitor "Log In" disappearance
+- [ ] Verify API call volume increase is acceptable
+
+### Medium-term (Next Week)
+
+Option 1: **Add Cache Invalidation**
+```typescript
+// Add API version to URL
+const CACHE_VERSION = '2'; // Increment on breaking changes
+const url = `${endpoint}?v=${CACHE_VERSION}`;
+```
+
+Option 2: **Add Cache-Control Headers**
+```typescript
+// Backend sends explicit cache policy
+res.setHeader('Cache-Control', 'public, max-age=30, must-revalidate');
+res.setHeader('Vary', 'Accept-Encoding');
+```
+
+Option 3: **Use ETag-Based Caching**
+```typescript
+// Backend sends ETag
+res.setHeader('ETag', hashOfResponse);
+
+// Frontend sends If-None-Match
+if (cachedETag) {
+  headers['If-None-Match'] = cachedETag;
+}
+
+// Backend responds 304 if unchanged
+if (req.headers['if-none-match'] === currentETag) {
+  return res.status(304).end();
+}
+```
+
+### Long-term (Next Sprint)
+
+1. **Implement Proper Cache Strategy**
+   - API versioning in query params
+   - Cache-Control headers from backend
+   - ETag-based conditional requests
+
+2. **Add Monitoring**
+   - Track cache hit/miss rates
+   - Monitor API call volume by user
+   - Alert on sudden spikes
+
+3. **Feature Flags**
+   - Gradual rollout of caching optimizations
+   - A/B test cache strategies
+   - Quick rollback capability
+
+4. **Re-enable Caching** (after 48-72 hours when Chrome caches cleared)
+   ```typescript
+   // TODO (2025-11-01): Re-enable smart caching
+   cache: 'default',
+   staleTime: 30 * 1000,
+   ```
+
+---
+
+## Testing Checklist
+
+### Before Re-enabling Caching
+
+- [ ] Add cache-busting mechanism (API version or ETag)
+- [ ] Test in Windows Chrome specifically
+- [ ] Test with user who saw "Log In" before
+- [ ] Monitor cache headers in Network tab
+- [ ] Verify 304 Not Modified responses work
+- [ ] Test hard refresh clears cache properly
+- [ ] Gradual rollout (10% → 50% → 100%)
+
+---
+
+## Success Metrics
+
+### Immediate (Post-Hotfix)
+- "Log In" disappears from all browsers: ✅
+- API call volume increases: Expected ✅
+- No new user complaints: Monitor
+
+### Future (Post-Re-enable)
+- API call reduction: 70% (target)
+- Cache hit rate: >80%
+- No stale data complaints: 0
+
+---
+
+## Related Documentation
+
+- [Placeholder Assignment Filtering Bug](/docs/operations/bug-reports/placeholder-assignment-filtering-bug) - Original bug fix
+- [Bug Analysis Summary - Dashboard Issues](/docs/operations/bug-reports/bug-analysis-summary-dashboard-issues) - Caching optimization proposal
+- [Chrome Cache Issue - Log In Placeholder](/docs/operations/bug-reports/chrome-cache-issue-log-in-placeholder) - Detailed cache analysis
+
+---
+
+**Status**: ✅ HOTFIX APPLIED
+**Next Review**: 2025-11-01 (Re-evaluate caching strategy)
+
+**Tags**: #hotfix #production #caching #chrome #urgent

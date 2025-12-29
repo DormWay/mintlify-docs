@@ -1,0 +1,705 @@
+---
+title: "AMPLITUDE_PRELAUNCH_IMPLEMENTATION"
+description: "Since we're pre-launch, we can: 1. **Delete all existing non-standard events** - clean slate approach 2. **Implement all P0-P1 events immediately** - no phas..."
+---
+
+# Amplitude Event Tracking - Pre-Launch Rapid Implementation
+
+**Target**: Get comprehensive, correct event tracking in place BEFORE launch
+**Advantage**: No legacy data, no breaking changes, no backward compatibility needed
+**Timeline**: 1-2 weeks aggressive implementation
+
+---
+
+## 🚀 Rapid Implementation Strategy
+
+Since we're pre-launch, we can:
+1. **Delete all existing non-standard events** - clean slate approach
+2. **Implement all P0-P1 events immediately** - no phased rollout
+3. **Enforce schema from day 1** - TypeScript types + validation
+4. **Break existing code** - fix it all at once
+5. **Skip migration path** - direct to final state
+
+---
+
+## Week 1: Foundation & Core Events
+
+### Day 1: Setup & Infrastructure
+
+#### Backend (Engine)
+```bash
+cd services/engine
+
+# 1. Update EventTracker service
+# Replace services/engine/src/services/eventTracker.ts with schema-compliant version
+
+# 2. Copy TypeScript types
+cp ../../shared/types/amplitude-events.ts src/types/amplitude-events.ts
+
+# 3. Delete deprecated CustomerIO code
+rm src/activities/customerio.ts  # Keep only transactional
+rm src/services/customerio.ts    # Keep only transactional
+
+# 4. Build & test
+npm run build
+npm run build:workflow
+npm test
+```
+
+#### Web (dormway-lockedin)
+```bash
+cd services/dormway-lockedin
+
+# 1. Copy TypeScript types
+cp ../../shared/types/amplitude-events.ts src/types/amplitude-events.ts
+
+# 2. Create type-safe tracking wrapper
+# See implementation below
+
+# 3. Delete all existing trackEvent calls - we'll rewrite them
+# Use grep to find all: grep -r "trackEvent(" src/
+
+# 4. Test build
+npm run build
+npm run lint
+```
+
+#### Amplitude Setup
+```bash
+# 1. Import event schema
+# Upload amplitude-event-schema-import.csv to Amplitude UI
+# This pre-configures all 74 events with descriptions and property schemas
+
+# 2. Configure Amplitude → CustomerIO integration
+# Set up native integration in Amplitude dashboard
+# Map standard event names to CustomerIO
+
+# 3. Create initial dashboards
+# - Signup Funnel
+# - Onboarding Completion
+# - Feature Adoption
+# - Error Tracking
+```
+
+---
+
+### Day 2-3: Core Authentication & Onboarding (P0)
+
+#### Implementation Order (by user journey)
+
+**1. Sign Up Flow** (Web + Backend)
+```typescript
+// services/dormway-lockedin/src/app/signup/page.tsx
+import { trackEvent } from '@/lib/amplitude-typed';
+
+// On signup form submit
+trackEvent('account_created', {
+  platform: 'web',
+  app_version: process.env.NEXT_PUBLIC_APP_VERSION!,
+  timestamp: new Date().toISOString(),
+  signup_method: 'email', // or 'google', 'apple'
+  campus_id: selectedCampus?.id,
+  campus_name: selectedCampus?.name,
+  email_domain: email.split('@')[1],
+  utm_source: searchParams.get('utm_source') || undefined,
+  utm_campaign: searchParams.get('utm_campaign') || undefined,
+});
+
+// Backend confirmation
+// services/engine/src/workflows/studentProcessor.workflow.ts
+await eventTrackerActivities.track(userId, 'account_created', {
+  platform: 'server',
+  app_version: process.env.APP_VERSION!,
+  timestamp: new Date().toISOString(),
+  signup_method: authMethod,
+  campus_id,
+  campus_name,
+});
+```
+
+**2. Login Flow** (Web + Backend)
+```typescript
+// On successful login
+trackEvent('account_login', {
+  platform: 'web',
+  app_version: APP_VERSION,
+  timestamp: new Date().toISOString(),
+  login_method: 'email',
+  session_count: user.session_count,
+  days_since_last_login: calculateDaysSince(user.last_login_at),
+});
+```
+
+**3. Onboarding Flow** (Web)
+```typescript
+// services/dormway-lockedin/src/app/onboarding/page.tsx
+
+// Step 1: Start
+trackEvent('onboarding_started', {
+  platform: 'web',
+  app_version: APP_VERSION,
+  timestamp: new Date().toISOString(),
+  entry_point: 'signup',
+  onboarding_version: ONBOARDING_VERSION,
+});
+
+// Step 2: School Selection
+trackEvent('school_selected', {
+  platform: 'web',
+  app_version: APP_VERSION,
+  timestamp: new Date().toISOString(),
+  campus_id: campus.id,
+  campus_name: campus.name,
+  selection_method: 'search',
+  search_query: searchTerm,
+});
+
+// Step 3: Email Verification
+trackEvent('email_verified', {
+  platform: 'web',
+  app_version: APP_VERSION,
+  timestamp: new Date().toISOString(),
+  verification_method: 'link',
+  time_to_verify_seconds: elapsedSeconds,
+});
+
+// Step 4: Academic Info
+trackEvent('academic_info_entered', {
+  platform: 'web',
+  app_version: APP_VERSION,
+  timestamp: new Date().toISOString(),
+  academic_year: 'sophomore',
+  major: 'Computer Science',
+  minor: 'Mathematics',
+  has_double_major: false,
+});
+
+// Step 5: Completion
+trackEvent('onboarding_completed', {
+  platform: 'web',
+  app_version: APP_VERSION,
+  timestamp: new Date().toISOString(),
+  total_duration_seconds: totalSeconds,
+  steps_completed: 5,
+  campus_verified: true,
+  schedule_imported: scheduleImported,
+});
+```
+
+**4. LMS Integration** (Web + Backend)
+```typescript
+// On LMS auth attempt
+trackEvent('schedule_source_selected', {
+  platform: 'web',
+  app_version: APP_VERSION,
+  timestamp: new Date().toISOString(),
+  source_type: 'lms',
+  lms_provider: 'canvas',
+});
+
+// On success
+trackEvent('lms_connected', {
+  platform: 'web',
+  app_version: APP_VERSION,
+  timestamp: new Date().toISOString(),
+  lms_provider: 'canvas',
+  campus_id,
+  campus_name,
+  connection_time_seconds: 3.2,
+});
+
+// On failure
+trackEvent('lms_connection_failed', {
+  platform: 'web',
+  app_version: APP_VERSION,
+  timestamp: new Date().toISOString(),
+  lms_provider: 'canvas',
+  error_type: 'auth_failed',
+  error_message: error.message,
+  retry_count: retries,
+});
+```
+
+---
+
+### Day 4-5: Schedule & Academic Features (P0)
+
+**5. Schedule Import** (Backend)
+```typescript
+// services/engine/src/workflows/scheduleImport.workflow.ts
+
+await eventTrackerActivities.track(userId, 'schedule_imported', {
+  platform: 'server',
+  app_version: APP_VERSION,
+  timestamp: new Date().toISOString(),
+  source: 'lms',
+  lms_provider: 'canvas',
+  course_count: courses.length,
+  has_conflicts: detectConflicts(courses),
+  import_duration_seconds: duration,
+});
+```
+
+**6. Syllabus Upload** (Web + Backend)
+```typescript
+// Web: File upload
+trackEvent('syllabus_uploaded', {
+  platform: 'web',
+  app_version: APP_VERSION,
+  timestamp: new Date().toISOString(),
+  upload_method: 'drag_drop',
+  file_type: 'pdf',
+  file_size_bytes: file.size,
+  course_id: selectedCourse?.id,
+  course_name: selectedCourse?.name,
+});
+
+// Backend: Processing complete
+await eventTrackerActivities.track(userId, 'syllabus_parsed', {
+  platform: 'server',
+  app_version: APP_VERSION,
+  timestamp: new Date().toISOString(),
+  syllabus_id,
+  course_id,
+  success: true,
+  processing_duration_seconds: 12.4,
+  assignments_extracted: 8,
+  exams_extracted: 2,
+  grading_policy_found: true,
+  confidence_score: 0.92,
+});
+
+// Backend: Processing failed
+await eventTrackerActivities.track(userId, 'syllabus_parsing_failed', {
+  platform: 'server',
+  app_version: APP_VERSION,
+  timestamp: new Date().toISOString(),
+  syllabus_id,
+  error_type: 'unreadable',
+  error_message: error.message,
+  file_type: 'pdf',
+  file_size_bytes: fileSize,
+});
+```
+
+**7. Assignments** (Web)
+```typescript
+// Create
+trackEvent('assignment_created', {
+  platform: 'web',
+  app_version: APP_VERSION,
+  timestamp: new Date().toISOString(),
+  source: 'manual',
+  course_id: assignment.course_id,
+  due_date: assignment.due_date,
+  has_reminder: true,
+  estimated_duration_minutes: 120,
+});
+
+// Complete
+trackEvent('assignment_completed', {
+  platform: 'web',
+  app_version: APP_VERSION,
+  timestamp: new Date().toISOString(),
+  assignment_id: assignment.id,
+  course_id: assignment.course_id,
+  completed_early: daysDiff > 0,
+  days_early_or_late: daysDiff,
+  completion_time_minutes: elapsedMinutes,
+});
+```
+
+---
+
+## Week 2: Engagement, Errors, & Polish
+
+### Day 6: Error Tracking (All Platforms)
+
+**Global Error Boundary** (Web)
+```typescript
+// services/dormway-lockedin/src/components/ErrorBoundary.tsx
+import { trackEvent } from '@/lib/amplitude-typed';
+
+class ErrorBoundary extends React.Component {
+  componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
+    trackEvent('error_occurred', {
+      platform: 'web',
+      app_version: APP_VERSION,
+      timestamp: new Date().toISOString(),
+      error_type: error.name,
+      error_message: error.message,
+      stack_trace: error.stack || '',
+      screen_name: window.location.pathname,
+      is_fatal: true,
+    });
+  }
+}
+```
+
+**API Error Interceptor** (Web)
+```typescript
+// services/dormway-lockedin/src/lib/api-client.ts
+import axios from 'axios';
+import { trackEvent } from './amplitude-typed';
+
+const apiClient = axios.create({
+  baseURL: process.env.NEXT_PUBLIC_API_URL,
+});
+
+apiClient.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    trackEvent('api_request_failed', {
+      platform: 'web',
+      app_version: APP_VERSION,
+      timestamp: new Date().toISOString(),
+      endpoint: error.config?.url || 'unknown',
+      http_method: error.config?.method?.toUpperCase() as 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH',
+      status_code: error.response?.status || 0,
+      error_message: error.message,
+      retry_count: error.config?.__retryCount || 0,
+    });
+
+    return Promise.reject(error);
+  }
+);
+```
+
+### Day 7: Calendar & Events (P1)
+
+```typescript
+// Calendar view
+trackEvent('calendar_viewed', {
+  platform: 'web',
+  app_version: APP_VERSION,
+  timestamp: new Date().toISOString(),
+  view_type: 'week',
+  has_events: events.length > 0,
+  event_count: events.length,
+});
+
+// Event creation
+trackEvent('event_created', {
+  platform: 'web',
+  app_version: APP_VERSION,
+  timestamp: new Date().toISOString(),
+  event_type: 'study_session',
+  has_location: !!event.location,
+  has_reminder: !!event.reminder,
+  duration_minutes: calculateDuration(event),
+});
+```
+
+### Day 8-9: Search & Engagement (P1)
+
+```typescript
+// Search
+trackEvent('search_performed', {
+  platform: 'web',
+  app_version: APP_VERSION,
+  timestamp: new Date().toISOString(),
+  search_query: query,
+  search_type: 'global',
+  results_count: results.length,
+  result_selected: false,
+});
+
+// Help access
+trackEvent('help_accessed', {
+  platform: 'web',
+  app_version: APP_VERSION,
+  timestamp: new Date().toISOString(),
+  help_type: 'faq',
+  screen_name: pathname,
+});
+
+// Feedback
+trackEvent('feedback_submitted', {
+  platform: 'web',
+  app_version: APP_VERSION,
+  timestamp: new Date().toISOString(),
+  feedback_type: 'bug',
+  sentiment: 'negative',
+  screen_name: pathname,
+  has_screenshot: !!screenshot,
+});
+```
+
+### Day 10: DormWay Lock (P1)
+
+```typescript
+// Lock access
+trackEvent('lock_accessed', {
+  platform: 'web',
+  app_version: APP_VERSION,
+  timestamp: new Date().toISOString(),
+  access_method: 'navbar',
+});
+
+// Schedule share
+trackEvent('lock_schedule_shared', {
+  platform: 'web',
+  app_version: APP_VERSION,
+  timestamp: new Date().toISOString(),
+  lock_id: generatedLockId,
+  share_method: 'link',
+  schedule_visibility: 'public',
+});
+
+// Lock view (server-side)
+await eventTrackerActivities.track('anonymous', 'lock_view_received', {
+  platform: 'server',
+  app_version: APP_VERSION,
+  timestamp: new Date().toISOString(),
+  lock_id,
+  lock_owner_id: lock.owner_id,
+  referrer_url: req.headers.referer,
+  is_authenticated: !!req.user,
+});
+```
+
+---
+
+## Type-Safe Implementation Pattern
+
+### Create Type-Safe Wrapper (Web)
+
+```typescript
+// services/dormway-lockedin/src/lib/amplitude-typed.ts
+import * as amplitude from '@amplitude/analytics-browser';
+import type { AmplitudeEventName, AmplitudeEventMap } from '@/types/amplitude-events';
+
+const APP_VERSION = process.env.NEXT_PUBLIC_APP_VERSION || '0.0.0';
+
+/**
+ * Type-safe event tracking
+ * TypeScript will enforce that all required properties are provided
+ */
+export function trackEvent<K extends AmplitudeEventName>(
+  eventName: K,
+  properties: AmplitudeEventMap[K]
+): void {
+  // Validate required standard properties
+  if (!properties.platform) {
+    console.error(`Missing required property 'platform' for event '${eventName}'`);
+    return;
+  }
+
+  if (!properties.timestamp) {
+    console.error(`Missing required property 'timestamp' for event '${eventName}'`);
+    return;
+  }
+
+  if (!properties.app_version) {
+    console.error(`Missing required property 'app_version' for event '${eventName}'`);
+    return;
+  }
+
+  // Track to Amplitude
+  amplitude.track(eventName, properties);
+}
+
+/**
+ * Helper to create standard properties
+ */
+export function createStandardProperties(overrides?: Partial<AmplitudeEventMap[AmplitudeEventName]>) {
+  return {
+    platform: 'web' as const,
+    app_version: APP_VERSION,
+    timestamp: new Date().toISOString(),
+    screen_name: typeof window !== 'undefined' ? window.location.pathname : undefined,
+    ...overrides,
+  };
+}
+
+/**
+ * Convenience wrapper with auto-injected standard properties
+ */
+export function trackEventWithDefaults<K extends AmplitudeEventName>(
+  eventName: K,
+  properties: Omit<AmplitudeEventMap[K], 'platform' | 'app_version' | 'timestamp'>
+): void {
+  trackEvent(eventName, {
+    ...createStandardProperties(),
+    ...properties,
+  } as AmplitudeEventMap[K]);
+}
+```
+
+### Usage Example
+```typescript
+import { trackEventWithDefaults } from '@/lib/amplitude-typed';
+
+// TypeScript enforces all required properties!
+trackEventWithDefaults('schedule_imported', {
+  // platform, app_version, timestamp auto-injected
+  source: 'lms',
+  lms_provider: 'canvas',
+  course_count: 5,
+  has_conflicts: false,
+  import_duration_seconds: 3.2,
+  // TypeScript error if you forget a required property!
+});
+```
+
+---
+
+## Backend Implementation
+
+### Update EventTracker Service
+
+```typescript
+// services/engine/src/services/eventTracker.ts
+
+import * as Amplitude from '@amplitude/analytics-node';
+import type {
+  AmplitudeEventName,
+  AmplitudeEventMap,
+  StandardEventProperties,
+} from '../types/amplitude-events';
+
+export class EventTracker {
+  // ... existing implementation ...
+
+  /**
+   * Type-safe track method
+   */
+  async track<K extends AmplitudeEventName>(
+    userId: string,
+    eventName: K,
+    properties: AmplitudeEventMap[K]
+  ): Promise<void> {
+    // Validate standard properties
+    this.validateStandardProperties(properties);
+
+    // Track to Amplitude
+    const result = Amplitude.track(
+      eventName,
+      properties as Record<string, any>,
+      {
+        user_id: userId,
+      }
+    );
+
+    if (result?.promise) {
+      await result.promise;
+    }
+  }
+
+  private validateStandardProperties(properties: StandardEventProperties): void {
+    if (!properties.platform) {
+      throw new Error('Missing required property: platform');
+    }
+    if (!properties.app_version) {
+      throw new Error('Missing required property: app_version');
+    }
+    if (!properties.timestamp) {
+      throw new Error('Missing required property: timestamp');
+    }
+  }
+}
+```
+
+---
+
+## Validation & Testing
+
+### Automated Tests
+
+```typescript
+// services/dormway-lockedin/src/__tests__/amplitude-tracking.test.ts
+
+import { trackEvent } from '@/lib/amplitude-typed';
+import * as amplitude from '@amplitude/analytics-browser';
+
+jest.mock('@amplitude/analytics-browser');
+
+describe('Amplitude Event Tracking', () => {
+  it('should track account_created with all required properties', () => {
+    trackEvent('account_created', {
+      platform: 'web',
+      app_version: '1.0.0',
+      timestamp: '2025-09-29T12:00:00Z',
+      signup_method: 'email',
+      campus_id: 'campus_123',
+      campus_name: 'University of Michigan',
+      email_domain: 'umich.edu',
+    });
+
+    expect(amplitude.track).toHaveBeenCalledWith(
+      'account_created',
+      expect.objectContaining({
+        platform: 'web',
+        signup_method: 'email',
+      })
+    );
+  });
+
+  it('should enforce TypeScript types', () => {
+    // This should not compile (TypeScript error)
+    // @ts-expect-error
+    trackEvent('account_created', {
+      platform: 'web',
+      // Missing required properties!
+    });
+  });
+});
+```
+
+### Manual Validation Checklist
+
+For each event:
+- [ ] Event appears in Amplitude Live View within 60 seconds
+- [ ] All standard properties present (platform, app_version, timestamp)
+- [ ] Event-specific properties have correct data types
+- [ ] Event name matches schema exactly (snake_case)
+- [ ] User ID correctly associated
+
+---
+
+## Launch Day Checklist
+
+### Pre-Launch (1 week before)
+- [ ] All P0 events implemented and tested
+- [ ] All P1 events implemented and tested
+- [ ] Amplitude dashboards configured
+- [ ] CustomerIO integration validated
+- [ ] Error tracking tested
+- [ ] Team trained on event schema
+
+### Launch Day
+- [ ] Enable Amplitude in production
+- [ ] Monitor event volume in real-time
+- [ ] Check for missing properties
+- [ ] Verify CustomerIO forwarding
+- [ ] Watch error rates
+
+### Post-Launch (Week 1)
+- [ ] Daily data quality review
+- [ ] Fix any missing events
+- [ ] Adjust property schemas if needed
+- [ ] Add P2 events as needed
+
+---
+
+## Success Metrics
+
+### Day 1
+- ✅ All signup/login events tracked
+- ✅ 100% event delivery rate
+
+### Week 1
+- ✅ All P0+P1 events implemented
+- ✅ < 1% events with missing properties
+- ✅ Amplitude dashboards operational
+
+### Week 2
+- ✅ All P2 events implemented
+- ✅ Error tracking catching 95%+ errors
+- ✅ CustomerIO campaigns running
+
+---
+
+**Document Owner**: Engineering Team
+**Status**: Ready for Implementation
+**Timeline**: Start immediately - complete before launch

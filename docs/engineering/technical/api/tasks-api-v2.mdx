@@ -1,0 +1,317 @@
+---
+title: "Tasks API V2"
+description: "This document describes the V2 Tasks API endpoints, which provide a unified interface for task management across iOS and LockedIn (web)."
+---
+
+# Tasks API V2
+
+This document describes the V2 Tasks API endpoints, which provide a unified interface for task management across iOS and LockedIn (web).
+
+## Overview
+
+The V2 Tasks API replaces the legacy `/mobile/tasks/*` endpoints with a more consistent pattern under `/v2/students/me/tasks`. This migration was completed as part of **DORM-787**.
+
+### Key Changes from V1
+
+| Aspect | V1 (Legacy) | V2 (Current) |
+|--------|-------------|--------------|
+| Base Path | `/mobile/tasks` | `/v2/students/me/tasks` |
+| Delete Method | `DELETE` | `PATCH` with `status: 'deleted'` |
+| Response Shape | `{ task: {...} }` | `{ success: true, data: {...} }` |
+| Field Names | snake_case | camelCase |
+
+## Endpoints
+
+### GET `/v2/students/me/tasks`
+
+Fetch all tasks for the authenticated student.
+
+**Query Parameters:**
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `status` | string | Filter by status: `pending`, `scheduled`, `completed`, `deleted`, `all` |
+| `source` | string | Filter by source: `manual`, `canvas`, `syllabus`, `ai_suggestion`, `all` |
+| `courseCode` | string | Filter by course code |
+| `limit` | number | Maximum results to return |
+| `offset` | number | Pagination offset |
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "items": [
+      {
+        "id": "uuid",
+        "title": "Study for exam",
+        "dueDate": "2025-12-30T23:59:59Z",
+        "courseCode": "EECS281",
+        "courseContextId": "uuid",
+        "priority": "high",
+        "status": "pending",
+        "source": "manual",
+        "estimatedMinutes": 60,
+        "metadata": {},
+        "createdAt": "2025-12-25T10:00:00Z",
+        "updatedAt": "2025-12-25T10:00:00Z"
+      }
+    ],
+    "total": 15,
+    "hasMore": false,
+    "sources": {
+      "manual": 5,
+      "canvas": 8,
+      "syllabus": 2,
+      "ai": 0
+    }
+  }
+}
+```
+
+### POST `/v2/students/me/tasks`
+
+Create a new task.
+
+**Request Body:**
+```json
+{
+  "title": "Study for exam",
+  "estimatedDuration": 60,
+  "priority": "high",
+  "courseCode": "EECS281",
+  "dueDate": "2025-12-30T23:59:59Z",
+  "notes": "Focus on chapter 5",
+  "metadata": {}
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "id": "uuid",
+    "title": "Study for exam",
+    "status": "pending",
+    ...
+  }
+}
+```
+
+### PATCH `/v2/students/me/tasks/:taskId`
+
+Update an existing task. Also used for soft-delete and completion.
+
+**Request Body (partial update):**
+```json
+{
+  "status": "completed",
+  "title": "Updated title",
+  "priority": "urgent",
+  "dueDate": "2025-12-31T23:59:59Z",
+  "estimatedDuration": 90,
+  "notes": "Updated notes"
+}
+```
+
+**Soft Delete:**
+```json
+{
+  "status": "deleted"
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "id": "uuid",
+    "status": "completed",
+    ...
+  }
+}
+```
+
+### POST `/v2/students/me/tasks/:taskId/schedule`
+
+Schedule a task to the timeline (creates a time block).
+
+**Request Body:**
+```json
+{
+  "startTime": "2025-12-26T14:00:00Z",
+  "endTime": "2025-12-26T15:00:00Z"
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "task": {
+      "id": "uuid",
+      "status": "scheduled",
+      ...
+    },
+    "timeBlock": {
+      "id": "uuid",
+      "startTime": "2025-12-26T14:00:00Z",
+      "endTime": "2025-12-26T15:00:00Z"
+    }
+  }
+}
+```
+
+### POST `/v2/students/me/tasks/:taskId/unschedule`
+
+Unschedule a task (deletes time block, returns task to pending).
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "task": {
+      "id": "uuid",
+      "status": "pending",
+      ...
+    },
+    "deletedBlockId": "uuid"
+  }
+}
+```
+
+### POST `/v2/students/me/tasks/quick-capture`
+
+Quick capture a task with smart parsing.
+
+**Request Body:**
+```json
+{
+  "rawInput": "!!! Finish essay 2h",
+  "courseCode": "EECS281",
+  "type": "task",
+  "priority": "high",
+  "estimatedDuration": 120
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "id": "uuid",
+    "title": "Finish essay",
+    "priority": "urgent",
+    "estimatedMinutes": 120,
+    ...
+  }
+}
+```
+
+## Types
+
+### TaskItem
+
+```typescript
+interface TaskItem {
+  id: string;
+  title: string;
+  dueDate: string | null;
+  courseCode: string | null;
+  courseContextId: string | null;
+  priority: 'urgent' | 'high' | 'medium' | 'low';
+  status: 'pending' | 'scheduled' | 'completed' | 'deleted';
+  source: 'manual' | 'canvas' | 'syllabus' | 'ai_suggestion';
+  estimatedMinutes: number | null;
+  metadata?: TaskItemMetadata;
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface TaskItemMetadata {
+  description?: string;
+  notes?: string;
+  weight?: number;
+  type?: string;
+  canvasAssignmentId?: string;
+  htmlUrl?: string;
+  submissionStatus?: string;
+  source?: string;
+  captureType?: 'task' | 'reminder' | 'note' | 'idea';
+}
+```
+
+## Implementation Details
+
+### Backend Architecture
+
+All business logic lives in `dormway-core` Student entity methods:
+- `Student.createTask()`
+- `Student.updateTask()`
+- `Student.scheduleTask()` - Uses transaction for atomic block creation
+- `Student.unscheduleTask()`
+- `Student.quickCaptureTask()`
+- `Student.deleteTask()`
+- `Student.completeTask()`
+
+The API router handlers in `students.routes.ts` are thin wrappers that delegate to these entity methods.
+
+### Frontend Hooks (LockedIn)
+
+Located in `hooks/home/useTasksV2.ts`:
+- `useTasksV2(filters?)` - Fetch tasks with React Query
+- `useCreateTaskV2()` - Create mutation
+- `useUpdateTaskV2()` - Update mutation
+- `useCompleteTaskV2()` - Complete (status change)
+- `useDeleteTaskV2()` - Delete (soft delete)
+- `useScheduleTaskV2()` - Schedule to timeline
+- `useUnscheduleTaskV2()` - Return to task bank
+- `useQuickCaptureV2()` - Quick capture
+
+Query key: `TASKS_V2_QUERY_KEY = 'tasks-v2'`
+
+### Cache Invalidation
+
+All mutations invalidate:
+- `['tasks-v2']` - V2 cache
+- `['dashboard-composite']` - Legacy dashboard cache
+
+Schedule/unschedule also invalidate:
+- `['timeBlocks']`
+- `['schedule-events']`
+
+## Migration Guide
+
+### From Legacy useTasks
+
+```typescript
+// Before (V1)
+import { useCompleteTask } from '@/hooks/home/useTasks';
+const completeTask = useCompleteTask(taskId);
+completeTask.mutate();
+
+// After (V2)
+import { useCompleteTaskV2 } from '@/hooks/home/useTasksV2';
+const completeTask = useCompleteTaskV2();
+completeTask.mutate(taskId);
+```
+
+### iOS Reference
+
+The V2 API matches the iOS pattern in:
+- `TasksAPIModels.swift` - Type definitions
+- `TasksService.swift` - API client
+
+## Related Documents
+
+- DormWay Platform Architecture
+- LockedIn Hooks Architecture
+
+---
+
+**Linear Issue:** DORM-787
+**Completed:** 2025-12-25

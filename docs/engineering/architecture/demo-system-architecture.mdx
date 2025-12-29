@@ -1,0 +1,868 @@
+---
+title: "Demo System Architecture"
+description: "Architecture for embedding DormWay as a demo iframe on the marketing site, with pre-populated, auto-refreshing demo data that simulates a realistic student e..."
+---
+
+# Demo System Architecture
+
+**Status**: Design Phase
+**Created**: 2025-11-09
+**Last Updated**: 2025-11-09
+**Tags**: #architecture #demo #product #iframe
+
+## Overview
+
+Architecture for embedding DormWay as a demo iframe on the marketing site, with pre-populated, auto-refreshing demo data that simulates a realistic student experience.
+
+---
+
+## Problem Statement
+
+### Iframe Auth Conflict
+When embedding DormWay dashboard in an iframe on the main marketing site:
+- User session state is shared between parent and iframe (same-origin cookies)
+- Authenticated users can't see the demo experience
+- No way to logout/register from within iframe
+- Need isolated demo environment that works regardless of parent auth state
+
+### Demo Data Requirements
+- Realistic student experience with actual course data
+- Multiple syllabi (various formats: PDF, Word, Canvas)
+- Processed term with assignments, deadlines, tasks
+- Schedule with time blocks and calendar events
+- Day plan with daily intelligence
+- Should feel "lived in" not empty/fake
+
+---
+
+## Solution: Dedicated Demo Route + Pre-Populated Data
+
+### Approach: `/demo` Route (Recommended)
+
+Create auth-free demo route with hardcoded demo user and periodically refreshed data:
+
+```
+dormway.app/demo              → Full demo dashboard
+dormway.app/demo?view=tasks   → Deep link to specific view
+```
+
+**Benefits:**
+- ✅ No Clerk auth conflicts
+- ✅ Works in iframe or standalone
+- ✅ Full control over UX
+- ✅ Can customize CTAs ("Try DormWay" instead of settings)
+- ✅ No cookie sharing issues
+- ✅ SEO-friendly demo landing page
+
+**Iframe Usage:**
+```html
+<iframe
+  src="https://dormway.app/demo?hideNav=true"
+  width="100%"
+  height="800px"
+  frameborder="0"
+/>
+```
+
+### Alternative Considered: Subdomain
+
+```
+demo.dormway.app → Demo environment
+app.dormway.app  → Production app
+```
+
+**Pros**: Complete cookie isolation
+**Cons**: Requires separate deployment, DNS config, more infrastructure
+
+**Decision**: Start with `/demo` route. Can migrate to subdomain if needed for performance/scaling.
+
+---
+
+## Demo Data Architecture
+
+### Core Principle: Real Data Structure, Demo User
+
+Store demo data in **actual database tables** using a dedicated demo account, not mocked/fake data. This ensures:
+- Demo reflects real system behavior
+- Works with actual queries/APIs
+- Updates as system evolves
+- Can test features in demo first
+
+### Demo User Identity
+
+```typescript
+const DEMO_USER = {
+  id: 'demo-student-001',
+  email: 'demo@dormway.app',
+  name: 'Alex Chen',
+  role: 'demo',
+  campus: 'University of Michigan',
+  term: 'Winter 2025'
+};
+```
+
+**Database Setup:**
+```sql
+-- Demo user account
+INSERT INTO accounts (id, email, full_name, role)
+VALUES ('demo-student-001', 'demo@dormway.app', 'Alex Chen', 'demo');
+
+-- Demo student context
+INSERT INTO contexts (id, type, user_id, parent_id, name)
+VALUES (
+  'ctx-demo-student',
+  'student',
+  'demo-student-001',
+  'ctx-umich-campus',
+  'Alex Chen - Winter 2025'
+);
+```
+
+### Demo Data Manifest
+
+**What's Pre-Populated:**
+
+1. **Student Context**
+   - University of Michigan student
+   - Winter 2025 term
+   - 4 courses across different departments
+   - Mix of large lectures and small seminars
+
+2. **Syllabi (Multiple Formats)**
+   ```
+   - EECS 280 (Data Structures) → PDF with tables
+   - MATH 215 (Multivariable Calc) → Canvas-sourced
+   - PSYCH 111 (Intro Psychology) → Word doc
+   - WRITING 100 (First Year Seminar) → Canvas rich text
+   ```
+
+3. **Assignments & Deadlines**
+   - 15-20 assignments across 4 courses
+   - Mix of statuses:
+     - Upcoming (5 assignments)
+     - Due soon (3 assignments, next 7 days)
+     - Overdue (1 assignment, demonstrates alert)
+     - Completed (10 assignments)
+   - Variety of types: essays, problem sets, labs, quizzes
+
+4. **Schedule Data**
+   - Time blocks for all 4 courses (MWF, TTH patterns)
+   - Office hours (2-3 per course)
+   - Study blocks
+   - Extracurriculars (club meeting, gym)
+
+5. **Calendar Events**
+   - Course lectures (synced from Canvas)
+   - Office hours
+   - Group study sessions
+   - Exam dates
+   - Personal events (club, social)
+
+6. **Task List**
+   - Generated tasks from assignments
+   - User-created tasks ("Buy textbook", "Email professor")
+   - Mix of priorities and statuses
+
+7. **Day Plan Intelligence**
+   - Morning briefing
+   - Afternoon check-in
+   - Evening wrap-up
+   - Personalized suggestions based on schedule
+
+8. **Service Integrations**
+   - Google Calendar connection (simulated)
+   - Canvas LMS sync (real courses from demo campus)
+   - Weather data for Ann Arbor, MI
+
+### Data Relationships
+
+```
+Demo Account (demo-student-001)
+  ├─ Student Context (ctx-demo-student)
+  │   ├─ Course Contexts (4 courses)
+  │   │   ├─ Assignments (15-20 total)
+  │   │   ├─ Time Blocks (12-15 weekly)
+  │   │   └─ Syllabus Documents (4 PDFs/docs)
+  │   ├─ Tasks (8-12 tasks)
+  │   ├─ Calendar Events (20-30 events)
+  │   └─ Daily Intelligence (7 days rolling)
+  └─ Service Data
+      ├─ Canvas sync data
+      └─ Google Calendar events
+```
+
+---
+
+## Periodic Refresh Strategy
+
+### Why Refresh Demo Data?
+
+1. **Realistic "lived in" feel**: Dates stay current, not stuck in past
+2. **System changes reflected**: As we update schemas/features, demo updates too
+3. **Test data quality**: Forces us to maintain seed data scripts
+4. **Showcases AI intelligence**: Daily briefings regenerate with current context
+
+### Refresh Schedule
+
+| Data Type | Refresh Frequency | Method |
+|-----------|-------------------|--------|
+| Assignments | Weekly | Shift dates forward, mark some completed |
+| Calendar Events | Daily | Update to current week |
+| Day Plan Intelligence | Every 6 hours | Regenerate AI briefings |
+| Task List | Weekly | Add new tasks, complete old ones |
+| Syllabus Documents | Monthly | Keep 1-2 current, rotate seasonally |
+| Service Data | Daily | Sync from demo Canvas course |
+
+### Implementation: Temporal Workflow
+
+```typescript
+// services/engine/src/workflows/demo-data-refresh.workflow.ts
+
+export async function demoDataRefreshWorkflow(): Promise<void> {
+  // Run daily at 3 AM UTC
+  await proxyActivities<typeof activities>({
+    scheduleToCloseTimeout: '10 minutes',
+  }).refreshDemoData();
+}
+
+// Scheduled in worker
+await client.workflow.start(demoDataRefreshWorkflow, {
+  taskQueue: 'demo-worker',
+  workflowId: 'demo-data-refresh',
+  cronSchedule: '0 3 * * *', // Daily at 3 AM UTC
+});
+```
+
+### Refresh Activities
+
+```typescript
+// services/engine/src/activities/demo/refresh-demo-data.ts
+
+export async function refreshDemoData(): Promise<void> {
+  const DEMO_USER_ID = 'demo-student-001';
+
+  // 1. Shift assignment dates forward
+  await shiftAssignmentDates(DEMO_USER_ID);
+
+  // 2. Mark recently-due assignments as completed
+  await completeOldAssignments(DEMO_USER_ID);
+
+  // 3. Update calendar events to current week
+  await updateCalendarEvents(DEMO_USER_ID);
+
+  // 4. Regenerate day plan intelligence
+  await regenerateDayPlan(DEMO_USER_ID);
+
+  // 5. Add new realistic tasks
+  await generateNewTasks(DEMO_USER_ID);
+
+  // 6. Sync from demo Canvas course
+  await syncDemoCanvasCourse(DEMO_USER_ID);
+}
+
+async function shiftAssignmentDates(userId: string): Promise<void> {
+  const pool = await getAuroraPool();
+
+  // Shift all future assignments forward by 1 day
+  await pool.query(`
+    UPDATE service_data
+    SET data = jsonb_set(
+      data,
+      '{due_at}',
+      to_jsonb((data->>'due_at')::timestamp + interval '1 day')
+    )
+    WHERE user_id = $1
+      AND data->>'type' = 'assignment'
+      AND (data->>'due_at')::timestamp > NOW()
+  `, [userId]);
+}
+
+async function completeOldAssignments(userId: string): Promise<void> {
+  const pool = await getAuroraPool();
+
+  // Mark assignments due 3+ days ago as completed
+  await pool.query(`
+    UPDATE service_data
+    SET data = jsonb_set(data, '{workflow_state}', '"submitted"')
+    WHERE user_id = $1
+      AND data->>'type' = 'assignment'
+      AND (data->>'due_at')::timestamp < NOW() - interval '3 days'
+      AND data->>'workflow_state' != 'submitted'
+  `, [userId]);
+}
+
+async function regenerateDayPlan(userId: string): Promise<void> {
+  // Call AI Crews to generate fresh day plan
+  const response = await fetch(`${AI_CREWS_URL}/api/v1/crew/execute`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      crew_type: 'daily_intelligence',
+      context: {
+        user_id: userId,
+        date: new Date().toISOString().split('T')[0],
+      },
+    }),
+  });
+
+  const intelligence = await response.json();
+
+  // Store in processed_student_daily_intelligence
+  await pool.query(`
+    INSERT INTO processed_student_daily_intelligence
+    (student_id, intelligence_date, intelligence_data, generated_at)
+    VALUES ($1, $2, $3, NOW())
+    ON CONFLICT (student_id, intelligence_date)
+    DO UPDATE SET
+      intelligence_data = $3,
+      generated_at = NOW()
+  `, [userId, new Date().toISOString().split('T')[0], intelligence]);
+}
+```
+
+---
+
+## Demo Route Implementation
+
+### File Structure
+
+```
+services/dormway-lockedin/src/app/demo/
+├── page.tsx                 # Main demo page
+├── layout.tsx               # Demo-specific layout
+├── components/
+│   ├── DemoHeader.tsx       # "You're viewing a demo" banner
+│   ├── DemoCTA.tsx          # "Sign up to get started" CTA
+│   └── DemoResetButton.tsx  # Admin: reset demo data
+└── lib/
+    ├── demo-data.ts         # Client-side data fetching
+    └── demo-auth.ts         # Mock auth provider
+```
+
+### Page Implementation
+
+```typescript
+// services/dormway-lockedin/src/app/demo/page.tsx
+'use client';
+
+import { useEffect, useState } from 'react';
+import { DashboardLayout } from '@/components/dashboard/DashboardLayout';
+import { DemoHeader } from './components/DemoHeader';
+import { DemoCTA } from './components/DemoCTA';
+
+const DEMO_USER_ID = 'demo-student-001';
+
+export default function DemoPage() {
+  const [demoData, setDemoData] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    // Fetch demo data via public API endpoint
+    fetch(`/api/demo/data`)
+      .then(res => res.json())
+      .then(data => {
+        setDemoData(data);
+        setLoading(false);
+      });
+  }, []);
+
+  if (loading) {
+    return <div>Loading demo...</div>;
+  }
+
+  return (
+    <>
+      <DemoHeader />
+      <DashboardLayout
+        user={{
+          id: DEMO_USER_ID,
+          email: 'demo@dormway.app',
+          name: 'Alex Chen',
+        }}
+        data={demoData}
+        isDemo={true}
+      />
+      <DemoCTA />
+    </>
+  );
+}
+```
+
+### Public Demo API Endpoint
+
+```typescript
+// services/dormway-lockedin/src/app/api/demo/data/route.ts
+import { NextResponse } from 'next/server';
+
+const DEMO_USER_ID = 'demo-student-001';
+
+export async function GET() {
+  // Fetch demo data from backend
+  const response = await fetch(
+    `${process.env.NEXT_PUBLIC_API_BASE_URL}/demo/dashboard`,
+    {
+      headers: {
+        'x-demo-user-id': DEMO_USER_ID,
+      },
+    }
+  );
+
+  const data = await response.json();
+
+  return NextResponse.json(data);
+}
+```
+
+### Backend Demo Endpoint
+
+```typescript
+// services/api-router/src/routes/demo.ts
+import { Router } from 'express';
+
+const router = Router();
+
+router.get('/demo/dashboard', async (req, res) => {
+  const DEMO_USER_ID = 'demo-student-001';
+
+  // Fetch all demo data
+  const [
+    assignments,
+    schedule,
+    tasks,
+    dayPlan,
+    courses,
+  ] = await Promise.all([
+    fetchAssignments(DEMO_USER_ID),
+    fetchSchedule(DEMO_USER_ID),
+    fetchTasks(DEMO_USER_ID),
+    fetchDayPlan(DEMO_USER_ID),
+    fetchCourses(DEMO_USER_ID),
+  ]);
+
+  res.json({
+    user: {
+      id: DEMO_USER_ID,
+      name: 'Alex Chen',
+      email: 'demo@dormway.app',
+      campus: 'University of Michigan',
+    },
+    assignments,
+    schedule,
+    tasks,
+    dayPlan,
+    courses,
+  });
+});
+
+export default router;
+```
+
+---
+
+## Demo Data Seed Script
+
+### Initial Setup SQL
+
+```sql
+-- scripts/database/seeds/demo-data-seed.sql
+
+-- 1. Create demo user
+INSERT INTO accounts (id, email, full_name, role, created_at)
+VALUES (
+  'demo-student-001',
+  'demo@dormway.app',
+  'Alex Chen',
+  'demo',
+  NOW()
+) ON CONFLICT (id) DO NOTHING;
+
+-- 2. Create student context
+INSERT INTO contexts (id, type, user_id, parent_id, name, metadata, created_at)
+VALUES (
+  'ctx-demo-student',
+  'student',
+  'demo-student-001',
+  'ctx-umich-campus',
+  'Alex Chen - Winter 2025',
+  jsonb_build_object(
+    'term', 'Winter 2025',
+    'year', 2025,
+    'expected_graduation', '2027'
+  ),
+  NOW()
+) ON CONFLICT (id) DO NOTHING;
+
+-- 3. Create course contexts
+INSERT INTO contexts (id, type, parent_id, name, external_id, metadata)
+VALUES
+  (
+    'ctx-demo-eecs280',
+    'course',
+    'ctx-demo-student',
+    'EECS 280: Programming and Intro Data Structures',
+    'eecs-280-w25',
+    jsonb_build_object(
+      'course_code', 'EECS 280',
+      'section', '001',
+      'credits', 4,
+      'instructor', 'Dr. Sarah Johnson'
+    )
+  ),
+  (
+    'ctx-demo-math215',
+    'course',
+    'ctx-demo-student',
+    'MATH 215: Multivariable and Vector Calculus',
+    'math-215-w25',
+    jsonb_build_object(
+      'course_code', 'MATH 215',
+      'section', '002',
+      'credits', 4,
+      'instructor', 'Prof. Michael Chen'
+    )
+  ),
+  (
+    'ctx-demo-psych111',
+    'course',
+    'ctx-demo-student',
+    'PSYCH 111: Introduction to Psychology',
+    'psych-111-w25',
+    jsonb_build_object(
+      'course_code', 'PSYCH 111',
+      'section', '003',
+      'credits', 4,
+      'instructor', 'Dr. Emily Rodriguez'
+    )
+  ),
+  (
+    'ctx-demo-writing100',
+    'course',
+    'ctx-demo-student',
+    'WRITING 100: First-Year Writing',
+    'writing-100-w25',
+    jsonb_build_object(
+      'course_code', 'WRITING 100',
+      'section', '012',
+      'credits', 3,
+      'instructor', 'Dr. James Williams'
+    )
+  )
+ON CONFLICT (id) DO NOTHING;
+
+-- 4. Create assignments (service_data table)
+INSERT INTO service_data (
+  id,
+  user_id,
+  context_id,
+  service_name,
+  data_type,
+  data,
+  fetched_at
+)
+VALUES
+  -- EECS 280 Assignments
+  (
+    gen_random_uuid(),
+    'demo-student-001',
+    'ctx-demo-eecs280',
+    'canvas',
+    'assignment',
+    jsonb_build_object(
+      'id', 'eecs280-p1',
+      'name', 'Project 1: Image Processor',
+      'due_at', (NOW() + interval '5 days')::text,
+      'points_possible', 100,
+      'workflow_state', 'published',
+      'description', 'Implement a basic image processing application using C++'
+    ),
+    NOW()
+  ),
+  (
+    gen_random_uuid(),
+    'demo-student-001',
+    'ctx-demo-eecs280',
+    'canvas',
+    'assignment',
+    jsonb_build_object(
+      'id', 'eecs280-hw3',
+      'name', 'Homework 3: Linked Lists',
+      'due_at', (NOW() + interval '2 days')::text,
+      'points_possible', 50,
+      'workflow_state', 'published',
+      'description', 'Problems on linked list implementation and analysis'
+    ),
+    NOW()
+  ),
+  -- MATH 215 Assignments
+  (
+    gen_random_uuid(),
+    'demo-student-001',
+    'ctx-demo-math215',
+    'canvas',
+    'assignment',
+    jsonb_build_object(
+      'id', 'math215-hw4',
+      'name', 'Homework 4: Partial Derivatives',
+      'due_at', (NOW() + interval '3 days')::text,
+      'points_possible', 40,
+      'workflow_state', 'published'
+    ),
+    NOW()
+  ),
+  -- Add more assignments...
+ON CONFLICT DO NOTHING;
+
+-- 5. Create time blocks
+INSERT INTO time_blocks (
+  id,
+  user_id,
+  context_id,
+  block_type,
+  day_of_week,
+  start_time,
+  end_time,
+  location
+)
+VALUES
+  -- EECS 280 Lectures
+  (
+    gen_random_uuid(),
+    'demo-student-001',
+    'ctx-demo-eecs280',
+    'lecture',
+    1, -- Monday
+    '10:00:00',
+    '11:30:00',
+    'EECS Building, Room 1500'
+  ),
+  (
+    gen_random_uuid(),
+    'demo-student-001',
+    'ctx-demo-eecs280',
+    'lecture',
+    3, -- Wednesday
+    '10:00:00',
+    '11:30:00',
+    'EECS Building, Room 1500'
+  )
+  -- Add more time blocks for all courses...
+ON CONFLICT DO NOTHING;
+
+-- 6. Create tasks
+-- (These would be in a tasks table or similar)
+```
+
+### Seed Script Runner
+
+```bash
+#!/bin/bash
+# scripts/database/seed-demo-data.sh
+
+set -e
+
+echo "Seeding demo data..."
+
+# Run SQL seed file
+docker exec dormway-postgres-local psql -U dormway_admin -d dormway -f /scripts/seeds/demo-data-seed.sql
+
+# Trigger initial day plan generation
+curl -X POST http://localhost:3001/api/demo/generate-intelligence \
+  -H "Content-Type: application/json" \
+  -d '{"user_id": "demo-student-001"}'
+
+echo "Demo data seeded successfully!"
+```
+
+---
+
+## Security Considerations
+
+### Demo User Restrictions
+
+1. **No writes allowed**: Demo account is read-only at DB level
+2. **Rate limiting**: Stricter limits on demo endpoints
+3. **No PII**: Demo data contains no real student information
+4. **Isolated**: Demo user cannot interact with real users/data
+
+### Database Role
+
+```sql
+-- Create read-only role for demo user
+CREATE ROLE demo_reader;
+
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO demo_reader;
+GRANT SELECT ON service_data TO demo_reader;
+GRANT SELECT ON contexts TO demo_reader;
+GRANT SELECT ON accounts TO demo_reader;
+
+-- Revoke writes
+REVOKE INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public FROM demo_reader;
+```
+
+### API Protection
+
+```typescript
+// Middleware to detect demo user
+function isDemoUser(userId: string): boolean {
+  return userId === 'demo-student-001';
+}
+
+// Block writes from demo
+router.post('/api/tasks', (req, res) => {
+  if (isDemoUser(req.user.id)) {
+    return res.status(403).json({
+      error: 'Demo accounts cannot create tasks. Sign up to get started!',
+    });
+  }
+  // ... normal logic
+});
+```
+
+---
+
+## Monitoring & Analytics
+
+### Demo Usage Metrics
+
+Track in separate analytics bucket:
+
+```typescript
+// Track demo page views
+analytics.track('demo_view', {
+  demo_user_id: 'demo-student-001',
+  referrer: req.headers.referer,
+  user_agent: req.headers['user-agent'],
+  iframe_embedded: req.query.hideNav === 'true',
+});
+
+// Track demo interactions
+analytics.track('demo_interaction', {
+  action: 'viewed_assignment',
+  assignment_id: 'eecs280-p1',
+});
+
+// Track demo CTAs clicked
+analytics.track('demo_cta_clicked', {
+  cta_type: 'sign_up_banner',
+  location: 'top_nav',
+});
+```
+
+### Demo Health Checks
+
+```bash
+# Cron job to validate demo data
+*/30 * * * * /scripts/demo/validate-demo-health.sh
+```
+
+```typescript
+// services/api-router/src/routes/demo-health.ts
+router.get('/demo/health', async (req, res) => {
+  const checks = await Promise.all([
+    checkDemoUserExists(),
+    checkAssignmentsExist(),
+    checkDayPlanCurrent(),
+    checkScheduleValid(),
+  ]);
+
+  const healthy = checks.every(c => c.healthy);
+
+  res.status(healthy ? 200 : 503).json({
+    healthy,
+    checks,
+    last_refresh: await getLastRefreshTime(),
+  });
+});
+```
+
+---
+
+## Migration Plan
+
+### Phase 1: Basic Demo Route (Week 1)
+- [ ] Create `/demo` route with static hardcoded data
+- [ ] Basic demo header/footer with CTA
+- [ ] Public API endpoint for demo data
+- [ ] Update marketing site iframe to point to `/demo`
+
+### Phase 2: Real Demo Data (Week 2)
+- [ ] Create demo user in database
+- [ ] Write demo data seed script
+- [ ] Populate 4 courses with assignments
+- [ ] Add schedule time blocks
+- [ ] Test in iframe
+
+### Phase 3: Auto-Refresh (Week 3)
+- [ ] Implement Temporal workflow for daily refresh
+- [ ] Write refresh activities (shift dates, complete assignments)
+- [ ] Add day plan regeneration
+- [ ] Monitor refresh health
+
+### Phase 4: Polish (Week 4)
+- [ ] Add demo-specific UI tweaks ("Try DormWay" CTAs)
+- [ ] Implement analytics tracking
+- [ ] Add demo reset button for internal testing
+- [ ] Documentation and runbook
+
+---
+
+## Open Questions
+
+1. **Should demo user see notifications?**
+   - Option A: Yes, pre-populated notifications (feel realistic)
+   - Option B: No, could be confusing in iframe
+   - **Recommendation**: Yes, but mark as "Demo notification"
+
+2. **How to handle demo Canvas course?**
+   - Option A: Create real Canvas course on test instance
+   - Option B: Mock Canvas API responses for demo user
+   - **Recommendation**: Real Canvas course for authenticity
+
+3. **Should demo show all features or subset?**
+   - Option A: Full feature parity with real app
+   - Option B: Limited "highlight reel" of best features
+   - **Recommendation**: Full parity, but guide users to key features
+
+4. **What if demo data refresh fails?**
+   - Fallback to static backup data
+   - Alert on-call engineer
+   - Display banner: "Demo temporarily using cached data"
+
+---
+
+## Success Metrics
+
+**Demo Effectiveness:**
+- Conversion rate: Demo view → Sign up
+- Time spent in demo (avg session duration)
+- Features explored (assignment view, schedule, day plan)
+- CTA click-through rate
+
+**Data Quality:**
+- Demo data staleness (days since last refresh)
+- Day plan generation success rate
+- Assignment date distribution (should always have upcoming)
+
+**Performance:**
+- Demo page load time (<2s)
+- Iframe embed performance
+- Demo API response time (<500ms)
+
+---
+
+## Related Documents
+
+- App Authentication Architecture - Auth system overview
+- [BFF Dashboard v1](/docs/engineering/architecture/bff-dashboard-v1) - Dashboard data patterns
+- DormWay Platform Architecture - Overall system design
+- [Canvas Backfill Runbook](/docs/operations/runbooks/canvas-backfill-runbook) - Canvas data sync patterns
+
+---
+
+## Revision History
+
+- **2025-11-09**: Initial architecture design
+  - Chose `/demo` route approach over subdomain
+  - Defined demo data manifest
+  - Designed Temporal-based refresh strategy
+  - Created implementation roadmap

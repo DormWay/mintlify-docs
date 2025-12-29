@@ -1,0 +1,271 @@
+---
+title: "TravelDetectionService"
+description: "This service was created to consolidate travel detection that was previously duplicated in api-router. All consumers (api-router, engine, FeedGenerator) now..."
+---
+
+# TravelDetectionService
+
+## Overview
+
+**TravelDetectionService** detects when a student is traveling away from their campus and enriches context data with travel-specific information including location-aware weather.
+
+**Purpose**: Centralized travel detection logic that determines if a user is traveling (>50 miles from campus), fetches weather for their current location, and provides this data to downstream consumers like DayPlan generation.
+
+**Location**: `@dormway/core/services/travel-detection`
+
+---
+
+## Architecture Principle
+
+**ALL business logic lives in dormway-core. Period.**
+
+- **api-router** = thin HTTP passthrough, NO business logic, NO SQL
+- **dormway-core** = ALL business logic including travel detection
+- **engine** = Workflow orchestration, calls dormway-core methods
+
+This service was created to consolidate travel detection that was previously duplicated in api-router. All consumers (api-router, engine, FeedGenerator) now call dormway-core methods.
+
+---
+
+## Installation
+
+```typescript
+import { detectTravelContext, type TravelContext } from '@dormway/core';
+```
+
+---
+
+## Functions
+
+### detectTravelContext
+
+Detect if user is traveling based on distance from campus and optionally fetch weather for their current location.
+
+**Signature**:
+```typescript
+async function detectTravelContext(
+  userLat: number,
+  userLng: number,
+  campusLat: number,
+  campusLng: number
+): Promise<TravelContext>
+```
+
+**Parameters**:
+- `userLat` - User's current latitude
+- `userLng` - User's current longitude
+- `campusLat` - Campus center latitude
+- `campusLng` - Campus center longitude
+
+**Returns**:
+```typescript
+interface TravelContext {
+  isTraveling: boolean;           // True if >50 miles from campus
+  distanceFromCampusMiles: number; // Distance in miles
+  currentLocationName?: string;    // City name if traveling
+  travelWeather?: {
+    temperature: number;
+    feels_like: number;
+    humidity: number;
+    wind_speed: number;
+    condition?: string;
+    description?: string;
+  };
+}
+```
+
+**Example**:
+```typescript
+import { detectTravelContext } from '@dormway/core';
+
+// User in West Hills, CA; Campus at University of Michigan
+const travel = await detectTravelContext(
+  34.225, -118.649,  // User location (West Hills)
+  42.278, -83.735    // Campus location (Ann Arbor)
+);
+
+if (travel.isTraveling) {
+  console.log(`User is ${travel.distanceFromCampusMiles} miles from campus`);
+  console.log(`Current location: ${travel.currentLocationName}`);
+  console.log(`Local weather: ${travel.travelWeather?.temperature}°F`);
+}
+// Output:
+// User is 1959 miles from campus
+// Current location: West Hills
+// Local weather: 56.62°F
+```
+
+---
+
+## How It Works
+
+### Distance Calculation
+
+Uses the Haversine formula to calculate the great-circle distance between two GPS coordinates:
+
+```typescript
+function haversineDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const R = 6371; // Earth's radius in km
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a = Math.sin(dLat/2)**2 +
+            Math.cos(lat1 * Math.PI/180) * Math.cos(lat2 * Math.PI/180) *
+            Math.sin(dLon/2)**2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+}
+```
+
+### Travel Threshold
+
+- **<= 50 miles**: Not traveling (on or near campus)
+- **> 50 miles**: Traveling
+
+### Weather Lookup
+
+When traveling, uses the City entity to find the nearest city and fetch weather:
+
+```typescript
+if (isCityFactoryInitialized()) {
+  const cityFactory = getCityFactory();
+  const nearestResult = await cityFactory.findNearestCity(userLat, userLng, 500);
+  if (nearestResult.success && nearestResult.data) {
+    const { city } = nearestResult.data;
+    currentLocationName = city.name;
+    travelWeather = await city.getWeather();
+  }
+}
+```
+
+---
+
+## Integration with Student Entity
+
+The `Student.getContextPrediction()` method automatically enriches context with travel data:
+
+```typescript
+// In student.entity.ts
+async getContextPrediction(): Promise<ContextPrediction | null> {
+  const cached = await this.lazyLoadServiceData<ContextPrediction>(
+    'contextPrediction',
+    'context_prediction_response'
+  );
+
+  if (!cached) return null;
+
+  // Enrich with travel detection
+  const userLocation = cached.input?.environment?.location;
+  const campus = await this.getCampus();
+
+  if (userLocation?.latitude && campus?.success && campus.data) {
+    const campusLocation = campus.data.location;
+    if (campusLocation?.latitude && campusLocation?.longitude) {
+      const travel = await detectTravelContext(
+        userLocation.latitude,
+        userLocation.longitude,
+        campusLocation.latitude,
+        campusLocation.longitude
+      );
+
+      // Add travel data to response
+      cached.travel = travel;
+      if (travel.isTraveling && travel.travelWeather) {
+        cached.input.environment.travelWeather = travel.travelWeather;
+        cached.input.environment.travelStatus = {
+          isTraveling: true,
+          distanceFromCampusMiles: travel.distanceFromCampusMiles,
+          currentLocationName: travel.currentLocationName
+        };
+      }
+    }
+  }
+
+  return cached;
+}
+```
+
+---
+
+## Consumers
+
+### DayPlan Generation (Engine)
+
+DayPlan reads travel context from `recentContext.rawContextPrediction.travel`:
+
+```typescript
+// In dayplan.activities.ts
+const travelData = recentContext?.rawContextPrediction?.travel;
+
+if (travelData?.isTraveling && travelData?.travelWeather) {
+  weather = {
+    current: {
+      temperature: travelData.travelWeather.temperature,
+      feelsLike: travelData.travelWeather.feels_like,
+      conditions: travelData.travelWeather.description,
+      humidity: travelData.travelWeather.humidity,
+      windSpeed: travelData.travelWeather.wind_speed,
+    },
+    locationName: travelData.currentLocationName,
+    isTravelWeather: true
+  };
+}
+```
+
+### API Router (Context Prediction)
+
+API Router delegates to dormway-core for travel detection:
+
+```typescript
+// In context-data-service.ts
+import { detectTravelContext as detectTravelContextCore } from '@dormway/core';
+
+// Wrapper for backward compatibility
+export async function detectTravelContext(...): Promise<TravelContext> {
+  const coreResult = await detectTravelContextCore(...);
+  // Map to local interface if needed
+  return coreResult;
+}
+```
+
+---
+
+## DayPlan Prompt Impact
+
+When a user is traveling, the DayPlan prompt includes:
+
+1. **Travel Context Section**:
+```
+## Travel Context
+You are currently TRAVELING away from your home campus.
+- Current location: West Hills (1959 miles from campus)
+- Travel weather: 56.62°F (feels like 56.08°F)
+```
+
+2. **Home Campus Labeled**:
+```
+## Campus & City Context (HOME - You are currently traveling)
+```
+
+3. **Home Weather Skipped**: Travel weather shown instead of home campus weather
+
+4. **Travel Considerations Section**:
+```
+## Travel Day Considerations
+Since you're traveling, focus on:
+- Flexible timing for activities
+- Local weather conditions at your current location
+- Travel-friendly recommendations
+```
+
+---
+
+## Related Documentation
+
+- [Context Prediction Pipeline Deep Dive (Current)](/docs/engineering/technical/ai/context/context-prediction-pipeline-deep-dive-current) - Full context flow
+- [DayPlanDataService](/docs/engineering/technical/dormway-core/domain-services/dayplandataservice) - DayPlan data aggregation
+- Student Entity - Student entity with travel enrichment
+- [DayPlan & Semester Summary Generation Deep Dive (Current)](/docs/engineering/technical/engine/dayplan-semester-summary-generation-deep-dive-current) - DayPlan generation
+
+---
+
+**Last Updated**: 2025-12-26
+**Maintainer**: Platform Team

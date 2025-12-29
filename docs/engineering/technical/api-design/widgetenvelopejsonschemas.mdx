@@ -1,0 +1,1141 @@
+---
+title: "WIDGET_ENVELOPE_JSON_SCHEMAS"
+description: "This document provides **JSON Schema (Draft 2020-12)** definitions and realistic sample payloads for DormWay's versioned widget envelope API at `/dashboard/v..."
+---
+
+# Widget Envelope JSON Schemas & Sample Payloads
+
+## Overview
+
+This document provides **JSON Schema (Draft 2020-12)** definitions and realistic sample payloads for DormWay's versioned widget envelope API at `/dashboard/v1/composite`. These schemas form the contract between frontend clients (iOS, web) and the backend BFF.
+
+**Transport Format**: Widget envelopes aggregated under `/dashboard/v1/composite`
+**Versioning**: Top-level `{ version: "1.0", widgets: [...], status?, server_time? }`
+**Real-time**: Ably delta ops: `{ op: "upsert"|"remove", id, value? }`
+**Clients**: Web + iOS; must tolerate unknown widgets; prefer additive evolution; breaking changes → v2
+
+---
+
+## Table of Contents
+
+1. [Core Envelope Schemas](#core-envelope-schemas)
+2. [Widget Type Schemas](#widget-type-schemas)
+3. [Sample Payloads](#sample-payloads)
+4. [Delta Messages](#delta-messages)
+5. [Contract Notes](#contract-notes)
+
+---
+
+## Core Envelope Schemas
+
+### 1. WidgetEnvelope (Base Schema)
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dormway.app/schemas/widget-envelope.json",
+  "title": "WidgetEnvelope",
+  "description": "Base widget envelope structure for all dashboard widgets",
+  "type": "object",
+  "required": ["id", "type", "content"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "Stable, deterministic widget identifier (e.g., 'widget:schedule:next-class')",
+      "pattern": "^[a-z0-9-_:]+$",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "type": {
+      "type": "string",
+      "description": "Widget type discriminator",
+      "enum": [
+        "action_cta",
+        "academic",
+        "schedule",
+        "weather",
+        "context_status",
+        "quick_links",
+        "dayplan",
+        "syllabus",
+        "notes"
+      ]
+    },
+    "title": {
+      "type": "string",
+      "description": "Optional user-facing widget title",
+      "minLength": 1,
+      "maxLength": 100
+    },
+    "priority": {
+      "type": "integer",
+      "description": "Widget display priority (higher = more prominent)",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "content": {
+      "type": "object",
+      "required": ["data"],
+      "properties": {
+        "displayType": {
+          "type": "string",
+          "description": "Presentation hint for client rendering"
+        },
+        "data": {
+          "description": "Widget-specific payload (see individual widget schemas)"
+        }
+      }
+    },
+    "grid": {
+      "type": "object",
+      "description": "Optional grid layout hints for flexible grid systems",
+      "properties": {
+        "w": { "type": "integer", "minimum": 1, "description": "Width in grid columns" },
+        "h": { "type": "integer", "minimum": 1, "description": "Height in grid rows" },
+        "minW": { "type": "integer", "minimum": 1 },
+        "minH": { "type": "integer", "minimum": 1 },
+        "preferred": {
+          "type": "array",
+          "description": "Preferred size configurations",
+          "items": {
+            "type": "object",
+            "required": ["w", "h"],
+            "properties": {
+              "w": { "type": "integer", "minimum": 1 },
+              "h": { "type": "integer", "minimum": 1 }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+### 2. DashboardCompositeV1 (Full Response)
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dormway.app/schemas/dashboard-composite-v1.json",
+  "title": "DashboardCompositeV1",
+  "description": "Complete dashboard snapshot with widget collection",
+  "type": "object",
+  "required": ["version", "request", "widgets", "metadata"],
+  "properties": {
+    "version": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "server_time": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Snapshot server time (RFC 3339 / ISO 8601) for client-side relative computations"
+    },
+    "request": {
+      "type": "object",
+      "required": ["context", "generatedAt"],
+      "properties": {
+        "tab": {
+          "type": "string",
+          "enum": ["home", "schedule", "assignments", "campus", "me"],
+          "description": "Requested dashboard tab"
+        },
+        "context": {
+          "type": "string",
+          "description": "User context (e.g., 'campus', 'traveling', 'commuting')"
+        },
+        "since": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Optional incremental update timestamp"
+        },
+        "generatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Response generation timestamp"
+        }
+      }
+    },
+    "widgets": {
+      "type": "array",
+      "description": "Array of widget envelopes",
+      "items": {
+        "$ref": "https://dormway.app/schemas/widget-envelope.json"
+      }
+    },
+    "status": {
+      "type": "object",
+      "description": "High-level data availability status",
+      "properties": {
+        "calendar_connected": {
+          "type": "boolean",
+          "description": "Whether user has connected calendar"
+        },
+        "syllabus_count": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of uploaded syllabi"
+        },
+        "last_ingest_at": {
+          "type": ["string", "null"],
+          "format": "date-time",
+          "description": "Last data ingestion timestamp"
+        },
+        "inferred": {
+          "type": "boolean",
+          "description": "True when status derived heuristically"
+        }
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "required": ["requestId", "processingTimeMs", "cache"],
+      "properties": {
+        "requestId": {
+          "type": ["string", "number"],
+          "description": "Unique request identifier for tracing"
+        },
+        "processingTimeMs": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Backend processing time in milliseconds"
+        },
+        "cache": {
+          "type": "object",
+          "required": ["hit", "ttl"],
+          "properties": {
+            "hit": {
+              "type": "boolean",
+              "description": "Whether response served from cache"
+            },
+            "ttl": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Cache TTL in seconds"
+            }
+          }
+        },
+        "flags": {
+          "type": "object",
+          "description": "Server feature flags for client consumption",
+          "additionalProperties": { "type": "boolean" }
+        }
+      }
+    },
+    "weather": {
+      "description": "Rollout shim for iOS normalizer backward compatibility (will be removed in Phase 3)"
+    },
+    "schedule": {
+      "description": "Rollout shim for iOS normalizer backward compatibility (will be removed in Phase 3)"
+    }
+  }
+}
+```
+
+### 3. DashboardDeltaV1 (Real-time Update)
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dormway.app/schemas/dashboard-delta-v1.json",
+  "title": "DashboardDeltaV1",
+  "description": "Real-time delta update via Ably",
+  "type": "object",
+  "required": ["type", "baseEtag", "seq", "ops"],
+  "properties": {
+    "type": {
+      "type": "string",
+      "const": "dashboard.delta"
+    },
+    "version": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "baseEtag": {
+      "type": "string",
+      "description": "Base ETag this delta applies to",
+      "pattern": "^W/\"dcv1-[a-f0-9]{16,}\"$"
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Monotonic sequence number for ordering"
+    },
+    "ops": {
+      "type": "array",
+      "description": "Array of delta operations",
+      "items": {
+        "type": "object",
+        "required": ["op", "id"],
+        "properties": {
+          "op": {
+            "type": "string",
+            "enum": ["upsert", "remove"],
+            "description": "Operation type"
+          },
+          "id": {
+            "type": "string",
+            "description": "Widget ID to upsert or remove"
+          },
+          "value": {
+            "$ref": "https://dormway.app/schemas/widget-envelope.json",
+            "description": "New widget value (required for upsert)"
+          }
+        },
+        "if": {
+          "properties": { "op": { "const": "upsert" } }
+        },
+        "then": {
+          "required": ["value"]
+        }
+      }
+    },
+    "ts": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Delta generation timestamp"
+    }
+  }
+}
+```
+
+---
+
+## Widget Type Schemas
+
+### 4. Schedule Widget (type: "schedule")
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dormway.app/schemas/widgets/schedule.json",
+  "title": "ScheduleWidget",
+  "description": "Schedule and timeline widgets",
+  "type": "object",
+  "required": ["id", "type", "content"],
+  "properties": {
+    "id": { "type": "string" },
+    "type": { "const": "schedule" },
+    "content": {
+      "type": "object",
+      "required": ["displayType", "data"],
+      "properties": {
+        "displayType": {
+          "type": "string",
+          "enum": ["upcoming_class", "timeline"]
+        },
+        "data": {
+          "type": "object",
+          "oneOf": [
+            {
+              "$comment": "displayType: upcoming_class",
+              "required": ["title", "startTime", "endTime"],
+              "properties": {
+                "title": { "type": "string", "minLength": 1 },
+                "courseCode": { "type": "string" },
+                "startTime": { "type": "string", "format": "date-time" },
+                "endTime": { "type": "string", "format": "date-time" },
+                "location": { "type": "string" },
+                "building": { "type": "string" },
+                "room": { "type": "string" },
+                "instructorName": { "type": "string" },
+                "urgencyLevel": {
+                  "type": "string",
+                  "enum": ["normal", "soon", "urgent", "critical"]
+                },
+                "showUrgencyBadge": { "type": "boolean" },
+                "urgencyColor": { "type": "string" }
+              }
+            },
+            {
+              "$comment": "displayType: timeline",
+              "required": ["items"],
+              "properties": {
+                "items": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": ["id", "title", "startTime", "endTime", "type"],
+                    "properties": {
+                      "id": { "type": "string" },
+                      "title": { "type": "string", "minLength": 1 },
+                      "startTime": { "type": "string", "format": "date-time" },
+                      "endTime": { "type": "string", "format": "date-time" },
+                      "type": {
+                        "type": "string",
+                        "enum": ["class", "event", "task", "free", "planner_block"]
+                      },
+                      "courseCode": { "type": "string" },
+                      "location": { "type": "string" },
+                      "status": {
+                        "type": "string",
+                        "enum": ["scheduled", "completed", "cancelled"]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}
+```
+
+### 5. Academic Widget (type: "academic")
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dormway.app/schemas/widgets/academic.json",
+  "title": "AcademicWidget",
+  "description": "Academic progress, deadlines, and workload widgets",
+  "type": "object",
+  "required": ["id", "type", "content"],
+  "properties": {
+    "id": { "type": "string" },
+    "type": { "const": "academic" },
+    "content": {
+      "type": "object",
+      "required": ["displayType", "data"],
+      "properties": {
+        "displayType": {
+          "type": "string",
+          "enum": ["urgent_deadlines", "workload_summary", "empty_state"]
+        },
+        "data": {
+          "type": "object",
+          "oneOf": [
+            {
+              "$comment": "displayType: urgent_deadlines",
+              "required": ["urgentAssignments"],
+              "properties": {
+                "urgentAssignments": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": ["id", "title", "dueAt"],
+                    "properties": {
+                      "id": { "type": "string" },
+                      "title": { "type": "string", "minLength": 1 },
+                      "courseCode": { "type": "string" },
+                      "dueAt": { "type": "string", "format": "date-time" },
+                      "priority": {
+                        "type": "string",
+                        "enum": ["low", "medium", "high", "urgent"]
+                      },
+                      "estimatedMinutes": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "submissionType": { "type": "string" },
+                      "weight": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 1
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "$comment": "displayType: workload_summary",
+              "properties": {
+                "urgentAssignments": {
+                  "type": "array",
+                  "items": { "$ref": "#/$defs/assignment" }
+                },
+                "dueToday": { "type": "integer", "minimum": 0 },
+                "dueThisWeek": { "type": "integer", "minimum": 0 },
+                "upcomingExams": { "type": "integer", "minimum": 0 }
+              }
+            },
+            {
+              "$comment": "displayType: empty_state",
+              "required": ["reason", "actions"],
+              "properties": {
+                "reason": {
+                  "type": "string",
+                  "enum": ["missing_sources", "no_data", "sync_pending"]
+                },
+                "actions": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": ["label", "action"],
+                    "properties": {
+                      "label": { "type": "string", "minLength": 1 },
+                      "action": {
+                        "type": "string",
+                        "enum": [
+                          "open_calendar_connect",
+                          "open_syllabus_uploader",
+                          "refresh_data"
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  },
+  "$defs": {
+    "assignment": {
+      "type": "object",
+      "required": ["id", "title", "dueAt"],
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string", "minLength": 1 },
+        "courseCode": { "type": "string" },
+        "dueAt": { "type": "string", "format": "date-time" },
+        "priority": {
+          "type": "string",
+          "enum": ["low", "medium", "high", "urgent"]
+        }
+      }
+    }
+  }
+}
+```
+
+### 6. Weather Widget (type: "weather")
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dormway.app/schemas/widgets/weather.json",
+  "title": "WeatherWidget",
+  "description": "Weather information widget",
+  "type": "object",
+  "required": ["id", "type", "content"],
+  "properties": {
+    "id": { "type": "string" },
+    "type": { "const": "weather" },
+    "content": {
+      "type": "object",
+      "required": ["displayType", "data"],
+      "properties": {
+        "displayType": {
+          "type": "string",
+          "enum": ["simple", "detailed"]
+        },
+        "data": {
+          "type": "object",
+          "required": ["current"],
+          "properties": {
+            "current": {
+              "type": "object",
+              "required": ["temp", "condition"],
+              "properties": {
+                "temp": {
+                  "type": "number",
+                  "description": "Temperature in Fahrenheit"
+                },
+                "feelsLike": { "type": "number" },
+                "condition": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Weather condition description (e.g., 'Sunny', 'Cloudy')"
+                },
+                "conditionCode": {
+                  "type": "string",
+                  "description": "Machine-readable condition code for icons"
+                },
+                "humidity": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 100
+                },
+                "windSpeed": { "type": "number", "minimum": 0 },
+                "precipitation": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 100,
+                  "description": "Precipitation probability percentage"
+                }
+              }
+            },
+            "forecast": {
+              "type": "object",
+              "properties": {
+                "high": { "type": "number" },
+                "low": { "type": "number" },
+                "hourly": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": ["time", "temp", "condition"],
+                    "properties": {
+                      "time": { "type": "string", "format": "date-time" },
+                      "temp": { "type": "number" },
+                      "condition": { "type": "string" },
+                      "precipitation": { "type": "integer" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+### 7. DayPlan Widget (type: "dayplan")
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dormway.app/schemas/widgets/dayplan.json",
+  "title": "DayPlanWidget",
+  "description": "AI-generated daily planner with scheduled and unscheduled blocks",
+  "type": "object",
+  "required": ["id", "type", "content"],
+  "properties": {
+    "id": { "type": "string" },
+    "type": { "const": "dayplan" },
+    "content": {
+      "type": "object",
+      "required": ["data"],
+      "properties": {
+        "displayType": {
+          "type": "string",
+          "enum": ["full_day", "remaining_day"]
+        },
+        "data": {
+          "type": "object",
+          "required": ["blocks"],
+          "properties": {
+            "blocks": {
+              "type": "array",
+              "description": "Scheduled and unscheduled time blocks",
+              "items": {
+                "type": "object",
+                "required": ["id", "title"],
+                "properties": {
+                  "id": { "type": "string" },
+                  "title": { "type": "string", "minLength": 1 },
+                  "name": { "type": "string" },
+                  "startTime": {
+                    "type": "string",
+                    "format": "date-time",
+                    "description": "If present, block is scheduled; if null, unscheduled"
+                  },
+                  "minutes": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Duration in minutes"
+                  },
+                  "estimated_duration_minutes": { "type": "integer", "minimum": 1 },
+                  "priority": {
+                    "type": "string",
+                    "enum": ["low", "medium", "high", "urgent"]
+                  },
+                  "courseCode": { "type": "string" },
+                  "course_code": { "type": "string" },
+                  "dueDate": { "type": "string", "format": "date-time" },
+                  "due_at": { "type": "string", "format": "date-time" },
+                  "due_date": { "type": "string", "format": "date-time" }
+                }
+              }
+            },
+            "unscheduledTasks": {
+              "type": "array",
+              "description": "Legacy field - use blocks with startTime=null instead",
+              "items": { "$ref": "#/$defs/task" }
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "task": {
+      "type": "object",
+      "required": ["id", "title", "estimatedDuration"],
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string", "minLength": 1 },
+        "estimatedDuration": { "type": "integer", "minimum": 1 },
+        "priority": {
+          "type": "string",
+          "enum": ["low", "medium", "high", "urgent"]
+        },
+        "courseCode": { "type": "string" },
+        "dueDate": { "type": "string", "format": "date-time" }
+      }
+    }
+  }
+}
+```
+
+### 8. Action CTA Widget (type: "action_cta")
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dormway.app/schemas/widgets/action-cta.json",
+  "title": "ActionCTAWidget",
+  "description": "Call-to-action widgets for user actions",
+  "type": "object",
+  "required": ["id", "type", "content"],
+  "properties": {
+    "id": { "type": "string" },
+    "type": { "const": "action_cta" },
+    "content": {
+      "type": "object",
+      "required": ["displayType", "data"],
+      "properties": {
+        "displayType": {
+          "type": "string",
+          "enum": ["primary_cta", "opportunity", "personal_todos"]
+        },
+        "data": {
+          "type": "object",
+          "required": ["action"],
+          "properties": {
+            "action": {
+              "type": "string",
+              "description": "Action identifier for client routing"
+            },
+            "title": { "type": "string", "minLength": 1 },
+            "subtitle": { "type": "string" },
+            "buttonLabel": { "type": "string" },
+            "icon": { "type": "string" },
+            "urgency": {
+              "type": "string",
+              "enum": ["low", "medium", "high", "critical"]
+            }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+---
+
+## Sample Payloads
+
+### Full Dashboard Response (DashboardCompositeV1)
+
+```json
+{
+  "version": "1.0",
+  "server_time": "2025-10-07T14:30:00.000Z",
+  "request": {
+    "tab": "home",
+    "context": "campus",
+    "generatedAt": "2025-10-07T14:30:00.123Z"
+  },
+  "widgets": [
+    {
+      "id": "next-class",
+      "type": "schedule",
+      "priority": 15,
+      "content": {
+        "displayType": "upcoming_class",
+        "data": {
+          "title": "Data Structures and Algorithms",
+          "courseCode": "EECS 281",
+          "startTime": "2025-10-07T15:30:00.000Z",
+          "endTime": "2025-10-07T17:00:00.000Z",
+          "location": "EECS 1311",
+          "building": "EECS",
+          "room": "1311",
+          "instructorName": "Dr. Johnson",
+          "urgencyLevel": "urgent",
+          "showUrgencyBadge": true,
+          "urgencyColor": "orange"
+        }
+      },
+      "grid": {
+        "minW": 2,
+        "minH": 1,
+        "preferred": [
+          { "w": 4, "h": 1 },
+          { "w": 2, "h": 1 }
+        ]
+      }
+    },
+    {
+      "id": "urgent-deadlines",
+      "type": "academic",
+      "content": {
+        "displayType": "urgent_deadlines",
+        "data": {
+          "urgentAssignments": [
+            {
+              "id": "assign_eecs281_hw3",
+              "title": "Data Structures Homework 3",
+              "courseCode": "EECS 281",
+              "dueAt": "2025-10-07T23:59:00.000Z",
+              "priority": "high",
+              "estimatedMinutes": 120,
+              "submissionType": "canvas",
+              "weight": 0.15
+            },
+            {
+              "id": "assign_math215_quiz",
+              "title": "Calculus Quiz 4",
+              "courseCode": "MATH 215",
+              "dueAt": "2025-10-08T14:30:00.000Z",
+              "priority": "medium",
+              "estimatedMinutes": 30,
+              "submissionType": "in_person",
+              "weight": 0.05
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "weather-simple",
+      "type": "weather",
+      "content": {
+        "displayType": "simple",
+        "data": {
+          "current": {
+            "temp": 72,
+            "feelsLike": 75,
+            "condition": "Partly Cloudy",
+            "conditionCode": "partly-cloudy-day",
+            "humidity": 55,
+            "windSpeed": 8.5,
+            "precipitation": 10
+          },
+          "forecast": {
+            "high": 78,
+            "low": 58,
+            "hourly": [
+              {
+                "time": "2025-10-07T15:00:00.000Z",
+                "temp": 74,
+                "condition": "Sunny",
+                "precipitation": 0
+              },
+              {
+                "time": "2025-10-07T16:00:00.000Z",
+                "temp": 76,
+                "condition": "Sunny",
+                "precipitation": 0
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "widget:dayplan",
+      "type": "dayplan",
+      "content": {
+        "displayType": "full_day",
+        "data": {
+          "blocks": [
+            {
+              "id": "block-class-eecs281",
+              "title": "EECS 281 Lecture",
+              "startTime": "2025-10-07T15:30:00.000Z",
+              "minutes": 90,
+              "courseCode": "EECS 281",
+              "priority": "high"
+            },
+            {
+              "id": "block-unscheduled-homework",
+              "title": "Work on: Data Structures Homework 3",
+              "startTime": null,
+              "minutes": 120,
+              "courseCode": "EECS 281",
+              "priority": "high",
+              "dueDate": "2025-10-07T23:59:00.000Z"
+            },
+            {
+              "id": "block-unscheduled-study",
+              "title": "Study for Calculus Quiz",
+              "startTime": null,
+              "minutes": 60,
+              "courseCode": "MATH 215",
+              "priority": "medium",
+              "due_at": "2025-10-08T14:30:00.000Z"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "status": {
+    "calendar_connected": true,
+    "syllabus_count": 4,
+    "last_ingest_at": "2025-10-07T14:15:00.000Z",
+    "inferred": false
+  },
+  "metadata": {
+    "requestId": "req_abc123xyz789",
+    "processingTimeMs": 142,
+    "cache": {
+      "hit": false,
+      "ttl": 300
+    },
+    "flags": {
+      "dayplan": true,
+      "syllabus": true
+    }
+  }
+}
+```
+
+### Delta Message (Ably Real-time Update)
+
+#### Upsert Operation
+```json
+{
+  "type": "dashboard.delta",
+  "version": "1.0",
+  "baseEtag": "W/\"dcv1-a1b2c3d4e5f67890\"",
+  "seq": 42,
+  "ops": [
+    {
+      "op": "upsert",
+      "id": "weather-simple",
+      "value": {
+        "id": "weather-simple",
+        "type": "weather",
+        "content": {
+          "displayType": "simple",
+          "data": {
+            "current": {
+              "temp": 74,
+              "feelsLike": 77,
+              "condition": "Sunny",
+              "conditionCode": "clear-day",
+              "humidity": 52,
+              "windSpeed": 9.2,
+              "precipitation": 5
+            },
+            "forecast": {
+              "high": 78,
+              "low": 58
+            }
+          }
+        }
+      }
+    }
+  ],
+  "ts": "2025-10-07T14:35:00.000Z"
+}
+```
+
+#### Remove Operation
+```json
+{
+  "type": "dashboard.delta",
+  "version": "1.0",
+  "baseEtag": "W/\"dcv1-a1b2c3d4e5f67890\"",
+  "seq": 43,
+  "ops": [
+    {
+      "op": "remove",
+      "id": "urgent-deadlines"
+    }
+  ],
+  "ts": "2025-10-07T14:36:00.000Z"
+}
+```
+
+### Empty State Widget (Academic)
+
+```json
+{
+  "id": "academic-empty",
+  "type": "academic",
+  "content": {
+    "displayType": "empty_state",
+    "data": {
+      "reason": "missing_sources",
+      "actions": [
+        {
+          "label": "Connect Google Calendar",
+          "action": "open_calendar_connect"
+        },
+        {
+          "label": "Upload Syllabus",
+          "action": "open_syllabus_uploader"
+        }
+      ]
+    }
+  }
+}
+```
+
+---
+
+## Contract Notes
+
+### Evolution Policy
+
+**Additive Changes (Non-Breaking)**:
+- Adding new widget types
+- Adding optional fields to existing widgets
+- Adding new `displayType` values
+- Adding new enum values (with client fallback handling)
+- Adding new properties to `metadata` or `status`
+
+**Breaking Changes (Requires v2)**:
+- Removing required fields
+- Changing field types
+- Removing widget types or displayTypes
+- Changing `version` field semantics
+- Renaming fields without backward compatibility
+
+**Client Requirements**:
+- **Unknown widgets**: Clients MUST ignore widgets with unrecognized `type` values
+- **Unknown fields**: Clients MUST preserve unknown fields (forward compatibility)
+- **Validation**: Clients SHOULD validate critical fields but gracefully degrade on failure
+- **Delta handling**: Clients MUST validate `baseEtag` matches before applying deltas
+
+### Payload Size Guidance
+
+**Target sizes per widget**:
+- **action_cta**: < 0.5 KB
+- **schedule.upcoming_class**: < 1 KB
+- **schedule.timeline**: < 3 KB (cap at 10 items)
+- **academic.urgent_deadlines**: < 2 KB (cap at 5 items)
+- **academic.workload_summary**: < 1.5 KB
+- **weather**: < 1 KB
+- **dayplan**: < 5 KB (cap at 20 blocks)
+
+**Total response targets**:
+- Typical: < 25 KB
+- Maximum: < 50 KB
+
+### Validation Notes
+
+**Runtime Guards (Backend)**:
+- MVP v1 widgets pass through shape guards before emission
+- Invalid widgets are dropped with warning logs
+- Optional JSON Schema validation (flag-gated: `DASHBOARD_VALIDATE_V2=true`)
+
+**Client Validation**:
+- Clients SHOULD validate critical fields (id, type, content.data)
+- Clients MUST NOT fail hard on validation errors (graceful degradation)
+- Unknown widgets/fields → silently ignore, do not render
+
+**Testing**:
+- **CI validation**: Run JSON Schema validation in CI against sample fixtures
+- **Fixtures**: Maintain sample payloads in `services/api-router/src/__tests__/fixtures/`
+- **Contract tests**: Backend integration tests validate against schemas
+
+### ID Stability Requirements
+
+**Widget ID format**: `<category>-<variant>` or `widget:<type>:<key>`
+
+**Examples**:
+- `next-class` (stable, single instance)
+- `urgent-deadlines` (stable, single instance)
+- `weather-simple` (stable, single instance)
+- `widget:dayplan` (stable, single instance)
+- `widget:syllabus:course123` (stable per course)
+
+**Stability rules**:
+- IDs MUST be deterministic (same input → same ID)
+- IDs SHOULD NOT include timestamps or random values
+- IDs MUST remain stable across refreshes for delta upserts
+- IDs MAY include entity keys for multi-instance widgets
+
+### Real-time Delta Semantics
+
+**Client apply logic**:
+```typescript
+function applyDelta(current: WidgetEnvelope[], delta: DashboardDeltaV1): WidgetEnvelope[] {
+  // Validate baseEtag matches current ETag
+  if (delta.baseEtag !== currentEtag) {
+    throw new Error('ETag mismatch - resync required');
+  }
+
+  // Validate sequence (detect gaps)
+  if (delta.seq !== lastSeq + 1) {
+    throw new Error('Sequence gap - resync required');
+  }
+
+  // Apply operations
+  let result = [...current];
+  for (const op of delta.ops) {
+    if (op.op === 'upsert') {
+      const idx = result.findIndex(w => w.id === op.id);
+      if (idx >= 0) {
+        result[idx] = op.value; // Replace
+      } else {
+        result.push(op.value);  // Insert
+      }
+    } else if (op.op === 'remove') {
+      result = result.filter(w => w.id !== op.id);
+    }
+  }
+
+  return result;
+}
+```
+
+**Error recovery**:
+- **ETag mismatch**: Full resync via `GET /dashboard/v1/composite`
+- **Sequence gap**: Full resync
+- **Invalid delta**: Log error, ignore delta, continue
+- **Network disconnect**: Resubscribe to Ably, full resync on reconnect
+
+---
+
+## Implementation Status
+
+### Currently Implemented (October 2025)
+
+| Widget Type | displayTypes | Status | Notes |
+|-------------|-------------|--------|-------|
+| **action_cta** | `primary_cta`, `opportunity`, `personal_todos` | ✅ MVP | Generated heuristically from context |
+| **academic** | `urgent_deadlines`, `workload_summary`, `empty_state` | ✅ MVP | Canvas integration complete |
+| **schedule** | `upcoming_class`, `timeline` | ✅ MVP | 48-hour window, urgency calculation |
+| **weather** | `simple` | ✅ MVP | City-level weather from OpenWeather API |
+| **context_status** | (no displayType) | ✅ MVP | Calendar/syllabus connection status |
+| **quick_links** | `action_buttons` | ✅ MVP | Static quick actions |
+| **dayplan** | `full_day`, `remaining_day` | ✅ Flag-gated | AI-generated planner (Crew integration) |
+| **syllabus** | `course_list` | ✅ Flag-gated | Uploaded syllabus documents |
+| **notes** | `recent` | ⚠️ Planned | Note metadata from MDX editor |
+
+### Roadmap Widgets (Not Yet Implemented)
+
+| Widget Type | displayTypes | Status | Use Case |
+|-------------|-------------|--------|----------|
+| **dining** | `locations`, `balance` | 📋 Planned | Campus dining halls, meal plans |
+| **transit** | `next_bus`, `directions` | 📋 Planned | Campus shuttle, public transit |
+| **parking** | `availability`, `locations` | 📋 Planned | Campus parking lots |
+| **events** | `campus_events`, `recommended` | 📋 Planned | Campus calendar events |
+| **focus** | `study_recommendation` | 📋 Planned | AI focus/productivity suggestions |
+
+---
+
+## Related Documentation
+
+- DASHBOARD_BFF_V1_IMPLEMENTATION - iOS implementation guide
+- [BFF Dashboard v1](/docs/engineering/architecture/bff-dashboard-v1) - Backend architecture
+- Widget System Architecture - Overall widget system design
+- [Realtime Dashboard Deltas](/docs/engineering/architecture/realtime-dashboard-deltas) - Ably real-time specification
+- [iOS Widget Integration Guide](/docs/engineering/technical/ios/ios-widget-integration-guide) - Client integration patterns
+
+---
+
+**Document Metadata**:
+- **Schema Version**: 1.0
+- **JSON Schema Draft**: 2020-12
+- **Last Updated**: 2025-10-07
+- **Maintainer**: Platform Team
+- **Status**: Current / Production

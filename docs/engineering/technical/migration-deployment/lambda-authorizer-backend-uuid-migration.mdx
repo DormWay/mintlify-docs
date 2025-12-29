@@ -1,0 +1,161 @@
+---
+title: "Lambda Authorizer Backend UUID Migration"
+description: "The Lambda Authorizer has been updated to extract the backend UUID from JWT custom claims instead of using the Auth0 ID from the `sub` claim. This ensures Au..."
+---
+
+# Lambda Authorizer Backend UUID Migration
+
+#backend #auth #migration #lambda
+
+**Date**: 2025-08-02
+**Status**: Ready for Deployment
+
+## Overview
+
+The Lambda Authorizer has been updated to extract the backend UUID from JWT custom claims instead of using the Auth0 ID from the `sub` claim. This ensures Auth0 IDs never propagate beyond the authentication layer.
+
+## Problem Statement
+
+- Auth0 IDs were being used throughout the system (e.g., `student-watcher-auth0|688a9ab5029bc3265682f8c3`)
+- This created inconsistency as some services expected backend UUIDs
+- Ably was using Auth0 IDs as client IDs from the authorizer context
+
+## Solution
+
+### Architecture Flow
+```
+iOS App → API Gateway → Lambda Authorizer → API Router → Services
+         JWT with         ↓                    ↓           ↓
+         Auth0 ID    Extracts UUID      Gets UUID    Only UUIDs
+```
+
+## Changes Made
+
+### 1. Lambda Authorizer (`auth0-authorizer/index.js`)
+```javascript
+// OLD: Used Auth0 ID
+const userId = decoded.sub;
+
+// NEW: Uses backend UUID
+const backendUserId = decoded['https://dormway.app/user_id'] || 
+                     decoded['https://dormway.app/backend_user_id'];
+```
+
+**Key changes**:
+- Extracts backend UUID from custom JWT claims
+- Validates that backend UUID exists in token
+- Logs ID translation for debugging
+- Passes backend UUID as `userId` in authorizer context
+- Keeps Auth0 ID only for reference
+
+### 2. Ably Relay Service (`temporal-dispatcher.ts`)
+Added warning logs to identify remaining Auth0 ID sources:
+```typescript
+if (routingKey.startsWith('auth0|')) {
+  logger.warn(`⚠️ Received Auth0 ID in telemetry: ${routingKey}...`);
+}
+```
+
+### 3. iOS App (`TelemetryService.swift`)
+Updated to extract backend UUID from JWT:
+```swift
+// Extract backend UUID from custom claim, NOT the Auth0 ID from 'sub'
+if let backendUserId = json["https://dormway.app/user_id"] as? String {
+    return backendUserId
+}
+```
+
+### 4. Engine (`student.activities.ts`)
+Updated `createStudentDormAssociation` to use PostgreSQL database service instead of direct Supabase calls.
+
+## Deployment Instructions
+
+### LocalStack (Development)
+```bash
+# Changes already copied, restart LocalStack
+cd dormway-aws-infrastructure
+make doppler-down
+make doppler-up
+```
+
+### AWS Production
+
+1. **Deploy Lambda Function**:
+```bash
+cd dormway-aws-infrastructure
+./scripts/deploy-auth0-authorizer.sh
+```
+
+2. **Verify Deployment**:
+```bash
+# Check Lambda logs
+aws logs tail /aws/lambda/dormway-auth0-authorizer --follow
+
+# Look for "ID Translation" log entries showing:
+# - auth0Id: auth0|xxx
+# - backendUserId: UUID
+```
+
+3. **Test the Flow**:
+```bash
+# Test with real JWT
+curl -X POST https://api.dormway.app/v1/mobile/profile \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
+  -v 2>&1 | grep -i "x-user-id"
+
+# Should see backend UUID, not Auth0 ID
+```
+
+## Verification Checklist
+
+- [ ] Lambda Authorizer logs show "ID Translation" with backend UUID
+- [ ] API Router receives backend UUID in `x-user-id` header
+- [ ] Ably clientId uses backend UUID (check Ably dashboard)
+- [ ] New Temporal workflows: `student-watcher-<uuid>` not `student-watcher-auth0|xxx`
+- [ ] No Auth0 ID warnings in ably-relay logs
+
+## Monitoring
+
+### CloudWatch Queries
+```
+# Find ID translations
+fields @timestamp, @message
+| filter @message like /ID Translation/
+| sort @timestamp desc
+
+# Find any Auth0 ID errors
+fields @timestamp, @message
+| filter @message like /auth0\|/
+| sort @timestamp desc
+```
+
+### Ably Relay Monitoring
+```bash
+# Check for Auth0 ID warnings
+docker logs dormway-ably-relay 2>&1 | grep "Auth0 ID in telemetry"
+```
+
+## Rollback Plan
+
+If issues arise:
+1. **Revert Lambda**: Use AWS Console to publish previous version
+2. **Update Environment**: Set `ALLOW_AUTH0_IDS=true` temporarily
+3. **Monitor**: Check logs for resolution
+
+## Impact
+
+- **Immediate**: All new auth tokens will use backend UUIDs throughout system
+- **Temporal**: New workflows will have clean UUID-based IDs
+- **Ably**: Client IDs will be backend UUIDs, improving debugging
+- **Future**: Can remove Auth0 ID handling code once migration complete
+
+## Related Documents
+- DormWay Development Status
+- Auth0 Configuration
+- API Gateway and Auth0 Migration Plan
+
+## Commits
+- Main repo: `68b8b92` - Lambda Authorizer UUID extraction
+- ably-relay: `80c5440` - Auth0 ID detection logs  
+- ios-clean: `88fd8bb` - Telemetry UUID fix
+- engine: `5ed75df` - Database service migration

@@ -1,0 +1,175 @@
+---
+title: "Multi Institution Architecture Upgrade"
+description: "Last updated: August 2025"
+---
+
+# Multi‑Institution Architecture Upgrade
+
+Last updated: August 2025
+
+## Overview
+DormWay now supports multiple cities and campuses beyond University of Michigan. The platform generalizes context, routing, and processing so data and workflows apply per city/campus and organization.
+
+```mermaid
+graph TD
+  subgraph Contexts
+    A[City Context]
+    B[Campus Context]
+    C[Student Context]
+    D[Course Context]
+  end
+  A -->|parent_id| B
+  B -->|parent_id| C
+  B --- D
+  %% Styling to indicate org scoping
+  classDef orgScoped stroke-dasharray: 5 5
+  class A,B,C,D orgScoped
+```
+
+```mermaid
+classDiagram
+  class contexts {
+    uuid id
+    uuid parent_id
+    text type
+    uuid organization_id
+    jsonb metadata
+    timestamptz last_sync_at
+    timestamptz next_sync_at
+  }
+  class campus_configs {
+    uuid campus_id
+    text campus_name
+    jsonb feature_flags
+    jsonb data_sources
+    jsonb sync_schedule
+    jsonb campus_metadata
+    text configuration_status
+  }
+  class city_configs {
+    uuid city_id
+    jsonb sync_schedule
+    jsonb processing_rules
+  }
+  contexts --> contexts : parent_id
+  contexts --> campus_configs : campus_id
+```
+
+## Domain Model Changes
+- Context hierarchy: `city → campus → student/course` stored in `contexts` with `type` and `parent_id`.
+- Multitenancy: `contexts.organization_id` scopes data by organization; queries accept/resolve org where relevant.
+- Campus registry: canonical campus metadata (name, city/state, lat/lon) used for onboarding and LLM enrichment.
+
+## API Router Updates
+- Campus endpoints: `GET /api/campus/:campus_id/housing`, `GET /api/campus/search`, `GET /api/campus/:campus_id/metadata`.
+- Campus config service: centralized source of truth for campus feature flags and metadata enrichment.
+- City linkage: helpers create/find a `city` context for a campus and set `parent_id` appropriately.
+- Geolocation support: IP lookup can suggest nearby campus; routing accepts `campusId`/`cityId` in request/claims.
+
+```mermaid
+sequenceDiagram
+  participant Client
+  participant API as API Router
+  participant DB as Aurora (contexts, campus_configs)
+  participant LLM as Perplexity/LLM
+
+  Client->>API: GET /api/campus/:id/metadata?refresh=true
+  API->>DB: SELECT campus + city context
+  alt Missing config
+    API->>DB: INSERT campus_configs
+  end
+  API->>LLM: Fetch metadata/enrichment
+  LLM-->>API: Metadata JSON
+  API->>DB: UPDATE campus_configs.campus_metadata
+  API-->>Client: 200 campus metadata
+```
+
+## Engine Updates
+- City and campus DAGs: batch workflows process per city/campus; see [City Processing DAG Flow](/docs/engineering/technical/engine/city-processing-dag-flow) and Engineering/Technical/Engine/Campus Processing DAG Flow.
+- Real‑time channels: Ably topics use scoped names `city:{cityId}` and `campus:{campusId}` for fan‑out.
+- Weather/news/context: activities fetch and generate context per city/campus and publish updates accordingly.
+
+```mermaid
+flowchart LR
+  subgraph Orchestrator
+    O[Admin sync/orchestrate]
+  end
+  O --> W1[processSingleCity]
+  O --> W2[processSingleCampus]
+  W1 --> A1[Fetch weather and news]
+  W1 --> A2[Save city context]
+  W1 --> N1[Notify Ably city channel]
+  W2 --> A3[Fetch campus data]
+  W2 --> A4[Save campus context]
+  W2 --> N2[Notify Ably campus channel]
+```
+
+### City→Campus Cascade
+
+```mermaid
+flowchart TD
+  C[City candidate] --> E{Evaluate cascade}
+  E --> T[Threshold from city_configs]
+  E --> L[List campuses by last_sync_at]
+  L --> K{Allow cascade?}
+  K --> CS[Select campus IDs]
+  K --> X[Skip cascade]
+  CS --> S[processSingleCity]
+  S --> CC{Within city workflow}
+  CC --> PC[processSingleCampus]
+```
+
+### Orchestrator vs City Workflow (Swimlane)
+
+```mermaid
+sequenceDiagram
+  participant Admin as Cron/Admin
+  participant API as API Router Orchestrator
+  participant TMP as Temporal
+  participant CityWF as City Workflow
+  participant CampusWF as Campus Workflow
+  participant DB as Aurora (contexts/configs)
+
+  Admin->>API: GET /api/admin/sync/orchestrate
+  API->>DB: Select prioritized candidates
+  API->>API: Apply limits, dedupe
+  alt City candidate
+    API->>TMP: start processSingleCity(cityId)
+  else Campus candidate
+    API->>TMP: start processSingleCampus(campusId)
+  end
+  TMP-->>API: workflow handles
+
+  CityWF->>DB: fetchCityContext + flags
+  CityWF->>DB: find campuses needing sync
+  CityWF->>TMP: start processSingleCampus(campusIds)
+  CityWF->>DB: save city context, update last_sync_at
+
+  API->>DB: update sync tracking (summary)
+```
+
+## Data & Security
+- Schema: `contexts(type, parent_id, organization_id, external_id, metadata, …)` is the backbone for city/campus/student.
+- RLS: Supabase policies enforced per user and table; organization scoping applied where applicable.
+- Backfill/migration: campus contexts are created on‑demand from registry on first use.
+
+## Backward Compatibility
+- Default campus fallback (UMich) remains for unknown users and is being phased out as campus detection improves.
+- Endpoint shapes remain stable; new optional `campusId`/`cityId` fields enable scoped behavior.
+
+## Developer Notes
+- Adding a new campus: ensure registry entry exists, then hit metadata endpoint to seed contexts; adjust feature flags via campus config service.
+- Observability: logs and events include `contextType` and `contextId`; verify Ably channel names when testing.
+- See also: Engineering/Technical/API/DormWay API Router, Engineering/Technical/Engine/Engine Workflow DAG Analysis.
+
+## Known Work-in-Progress
+- Remove remaining UMich-specific heuristics in event/location processing where noted in code.
+- Complete migration of legacy records to include `organization_id` and correct parent `city`.
+
+## Code Touchpoints
+- `services/api-router/src/services/campus-config-service.ts`
+- `services/api-router/src/routes/campus-routes.ts`
+- `services/api-router/src/services/ip-geolocation-service.ts`
+- `services/engine/src/activities/city.activities.ts`
+- `services/engine/src/services/auroraDb.ts` (contexts, organization_id)
+- `services/engine/src/services/ably-publisher.ts` (channel naming)

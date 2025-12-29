@@ -1,0 +1,168 @@
+---
+title: "Canvas to DayPlan Integration Plan"
+description: "1. **AI-first DayPlan enrichment (uses existing `student_time_blocks` + `canvas_assignments`).**"
+---
+
+# Canvas → DayPlan Integration Plan
+
+## 1. Purpose & Success Criteria
+- Treat Canvas as the system of record for active coursework, deadlines, and meeting schedules.
+- Reconcile Canvas assignments with syllabus-derived data so students see a single, conflict-free view.
+- Populate `time_blocks` / `student_time_blocks` and the DayPlanner with Canvas-backed events and workload forecasts.
+- Feed Canvas signals into AI/automation flows (e.g., `semesterProcessor`, study-time recommendations, alerting) without double counting.
+- Deliver measurable improvements: fewer manual edits, alignment between Canvas and schedule UI, and richer insights (risk flags, workload spikes) powered by Canvas metadata.
+
+## 2. Current State Snapshot (Oct 5, 2025)
+- Canvas-sync service ingests sections, assignments, submissions, and stores them in dedicated tables + context graph.
+- `syncCanvasAssignments` already writes assignment deadlines into `student_time_blocks` (see `services/engine/src/activities/canvas.activities.ts:418-468`), but titles/metdata differ from syllabus projections and no reconciliation occurs.
+- Schedule imports (`scheduleImport.workflow.ts` → `normalizeAndStoreCalendarData`) populate both `time_blocks` and `student_time_blocks`, establishing the current authoritative course schedule (`services/engine/src/activities/calendar.activities.ts:236-410`).
+- DayPlanner prompt building consumes merged schedule + calendar time blocks directly (`services/engine/src/activities/dayplan.activities.ts:920-1110`), so any Canvas entries appear only if they arrive in `student_time_blocks` with `type='assignment'`.
+- `semesterProcessorWorkflow` relies on `semester.activities.ts` utilities that pull `student_time_blocks` first and fall back to master `time_blocks` (`services/engine/src/activities/semester.activities.ts:528-615, 3523-3612`). Canvas data is not yet blended into those projections beyond the raw deadline inserts.
+- Conflict resolution between syllabus and Canvas is manual; duplicates shown when both sources exist.
+- Dashboard and notifications surface Canvas status but not assignment-level intelligence.
+
+## 3. Priority Stack (Existing Data → Future Enhancements)
+1. **AI-first DayPlan enrichment (uses existing `student_time_blocks` + `canvas_assignments`).**
+   - Expand the DayPlan prompt, email template, and notification cadence to surface Canvas assignments already stored in Postgres.
+   - Layer AI-generated summaries (risk level, suggested prep actions) without touching schema.
+2. **Experience updates reusing current payloads.**
+   - Adjust Dormway Admin and DayPlan rendering to display the enriched Canvas context; no new tables required.
+   - Record adoption and performance telemetry using current analytics pipelines.
+3. **Operational guardrails on top of existing sync.**
+   - Improve freshness indicators, duplication detection, and notification throttling using the synchronized data.
+4. **Reconciliation + schema changes (deferred).**
+   - Only after AI and cadence improvements ship do we invest in new dataset structures or broader reconciliation logic.
+
+
+### 2.1 Workflow Inventory
+| Workflow / Activity | Role today | Canvas touchpoints |
+|--------------------|------------|--------------------|
+| `canvasFullSyncWorkflow` (`services/engine/src/workflows/canvasSync.workflow.ts`) | Orchestrates course + assignment fetch | Calls `syncCanvasAssignments`, which inserts deadlines into `student_time_blocks` without dedupe against schedule imports |
+| `scheduleImportWorkflow` (`services/engine/src/workflows/scheduleImport.workflow.ts`) | Parses syllabus uploads and writes recurring class meetings | Uses `normalizeAndStoreCalendarData` to upsert `time_blocks` + `student_time_blocks`; source tagged `schedule_import` |
+| `semesterProcessorWorkflow` (`services/engine/src/workflows/semesterProcessor.workflow.ts`) | Generates term-level summaries + AI prompts | Activities in `semester.activities.ts` pull `student_time_blocks` first, then master `time_blocks`; Canvas deadlines currently show up as additional time blocks but are not reconciled with assignments dataset |
+| DayPlanner generation (`services/engine/src/activities/dayplan.activities.ts`) | Builds daily prompt from `student_time_blocks` and service data | Treats any `type='assignment'` block equally; Canvas inserts appear as separate rows with `source='canvas'` |
+
+### 2.2 Engine Audit – October 7, 2025
+- **DayPlan enrichment path** (`services/engine/src/activities/dayplan.activities.ts`)
+  - `generateDayPlan` pulls schedule + calendar exclusively from `student_time_blocks` via `getStudentSchedule` / `getCalendarEvents` (lines 646–737); no direct query to Canvas tables or assignment projections.
+  - `mergeAndDedupeTimeBlocks` (lines 985–1036) prefers Canvas-sourced rows when duplicates exist but only if they already reached `student_time_blocks`.
+  - The prompt builder (lines 1077–1340) emits rich metadata but has no workload/effort context and does not surface Canvas submission state.
+  - Email/notification helpers (`sendDayPlanEmail` at line 2690+) mirror the same data structures, so any new assignment fields must propagate through email templates.
+- **StudentWatcher coupling** (`services/engine/src/workflows/studentWatcher.simplified.workflow.ts`)
+  - Triggers `processSemester` on startup but otherwise relies on context updates and `captureServerContextPrediction` (lines 244–405). No Canvas-aware throttling beyond whatever lands in time blocks.
+- **Semester processing** (`services/engine/src/workflows/semesterProcessor.workflow.ts` & `semester.activities.ts`)
+  - `assemblePromptVariables` (≈2300–2600) gathers course sessions and assignments from `student_time_blocks` + normalized syllabus data; Canvas tables are not merged into the term prompt yet.
+  - Normalization helpers build schedule grids from time blocks, leaving Canvas metadata (workload, submission status) unused.
+- **Calendar normalization** (`services/engine/src/activities/calendar.activities.ts`)
+  - Source-priority map ranks Canvas above inferred data (lines 1008–1043), but conversion to legacy time blocks strips effort estimates.
+- **Data gaps**
+  - No consolidated assignment workload view; DayPlan cannot differentiate Canvas tasks due today.
+  - `DayPlan` types lack fields for effort/Canvas metadata, blocking downstream email/widget enrichment.
+
+## 3. Guiding Principles
+1. **Canvas first, syllabus supplemental**: Canvas data overrides inferred deadlines but never silently deletes syllabus history.
+2. **Single canonical assignment model**: Normalise Canvas + syllabus + manual entries into one `assignment_events` view, keyed by course context + normalized identifiers (Canvas `id`, SIS code, sanitized title).
+3. **Transparent reconciliation**: Surface conflicts in admin dashboards, log auto-resolutions, and leave breadcrumbs in `service_data`.
+4. **Non-destructive migrations**: Seed new tables/views alongside existing flows, backfill, then flip feature flags.
+5. **Telemetry everywhere**: Emit events for reconciliations, overrides, and AI adjustments to validate impact.
+
+## 4. Target Architecture Overview
+```
+Canvas Ingestion ──► canvas_assignments, canvas_sections, canvas_meetings
+                         │
+                         ▼
+                 reconciliation_service (new)
+                         │
+        ┌────────────────┴─────────────────┐
+        ▼                                  ▼
+assignment_projection              meeting_projection
+        │                                  │
+        ▼                                  ▼
+assignment_events_vw           time_blocks / student_time_blocks
+        │                                  │
+        ▼                                  ▼
+semesterProcessor + AI        DayPlanner + notifications
+```
+
+## 5. Phase Plans & Timelines (Reordered Oct 7, 2025)
+
+### Phase A – AI-First DayPlan & Prompt Enrichment (0.5–1 week)
+1. **Surface Canvas assignments with current tables.**
+   - Extend `generateDayPlan` / `mergeAndDedupeTimeBlocks` to prioritise `source='canvas'` rows already in `student_time_blocks` and expose `dueInHours`, `course`, and `submissionState` to the prompt.
+   - Ensure the structured payload is re-used across the API, email, and notifications without new schema.
+2. **AI narrative for upcoming workload.**
+   - Add a Nova prompt segment that summarises Canvas assignments due within 72 hours (risk level, prep steps) using existing `canvas_assignments` + `canvas_submissions` joins.
+   - Store generated copy in-memory with the DayPlan response so downstream surfaces can display it instantly.
+3. **Prep-time suggestions.**
+   - Reuse existing heuristics (estimated minutes, course weight) to suggest study blocks inside the plan narrative, aligning with AI guidance rather than mutating persisted calendars.
+4. **Instrumentation.**
+   - Emit `dayplan_canvas_summary_generated` with surfaced assignment counts and AI confidence to verify enrichment coverage before UI changes.
+
+### Phase B – Notification Cadence & Email Template Updates (0.5 week)
+1. **DayPlan digest refresh.**
+   - Update the Mandrill DayPlan template to insert the AI Canvas summary, highlight top tasks with Canvas badges, and deep-link via stored assignment URLs.
+2. **Notification layering.**
+   - Adjust daily/24h nudges in `studentNotifications.activities.ts` to consume the enriched payload, deduping against legacy `assignment_due` alerts by checking `source='canvas'`.
+3. **Preference-aware throttling.**
+   - Honour existing frequency settings in `user_preferences` so cadence changes rely only on current data.
+
+### Phase C – Dormway Admin & Student UI Integration (0.5 week)
+1. **DayPlan rendering updates.**
+   - Enhance Dormway Admin preview and client components to display Canvas assignment chips, risk labels, and the AI summary block from the updated DayPlan response.
+2. **Canvas context affordances.**
+   - Surface “Open in Canvas” CTAs and freshness badges using metadata already attached to each `student_time_blocks` record.
+3. **Adoption telemetry.**
+   - Emit `dayplan_canvas_assignment_rendered` / `..._clicked` via existing analytics helpers to measure usage without new tables.
+
+### Phase D – Operational Guardrails & Telemetry (0.5 week)
+1. **Freshness & duplication monitors.**
+   - Reuse warehouse views to flag stale Canvas syncs and duplicate assignments so AI summaries stay accurate.
+2. **Notification pacing checks.**
+   - Alert when enriched cadence sends more than N notifications per student per week using current notification logs.
+3. **Support playbooks.**
+   - Document troubleshooting for Canvas-driven DayPlan enrichments in existing runbooks ahead of schema work.
+
+### Phase E – Data Reconciliation & Schema Evolution (1–2 weeks, deferred)
+1. **Assignment reconciliation service.**
+   - Build deterministic + fuzzy matching between Canvas and syllabus tasks, persisting a canonical assignment view when we commit to schema updates.
+2. **Context graph alignment.**
+   - Extend `contexts` / `context_dependencies` once prioritised, keeping fallback paths for syllabus-only schools.
+3. **Delta detection & backfill.**
+   - Add nightly checks for Canvas deltas and plan the historical backfill after AI-first wins are in production.
+
+### Phase F – SemesterProcessor & Crew Alignment (1–1.5 weeks)
+1. **Prompt variable expansion.**
+   - Update `semester.activities.ts` to ingest the enriched DayPlan summaries so crews reason about Canvas workload spikes using the new narrative payloads.
+2. **Crew & Ace prompt refresh.**
+   - Revise semester planning templates to cite Canvas risk levels and suggested prep windows; add regression tests for token counts.
+3. **Reprocessing triggers & dashboards.**
+   - Schedule `processSemesterWithFeedback` on significant Canvas deltas and extend admin dashboards to surface those jobs via existing observability stacks.
+
+## 6. Testing Strategy
+- **Unit**: heuristics for assignment matching, time-block projection (`calendar.activities.ts`) and Canvas deadline upserts (`canvas.activities.ts`).
+- **Integration**: Temporal workflow tests covering `canvasFullSyncWorkflow` → reconciliation service, and `semesterProcessorWorkflow` consuming the unified assignment view.
+- **Backfill simulation**: run reconciliation on sanitized prod snapshot; verify conflict resolution metrics and ensure legacy schedule imports remain untouched.
+- **UI**: Playwright scenarios to ensure DayPlanner renders Canvas tasks, toggles between sources, respects user overrides, and that duplication guards work.
+
+## 7. Risks & Mitigations
+| Risk | Mitigation |
+|------|------------|
+| Canvas data gaps or delayed syncs | Keep syllabus fallback active; record `confidence` per assignment; show freshness badge. |
+| Overwriting user edits | Track manual overrides; require explicit confirmation before replacing. |
+| AI recommendations thrash with frequent Canvas changes | Add debounce window; feed smoothing into workload predictor. |
+| Performance hit during bulk projections | Paginate sync, cache assignment view, schedule projections during off-peak. |
+
+## 8. Decisions (from Canvas → DayPlan PRD)
+- **Student-facing reconciliation status:** Yes. Surface a lightweight “Canvas sync pending verification” badge in DayPlanner and the Integrations panel so students understand when syllabus vs Canvas data is still resolving.
+- **Write-back to Canvas:** No. DormWay remains read-only; manual DayPlanner edits do not push to Canvas.
+- **Conflict handling priority:** Highlight conflicts inline. When Canvas, Google Calendar, and manual data diverge we display a conflict ribbon and let Canvas win by default while flagging the others.
+- **Canvas snapshot retention:** Follow user preference. Respect per-student retention settings (default 90 days) and allow opt-in compression/ purge from Integrations settings.
+
+## 9. Next Steps
+1. Align with product/design on the AI-first DayPlan summary block and required template tweaks.
+2. Spin up Phase A sprint: implement the prompt enrichment spike and emit `dayplan_canvas_summary_generated` telemetry in stage.
+3. Coordinate with notifications/email owners to slot the enriched cadence and template updates (Phase B) immediately after prompt work ships.
+
+---
+
+*Draft prepared to align Canvas ingestion with scheduling and AI enrichment workflows. Update status after Phase A spike.*

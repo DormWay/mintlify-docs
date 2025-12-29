@@ -1,0 +1,538 @@
+---
+title: "Syllabus Page Redesign   Overlap First View (DORM 508)"
+description: "The current syllabus page is overwhelming and not student-focused:"
+---
+
+# Syllabus Page Redesign - Overlap-First View (DORM-508)
+
+**Status:** In Progress
+**Priority:** High
+**Assignee:** Ethan Kaplan
+**Linear Issue:** [DORM-508](https://linear.app/dormwayllc/issue/DORM-508)
+**Created:** 2025-11-01
+**Branch:** `feat/dorm-508-syllabus-overlap-view`
+
+---
+
+## 🎯 Problem Statement
+
+The current syllabus page is overwhelming and not student-focused:
+- ❌ Too much technical information (processing details, AI metadata)
+- ❌ Unclear value proposition - students don't know what to DO
+- ❌ Data accuracy issues (e.g., "1 on Sunday" weekly distribution)
+- ❌ Critical overlaps are hard to spot - requires mental correlation across sections
+- ❌ "Course Command Center" takes space without showing overlaps
+
+**Key Insight:** Students need to quickly identify **when things overlap** and **what to do about it**.
+
+---
+
+## 🌟 Solution Overview
+
+**Redesign the "Your Term" view to be overlap-first:**
+
+1. **Collision Report Cards** - Immediate, actionable view of critical overlap periods
+2. **Swimlane Timeline** - Visual exploration showing all courses and overlaps at a glance
+3. **Enhanced Workload Chart** - Keep existing chart, add overlap markers
+4. **Collapsed Details** - Technical analysis available on-demand
+
+**Design Philosophy:**
+- Show the problem (overlaps) first
+- Provide actionable recommendations
+- Make it visual and scannable
+- Work great on mobile (future React Native app)
+
+---
+
+## 📊 Information Hierarchy
+
+### **New Layout:**
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ 1. ALERT BANNER (if critical period within 2 weeks)            │
+│    "⚠️ Critical overlap coming Nov 5-11 • 3 exams + 2 papers"  │
+└─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+│ 2. COLLISION REPORT CARDS (Top 2-3 critical periods)           │
+│    • What's happening (assignments/exams on same days)          │
+│    • Total estimated hours                                      │
+│    • Affected courses                                           │
+│    • AI recommendations (start early, request extension, etc.)  │
+│    • Quick actions (add to calendar, set reminders)            │
+└─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+│ 3. SWIMLANE TIMELINE (Full semester visual)                    │
+│    • Horizontal timeline (next 16 weeks)                        │
+│    • One row per course (swimlane)                              │
+│    • Vertical alignment shows overlaps                          │
+│    • Color-coded by severity                                    │
+│    • Interactive (click for details)                            │
+└─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+│ 4. ENHANCED WORKLOAD CHART (Keep existing, add markers)        │
+│    • Bar chart with overlap indicators                          │
+│    • Click to see breakdown                                     │
+└─────────────────────────────────────────────────────────────────┘
+
+▼ All Conflicts (6) - Collapsed by default
+▼ Course Details - Collapsed by default
+▼ Full Analysis - Collapsed by default
+```
+
+---
+
+## 🎨 Visual Design Concepts
+
+### **Swimlane Timeline (Desktop)**
+
+```
+Week of Nov 4-10
+        Mon  Tue  Wed  Thu  Fri  Sat  Sun
+CS101   │    │   ⚡   │    │    │    │
+MATH    │    │   ⚡   │    │    │    │   ← OVERLAP!
+ENGL    │    │    │   📄  │    │    │
+CHEM    │   🧪 │    │    │   🧪 │    │
+
+Legend: ⚡ Exam  📄 Paper  🧪 Lab  🎯 Project
+Red bar = 3+ items overlapping
+```
+
+### **Collision Report Card**
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ 🔥 WEEK OF NOV 5-11 • Intensity: 9/10                          │
+├─────────────────────────────────────────────────────────────────┤
+│ What's Happening:                                               │
+│ • CS 101: Midterm (Nov 8) - 10 hours study                     │
+│ • MATH 200: Exam 1 (Nov 8) - 8 hours study                     │
+│ • ENGL 301: Essay due (Nov 10) - 6 hours writing               │
+│                                                                  │
+│ Total Estimated: 24 hours workload                              │
+│                                                                  │
+│ 💡 Recommendations:                                             │
+│ • Start CS 101 review by Nov 1 (1 week early)                  │
+│ • Request extension on ENGL 301 paper if possible              │
+│ • Block Nov 6-7 weekend for focused study                      │
+│                                                                  │
+│ [View Full Schedule] [Add to Calendar] [Set Reminders]         │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### **Mobile View**
+
+```
+┌──────────────────────────────┐
+│ Week of Nov 4-10 ▼           │
+│ 🔥 3 overlapping items       │
+├──────────────────────────────┤
+│ Wed Nov 8 (CRITICAL)         │
+│ • CS 101: Midterm ⚡         │
+│ • MATH 200: Exam 1 ⚡        │
+│ • ENGL: Paper (next day) 📄  │
+│                               │
+│ [Expand Timeline View →]     │
+└──────────────────────────────┘
+```
+
+---
+
+## 🛠️ Technical Implementation
+
+### **Phase 1: Data Layer (6 hours)**
+
+**New Hook:** `useOverlapAnalysis.ts`
+
+**Purpose:** Aggregate and analyze all deadlines to detect overlap periods.
+
+**Key Data Structures:**
+
+```typescript
+interface OverlapPeriod {
+  weekKey: string;          // "2025-W45"
+  weekStart: string;        // ISO date
+  weekEnd: string;
+  weekLabel: string;        // "Nov 4-10"
+  intensity: number;        // 1-10 scale
+  totalEstimatedHours: number;
+  overlapCount: number;     // Number of items on same day
+
+  assignments: Assignment[];
+  exams: Assignment[];
+
+  // Critical days (3+ items)
+  criticalDays: {
+    date: string;
+    dayLabel: string;
+    items: Assignment[];
+    totalHours: number;
+  }[];
+
+  affectedCourses: {
+    courseId: string;
+    courseName: string;
+    itemCount: number;
+  }[];
+
+  recommendations: {
+    type: 'start_early' | 'request_extension' | 'block_time';
+    priority: 'high' | 'medium' | 'low';
+    action: string;
+  }[];
+
+  severity: 'critical' | 'high' | 'moderate' | 'low';
+}
+```
+
+**Algorithm:**
+
+1. Group all assignments by week
+2. Identify weeks with 2+ major items (exams, papers, projects)
+3. Calculate intensity score based on:
+   - Total estimated hours
+   - Number of exams
+   - Same-day conflicts
+4. Generate AI recommendations:
+   - Start early for exam-heavy weeks
+   - Block study time before critical days
+   - Suggest extensions when papers overlap with exams
+5. Classify severity and sort by criticality
+
+**Data Sources:**
+- `summary.weekly_cadence` - Workload per week
+- `summary.conflictAnalysis.conflicts` - Detected conflicts
+- `summary.course_assignments` - All assignments from Canvas/syllabi
+- `syllabusCourses` - Course syllabus data
+- `flattenedAssignments` - Collected from `collectCourseAssignments()`
+
+### **Phase 2: Collision Report Cards (8 hours)**
+
+**Component:** `CollisionReportSection.tsx`
+
+**Features:**
+- Card-based layout (1-3 most critical periods)
+- Expandable/collapsible details
+- Color-coded by severity (red = critical, orange = high, yellow = moderate)
+- Action buttons (Add to Calendar, Set Reminders)
+- Responsive (stacks on mobile)
+
+**Visual Elements:**
+- Severity badge (🔥 CRITICAL, ⚠️ HIGH, ⚡ MODERATE)
+- Icon indicators (⚡ exam, 📄 paper, 🎯 project)
+- Progress indicators
+- Gradient backgrounds based on severity
+- Glowing effects for critical periods
+
+### **Phase 3: Swimlane Timeline (16 hours)**
+
+**Component:** `SwimlaneTimelineView.tsx`
+
+**Desktop Features:**
+- Horizontal scrolling timeline (next 16 weeks)
+- Vertical swimlanes (one per course)
+- Color-coded course indicators (unique hue per course)
+- Assignment icons in cells (⚡🧪📄🎯)
+- Overlap detection (red border when 2+ items same day)
+- Click assignment → Detail modal
+- Navigation controls (prev/next week)
+
+**Mobile Features:**
+- Compact week-by-week view
+- Swipe gestures to navigate
+- Tap to expand timeline
+- Touch-optimized hit targets
+- Simplified layout for small screens
+
+**Technical Challenges:**
+- Performance optimization for 100+ assignments
+- Smooth scrolling with many DOM elements
+- Responsive breakpoints
+- Touch gesture handling
+- Timezone-aware date calculations
+
+### **Phase 4: Mobile Optimizations (6 hours)**
+
+**Responsive Design:**
+- Desktop (> 768px): Full swimlane timeline
+- Tablet (768-1024px): Condensed timeline with horizontal scroll
+- Mobile (< 768px): Stacked week cards with expand/collapse
+
+**Touch Interactions:**
+- Horizontal swipe = Navigate weeks
+- Tap assignment = Show details modal
+- Long press = Quick actions menu
+- Pinch zoom = Adjust timeline density
+
+### **Phase 5: Integration (6 hours)**
+
+**Modified Files:**
+- `SyllabusTermView.tsx` - Main integration point
+- `SyllabusCoursesView.tsx` - Keep for reference (move to tab)
+- `WeeklyWorkloadChart.tsx` - Add overlap markers
+
+**New Files:**
+- `hooks/useOverlapAnalysis.ts` - Data layer
+- `components/syllabus/CollisionReportSection.tsx` - Cards
+- `components/syllabus/SwimlaneTimelineView.tsx` - Timeline
+- `components/syllabus/AlertBanner.tsx` - Top alert
+
+### **Phase 6: Testing & Refinement (6 hours)**
+
+**Test Scenarios:**
+- No overlaps (empty state)
+- 1 critical period
+- Multiple critical periods (5+)
+- Mobile vs desktop rendering
+- Timezone edge cases
+- Missing data (no estimated hours, no syllabus)
+- Performance with 50+ courses
+
+**Edge Cases:**
+- Weeks with no assignments
+- Same-day conflicts (5+ items)
+- Multi-day assignments (projects)
+- Break weeks
+- Timezone boundaries
+
+---
+
+## 📱 Mobile App Considerations
+
+**React Native Implementation:**
+- Create separate `MobileSwimlaneTimeline.tsx` using React Native components
+- Use `react-native-gesture-handler` for swipe gestures
+- Use `react-native-reanimated` for smooth animations
+- Optimize for touch targets (44x44 minimum)
+- Support both iOS and Android
+- Offline mode (cache overlap analysis)
+
+**Native Features:**
+- Local notifications for critical periods
+- Calendar integration (iOS/Android)
+- Share timeline screenshot
+- Widget showing next critical period
+
+---
+
+## 🎯 Success Metrics
+
+**Post-Implementation:**
+- ✅ Students can identify next critical period in < 5 seconds
+- ✅ No "1 on Sunday" data anomalies (validation layer)
+- ✅ Overlaps visually clear without reading text
+- ✅ Mobile experience on par with desktop
+- ✅ Recommendations are actionable and specific
+
+**User Feedback Targets:**
+- "This helped me plan my studying" - 80%+ positive
+- Reduced support tickets about deadline confusion
+- Increased engagement with syllabus features
+
+---
+
+## 🚧 Known Limitations
+
+1. **AI Recommendations:** Initial implementation uses rule-based logic (not LLM)
+2. **Calendar Integration:** Add to Calendar feature requires backend support
+3. **Estimation Accuracy:** Relies on AI-extracted hours from syllabi (may be inaccurate)
+4. **Historical Data:** Only shows future overlaps (past deadlines hidden)
+
+---
+
+## 📚 Related Documentation
+
+- [Syllabus Processing Architecture](/docs/engineering/technical/syllabus/syllabus-processing-overlays-deep-dive-current)
+- Semester Aggregate API
+- Course Assignment Collection
+- Design System - Overlap Indicators
+
+---
+
+## 🔗 External Links
+
+- Linear Issue: https://linear.app/dormwayllc/issue/DORM-508
+- Figma Mockups: (TBD)
+- User Testing Results: (TBD)
+
+---
+
+## 📋 Implementation Checklist
+
+- [x] Document plan in Obsidian
+- [ ] Update Linear issue with plan
+- [ ] Create feature branch `feat/dorm-508-syllabus-overlap-view`
+- [ ] Phase 1: Data layer (`useOverlapAnalysis.ts`)
+- [ ] Phase 2: Collision Report Cards
+- [ ] Phase 3: Swimlane Timeline
+- [ ] Phase 4: Mobile optimizations
+- [ ] Phase 5: Integration
+- [ ] Phase 6: Testing & refinement
+- [ ] Code review
+- [ ] QA testing
+- [ ] Deploy to staging
+- [ ] User acceptance testing
+- [ ] Deploy to production
+
+---
+
+## 🕐 Time Estimate
+
+**Total: 48 hours**
+
+| Phase | Task | Hours |
+|-------|------|-------|
+| 1 | Data layer (useOverlapAnalysis hook) | 6 |
+| 2 | Collision Report Cards component | 8 |
+| 3 | Swimlane Timeline component | 16 |
+| 4 | Mobile optimizations | 6 |
+| 5 | Integration & polish | 6 |
+| 6 | Testing & refinement | 6 |
+
+---
+
+## 📝 Notes
+
+- This redesign focuses on **student value** over technical details
+- Maintains existing data sources (no backend changes required)
+- All transformations happen in frontend hooks/components
+- Admin/debug mode can still show raw data
+- Demo users see same view as regular students
+
+---
+
+---
+
+## 🐛 Phase 3 Bug Fixes (2025-11-02)
+
+### Issues Fixed
+
+#### 1. Temporal Context Not Passing to Cross-Course Insights ✅
+
+**Problem:** CURRENT_WEEK, TOTAL_WEEKS, WEEKS_REMAINING variables were empty in Portkey prompt pp-cross-cour-51ca51.
+
+**Root Cause:** Workflow wasn't passing `term_dates` to `runCrossCourseLearning` activity (line 522).
+
+**Fix:**
+- Updated workflow (lines 522-528) to spread `term_dates` into activity call
+- Updated activity (lines 1502-1503) to support both field formats: `start`/`end` AND `start_date`/`end_date`
+
+**Impact:**
+- Temporal context now calculated correctly using `new Date()` grounded in today's date
+- Portkey prompt receives week-based semester progress for time-aware recommendations
+
+**Files Changed:**
+- `services/engine/src/workflows/semesterProcessor.workflow.ts` (lines 522-528)
+- `services/engine/src/activities/semester.activities.ts` (lines 1498-1538)
+
+#### 2. Term Dates Never Populated ✅
+
+**Problem:** Even after fix #1, logs showed `"No term dates available for temporal context"` because `resolveCurrentTermForStudent` was only called when term/year were NOT provided.
+
+**Root Cause:** Workflow line 132 conditional only called resolver when `!termProvided || !yearProvided`. When user explicitly passed `term="Fall"` and `year=2025`, function was skipped entirely.
+
+**Fix:**
+- Changed workflow (lines 132-163) to ALWAYS call `resolveCurrentTermForStudent`
+- Only override term/year if not explicitly provided
+- ALWAYS set `term_dates` for temporal context regardless of whether term/year were provided
+- Extract from `campus_configs.academic_calendar.terms`
+
+**Impact:**
+- Term dates now consistently fetched from academic calendar
+- Temporal context calculation works for both explicit and implicit term/year parameters
+
+**Files Changed:**
+- `services/engine/src/workflows/semesterProcessor.workflow.ts` (lines 132-163)
+
+#### 3. Semester Planning Data Not Displaying ✅
+
+**Problem:** Latest run (01:48:48) had risk management data in database but wasn't showing in UI. Habit formation and milestone calendar were also missing.
+
+**Root Cause:** Portkey prompt structure changed to nest data under `success_framework` and `semester_strategy`:
+- `success_framework.habit_formation` (5 entries)
+- `success_framework.milestone_calendar` (6 entries)
+- `semester_strategy.contingency_plans`
+
+UI was looking for these at the top level.
+
+**Fix:**
+- Updated `useSemesterAggregate` hook (lines 113-125) to extract nested data
+- Added fallback extraction logic to support both nested and top-level structures
+- Extracts from `dataSummary?.success_framework` and `dataSummary?.semester_strategy`
+
+**Impact:**
+- Habit formation, milestone calendar, and contingency plans now display correctly
+- Hook gracefully handles both old and new Portkey prompt structures
+
+**Files Changed:**
+- `services/dormway-lockedin/src/hooks/useSemesterAggregate.ts` (lines 113-125)
+
+### Data Quality Improvements
+
+**With Gemini Thinking Mode OFF:**
+
+**Semester Planning** (pp-semester-p-190a90):
+- ✅ 5 risk management entries with linked courses and mitigation strategies
+- ✅ 5 habit formation entries with implementation weeks and measurement criteria
+- ✅ 6 milestone calendar entries with success criteria
+- ✅ Detailed contingency plans with trigger conditions
+- ✅ Semester strategy phases with weekly focus areas
+
+**Workload Analysis** (pp-semester-w-6ea66d):
+- ✅ 4 peak weeks identified:
+  - Week of Oct 6: Intensity 90 (3 midterms)
+  - Week of Oct 27: Intensity 80 (2 quizzes + Executive Brief)
+  - Week of Nov 3: Intensity 80 (Chem midterm + Book Analysis)
+  - Week of Dec 1: Intensity 80 (Finals prep begins)
+- ✅ 2 resource conflicts (mental_energy, time) across peak weeks
+- ✅ 1 sustained high-intensity period (Oct 6 - Nov 10, intensity 8)
+- ✅ Weekly analysis with real assignment hours (not generic placeholders)
+- ✅ Stress alerts for each peak week with mitigation strategies
+
+### Related Issues Created
+
+- **DORM-512**: Handle Gemini thinking mode responses in Portkey parser
+  - Gemini 2.5 thinking mode returns multi-part responses with `"thought": true` parts
+  - Parser needs to filter out thought parts and extract only the actual JSON response
+  - Temporary workaround: Disabled thinking mode in Portkey prompts
+  - Proper fix will be implemented in DORM-512
+
+### Technical Details
+
+**Temporal Context Calculation Logic:**
+```typescript
+const now = new Date();  // Ground in today's date
+const termStart = new Date(startDate);
+const termEnd = new Date(endDate);
+const totalMs = termEnd.getTime() - termStart.getTime();
+const elapsedMs = now.getTime() - termStart.getTime();
+const weeksElapsed = Math.max(0, Math.floor(elapsedMs / (7 * 24 * 60 * 60 * 1000)));
+const totalWeeks = Math.max(1, Math.ceil(totalMs / (7 * 24 * 60 * 60 * 1000)));
+const currentWeek = Math.min(weeksElapsed + 1, totalWeeks); // 1-indexed
+```
+
+**Data Structure Mapping:**
+```typescript
+// OLD (expected at top level)
+summary.habit_formation
+summary.milestone_calendar
+summary.contingency_plans
+
+// NEW (nested under success_framework/semester_strategy)
+dataSummary.success_framework.habit_formation
+dataSummary.success_framework.milestone_calendar
+dataSummary.semester_strategy.contingency_plans
+
+// Hook now supports BOTH patterns with fallback logic
+```
+
+### Commit
+
+`86c56633` - fix(dorm-508): Fix temporal context passing and semester planning data extraction
+
+---
+
+**Last Updated:** 2025-11-02 by Ethan Kaplan

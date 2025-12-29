@@ -1,0 +1,953 @@
+---
+title: "DayPlanDataService"
+description: "import { DayPlanDataService } from '@dormway/core'; import { getConnectionPool } from '@dormway/core/database'; import { createStructuredLogger } from '@dorm..."
+---
+
+# DayPlanDataService
+
+## Overview
+
+**DayPlanDataService** is the most critical domain service in @dormway/core. It aggregates all data required for dayplan generation, including student context, courses, schedules, weather, preferences, wellness history, and semester insights.
+
+**Purpose**: Provide a single service to fetch all dayplan inputs, ensuring consistent data retrieval patterns and reducing boilerplate in Temporal activities.
+
+**Location**: `@dormway/core/domains/day-plan-data`
+
+---
+
+## Table of Contents
+
+- [Installation](#installation)
+- [Constructor](#constructor)
+- [Methods](#methods)
+  - [getStudentContext](#getstudentcontext)
+  - [getStudentCampus](#getstudentcampus)
+  - [getEnrolledCourses](#getenrolledcourses)
+  - [getScheduleForStudent](#getscheduleforstudent)
+  - [getWeatherForStudent](#getweatherforstudent)
+  - [getPreferencesForStudent](#getpreferencesforstudent)
+  - [getRecentWellnessData](#getrecentwellnessdata)
+  - [getSemesterInsights](#getsemesterinsights)
+- [Complete Example](#complete-example)
+- [Common Patterns](#common-patterns)
+- [Error Handling](#error-handling)
+- [Performance Optimization](#performance-optimization)
+- [Troubleshooting](#troubleshooting)
+
+---
+
+## Installation
+
+```typescript
+import { DayPlanDataService } from '@dormway/core';
+import { getConnectionPool } from '@dormway/core/database';
+import { createStructuredLogger } from '@dormway/core/logger';
+
+const pool = getConnectionPool();
+const logger = createStructuredLogger({ service: 'engine' });
+
+const service = new DayPlanDataService({ pool, logger });
+```
+
+---
+
+## Constructor
+
+```typescript
+interface DayPlanDataServiceOptions {
+  pool: Pool;           // PostgreSQL connection pool
+  logger?: StructuredLogger;  // Optional structured logger
+}
+
+const service = new DayPlanDataService(options);
+```
+
+---
+
+## Methods
+
+### getStudentContext
+
+Get student's campus and city context with timezone information.
+
+**Signature**:
+```typescript
+getStudentContext(userId: string): Promise<ServiceResult<StudentContext | null>>
+```
+
+**Returns**:
+```typescript
+interface StudentContext {
+  campusId: string;      // UUID of campus context
+  cityId: string;        // UUID of city context
+  campusName: string;    // Campus display name
+  cityName: string;      // City display name
+  timezone: string;      // IANA timezone (e.g., "America/New_York")
+  state: string | null;  // State abbreviation
+}
+```
+
+**SQL Query**:
+```sql
+SELECT
+  campus_ctx.id as campus_id,
+  campus_ctx.name as campus_name,
+  city_ctx.id as city_id,
+  city_ctx.name as city_name,
+  city_ctx.metadata->>'timezone' as timezone,
+  city_ctx.metadata->>'state' as state
+FROM accounts a
+INNER JOIN contexts student_ctx
+  ON student_ctx.user_id = a.id
+  AND student_ctx.type = 'student'
+INNER JOIN contexts campus_ctx
+  ON campus_ctx.id = student_ctx.parent_id
+  AND campus_ctx.type = 'campus'
+INNER JOIN contexts city_ctx
+  ON city_ctx.id = campus_ctx.parent_id
+  AND city_ctx.type = 'city'
+WHERE a.id = $1
+```
+
+**Example**:
+```typescript
+const result = await service.getStudentContext(userId);
+
+if (!result.success) {
+  logger.error('context.fetch.error', result.error!, { metadata: { userId } });
+  throw new NotFoundError('Student context not found');
+}
+
+const context = result.data!;
+console.log(`Campus: ${context.campusName}, City: ${context.cityName}`);
+console.log(`Timezone: ${context.timezone}`);
+```
+
+**Critical Notes**:
+- Uses **contexts hierarchy** (student → campus → city), NOT accounts.campus_id
+- Timezone comes from city context metadata, not campus
+- Returns null if student has no campus/city relationship
+
+---
+
+### getStudentCampus
+
+Get detailed campus information including coordinates, enrollment, and configuration.
+
+**Signature**:
+```typescript
+getStudentCampus(userId: string): Promise<ServiceResult<CampusDetails | null>>
+```
+
+**Returns**:
+```typescript
+interface CampusDetails {
+  campus_id: string;
+  campus_name: string;
+  city: string;
+  state: string;
+  latitude: number;
+  longitude: number;
+  timezone: string;
+  enrollment_total: number;
+  // ... additional campus config fields
+}
+```
+
+**Example**:
+```typescript
+const result = await service.getStudentCampus(userId);
+if (result.success && result.data) {
+  const campus = result.data;
+  console.log(`${campus.campus_name} - ${campus.city}, ${campus.state}`);
+  console.log(`Location: (${campus.latitude}, ${campus.longitude})`);
+}
+```
+
+---
+
+### getEnrolledCourses
+
+Get all active courses for a student from Canvas integration.
+
+**Signature**:
+```typescript
+getEnrolledCourses(userId: string): Promise<ServiceResult<Course[]>>
+```
+
+**Returns**:
+```typescript
+interface Course {
+  id: string;              // Course context UUID
+  name: string;            // Course name
+  external_id: string;     // Canvas course ID
+  course_code: string;     // Course code (e.g., "CS-101")
+  metadata: {
+    canvas_course_id: string;
+    enrollment_type: string;
+    workflow_state: string;
+    // ... additional Canvas data
+  };
+}
+```
+
+**SQL Query**:
+```sql
+SELECT
+  course_ctx.id,
+  course_ctx.name,
+  course_ctx.external_id,
+  course_ctx.metadata->>'course_code' as course_code,
+  course_ctx.metadata
+FROM contexts student_ctx
+INNER JOIN context_dependencies cd
+  ON cd.parent_context_id = student_ctx.id
+INNER JOIN contexts course_ctx
+  ON course_ctx.id = cd.child_context_id
+  AND course_ctx.type = 'course'
+  AND course_ctx.is_active = true
+WHERE student_ctx.user_id = $1
+  AND student_ctx.type = 'student'
+  AND cd.dependency_type = 'enrolled_in'
+```
+
+**Example**:
+```typescript
+const result = await service.getEnrolledCourses(userId);
+
+if (result.success && result.data) {
+  const courses = result.data;
+  console.log(`Student enrolled in ${courses.length} courses:`);
+
+  courses.forEach(course => {
+    console.log(`- ${course.course_code}: ${course.name}`);
+    console.log(`  Canvas ID: ${course.metadata.canvas_course_id}`);
+  });
+}
+```
+
+**Critical Notes**:
+- Uses **context_dependencies** with `dependency_type = 'enrolled_in'`
+- Only returns active courses (`is_active = true`)
+- Includes Canvas course ID in `external_id` and `metadata.canvas_course_id`
+
+---
+
+### getScheduleForStudent
+
+Get student's schedule for a specific date (classes, assignments, events).
+
+**Signature**:
+```typescript
+getScheduleForStudent(
+  userId: string,
+  date: string  // ISO date: "2025-11-23"
+): Promise<ServiceResult<ScheduleEvent[]>>
+```
+
+**Returns**:
+```typescript
+interface ScheduleEvent {
+  id: string;
+  type: 'class' | 'assignment' | 'event';
+  title: string;
+  start_time: string;      // ISO timestamp
+  end_time: string;        // ISO timestamp
+  location?: string;
+  course_id?: string;
+  metadata: Record<string, unknown>;
+}
+```
+
+**Example**:
+```typescript
+const result = await service.getScheduleForStudent(userId, '2025-11-23');
+
+if (result.success && result.data) {
+  const events = result.data;
+  console.log(`Schedule for ${date}:`);
+
+  events.forEach(event => {
+    const start = new Date(event.start_time).toLocaleTimeString();
+    const end = new Date(event.end_time).toLocaleTimeString();
+    console.log(`- ${start}-${end}: ${event.title} (${event.type})`);
+  });
+}
+```
+
+---
+
+### getWeatherForStudent
+
+**🔴 CRITICAL**: Get weather for student's **CITY**, not campus!
+
+**Signature**:
+```typescript
+getWeatherForStudent(
+  userId: string,
+  date: string
+): Promise<ServiceResult<WeatherData | null>>
+```
+
+**Returns**:
+```typescript
+interface WeatherData {
+  temperature?: number;
+  feels_like?: number;
+  condition?: string;
+  description?: string;
+  humidity?: number;
+  wind_speed?: number;
+  precipitation_probability?: number;
+  // Structure varies by method!
+}
+```
+
+**SQL Query**:
+```sql
+-- Gets city context, then queries service_data for city weather
+SELECT data
+FROM service_data
+WHERE context_id = $1  -- cityId, NOT campusId!
+  AND method IN (
+    'processed_city_weather_context',
+    'fetch_weather',
+    'fetch_forecast'
+  )
+ORDER BY
+  CASE method
+    WHEN 'processed_city_weather_context' THEN 1
+    WHEN 'fetch_weather' THEN 2
+    WHEN 'fetch_forecast' THEN 3
+  END,
+  fetched_at DESC
+LIMIT 1
+```
+
+**Example**:
+```typescript
+const result = await service.getWeatherForStudent(userId, '2025-11-23');
+
+if (result.success && result.data) {
+  const weather = result.data;
+  console.log(`Weather: ${weather.condition}`);
+  console.log(`Temperature: ${weather.temperature}°F`);
+  console.log(`Feels like: ${weather.feels_like}°F`);
+
+  if (weather.precipitation_probability && weather.precipitation_probability > 50) {
+    console.log('⚠️ High chance of precipitation - bring umbrella!');
+  }
+}
+```
+
+**Critical Notes**:
+- **Weather is stored for CITIES, not campuses!**
+- Method automatically gets cityId from student context
+- Prioritizes `processed_city_weather_context` (most processed)
+- Falls back to `fetch_weather`, then `fetch_forecast`
+- Returns null if no weather data found (not an error)
+- Weather data structure varies by method - handle flexibly!
+
+**Common Bug**: Using campusId instead of cityId returns no weather data:
+```typescript
+// ❌ WRONG - will return null
+SELECT data FROM service_data WHERE context_id = campusId
+
+// ✅ CORRECT - returns weather
+SELECT data FROM service_data WHERE context_id = cityId
+```
+
+---
+
+### getPreferencesForStudent
+
+Get user preferences (study times, notification settings, accessibility).
+
+**Signature**:
+```typescript
+getPreferencesForStudent(userId: string): Promise<ServiceResult<Preferences | null>>
+```
+
+**Returns**:
+```typescript
+interface Preferences {
+  user_id: string;
+  study_time_preferences?: {
+    preferred_start_time?: string;
+    preferred_end_time?: string;
+    break_duration?: number;
+  };
+  notification_settings?: {
+    email_enabled: boolean;
+    push_enabled: boolean;
+    quiet_hours?: { start: string; end: string };
+  };
+  accessibility_settings?: {
+    high_contrast?: boolean;
+    large_text?: boolean;
+  };
+  created_at: Date;
+  updated_at: Date;
+}
+```
+
+**Example**:
+```typescript
+const result = await service.getPreferencesForStudent(userId);
+
+if (result.success && result.data) {
+  const prefs = result.data;
+
+  if (prefs.study_time_preferences) {
+    console.log('Preferred study time:',
+      prefs.study_time_preferences.preferred_start_time,
+      '-',
+      prefs.study_time_preferences.preferred_end_time
+    );
+  }
+
+  if (prefs.notification_settings?.push_enabled) {
+    console.log('Push notifications enabled');
+  }
+}
+```
+
+---
+
+### getRecentWellnessData
+
+Get wellness check-in history for the past N days.
+
+**Signature**:
+```typescript
+getRecentWellnessData(
+  userId: string,
+  days: number = 7
+): Promise<ServiceResult<WellnessEntry[]>>
+```
+
+**Returns**:
+```typescript
+interface WellnessEntry {
+  id: string;
+  user_id: string;
+  date: string;
+  energy_level: 'energized' | 'normal' | 'tired' | 'exhausted';
+  mood?: string;
+  stress_level?: number;  // 1-5
+  sleep_hours?: number;
+  hydration_glasses?: number;
+  notes?: string;
+  created_at: Date;
+}
+```
+
+**Example**:
+```typescript
+const result = await service.getRecentWellnessData(userId, 7);
+
+if (result.success && result.data) {
+  const wellnessHistory = result.data;
+
+  // Calculate average energy
+  const energyMap = { energized: 5, normal: 3, tired: 2, exhausted: 1 };
+  const avgEnergy = wellnessHistory.reduce(
+    (sum, entry) => sum + energyMap[entry.energy_level],
+    0
+  ) / wellnessHistory.length;
+
+  console.log(`Average energy (7 days): ${avgEnergy.toFixed(1)}/5`);
+
+  // Detect trend
+  const recent = energyMap[wellnessHistory[0].energy_level];
+  const older = energyMap[wellnessHistory[wellnessHistory.length - 1].energy_level];
+  const trend = recent > older ? 'improving' : recent < older ? 'declining' : 'stable';
+
+  console.log(`Wellness trend: ${trend}`);
+}
+```
+
+---
+
+### getSemesterInsights
+
+Get AI-generated semester analysis and early warnings from BrainGains.
+
+**Signature**:
+```typescript
+getSemesterInsights(userId: string): Promise<ServiceResult<SemesterInsights | null>>
+```
+
+**Returns**:
+```typescript
+interface SemesterInsights {
+  user_id: string;
+  semester_id: string;
+  early_warnings: Array<{
+    message: string;              // Full warning message
+    type: string;                 // Warning type/category
+    recommended_actions?: string[];  // Optional action items
+  }>;
+  risk_score?: number;           // 0-100 risk score
+  predicted_gpa?: number;
+  analysis_date: Date;
+}
+```
+
+**SQL Query**:
+```sql
+SELECT
+  user_id,
+  semester_id,
+  braingains_early_warnings as early_warnings,
+  risk_score,
+  predicted_gpa,
+  created_at as analysis_date
+FROM semester_analysis
+WHERE user_id = $1
+  AND is_current_semester = true
+ORDER BY created_at DESC
+LIMIT 1
+```
+
+**Example**:
+```typescript
+const result = await service.getSemesterInsights(userId);
+
+if (result.success && result.data) {
+  const insights = result.data;
+
+  if (insights.early_warnings && insights.early_warnings.length > 0) {
+    console.log('⚠️ Semester Warnings:');
+
+    insights.early_warnings.forEach(warning => {
+      console.log(`- ${warning.message}`);
+
+      if (warning.recommended_actions && warning.recommended_actions.length > 0) {
+        warning.recommended_actions.forEach(action => {
+          console.log(`  • ${action}`);
+        });
+      }
+    });
+  }
+
+  if (insights.risk_score) {
+    console.log(`Risk Score: ${insights.risk_score}/100`);
+  }
+}
+```
+
+**Critical Notes**:
+- Warnings come from `braingains_early_warnings` table
+- Each warning has `recommended_action` field containing full message
+- `recommended_actions` array is optional additional action items
+- Don't add generic fallback messages - the message field is complete
+
+**Common Bug**: Adding generic fallback when `recommended_actions` is empty:
+```typescript
+// ❌ WRONG - adds meaningless fallback
+const actions = warning.recommended_actions?.length
+  ? warning.recommended_actions
+  : ['Add a buffer block and create a contingency plan'];
+
+// ✅ CORRECT - use message as-is, actions are optional
+const message = warning.message;  // e.g., "You have multiple quizzes in CHEM-3A this week..."
+const actions = warning.recommended_actions || [];
+```
+
+---
+
+## Complete Example
+
+**Temporal Activity: Generate DayPlan**
+
+```typescript
+// activities/dayplan.activities.ts
+import { getConnectionPool } from '@dormway/core/database';
+import { createStructuredLogger } from '@dormway/core/logger';
+import { DayPlanDataService } from '@dormway/core';
+import { NotFoundError } from '@dormway/core/errors';
+
+export async function generateDayPlan(
+  userId: string,
+  date: string
+): Promise<DayPlan> {
+  const pool = getConnectionPool();
+  const logger = createStructuredLogger({
+    service: 'engine',
+    activity: { name: 'generateDayPlan' },
+  });
+
+  const service = new DayPlanDataService({ pool, logger });
+
+  logger.info('dayplan.start', 'Starting dayplan generation', {
+    metadata: { userId, date },
+  });
+
+  // Fetch all data in parallel
+  const [
+    contextResult,
+    coursesResult,
+    scheduleResult,
+    weatherResult,
+    preferencesResult,
+    wellnessResult,
+    insightsResult,
+  ] = await Promise.all([
+    service.getStudentContext(userId),
+    service.getEnrolledCourses(userId),
+    service.getScheduleForStudent(userId, date),
+    service.getWeatherForStudent(userId, date),
+    service.getPreferencesForStudent(userId),
+    service.getRecentWellnessData(userId, 7),
+    service.getSemesterInsights(userId),
+  ]);
+
+  // Validate required data
+  if (!contextResult.success || !contextResult.data) {
+    logger.error('dayplan.context.missing', 'Student context not found', {
+      metadata: { userId },
+    });
+    throw new NotFoundError('Student context not found');
+  }
+
+  const context = contextResult.data;
+
+  // Log data quality
+  logger.info('dayplan.data.quality', 'Data fetched for dayplan', {
+    metadata: {
+      hasContext: true,
+      hasCourses: coursesResult.success && coursesResult.data!.length > 0,
+      hasSchedule: scheduleResult.success && scheduleResult.data!.length > 0,
+      hasWeather: weatherResult.success && !!weatherResult.data,
+      hasPreferences: preferencesResult.success && !!preferencesResult.data,
+      hasWellness: wellnessResult.success && wellnessResult.data!.length > 0,
+      hasInsights: insightsResult.success && !!insightsResult.data,
+    },
+  });
+
+  // Build dayplan prompt
+  const prompt = buildDayPlanPrompt({
+    context,
+    courses: coursesResult.data || [],
+    schedule: scheduleResult.data || [],
+    weather: weatherResult.data,
+    preferences: preferencesResult.data,
+    wellness: wellnessResult.data || [],
+    insights: insightsResult.data,
+    date,
+  });
+
+  // Call LLM
+  const response = await callHelicone('dayplan-generation', {
+    STUDENT_CONTEXT: JSON.stringify(context),
+    DATE: date,
+    PROMPT_DATA: prompt,
+  });
+
+  // Parse and save dayplan
+  const dayplan = JSON.parse(response.choices[0].message.content);
+
+  logger.info('dayplan.complete', 'DayPlan generated successfully', {
+    metadata: { userId, date, planId: dayplan.id },
+  });
+
+  return dayplan;
+}
+```
+
+---
+
+## Common Patterns
+
+### Pattern 1: Parallel Data Fetching
+
+Always fetch independent data in parallel for performance:
+
+```typescript
+// ✅ Good - parallel (fast)
+const [context, courses, weather] = await Promise.all([
+  service.getStudentContext(userId),
+  service.getEnrolledCourses(userId),
+  service.getWeatherForStudent(userId, date),
+]);
+
+// ❌ Bad - sequential (slow)
+const context = await service.getStudentContext(userId);
+const courses = await service.getEnrolledCourses(userId);
+const weather = await service.getWeatherForStudent(userId, date);
+```
+
+### Pattern 2: Graceful Degradation
+
+Handle missing optional data gracefully:
+
+```typescript
+const weatherResult = await service.getWeatherForStudent(userId, date);
+
+// Weather is optional - don't fail if missing
+const weatherData = weatherResult.success && weatherResult.data
+  ? weatherResult.data
+  : null;
+
+if (!weatherData) {
+  logger.info('dayplan.weather.missing', 'No weather data available', {
+    metadata: { userId, date },
+  });
+}
+
+// Continue with dayplan generation...
+```
+
+### Pattern 3: Data Quality Logging
+
+Log data completeness for debugging:
+
+```typescript
+const dataQuality = {
+  hasContext: !!contextResult.data,
+  hasCourses: (coursesResult.data?.length || 0) > 0,
+  hasSchedule: (scheduleResult.data?.length || 0) > 0,
+  hasWeather: !!weatherResult.data,
+  hasPreferences: !!preferencesResult.data,
+  hasWellness: (wellnessResult.data?.length || 0) > 0,
+};
+
+const completeness = Object.values(dataQuality).filter(Boolean).length /
+                     Object.values(dataQuality).length;
+
+logger.info('dayplan.data.quality', 'Data quality check', {
+  metadata: {
+    ...dataQuality,
+    completeness: `${(completeness * 100).toFixed(0)}%`,
+  },
+});
+```
+
+---
+
+## Error Handling
+
+### ServiceResult Pattern
+
+All methods return `ServiceResult<T>`:
+
+```typescript
+interface ServiceResult<T> {
+  success: boolean;
+  data?: T;
+  error?: string;
+  errorDetails?: Record<string, unknown>;
+}
+```
+
+**Best Practice**: Check success before accessing data:
+
+```typescript
+const result = await service.getStudentContext(userId);
+
+if (!result.success) {
+  logger.error('context.fetch.error', result.error!, {
+    metadata: { userId, ...result.errorDetails },
+  });
+  throw new NotFoundError('Failed to fetch student context');
+}
+
+// Safe to access data
+const context = result.data!;
+```
+
+### Common Errors
+
+1. **Student Not Found**:
+   ```typescript
+   // getStudentContext returns null if no contexts found
+   if (!result.success || !result.data) {
+     throw new NotFoundError('Student not found');
+   }
+   ```
+
+2. **Database Connection**:
+   ```typescript
+   // All methods catch and wrap database errors
+   if (!result.success) {
+     // result.error contains message
+     // result.errorDetails contains originalError
+   }
+   ```
+
+3. **Invalid Date Format**:
+   ```typescript
+   // Always use ISO date strings: "2025-11-23"
+   const date = new Date().toISOString().split('T')[0];
+   ```
+
+---
+
+## Performance Optimization
+
+### 1. Use Connection Pooling
+
+```typescript
+// ✅ Good - reuse pool
+import { getConnectionPool } from '@dormway/core/database';
+const pool = getConnectionPool();
+const service = new DayPlanDataService({ pool, logger });
+
+// ❌ Bad - creates new pool
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+```
+
+### 2. Fetch in Parallel
+
+```typescript
+// ✅ Good - all fetches run concurrently
+const results = await Promise.all([
+  service.getStudentContext(userId),
+  service.getEnrolledCourses(userId),
+  service.getWeatherForStudent(userId, date),
+]);
+
+// ❌ Bad - sequential blocking
+const context = await service.getStudentContext(userId);
+const courses = await service.getEnrolledCourses(userId);
+```
+
+### 3. Query Only What You Need
+
+```typescript
+// If you only need context, don't fetch everything
+const contextResult = await service.getStudentContext(userId);
+
+// Only fetch additional data if needed
+if (needsCourses) {
+  const coursesResult = await service.getEnrolledCourses(userId);
+}
+```
+
+### 4. Cache Frequently Accessed Data
+
+```typescript
+import { getCacheAdapter } from '@dormway/core/adapters/cache';
+
+const cache = getCacheAdapter();
+const cacheKey = `student:${userId}:context`;
+
+// Try cache first
+let context = await cache.get(cacheKey);
+
+if (!context) {
+  const result = await service.getStudentContext(userId);
+  if (result.success && result.data) {
+    context = result.data;
+    await cache.set(cacheKey, context, { ttl: 3600 }); // 1 hour
+  }
+}
+```
+
+---
+
+## Troubleshooting
+
+### Problem: getWeatherForStudent returns null
+
+**Cause**: Weather is stored for cities, not campuses.
+
+**Solution**: Ensure weather data exists in `service_data` with cityId:
+
+```sql
+-- Check if weather exists for city
+SELECT
+  context_id,
+  method,
+  fetched_at,
+  data->>'temperature' as temp
+FROM service_data
+WHERE context_id = 'city-uuid'
+  AND method IN ('processed_city_weather_context', 'fetch_weather', 'fetch_forecast')
+ORDER BY fetched_at DESC
+LIMIT 5;
+```
+
+### Problem: getEnrolledCourses returns empty array
+
+**Cause**: Missing `context_dependencies` entries with `enrolled_in` type.
+
+**Solution**: Verify dependencies exist:
+
+```sql
+-- Check course enrollments
+SELECT
+  cd.dependency_type,
+  course_ctx.name as course_name,
+  course_ctx.external_id as canvas_id
+FROM contexts student_ctx
+INNER JOIN context_dependencies cd
+  ON cd.parent_context_id = student_ctx.id
+INNER JOIN contexts course_ctx
+  ON course_ctx.id = cd.child_context_id
+WHERE student_ctx.user_id = 'user-uuid'
+  AND student_ctx.type = 'student';
+```
+
+### Problem: getStudentContext returns null
+
+**Cause**: Student has no campus or city relationship.
+
+**Solution**: Verify context hierarchy:
+
+```sql
+-- Check student → campus → city chain
+SELECT
+  student_ctx.id as student_id,
+  student_ctx.name as student_name,
+  campus_ctx.id as campus_id,
+  campus_ctx.name as campus_name,
+  city_ctx.id as city_id,
+  city_ctx.name as city_name
+FROM accounts a
+LEFT JOIN contexts student_ctx
+  ON student_ctx.user_id = a.id
+  AND student_ctx.type = 'student'
+LEFT JOIN contexts campus_ctx
+  ON campus_ctx.id = student_ctx.parent_id
+  AND campus_ctx.type = 'campus'
+LEFT JOIN contexts city_ctx
+  ON city_ctx.id = campus_ctx.parent_id
+  AND city_ctx.type = 'city'
+WHERE a.id = 'user-uuid';
+```
+
+### Problem: Performance is slow
+
+**Cause**: Not fetching data in parallel.
+
+**Solution**: Use `Promise.all()` for independent fetches:
+
+```typescript
+// ✅ Fast - parallel
+const [context, courses, weather] = await Promise.all([
+  service.getStudentContext(userId),
+  service.getEnrolledCourses(userId),
+  service.getWeatherForStudent(userId, date),
+]);
+
+// ❌ Slow - sequential
+const context = await service.getStudentContext(userId);
+const courses = await service.getEnrolledCourses(userId);
+const weather = await service.getWeatherForStudent(userId, date);
+```
+
+---
+
+## Related Documentation
+
+- [DormWay Core Library (@dormway-core)](/docs/engineering/technical/dormway-core-library-dormway-core) - Main overview
+- [CampusService](/docs/engineering/technical/dormway-core/domain-services/campusservice) - Campus and city operations
+- [ContextsService](/docs/engineering/technical/dormway-core/domain-services/contextsservice) - Context hierarchy queries
+- Engine Workflow DAG Analysis - Temporal workflows using this service
+
+---
+
+**Last Updated**: 2025-11-23
+**Maintainer**: Platform Team

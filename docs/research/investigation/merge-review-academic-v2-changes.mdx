@@ -1,0 +1,402 @@
+---
+title: "Merge Review   Academic V2 Changes"
+description: "The merge successfully restored your Academic Workstation V2 implementation from the backup branch. However, **critical architectural conflicts** were discov..."
+---
+
+# Merge Review: Academic Workstation V2 Changes
+
+**Date:** October 26, 2025
+**Merge Commit:** `e3ad00cd`
+**Branches:** `backup-riley-work-20251026-023431` → `riley/canvas-academic-clean`
+**Reviewer:** Claude (automated analysis)
+**Status:** 🔴 CRITICAL ISSUES FOUND - REQUIRES DECISION
+
+---
+
+## Executive Summary
+
+The merge successfully restored your Academic Workstation V2 implementation from the backup branch. However, **critical architectural conflicts** were discovered that need resolution before proceeding.
+
+### The Good ✅
+- Code quality is high
+- Database schema usage is correct
+- Soft delete pattern properly implemented
+- API design follows REST conventions
+- Frontend integration is clean
+
+### The Critical Issue 🔴
+**You've created a duplicate planning system** that conflicts with existing infrastructure:
+
+| System | Endpoint | Database Table | Purpose |
+|--------|----------|----------------|---------|
+| **EXISTING** (Mobile) | `/api/mobile/planner/blocks` | `student_time_blocks` | Manual planning blocks |
+| **NEW** (Web V2) | `/api/proxy/time-blocks` | `time_blocks` | Manual study sessions |
+
+**Both systems solve the same problem differently.**
+
+---
+
+## Detailed Analysis
+
+### 1. Code Quality ✅ EXCELLENT
+
+**Strengths:**
+- Clean TypeScript with proper types
+- Good error handling with AppError
+- Input validation (duration 1-480 minutes)
+- Logging for observability
+- Parameterized queries (SQL injection safe)
+- Soft delete pattern using `lifecycle_status`
+
+**Example (time-blocks-routes.ts):**
+```typescript
+// ✅ Proper validation
+if (minutes <= 0 || minutes > 480) {
+  throw new AppError('Duration must be between 1 and 480 minutes (8 hours)', 400);
+}
+
+// ✅ Soft delete
+UPDATE time_blocks
+SET lifecycle_status = 'deleted', deleted_at = NOW()
+WHERE id = $1 AND user_id = $2 AND source_type = 'manual'
+```
+
+### 2. Database Schema Usage ✅ CORRECT
+
+**My investigation report was WRONG** - the `time_blocks` table DOES have `lifecycle_status`.
+
+**Verified schema:**
+```sql
+time_blocks
+├── lifecycle_status: time_block_lifecycle_status (✅ EXISTS, default 'active')
+├── deleted_at: timestamptz (✅ EXISTS)
+├── source_type: time_block_source_type (✅ Used correctly as 'manual')
+└── source_id: text (✅ Stores deliverable ID)
+```
+
+**The API correctly:**
+- Filters by `lifecycle_status = 'active'`
+- Soft deletes with `lifecycle_status = 'deleted'`
+- Isolates by `user_id`
+- Distinguishes sources with `source_type = 'manual'`
+
+### 3. Architecture Conflict 🔴 CRITICAL
+
+#### The Duplicate Systems Problem
+
+**EXISTING Mobile Planner (In Production):**
+```typescript
+// services/api-router/src/routes/mobile-routes.ts
+POST /api/mobile/planner/blocks
+  → Writes to: student_time_blocks
+  → Used by: iOS app, mobile clients
+  → Features:
+    - Manual focus blocks
+    - Course association
+    - Related event IDs
+    - Metadata storage
+```
+
+**NEW Web V2 Planner (Just Merged):**
+```typescript
+// services/api-router/src/routes/time-blocks-routes.ts
+POST /api/proxy/time-blocks
+  → Writes to: time_blocks
+  → Used by: Academic Workstation V2 (web)
+  → Features:
+    - Manual study sessions
+    - Task/deliverable association
+    - ISO week queries
+    - Soft delete
+```
+
+#### Why This Is a Problem
+
+1. **Data Fragmentation**
+   - Mobile users: blocks in `student_time_blocks`
+   - Web users: blocks in `time_blocks`
+   - Cross-platform inconsistency
+
+2. **Duplicate Effort**
+   - Two APIs doing the same thing
+   - Two database tables for similar data
+   - Two maintenance burdens
+
+3. **Conflicts with Stated Plans**
+   - "Academic Dashboard and Inbox Upgrade Plan.md" (Oct 20) explicitly says to use `/mobile/planner/blocks`
+   - Your co-founder's plan: *"Allow `POST /mobile/planner/blocks` to accept optional `assignmentId` and `taskId`"*
+   - The new V2 API ignores this plan
+
+4. **Future Migration Pain**
+   - If mobile/web need unified view, requires data migration
+   - Analytics split across two tables
+   - Reporting complexity
+
+### 4. Technical Debt Added
+
+**New files added:**
+```
++ services/api-router/src/routes/time-blocks-routes.ts (219 lines)
++ services/dormway-lockedin/src/hooks/useTimeBlocks.ts (144 lines)
++ services/dormway-lockedin/ACADEMIC_V2_IMPLEMENTATION.md (387 lines)
++ services/dormway-lockedin/ACADEMIC_V2_IMPLEMENTATION_SUMMARY.md (428 lines)
++ services/dormway-lockedin/ACADEMIC_V2_TEST_CHECKLIST.md (238 lines)
+```
+
+**Total:** ~1,416 lines of new code/docs for functionality that partially duplicates existing `/mobile/planner/blocks`.
+
+### 5. What Works Well ✅
+
+**Frontend Integration:**
+- `useTimeBlocks` hook is clean and well-typed
+- Academic page properly uses optimistic updates
+- Deep-linking works (`?item=<id>`)
+- CapacityBar integration is smooth
+- Keyboard shortcuts (ESC to close)
+
+**API Design:**
+- RESTful conventions
+- ISO week format (`YYYY-WW`) is standard
+- Clear endpoint naming
+- Good separation of concerns
+
+**Documentation:**
+- Comprehensive Obsidian docs
+- Test checklists
+- Implementation notes
+
+---
+
+## The Core Question
+
+**Should DormWay have two separate planning systems?**
+
+### Option A: Keep Both Systems (Current State)
+
+**Pros:**
+- Web and mobile stay independent
+- No immediate refactoring needed
+- V2 already implemented
+
+**Cons:**
+- Data fragmentation
+- Duplicate maintenance
+- Conflicts with documented plan
+- Future cross-platform pain
+- Higher complexity
+
+### Option B: Unify on Existing Mobile Endpoint ⭐ RECOMMENDED
+
+**Action:**
+1. Remove new time-blocks API
+2. Update web V2 to use `/api/mobile/planner/blocks`
+3. Extend mobile endpoint per "Academic Dashboard and Inbox Upgrade Plan.md":
+   - Add `assignmentId` / `taskId` to metadata
+   - Keep using `student_time_blocks`
+   - Emit Ably events for real-time
+
+**Pros:**
+- Single source of truth
+- Aligns with documented plan
+- Cross-platform consistency
+- Less code to maintain
+- Mobile/web data unified
+
+**Cons:**
+- Requires refactoring useTimeBlocks hook
+- Need to update academic page
+- Short-term rework
+
+### Option C: Unify on New Time-Blocks System
+
+**Action:**
+1. Keep time-blocks API
+2. Migrate mobile to use it
+3. Migrate `student_time_blocks` → `time_blocks`
+
+**Pros:**
+- Cleaner API design (time-blocks is more focused)
+- Better separation (time_blocks for manual, student_time_blocks for system)
+
+**Cons:**
+- Breaks existing mobile clients
+- Data migration required
+- More invasive change
+- Conflicts with existing docs
+
+---
+
+## Alignment with DormWay's Long-Term Goals
+
+Based on the Obsidian vault and codebase patterns:
+
+### ✅ Aligned With
+- **"Student OS" mentality** - Unified planning across platforms
+- **Dashboard BFF pattern** - Consolidating data sources
+- **Real-time updates** - Ably integration
+- **Quality documentation** - Comprehensive docs
+
+### ❌ Conflicts With
+- **Existing architectural plans** - "Academic Dashboard and Inbox Upgrade Plan.md"
+- **Code consolidation** - Creates fragmentation instead
+- **Cross-platform consistency** - Mobile/web use different tables
+
+### Your stated priorities (from docs):
+1. **Single source of truth** - ❌ Violated (two planning systems)
+2. **Planner-first workflows** - ✅ Achieved (but duplicated)
+3. **Consistent completion prompts** - ⚠️ Works but fragmented
+4. **Stateful inbox** - ⚠️ Not addressed by this change
+
+---
+
+## Recommendations
+
+### Immediate Action Required
+
+**🔴 DO NOT PUSH THIS MERGE YET**
+
+You need to make an architectural decision first:
+
+1. **Review "Academic Dashboard and Inbox Upgrade Plan.md"** (Oct 20)
+   - Was this plan abandoned?
+   - Or should V2 follow it?
+
+2. **Decide on ONE planner system:**
+   - Option B (mobile endpoint) = aligned with existing plan
+   - Option A (keep both) = accept fragmentation
+   - Option C (time-blocks) = major refactor
+
+3. **If choosing Option B:**
+   - I can help refactor `useTimeBlocks` to call `/mobile/planner/blocks`
+   - Update academic page to use `student_time_blocks`
+   - Remove time-blocks-routes.ts
+
+### What to Keep Regardless
+
+These are good and should stay:
+- ✅ Academic page V2 UI (docked inspector, filters, etc.)
+- ✅ `useTimeBlocks` hook interface (just change backend endpoint)
+- ✅ CapacityBar component
+- ✅ Deep-linking with `?item=`
+- ✅ Optimistic updates pattern
+- ✅ Documentation approach
+
+### What Needs Decision
+
+These need your call:
+- ❓ time-blocks-routes.ts (remove or keep?)
+- ❓ Which database table (`time_blocks` vs `student_time_blocks`)?
+- ❓ Which API endpoint (new vs existing)?
+
+---
+
+## Code Quality Assessment ⭐⭐⭐⭐½ (4.5/5)
+
+**Strengths:**
+- Clean TypeScript
+- Proper error handling
+- Good validation
+- Secure SQL
+- Well documented
+
+**Deductions:**
+- -0.5 for architectural duplication
+
+**The code itself is excellent.** The issue is architectural, not implementation quality.
+
+---
+
+## Specific Files to Review
+
+### High Priority
+
+1. **services/api-router/src/routes/time-blocks-routes.ts**
+   - Decision: Keep or remove?
+   - If remove: delete file, remove from routes/index.ts
+
+2. **services/dormway-lockedin/src/hooks/useTimeBlocks.ts**
+   - Decision: Keep interface, change backend endpoint?
+
+3. **services/dormway-lockedin/src/app/dashboard/academic/page.tsx**
+   - Good implementation
+   - May need small tweaks if changing endpoint
+
+### Documentation Discrepancies
+
+**My Obsidian docs (Oct 26) say:**
+- "Uses `time_blocks` table"
+- "Endpoint: `/api/proxy/time-blocks`"
+- Status: "✅ Shipped"
+
+**Older doc (Oct 20) "Academic Dashboard and Inbox Upgrade Plan.md" says:**
+- "Use `/mobile/planner/blocks`"
+- "Store in `student_time_blocks`"
+- Status: "draft"
+
+**Which is the source of truth?**
+
+---
+
+## Testing Recommendations
+
+**If keeping current approach:**
+- [ ] Test mobile app still works
+- [ ] Verify no conflicts between systems
+- [ ] Check analytics can query both tables
+- [ ] Document which platform uses which system
+
+**If consolidating:**
+- [ ] Test cross-platform consistency
+- [ ] Verify migration doesn't lose data
+- [ ] Ensure mobile clients updated
+
+---
+
+## Questions for You
+
+1. **Was "Academic Dashboard and Inbox Upgrade Plan.md" (Oct 20) abandoned?**
+   - If yes: update that doc to reflect new approach
+   - If no: consider aligning V2 with that plan
+
+2. **Do you want mobile and web to share planning data?**
+   - If yes: need unified system
+   - If no: accept dual systems
+
+3. **Is `student_time_blocks` vs `time_blocks` intentional separation?**
+   - system-generated (Canvas, Google) → time_blocks
+   - user-created (manual planning) → student_time_blocks
+   - This could be valid architecture if documented
+
+4. **Timeline preference?**
+   - Quick fix (remove duplication now)
+   - Or ship as-is and consolidate later?
+
+---
+
+## Conclusion
+
+**The code you merged is high quality and works correctly.** However, it creates architectural duplication that conflicts with existing systems and documented plans.
+
+### My Recommendation: Option B
+
+1. **Keep the UX** - Academic V2 interface is great
+2. **Change the backend** - Point to existing `/mobile/planner/blocks`
+3. **Follow the plan** - Align with "Academic Dashboard and Inbox Upgrade Plan.md"
+4. **Unify the data** - Use `student_time_blocks` consistently
+
+This gives you:
+- ✅ Beautiful V2 interface
+- ✅ Cross-platform consistency
+- ✅ Single source of truth
+- ✅ Aligned with documented architecture
+- ✅ Less code to maintain
+
+**But the final decision is yours.** All options are technically viable.
+
+---
+
+**Next Step:** Tell me which option you prefer, and I'll help implement it.
+
+**Status:** ⏸️ AWAITING DECISION
+**Confidence:** High (architectural analysis)
+**Risk Level:** Medium (dual systems create future pain)

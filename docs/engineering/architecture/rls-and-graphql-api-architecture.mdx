@@ -1,0 +1,549 @@
+---
+title: "RLS and GraphQL API Architecture"
+description: "This document describes the Row-Level Security (RLS) and GraphQL API implementation for DormWay's SOC2 compliance initiative. The system provides database-le..."
+---
+
+# RLS and GraphQL API Architecture
+
+#architecture #security #soc2 #database #graphql
+
+**Issue**: DORM-680
+**Status**: Implemented
+**Date**: 2025-12-02
+
+## Overview
+
+This document describes the Row-Level Security (RLS) and GraphQL API implementation for DormWay's SOC2 compliance initiative. The system provides database-level access control using PostgreSQL RLS policies combined with session variables, exposed through a GraphQL API via pg_graphql.
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        Client Request                           │
+│                    (Clerk JWT via Zuplo)                        │
+└────────────────────────────┬────────────────────────────────────┘
+                             │
+                             ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                      API Router (3001)                          │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │  POST /api/graphql                                       │   │
+│  │  - Extract user from JWT/headers                         │   │
+│  │  - Rate limit (30 req/10s)                               │   │
+│  │  - Build SessionContext                                  │   │
+│  └─────────────────────────────────────────────────────────┘   │
+└────────────────────────────┬────────────────────────────────────┘
+                             │
+                             ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                   dormway-core Database Adapter                  │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │  transactionWithSession(callback, session)               │   │
+│  │  - BEGIN                                                 │   │
+│  │  - SET LOCAL app.current_user_id = 'uuid'                │   │
+│  │  - SET LOCAL app.current_role = 'authenticated'          │   │
+│  │  - Execute callback                                      │   │
+│  │  - COMMIT                                                │   │
+│  └─────────────────────────────────────────────────────────┘   │
+└────────────────────────────┬────────────────────────────────────┘
+                             │
+                             ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                   PostgreSQL (Neon)                              │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │  pg_graphql.resolve(query, variables)                    │   │
+│  │  - RLS policies read session variables                   │   │
+│  │  - app.current_user_id()                                 │   │
+│  │  - app.current_role()                                    │   │
+│  │  - app.has_privileged_access()                           │   │
+│  └─────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Session Variables
+
+The `app` schema provides functions for reading session variables set by the application:
+
+| Function | Purpose |
+|----------|---------|
+| `app.current_user_id()` | Returns current user UUID |
+| `app.current_role()` | Returns role (authenticated/admin/demo/service) |
+| `app.current_context_id()` | Returns current context UUID (optional) |
+| `app.is_admin()` | True if admin role |
+| `app.is_service_account()` | True if service role (Engine/Temporal) |
+| `app.has_privileged_access()` | True if admin OR service |
+| `app.owns_context(uuid)` | Checks context ownership |
+| `app.owns_context_dependency(uuid, uuid)` | Checks dependency ownership |
+
+**Header sources & validation**
+- `x-impersonate-user-id` (admin-only): must be a UUID; when present, session role is downgraded to `authenticated` and queries run as the impersonated user. All attempts are audit-logged.
+- `x-context-id`: optional, must be a UUID; invalid values are ignored to avoid SQL injection.
+
+## RLS Policy Pattern
+
+All user-scoped tables follow this policy pattern:
+
+```sql
+-- SELECT: Users see their own data, privileged see all
+CREATE POLICY "table_select_policy" ON table
+  FOR SELECT
+  USING (
+    user_id = app.current_user_id()
+    OR app.has_privileged_access()
+  );
+
+-- INSERT/UPDATE/DELETE: Similar pattern
+```
+
+### Special Cases
+
+**accounts table**: Uses `id` instead of `user_id`:
+```sql
+USING (id = app.current_user_id() OR app.has_privileged_access())
+```
+
+**contexts table**: Mixed visibility - public types visible to all:
+```sql
+USING (
+  type IN ('campus', 'city', 'course', 'department', 'building') -- Public
+  OR (type = 'student' AND user_id = app.current_user_id())       -- Private
+  OR app.has_privileged_access()
+)
+```
+
+**service_data table**: Supports both user_id and context_id ownership:
+```sql
+USING (
+  user_id = app.current_user_id()
+  OR (context_id IS NOT NULL AND app.owns_context(context_id))
+  OR (context_id IS NOT NULL AND EXISTS (
+    SELECT 1 FROM contexts WHERE id = context_id
+    AND type IN ('campus', 'city', 'course')  -- Public context
+  ))
+  OR app.has_privileged_access()
+)
+```
+
+## Tables with RLS
+
+### Core Tables
+- `accounts` (id-based)
+- `tasks` (user_id-based)
+- `contexts` (mixed visibility)
+- `context_dependencies` (ownership chain)
+- `user_preferences`
+- `student_time_blocks`
+- `time_blocks`
+
+### User-Scoped Tables (~40 tables)
+- Notifications: `app_notifications`, `engine_notification_*`
+- Canvas: `canvas_accounts`, `canvas_courses`, `canvas_submissions`
+- Notes: `notes`, `note_revisions`, `syllabus_documents`
+- Calendar: `user_calendar_preferences`, `schedule_parsing_artifacts`
+- AI Chat: `braingains_chats`, `braingains_documents`
+- Tracking: `user_locations`, `assignment_completion`
+
+### System Tables (read-only for users)
+- `student_watcher_state`
+- `worker_jobs`
+- `workflow_health_checks`
+- `workflow_maintenance_log`
+
+## GraphQL API
+
+### Endpoint
+```
+POST /api/graphql   (Zuplo exposes /graphql and /graphql-admin -> /api/graphql)
+```
+
+### Request Format
+```json
+{
+  "query": "{ tasksCollection { edges { node { id title } } } }",
+  "variables": {},
+  "operationName": "GetTasks"
+}
+```
+
+### Response Format
+```json
+{
+  "data": { ... },
+  "errors": [...]
+}
+```
+
+### Headers
+- `Authorization`: Clerk JWT (via Zuplo)
+- `x-context-id`: Optional context scope
+- `x-impersonate-user-id`: Admin-only RLS impersonation (validated UUID; logged)
+- `X-GraphQL-Duration`: Response time (ms)
+- `Cache-Control`: `no-store`
+- `gateway-api-key`: Added by Zuplo for server-to-server calls
+
+### Rate Limiting
+- 30 requests per 10 seconds per user
+- Returns 429 Too Many Requests on exceed
+
+### Introspection
+- Allowed in development
+- Blocked in production (`__schema`, `__type` queries)
+
+## Tables Excluded from GraphQL
+
+For security, these tables are hidden from the GraphQL schema:
+
+- **Internal**: `migration_history`, `roles`, `role_permissions`, `config`
+- **System**: `worker_jobs`, `workflow_*`, `student_watcher_state`
+- **Credentials**: `device_keys`, `service_credentials`, `canvas_accounts`
+- **Audit**: `ingestion_audit`, `syllabus_audit_log`
+- **Notifications**: `app_notifications`, `engine_notification_*`
+- **Location**: `user_locations`, `locations`
+
+## TypeScript Integration
+
+### SessionContext Type
+```typescript
+interface SessionContext {
+  userId: string;
+  role: 'authenticated' | 'admin' | 'demo' | 'service';
+  contextId?: string;
+  // Admin-only impersonation metadata (added by graphql-routes)
+  isImpersonating?: boolean;
+  adminUserId?: string;
+}
+```
+
+### Database Adapter Methods
+```typescript
+// Query with RLS session
+const tasks = await db.queryWithSession<Task>(
+  'SELECT * FROM tasks',
+  [],
+  { userId: req.user.id, role: 'authenticated' }
+);
+
+// Transaction with RLS session
+const result = await db.transactionWithSession(
+  async (client) => {
+    await client.query('INSERT INTO tasks ...');
+    return 'success';
+  },
+  { userId: req.user.id, role: 'authenticated' }
+);
+```
+
+## Migration Files
+
+1. `20251202_rls_session_variables.sql` - Creates `app` schema and helper functions
+2. `20251202_rls_core_tables.sql` - RLS for core tables
+3. `20251202_rls_service_data.sql` - RLS for partitioned service_data
+4. `20251202_rls_user_tables.sql` - RLS for remaining user tables
+5. `20251202_graphql_table_exclusions.sql` - GraphQL visibility configuration
+6. `20251202_rls_application_role.sql` - Creates `dormway_api` role (NOBYPASSRLS)
+
+## Database Roles
+
+### Role Comparison
+
+| Role | BYPASSRLS | Use Case |
+|------|-----------|----------|
+| `neondb_owner` | ✅ Yes | Schema migrations, admin operations |
+| `app` | ✅ Yes | Legacy admin operations (bypasses RLS) |
+| `dormway_api` | ❌ No | **Application connections** (RLS enforced) |
+
+### Why `dormway_api`?
+
+Roles created via Neon Console/API inherit from `neon_superuser`, which has `BYPASSRLS` privilege. To enforce RLS, `dormway_api` was created via SQL migration without this inheritance.
+
+### Connection String Update (Required)
+
+Update Doppler `DATABASE_URL` from:
+```
+postgresql://app:PASSWORD@HOST/dormway
+```
+
+To:
+```
+postgresql://dormway_api:PASSWORD@HOST/dormway
+```
+
+Keep the `app` role connection string as `DATABASE_URL_ADMIN` for admin operations that need to bypass RLS.
+
+## Service Database Access Matrix
+
+### Database Connection Patterns
+
+**Pattern A: dormway-core adapter (recommended)**
+```typescript
+import { getDatabaseAdapter } from '@dormway/core/adapters/database';
+const db = getDatabaseAdapter({ logger: adapterLogger });
+// Reads from process.env.DATABASE_URL by default
+```
+
+**Pattern B: Direct Pool creation (legacy)**
+```typescript
+import { Pool } from 'pg';
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+```
+
+### Services Using dormway-core Adapter
+
+| Service | Port | Env Var | RLS? | Notes |
+|---------|------|---------|------|-------|
+| **api-router** | 3001 | `DATABASE_URL` | ✅ | GraphQL, user profile, BFF |
+| **engine** | 3030 | `DATABASE_URL_ADMIN` | ❌ | System operations, batch processing |
+| **ably-relay** | 3032 | `DATABASE_URL` | ✅ | User mobile telemetry |
+
+### Services Using Direct Pool (Legacy Pattern)
+
+| Service | Port | Env Var | RLS? | Notes |
+|---------|------|---------|------|-------|
+| **canvas-sync** | 3033 | `DATABASE_URL` | ✅ | User Canvas data |
+| **plugin-runner** | 8083 | `DATABASE_URL` | ✅ | Plugin execution |
+
+> **Tech Debt**: `canvas-sync` and `plugin-runner` should migrate to dormway-core adapter for consistency.
+
+### Services Without Direct Database Access
+
+| Service | Port | Data Access |
+|---------|------|-------------|
+| dormway-admin | 3004 | Via api-router REST |
+| dormway-lockedin | 3008 | Via api-router REST/GraphQL |
+| dormway-crews | 8000 | Via api-router (AI context) |
+| syllabus-webviewer | 3002 | Via api-router |
+
+## Doppler Configuration
+
+### Required Environment Variables
+
+```bash
+# RLS-enforced connection (dormway_api role)
+# Used by: api-router, ably-relay, canvas-sync, plugin-runner
+DATABASE_URL=postgresql://dormway_api:PASSWORD@ep-misty-star-adwk1w0o-pooler.c-2.us-east-1.aws.neon.tech/dormway?sslmode=require
+
+# RLS-bypassing connection (app role)
+# Used by: engine (Temporal workflows need cross-user access)
+DATABASE_URL_ADMIN=postgresql://app:PASSWORD@ep-misty-star-adwk1w0o-pooler.c-2.us-east-1.aws.neon.tech/dormway?sslmode=require
+```
+
+### Code Changes Applied
+
+**Engine service** (`services/engine/src/services/auroraDb.ts`):
+```typescript
+// Engine uses DATABASE_URL_ADMIN (RLS-bypassing role) for system operations.
+// Falls back to DATABASE_URL for backwards compatibility.
+const db = getDatabaseAdapter({
+  connectionString: process.env.DATABASE_URL_ADMIN || process.env.DATABASE_URL,
+  logger: adapterLogger,
+});
+```
+
+### Deployment Checklist
+
+1. ✅ Create `dormway_api` role via migration
+2. ⬜ Set `dormway_api` password in Doppler (generated: `8GL0oeThxr3dgWTcwnXGvS6lBSq5PCRZ`)
+3. ⬜ Update `DATABASE_URL` in Doppler to use `dormway_api` role
+4. ⬜ Add `DATABASE_URL_ADMIN` in Doppler with `app` role
+5. ⬜ Deploy services (engine will use `DATABASE_URL_ADMIN`, others use `DATABASE_URL`)
+
+## Testing
+
+### Unit Tests
+- `postgres.adapter.test.ts` - RLS session method tests
+- `graphql-routes.test.ts` - GraphQL endpoint tests
+
+### Manual Testing
+```bash
+# Test GraphQL endpoint
+curl -X POST http://localhost:3001/api/graphql \
+  -H "Content-Type: application/json" \
+  -H "x-user-id: YOUR_USER_UUID" \
+  -H "x-user-role: authenticated" \
+  -d '{"query": "{ tasksCollection { edges { node { id title } } } }"}'
+
+# Test health endpoint
+curl http://localhost:3001/api/graphql/health
+```
+
+## Security Considerations
+
+1. **Defense in Depth**: RLS policies + application-level WHERE clauses
+2. **Session Variable Safety**: SET LOCAL scoped to transaction
+3. **Service Account Bypass**: Engine uses `service` role for cross-user operations
+4. **Introspection Disabled**: Production blocks schema discovery
+5. **Rate Limiting**: Prevents abuse of GraphQL endpoint
+6. **No Credentials in GraphQL**: Sensitive tables excluded
+
+## Related Documents
+
+- SOC2 Compliance Checklist
+- Database Schema Reference
+- API Router Architecture
+- Clerk Authentication
+
+## Production Deployment Runbook
+
+### Pre-Deployment Checklist
+
+- [ ] Verify PR #562 is approved and CI is green
+- [ ] Have Neon console access ready
+- [ ] Have Doppler admin access ready
+
+### Step 1: Create Database Roles on Neon
+
+Connect as `neondb_owner` and run:
+
+```sql
+-- Create dormway_api role (RLS-enforced, for application connections)
+CREATE ROLE dormway_api WITH
+  LOGIN
+  PASSWORD '<generate_secure_password>'
+  NOSUPERUSER
+  NOCREATEDB
+  NOCREATEROLE
+  NOINHERIT
+  NOREPLICATION;
+
+-- Create dormway_admin role (RLS-bypassing, for migrations/admin)
+CREATE ROLE dormway_admin WITH
+  LOGIN
+  PASSWORD '<generate_secure_password>'
+  NOSUPERUSER
+  NOCREATEDB
+  NOCREATEROLE
+  NOINHERIT
+  NOREPLICATION
+  BYPASSRLS;
+
+-- Grant permissions to dormway_api
+GRANT USAGE ON SCHEMA public TO dormway_api;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO dormway_api;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO dormway_api;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO dormway_api;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO dormway_api;
+
+-- Grant full permissions to dormway_admin
+GRANT ALL PRIVILEGES ON SCHEMA public TO dormway_admin;
+GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO dormway_admin;
+GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO dormway_admin;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL PRIVILEGES ON TABLES TO dormway_admin;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL PRIVILEGES ON SEQUENCES TO dormway_admin;
+```
+
+### Step 2: Set Doppler prd Config Variables
+
+```bash
+# DATABASE_URL - Regular API connections (RLS enforced via dormway_api)
+doppler secrets set DATABASE_URL "postgresql://dormway_api:<password>@<neon-host>/neondb?sslmode=require" --project dormway --config prd
+
+# DATABASE_URL_ADMIN - Admin/service bypass (for Engine, migrations)
+doppler secrets set DATABASE_URL_ADMIN "postgresql://neondb_owner:<existing_password>@<neon-host>/neondb?sslmode=require" --project dormway --config prd
+```
+
+**Critical**: The `DATABASE_URL` must use the `dormway_api` role for RLS to be enforced. The defense-in-depth check in `app.has_privileged_access()` verifies both:
+1. Session GUC (`app.current_role = 'admin'` or `'service'`)
+2. Database role (`current_user` is `dormway_admin`, `dormway_api`, or `neondb_owner`)
+
+### Step 3: Install pg_graphql Extension
+
+```sql
+-- Connect as neondb_owner
+CREATE EXTENSION IF NOT EXISTS pg_graphql;
+```
+
+### Step 4: Run RLS Migrations (IN ORDER)
+
+```bash
+# Connect to Neon prd
+doppler run --config prd -- bash -c 'psql "$DATABASE_URL_ADMIN"'
+```
+
+Then run each migration in sequence:
+
+```sql
+\i infrastructure/database/migrations/20251202_rls_session_variables.sql
+\i infrastructure/database/migrations/20251202_rls_core_tables.sql
+\i infrastructure/database/migrations/20251202_rls_context_tables.sql
+\i infrastructure/database/migrations/20251202_rls_service_data.sql
+\i infrastructure/database/migrations/20251202_rls_user_tables.sql
+```
+
+**Verify migrations:**
+```sql
+-- Check app schema functions exist (should return 9+ functions)
+SELECT proname FROM pg_proc p
+JOIN pg_namespace n ON p.pronamespace = n.oid
+WHERE n.nspname = 'app';
+
+-- Check RLS is enabled on key tables
+SELECT tablename, rowsecurity
+FROM pg_tables
+WHERE schemaname = 'public'
+AND tablename IN ('accounts', 'tasks', 'contexts', 'service_data');
+
+-- Grant app schema access to dormway_api
+GRANT USAGE ON SCHEMA app TO dormway_api;
+GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA app TO dormway_api;
+```
+
+### Step 5: Merge PR #562 → Auto-Deploy
+
+After migrations are applied:
+1. Merge PR #562 to main
+2. Auto-deployment will update services
+3. Monitor deployment in AWS ECS / Vercel
+
+### Step 6: Verify Production
+
+```bash
+# Health check
+curl https://relay.dormway.app/api/graphql/health
+
+# Test authenticated GraphQL query (requires valid Clerk token)
+curl -X POST https://relay.dormway.app/api/graphql \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <clerk_jwt>" \
+  -d '{"query": "{ accountsCollection(first: 1) { edges { node { id email } } } }"}'
+```
+
+### Rollback Plan
+
+If issues occur after deployment:
+
+**Quick Fix - Disable RLS:**
+```sql
+-- Connect as neondb_owner
+ALTER TABLE accounts DISABLE ROW LEVEL SECURITY;
+ALTER TABLE tasks DISABLE ROW LEVEL SECURITY;
+ALTER TABLE contexts DISABLE ROW LEVEL SECURITY;
+ALTER TABLE service_data DISABLE ROW LEVEL SECURITY;
+-- Repeat for other tables as needed
+```
+
+**Full Rollback - Remove RLS infrastructure:**
+```sql
+-- DANGER: This removes all RLS policies
+DROP SCHEMA app CASCADE;
+
+-- Re-enable tables without RLS
+DO $$
+DECLARE
+  t text;
+BEGIN
+  FOR t IN SELECT tablename FROM pg_tables WHERE schemaname = 'public' LOOP
+    EXECUTE format('ALTER TABLE %I DISABLE ROW LEVEL SECURITY', t);
+  END LOOP;
+END $$;
+```
+
+**Revert DATABASE_URL in Doppler:**
+```bash
+# Revert to neondb_owner (bypasses RLS)
+doppler secrets set DATABASE_URL "postgresql://neondb_owner:<password>@<neon-host>/neondb?sslmode=require" --project dormway --config prd
+```
+
+## Changelog
+
+- 2025-12-02: Initial implementation (DORM-680)
+- 2025-12-02: Added production deployment runbook with Doppler config steps

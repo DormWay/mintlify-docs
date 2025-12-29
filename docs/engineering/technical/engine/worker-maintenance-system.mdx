@@ -1,0 +1,442 @@
+---
+title: "Worker Maintenance System"
+description: "The Worker Maintenance System is a comprehensive solution for managing, monitoring, and maintaining the health of thousands of long-running StudentWatcher wo..."
+---
+
+# StudentWatcher Worker Maintenance System
+
+## Overview
+
+The Worker Maintenance System is a comprehensive solution for managing, monitoring, and maintaining the health of thousands of long-running StudentWatcher workflows in the DormWay platform. It ensures that every student's digital twin remains active and healthy, automatically recovering from failures and gracefully handling code deployments.
+
+## Architecture
+
+### Components
+
+1. **Maintenance Activities** (`workerMaintenance.activities.ts`)
+   - Health monitoring functions
+   - Batch restart operations
+   - Worker lifecycle management
+
+2. **Maintenance Workflow** (`workerMaintenance.workflow.ts`)
+   - Long-running workflow that continuously monitors system health
+   - Performs scheduled maintenance at configurable intervals
+   - Handles deployment restarts
+
+3. **Database Schema** (Migration 031)
+   - `workflow_health_checks` - Tracks workflow health status
+   - `workflow_maintenance_log` - Audit log of all operations
+   - `maintenance_reports` - Summary reports of maintenance cycles
+
+4. **API Endpoints** (`worker-maintenance-routes.ts`)
+   - RESTful API for admin operations
+   - Real-time statistics and monitoring
+   - Manual intervention capabilities
+
+5. **Admin Dashboard** (React components)
+   - Visual monitoring of worker health
+   - One-click restart capabilities
+   - Historical analytics
+
+## Key Features
+
+### 🔍 Health Monitoring
+- Periodic health checks every 30 minutes (configurable)
+- Detects failed, terminated, or missing workflows
+- Identifies workflows approaching Temporal history limits
+- Tracks execution time and resource usage
+
+### 🔄 Automatic Recovery
+- Auto-restarts failed workers
+- Handles continue-as-new for workflows approaching history limits
+- Starts missing workers for new students
+- Stops workers for inactive students
+
+### 🚀 Deployment Management
+- Batch restart all workers with new code
+- Zero-downtime deployments
+- Progress tracking and reporting
+- Rollback capabilities
+
+### 📊 Analytics & Reporting
+- Real-time worker statistics
+- Historical trend analysis
+- Issue identification and prioritization
+- Performance metrics
+
+## Database Schema
+
+### workflow_health_checks
+```sql
+CREATE TABLE workflow_health_checks (
+    workflow_id VARCHAR(255) PRIMARY KEY,
+    student_id UUID NOT NULL,
+    status VARCHAR(20) NOT NULL, -- running, failed, terminated, completed, unknown
+    last_heartbeat TIMESTAMPTZ,
+    start_time TIMESTAMPTZ,
+    execution_seconds INTEGER,
+    history_length INTEGER,
+    continue_as_new_suggested BOOLEAN DEFAULT FALSE,
+    error TEXT,
+    checked_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ
+);
+```
+
+### workflow_maintenance_log
+```sql
+CREATE TABLE workflow_maintenance_log (
+    id UUID PRIMARY KEY,
+    workflow_id VARCHAR(255) NOT NULL,
+    student_id UUID,
+    action VARCHAR(50) NOT NULL, -- start, restart, stop, cancel, terminate
+    reason VARCHAR(100),
+    success BOOLEAN NOT NULL,
+    error TEXT,
+    metadata JSONB,
+    created_at TIMESTAMPTZ
+);
+```
+
+### maintenance_reports
+```sql
+CREATE TABLE maintenance_reports (
+    id UUID PRIMARY KEY,
+    report_type VARCHAR(50) NOT NULL,
+    total_workers INTEGER,
+    healthy_workers INTEGER,
+    unhealthy_workers INTEGER,
+    restarted_workers INTEGER,
+    started_workers INTEGER,
+    stopped_workers INTEGER,
+    failed_restarts TEXT[],
+    recommendations TEXT[],
+    duration_seconds INTEGER,
+    metadata JSONB,
+    created_at TIMESTAMPTZ
+);
+```
+
+## API Endpoints
+
+### Worker Statistics
+```http
+GET /api/admin/worker-stats
+```
+Returns current worker health statistics and recent maintenance reports.
+
+**Response:**
+```json
+{
+  "success": true,
+  "stats": {
+    "total_students": 5000,
+    "workflows_running": 4850,
+    "workflows_healthy": 4800,
+    "workflows_unhealthy": 50,
+    "workflows_missing": 150,
+    "workflows_need_refresh": 10,
+    "avg_execution_hours": 72.5,
+    "max_execution_hours": 168,
+    "avg_history_length": 25000,
+    "max_history_length": 49000
+  },
+  "recentReports": [...]
+}
+```
+
+### Trigger Health Check
+```http
+POST /api/admin/worker-maintenance/health-check
+```
+Manually triggers a health check across all workers.
+
+### Restart Workers
+```http
+POST /api/admin/worker-maintenance/restart
+```
+**Body:**
+```json
+{
+  "studentIds": ["uuid1", "uuid2"],  // Optional: specific students
+  "forceRestart": false,              // Force restart healthy workers
+  "dryRun": false,                    // Simulation mode
+  "maxWorkers": 100                   // Batch size limit
+}
+```
+
+### Full Maintenance Cycle
+```http
+POST /api/admin/worker-maintenance/full
+```
+Performs complete maintenance: health check, restart unhealthy, start missing, stop inactive.
+
+### Deployment Restart
+```http
+POST /api/admin/worker-maintenance/deployment-restart
+```
+**Body:**
+```json
+{
+  "reason": "v2.0.1 deployment",
+  "maxWorkers": 10000,
+  "batchSize": 100
+}
+```
+
+### Start Maintenance Workflow
+```http
+POST /api/admin/worker-maintenance/start
+```
+**Body:**
+```json
+{
+  "checkInterval": 30,           // Minutes between health checks
+  "batchSize": 100,              // Workers per batch
+  "continueAsNewThreshold": 50000, // History event limit
+  "autoRestart": true            // Auto-restart unhealthy workers
+}
+```
+
+### Individual Worker Management
+```http
+GET /api/admin/worker/{studentId}
+POST /api/admin/worker/{studentId}/restart
+```
+
+## Deployment Process
+
+### 1. Pre-Deployment
+```bash
+# Check current worker health
+curl localhost:3001/api/admin/worker-stats
+
+# Optional: Dry run to see what would happen
+./scripts/deployment-worker-restart.sh --dry-run
+```
+
+### 2. During Deployment
+```bash
+# In your CI/CD pipeline or deployment script
+make deploy
+
+# Restart all workers with new code
+./scripts/deployment-worker-restart.sh \
+  --reason "v2.0.1 deployment" \
+  --batch-size 100 \
+  --max-workers 10000
+```
+
+### 3. Post-Deployment Verification
+```bash
+# Check worker health after restart
+curl localhost:3001/api/admin/worker-stats
+
+# View any failed restarts
+curl localhost:3001/api/admin/workers-needing-attention
+```
+
+## Maintenance Workflow Configuration
+
+The maintenance workflow runs continuously with the following default settings:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `checkIntervalMinutes` | 30 | Minutes between health checks |
+| `batchSize` | 100 | Workers processed per batch |
+| `continueAsNewThreshold` | 50000 | History events before refresh |
+| `autoRestartUnhealthy` | true | Automatically restart failed workers |
+| `deploymentRestartEnabled` | true | Allow deployment restarts |
+
+### Daily Schedule
+- **3:00 AM**: Full maintenance cycle (health check, cleanup, optimization)
+- **Every 30 minutes**: Health check and auto-recovery
+- **Midnight**: Workflow continues-as-new to reset state
+
+## Monitoring & Alerts
+
+### Key Metrics to Monitor
+
+1. **Worker Health Ratio**
+   - Healthy workers / Total workers
+   - Alert if < 95%
+
+2. **Missing Workers**
+   - Active students without workflows
+   - Alert if > 1% of total students
+
+3. **History Length**
+   - Workers approaching 50k event limit
+   - Alert if > 10 workers need refresh
+
+4. **Restart Failures**
+   - Workers that failed to restart
+   - Alert on any deployment restart failures
+
+### Database Queries for Monitoring
+
+```sql
+-- Current worker health summary
+SELECT * FROM get_workflow_health_stats();
+
+-- Workers needing immediate attention
+SELECT * FROM get_workflows_needing_attention()
+WHERE priority = 1;
+
+-- Recent maintenance operations
+SELECT * FROM maintenance_reports
+WHERE created_at > NOW() - INTERVAL '24 hours'
+ORDER BY created_at DESC;
+
+-- Failed restart attempts
+SELECT student_id, error, COUNT(*) as failure_count
+FROM workflow_maintenance_log
+WHERE success = false
+  AND created_at > NOW() - INTERVAL '1 hour'
+GROUP BY student_id, error
+ORDER BY failure_count DESC;
+```
+
+## Troubleshooting
+
+### Common Issues
+
+#### 1. Workers Not Starting
+**Symptoms:** Students show as having missing workflows
+**Solution:**
+```bash
+# Check if student is active
+psql -c "SELECT id, is_active, email FROM accounts WHERE id = 'STUDENT_ID'"
+
+# Manually start worker
+curl -X POST localhost:3001/api/admin/worker/STUDENT_ID/restart
+```
+
+#### 2. High History Length
+**Symptoms:** Workers showing "needs_refresh" status
+**Solution:**
+```bash
+# Trigger batch restart for affected workers
+curl -X POST localhost:3001/api/admin/worker-maintenance/restart \
+  -d '{"forceRestart": false, "maxWorkers": 100}'
+```
+
+#### 3. Deployment Restart Timeout
+**Symptoms:** Deployment script times out
+**Solution:**
+```bash
+# Increase timeout or reduce batch size
+./scripts/deployment-worker-restart.sh \
+  --batch-size 50 \
+  --max-workers 5000
+```
+
+#### 4. Maintenance Workflow Not Running
+**Symptoms:** No recent health checks
+**Solution:**
+```bash
+# Start the maintenance workflow
+curl -X POST localhost:3001/api/admin/worker-maintenance/start
+
+# Check status
+curl localhost:3001/api/admin/worker-maintenance/status
+```
+
+## Best Practices
+
+### 1. Deployment Strategy
+- Always run health check before deployment
+- Use smaller batch sizes during peak hours
+- Monitor the first batch before proceeding
+- Keep deployment restart logs for audit
+
+### 2. Resource Management
+- Limit concurrent restarts to prevent overwhelming Temporal
+- Use exponential backoff for retry logic
+- Monitor database connection pool during batch operations
+
+### 3. Monitoring
+- Set up alerts for critical thresholds
+- Review maintenance reports daily
+- Track trends in worker health over time
+- Document any manual interventions
+
+### 4. Testing
+- Test deployment restart in staging first
+- Verify health check queries performance
+- Load test batch restart operations
+- Practice rollback procedures
+
+## Security Considerations
+
+1. **Access Control**
+   - All maintenance endpoints require admin authentication
+   - Audit log tracks who triggered operations
+   - Sensitive student data is not exposed
+
+2. **Rate Limiting**
+   - Batch operations are throttled
+   - API endpoints have rate limits
+   - Database queries use connection pooling
+
+3. **Data Privacy**
+   - Worker IDs are hashed
+   - Error messages sanitized
+   - Logs exclude sensitive information
+
+## Performance Optimization
+
+### Database Indexes
+All critical queries are optimized with indexes:
+- `workflow_id` for quick lookups
+- `student_id` for student-specific queries
+- `checked_at` for time-based queries
+- `status` for filtering by health state
+
+### Batch Processing
+- Process workers in configurable batch sizes
+- Use Promise.allSettled for resilience
+- Implement progress tracking
+- Add delays between batches
+
+### Caching
+- Cache health statistics for 1 minute
+- Store recent maintenance reports
+- Use database views for complex queries
+
+## Future Enhancements
+
+1. **Machine Learning**
+   - Predict worker failures before they occur
+   - Optimize restart timing based on patterns
+   - Identify problematic code deployments
+
+2. **Auto-Scaling**
+   - Dynamic batch sizes based on system load
+   - Automatic resource allocation
+   - Load balancing across Temporal workers
+
+3. **Advanced Analytics**
+   - Worker lifetime analysis
+   - Cost optimization recommendations
+   - Performance regression detection
+
+4. **Integration**
+   - Slack/Discord notifications
+   - PagerDuty alerts
+   - Grafana dashboards
+   - DataDog metrics
+
+## Support
+
+For issues or questions:
+1. Check the troubleshooting section
+2. Review recent maintenance reports
+3. Contact the platform team
+4. File an issue in the repository
+
+## License
+
+Copyright (c) 2025 DormWay Platform
+Internal use only - Proprietary and confidential

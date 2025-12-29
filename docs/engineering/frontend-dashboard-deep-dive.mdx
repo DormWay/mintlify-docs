@@ -1,0 +1,52 @@
+---
+title: "Frontend Dashboard Deep Dive"
+description: "1. Cold start: Service fetch → 200 with ETag → Store saves snapshot + ETag → Coordinator applies → Grid renders. 2. Subsequent fetch: `If-None-Match` → 304 →..."
+---
+
+# Frontend Dashboard Deep Dive
+
+## Overview
+- Source of truth: `DashboardStore` holds per-tab snapshots (`widgets`, `placements`, `etag`, `status`).
+- Data path: `/dashboard/v1/composite` (header ETag) → Store → Coordinator + GridEngine.
+- Realtime: Ably widget operations via `RealtimeClientAdapter`; delta pipeline (`{baseEtag, seq, ops}`) staged for future rollout.
+- Edit: Home read-only; Campus/Me editable when tab `.ready` + user authenticated.
+- App auth (mobile): API requests are signed with app-level HMAC (shadow → enforce). Headers: `X‑App‑Signature`, `X‑App‑Timestamp`, `X‑App‑Key‑Id`, `X‑App‑Sig‑V`, optional `X‑App‑Nonce`. Server string‑to‑sign is `timestamp\nMETHOD\npathWithQuery\nbodySha256Hex`.
+
+## Key Files (clickable paths)
+- Store: `ios-clean/Core/Services/DashboardStore.swift:1`
+- Realtime: `ios-clean/Core/Services/DashboardStoreAdapters.swift:463` (RealtimeClientAdapter)
+- Service (v1): `ios-clean/Packages/DWServices/Sources/DWServices/DashboardService.swift:427`
+- Coordinator: `ios-clean/Packages/DWDashboard/Sources/DWDashboard/Coordinators/DashboardCoordinator.swift:31`
+- Grid engine: `ios-clean/Packages/DWDashboard/Sources/DWDashboard/Views/FlexibleGridView.swift:1`
+- Mappers: `ios-clean/Packages/DWWidgets/Sources/DWWidgets/Core/DataMappers/BackendDataMappers.swift:34`
+- Actions: `ios-clean/Core/Services/WidgetActionExecutor.swift:9`
+
+## State Flow
+1. Cold start: Service fetch → 200 with ETag → Store saves snapshot + ETag → Coordinator applies → Grid renders.
+2. Subsequent fetch: `If-None-Match` → 304 → Store reuses snapshot; no churn.
+3. Realtime: Ably widget operations → RealtimeClientAdapter → Store.handleRealtimeOp() → Coordinator updates grid.
+4. Resync: Operation conflicts → Store triggers refresh; Coordinator re-applies snapshot.
+
+## Guardrails
+- ETag: No local hashes. If missing, apply without dedupe and warn.
+- Edit gating: Home read-only; Campus/Me editable only when `.ready` + authenticated.
+- Dev mocks: DEBUG + feature flag only; hard-off in release.
+- Realtime: RealtimeClientAdapter subscribes to widget operations; delta pipeline (DashboardRealtimeManager) staged.
+
+## QA Scripts
+- Cold start: Expect 200 then 304; no redraws on 304.
+- Realtime: Publish `upsert`, then `remove` → UI updates within 250–500ms.
+- Edit: Home shows read‑only; Campus/Me edit works; layout persists on relaunch.
+- Auth: Logout → login → edit available after tab `.ready`.
+
+## Feature Flags
+- Dev widget mocks: `AppFeatureFlags.edevWidgetMocking` (DEBUG only).
+- Mapper strictness/logging: Sentry breadcrumbs on drops.
+
+## References
+- Architecture (refined): `obsidian-vault/DormWay/Engineering/Architecture/Dashboard_Architecture_Refined.md:13`
+- Widget System: `obsidian-vault/DormWay/Engineering/Architecture/DormWay Widget System.md:1`
+- Widget Implementation: `obsidian-vault/DormWay/Engineering/Technical/Widget System/Widget Implementation Guide.md:11`
+- FE/BE Contracts: `obsidian-vault/DormWay/Engineering/FE-BE-Contracts.md:17`
+- HMAC Spec (server): `dormway-platform/services/api-router/src/middleware/app-hmac-v2.ts:1`
+- iOS signer: `ios-clean/Core/Security/AppHMACSigner.swift:1`

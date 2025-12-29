@@ -1,0 +1,69 @@
+---
+title: "2025 07 20 Ably Channel Separation Bug"
+description: "Development and production Ably relay services are using the same channel names, causing dev receivers to intercept production telemetry data. This creates d..."
+---
+
+# 2025-07-20 Ably Channel Separation Bug
+
+## Issue
+Development and production Ably relay services are using the same channel names, causing dev receivers to intercept production telemetry data. This creates data pollution and potential processing conflicts.
+
+## Current Behavior
+- Both dev and prod use the same channel: `telemetry` (defined in `ABLY_TELEMETRY_CHANNEL`)
+- Dev receivers are picking up and processing production telemetry messages
+- This can cause duplicate processing or incorrect routing of events
+
+## Impact
+- Production telemetry may be processed by development workers
+- Development testing can interfere with production data flow
+- Difficult to isolate environments for testing
+- Potential data privacy concerns with dev accessing prod telemetry
+
+## Root Cause
+The Ably channel names are hardcoded in `.env.example`:
+```
+ABLY_TELEMETRY_CHANNEL=telemetry
+```
+
+Both environments use the same channel name without environment-specific prefixing.
+
+## Proposed Solution
+1. Add environment-specific channel prefixes:
+   - Development: `dev-telemetry`
+   - Production: `prod-telemetry`
+   
+2. Update configuration to include environment in channel name:
+   ```typescript
+   // src/config/index.ts
+   const environment = process.env.NODE_ENV || 'development';
+   const channelPrefix = environment === 'production' ? 'prod' : 'dev';
+   
+   export const config = {
+     ably: {
+       telemetryChannel: process.env.ABLY_TELEMETRY_CHANNEL || `${channelPrefix}-telemetry`,
+       presenceChannel: process.env.ABLY_PRESENCE_CHANNEL || `${channelPrefix}-presence`
+     }
+   }
+   ```
+
+3. Alternative: Use separate Ably apps for dev/prod (more secure but requires separate API keys)
+
+## Temporary Workaround
+Set different `ABLY_TELEMETRY_CHANNEL` values in Doppler/Railway:
+- Development: `ABLY_TELEMETRY_CHANNEL=dev-telemetry`
+- Production: `ABLY_TELEMETRY_CHANNEL=prod-telemetry`
+
+## Files to Update
+- `/src/config/index.ts` - Add environment prefixing logic
+- `.env.example` - Document the channel naming convention
+- Doppler/Railway configs - Update channel names for each environment
+
+## Priority
+**HIGH** - This is affecting production data flow and needs immediate attention.
+
+## Related Configuration
+- `TEMPORAL_NAMESPACE` is already environment-specific
+- Need to ensure Ably channels follow the same pattern
+
+## Tags
+#bug #production #ably #infrastructure #high-priority

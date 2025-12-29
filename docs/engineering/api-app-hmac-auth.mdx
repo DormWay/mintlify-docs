@@ -1,0 +1,89 @@
+---
+title: "API – App HMAC Authentication (Mobile Routes)"
+description: "timestamp\\nMETHOD\\npathWithQuery\\nbodySha256Hex"
+---
+
+# API – App HMAC Authentication (Mobile Routes)
+
+## Summary (current state)
+- Mobile and anonymous API routes are protected by an app-level HMAC signature, rolled out in phases:
+  - `APP_HMAC_MODE=off|shadow|enforce` (shadow = verify/log only; enforce = reject on failure).
+  - Applied to `/v1/mobile/*` and `/v1/calendar/*`.
+- iOS client signs requests using exact raw body bytes. Server verifies with skew and TTL checks, plus replay protection.
+- Server provides `/time` for client skew calibration and `/metrics` to expose verification counters/histograms.
+
+## Headers (client → server)
+- `X-App-Signature`: Base64(HMAC-SHA256)
+- `X-App-Timestamp`: Epoch seconds
+- `X-App-Key-Id`: Key identifier (rotation support)
+- `X-App-Sig-V`: Signature version (currently `1`)
+- `X-App-Nonce` (optional): Random nonce for replay protection on safe methods
+
+## String to sign
+```
+timestamp\nMETHOD\npathWithQuery\nbodySha256Hex
+```
+- METHOD uppercased; path+query exactly as sent (no fragment), raw body bytes hashed with SHA‑256 (hex).
+- GET/HEAD bodies are empty; body hash is SHA‑256 of zero‑length data.
+
+## Server behavior
+- Skew: reject if `timestamp` is more than `APP_HMAC_MAX_SKEW_SECS` in the future (default 60s).
+- TTL: reject if request age exceeds `APP_HMAC_TTL_SECS` (default 300s).
+- Replay: block repeated `(kid, ts, method, path)` for mutating methods; if `X-App-Nonce` is present, include it in the replay key (allows parallel idempotent requests).
+- Errors: 401 for missing/bad signature/expired; 403 for future skew or replay. Adds `WWW-Authenticate: HMAC-SHA256 realm="app", version="1"`.
+
+## Endpoints
+- `/time`: `{ epoch, iso }` with `Cache-Control: no-store` for skew calibration.
+- `/metrics`: Prometheus-like text exposition for HMAC counters/histograms (guard via `METRICS_ENABLED`).
+
+## iOS client
+- Signer: `ios-clean/Core/Security/AppHMACSigner.swift`
+- Injection: `AuthService.initialize(apiService:)` wires a request decorator into `DWNetworking.APIService` to sign requests (uses `APP_SIGNING_KEY` from Info.plist; hex-encoded).
+
+## Rollout
+1. Shadow: enable `APP_HMAC_MODE=shadow` → observe metrics/logs.
+2. Targeted enforce: switch to `enforce` for a narrow subset of write routes; keep the rest in shadow.
+3. Broad enforce: expand coverage once verified rate is stable; keep GETs optional‑nonce.
+
+## Observability
+- Counters: `hmac_verify_total{mode,result,reason,route_group,method,ver}`, `hmac_shadow_total{verified,route_group}`
+- Histograms: `hmac_verify_latency_ms`, `hmac_request_skew_seconds`
+
+## References
+- Middleware (server): `dormway-platform/services/api-router/src/middleware/app-hmac-v2.ts:1`
+- Metrics: `dormway-platform/services/api-router/src/metrics/hmac-metrics.ts:1`
+- Router wiring: `dormway-platform/services/api-router/src/routes/index.ts:1`
+- iOS signer: `ios-clean/Core/Security/AppHMACSigner.swift:1`
+- APIService decorator: `ios-clean/Packages/DWNetworking/Sources/DWNetworking/APIService.swift:1`
+
+---
+
+## Legacy vs v1 (comparison + migration plan)
+
+Why v1 is better (brief):
+- Binary‑safe: signs SHA‑256 of raw body bytes (works for JSON/form/binary), not a re‑encoded body string.
+- Safer ops: built‑in TTL/skew checks and replay protection (nonce) on mutating methods.
+- Evolvable: explicit `X‑App‑Sig‑V` and `X‑App‑Key‑Id` for versioning and rotation.
+
+Side‑by‑side (legacy AppAuthService vs v1 HMACSigner):
+- Canonical string
+  - Legacy: `ts:method:path:bodyString` (ms ts, hex MAC)
+  - v1: `timestamp\nMETHOD\npathWithQuery\nbodySha256Hex` (sec ts, Base64 MAC)
+- Headers
+  - Legacy: `X‑App‑Signature` + optional `X‑App‑Version`/`X‑App‑Platform`
+  - v1: `X‑App‑Signature`, `X‑App‑Timestamp`, `X‑App‑Key‑Id`, `X‑App‑Sig‑V`, optional `X‑App‑Nonce`
+- Replay
+  - Legacy: none specified
+  - v1: Redis nonce guard for mutating methods; optional nonce on safe methods
+
+Decision (no replacement required):
+- Keep `AppAuthService` as the single client API. Internally, delegate to v1 signing (or call `AppHMACSigner`) so the external surface stays unchanged.
+- Optionally accept both on the server during migration (v0 when `X‑App‑Sig‑V` missing; v1 when present), then deprecate v0.
+
+Client integration pattern:
+1) `AuthService.initialize(apiService:)` installs a request decorator that signs every request just before send.
+2) `AppAuthService` may still expose its helpers, but should compute the v1 headers (or call `AppHMACSigner`) to avoid divergence.
+
+Server compatibility notes:
+- HMAC is framed for `/v1/mobile/*` and `/v1/calendar/*` (shadow → enforce). Keep `/time` for skew and `/metrics` for visibility.
+- Capture raw bodies for JSON/urlencoded/text and binary; ensure `application/octet‑stream` uses `express.raw()` so raw bytes are signed/verified consistently.

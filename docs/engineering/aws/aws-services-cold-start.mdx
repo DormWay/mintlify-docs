@@ -1,0 +1,337 @@
+---
+title: "AWS Services Cold Start"
+description: "Since DormWay is prelaunch, we can implement AWS services (Aurora + S3) cleanly without any data migration. This simplifies our approach significantly."
+---
+
+# AWS Services Cold Start Implementation
+
+## Overview
+Since DormWay is prelaunch, we can implement AWS services (Aurora + S3) cleanly without any data migration. This simplifies our approach significantly.
+
+## Current Status - ✅ MIGRATION COMPLETE (August 13, 2025)
+
+### ✅ Completed
+- Aurora Serverless v2 deployed and operational
+- RDS Proxy configured and working
+- VPC and networking fully set up
+- Bastion host for secure access
+- All API Router connections to Aurora working
+- S3 buckets created and configured
+- CloudFront CDN integrated and operational
+- All Supabase database code removed
+- File upload/download flows via S3 operational
+- Production deployment verified and stable
+
+## Implementation Plan
+
+### Phase 1: Complete Aurora Setup (This Week)
+
+#### 1. Fix Remaining Issues
+- Complete any pending Aurora connection issues
+- Test all endpoints in production
+- Ensure RDS Proxy is working correctly
+
+#### 2. Remove Supabase Database Code
+```bash
+# In API Router
+npm uninstall @supabase/supabase-js
+
+# Remove Supabase client initialization
+rm src/services/supabase.ts
+```
+
+#### 3. Update All Database Queries
+Since we're already using Aurora, just ensure all services use the Aurora connection:
+
+```typescript
+// src/services/db.ts
+import { auroraDb } from './auroraDb';
+
+// Use throughout the app
+export const db = auroraDb;
+```
+
+### Phase 2: S3 Setup (Next Week)
+
+#### 1. Create S3 Buckets (Terraform)
+```hcl
+# terraform/s3.tf
+resource "aws_s3_bucket" "uploads" {
+  bucket = "dormway-uploads-${var.environment}"
+  
+  tags = {
+    Name        = "DormWay Uploads"
+    Environment = var.environment
+  }
+}
+
+resource "aws_s3_bucket_public_access_block" "uploads" {
+  bucket = aws_s3_bucket.uploads.id
+  
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_cors_configuration" "uploads" {
+  bucket = aws_s3_bucket.uploads.id
+  
+  cors_rule {
+    allowed_headers = ["*"]
+    allowed_methods = ["GET", "PUT", "POST"]
+    allowed_origins = [
+      "https://app.dormway.app",
+      "http://localhost:3000",
+      "capacitor://localhost"
+    ]
+    expose_headers  = ["ETag"]
+    max_age_seconds = 3000
+  }
+}
+```
+
+#### 2. CloudFront CDN
+```hcl
+# terraform/cloudfront.tf
+resource "aws_cloudfront_distribution" "cdn" {
+  enabled = true
+  
+  origin {
+    domain_name = aws_s3_bucket.uploads.bucket_regional_domain_name
+    origin_id   = "S3-uploads"
+    
+    s3_origin_config {
+      origin_access_identity = aws_cloudfront_origin_access_identity.cdn.cloudfront_access_identity_path
+    }
+  }
+  
+  default_cache_behavior {
+    allowed_methods  = ["GET", "HEAD"]
+    cached_methods   = ["GET", "HEAD"]
+    target_origin_id = "S3-uploads"
+    
+    viewer_protocol_policy = "redirect-to-https"
+    compress               = true
+    
+    default_ttl = 86400
+    max_ttl     = 31536000
+  }
+  
+  aliases = ["cdn.dormway.app"]
+  
+  viewer_certificate {
+    acm_certificate_arn = aws_acm_certificate_validation.cert.certificate_arn
+    ssl_support_method  = "sni-only"
+  }
+}
+```
+
+### Phase 3: Implement S3 in Services
+
+#### API Router S3 Service
+```typescript
+// src/services/s3.ts
+import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+
+const s3 = new S3Client({ region: process.env.AWS_REGION });
+
+export async function getUploadUrl(key: string, contentType: string) {
+  const command = new PutObjectCommand({
+    Bucket: process.env.S3_BUCKET,
+    Key: key,
+    ContentType: contentType
+  });
+  
+  return getSignedUrl(s3, command, { expiresIn: 3600 });
+}
+
+// src/routes/upload.ts
+router.post('/upload/url', checkJwt, async (req, res) => {
+  const { filename, contentType } = req.body;
+  const userId = req.auth.payload.sub;
+  
+  const key = `uploads/${userId}/${Date.now()}-${filename}`;
+  const uploadUrl = await getUploadUrl(key, contentType);
+  
+  res.json({
+    uploadUrl,
+    fileUrl: `${process.env.CDN_URL}/${key}`
+  });
+});
+```
+
+#### iOS S3 Upload
+```swift
+// S3Service.swift
+class S3Service {
+    func uploadFile(data: Data, filename: String, contentType: String) async throws -> String {
+        // Get presigned URL
+        let response = try await api.getUploadUrl(
+            filename: filename,
+            contentType: contentType
+        )
+        
+        // Upload to S3
+        var request = URLRequest(url: URL(string: response.uploadUrl)!)
+        request.httpMethod = "PUT"
+        request.setValue(contentType, forHTTPHeaderField: "Content-Type")
+        request.httpBody = data
+        
+        let (_, httpResponse) = try await URLSession.shared.data(for: request)
+        
+        guard (httpResponse as? HTTPURLResponse)?.statusCode == 200 else {
+            throw UploadError.failed
+        }
+        
+        return response.fileUrl
+    }
+}
+```
+
+## Environment Variables Update
+
+### Remove Supabase Variables
+```env
+# Remove all of these
+SUPABASE_URL=
+SUPABASE_ANON_KEY=
+SUPABASE_SERVICE_KEY=
+NEXT_PUBLIC_SUPABASE_URL=
+NEXT_PUBLIC_SUPABASE_ANON_KEY=
+```
+
+### Add AWS Variables
+```env
+# S3 and CloudFront
+AWS_REGION=us-east-1
+S3_BUCKET=dormway-uploads-prod
+CDN_URL=https://cdn.dormway.app
+
+# Aurora (already added)
+AURORA_DB_HOST=xxx
+AURORA_DB_PORT=5432
+AURORA_DB_NAME=dormway
+AURORA_DB_USER=dormway_admin
+AURORA_DB_PASSWORD=xxx
+AURORA_PROXY_HOST=xxx
+```
+
+## Database Schema (Fresh Start)
+
+Since we're starting fresh, here's the clean schema without any Supabase artifacts:
+
+```sql
+-- Enable extensions
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+
+-- Users table (simplified, Auth0 handles auth)
+CREATE TABLE users (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    auth0_id VARCHAR(255) UNIQUE NOT NULL,
+    email VARCHAR(255) UNIQUE NOT NULL,
+    name VARCHAR(255),
+    avatar_url TEXT,
+    preferences JSONB DEFAULT '{}',
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Uploads table
+CREATE TABLE uploads (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES users(id),
+    file_url TEXT NOT NULL,
+    file_name VARCHAR(255),
+    file_size INTEGER,
+    content_type VARCHAR(100),
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Add other tables as needed...
+
+-- Indexes
+CREATE INDEX idx_users_auth0_id ON users(auth0_id);
+CREATE INDEX idx_users_email ON users(email);
+CREATE INDEX idx_uploads_user_id ON uploads(user_id);
+```
+
+## Testing Approach
+
+### 1. Aurora Testing
+```bash
+# Test connection
+curl https://api.dormway.app/aurora/test
+
+# Test query
+curl https://api.dormway.app/aurora/health
+```
+
+### 2. S3 Testing
+```bash
+# Get upload URL
+curl -X POST https://api.dormway.app/upload/url \
+  -H "Authorization: Bearer TOKEN" \
+  -d '{"filename": "test.jpg", "contentType": "image/jpeg"}'
+
+# Upload file
+curl -X PUT "PRESIGNED_URL" \
+  -H "Content-Type: image/jpeg" \
+  --data-binary @test.jpg
+```
+
+## Deployment Checklist - ✅ ALL COMPLETE
+
+### Week 1 ✅
+- [x] Complete Aurora testing
+- [x] Remove all Supabase database code
+- [x] Deploy S3 buckets via Terraform
+- [x] Set up CloudFront distribution
+
+### Week 2 ✅
+- [x] Implement S3 upload endpoints
+- [x] Update iOS app for S3 uploads
+- [x] Full integration testing
+- [x] Performance testing
+
+### Launch ✅
+- [x] Verify all services connected
+- [x] Monitor CloudWatch metrics
+- [x] Check error rates
+- [x] Celebrate! 🎉
+
+## Next Focus
+With AWS services fully migrated and operational, development focus shifts to:
+- **StudentWatcher Digital Twin implementation**
+- Proactive orchestration workflows
+- Context-aware experiences
+
+## Benefits of Cold Start
+
+1. **No Migration Complexity** - Start with clean, optimized schema
+2. **Modern Architecture** - Use best practices from day one
+3. **Cost Optimized** - Right-size resources for actual usage
+4. **Performance Focused** - Design for scale from the beginning
+5. **Zero Downtime** - No migration windows needed
+
+## Cost Estimates (Monthly)
+
+### Aurora Serverless v2
+- Minimum: ~$45 (0.5 ACU)
+- Expected: ~$90 (1 ACU average)
+- Auto-scales with usage
+
+### S3 + CloudFront
+- Storage: ~$5 (first 100GB)
+- CDN: ~$10 (first TB transfer)
+- Requests: ~$5
+
+### Total: ~$100-150/month initially
+
+Much more cost-effective than Supabase's $25/month minimum + usage!
+
+---
+
+*Starting fresh with AWS services gives us a solid, scalable foundation without any technical debt from migrations.*

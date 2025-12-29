@@ -1,0 +1,219 @@
+---
+title: "GraphQL pg_graphql Setup"
+description: "DormWay uses Neon's `pg_graphql` extension to auto-generate a GraphQL API directly from the PostgreSQL schema. This provides instant GraphQL without maintain..."
+---
+
+# GraphQL via pg_graphql (Neon)
+
+> **Status**: Enabled (v1.5.11) - NOT production-ready until RLS implemented
+> **Linear Issue**: DORM-680 - Implement Row-Level Security (RLS) + GraphQL API
+
+## Overview
+
+DormWay uses Neon's `pg_graphql` extension to auto-generate a GraphQL API directly from the PostgreSQL schema. This provides instant GraphQL without maintaining separate schema definitions or resolvers.
+
+## Current State
+
+- **Extension**: `pg_graphql v1.5.11` enabled
+- **Security**: NO RLS policies yet - all tables exposed with full read access
+- **Endpoint**: Via `graphql.resolve()` SQL function (no HTTP endpoint configured)
+
+## How It Works
+
+pg_graphql introspects your database schema and generates:
+- **Query types** for each table (e.g., `accountsCollection`)
+- **Filter types** for WHERE clauses
+- **Connection types** for pagination (Relay-style)
+- **Mutation types** for INSERT/UPDATE/DELETE
+
+### Querying via SQL
+
+```sql
+-- Basic query
+SELECT graphql.resolve($$
+  query {
+    accountsCollection(first: 10) {
+      edges {
+        node {
+          id
+          email
+          created_at
+        }
+      }
+    }
+  }
+$$);
+
+-- With filtering
+SELECT graphql.resolve($$
+  query {
+    contextsCollection(first: 5, filter: { type: { eq: "campus" } }) {
+      edges {
+        node {
+          id
+          name
+          type
+        }
+      }
+    }
+  }
+$$);
+```
+
+### Available Collections
+
+Key collections auto-generated from our schema:
+
+| Collection | Table | Access Pattern |
+|------------|-------|----------------|
+| `accountsCollection` | accounts | User-scoped |
+| `contextsCollection` | contexts | Hierarchical |
+| `context_dependenciesCollection` | context_dependencies | Graph edges |
+| `service_data_*Collection` | service_data partitions | User + context scoped |
+| `campus_configsCollection` | campus_configs | Public |
+| `city_configsCollection` | city_configs | Public |
+| `tasksCollection` | tasks | User-scoped |
+| `time_blocksCollection` | time_blocks | User-scoped |
+
+## API Integration Pattern
+
+### Planned: GraphQL Proxy Endpoint
+
+```typescript
+// POST /graphql in api-router
+app.post('/graphql', authMiddleware, async (req, res) => {
+  const { query, variables } = req.body;
+  const userId = req.user.id;
+  const contextId = req.user.contextId;
+
+  // Set session variables for RLS
+  const result = await db.query(`
+    SELECT set_config('app.current_user_id', $1, true);
+    SELECT set_config('app.current_context_id', $2, true);
+    SELECT graphql.resolve($3);
+  `, [userId, contextId, query]);
+
+  res.json(JSON.parse(result.rows[0].resolve));
+});
+```
+
+### Session Variables for RLS
+
+Before any GraphQL query, the API must set:
+
+```sql
+SET app.current_user_id = '<uuid>';      -- From JWT
+SET app.current_context_id = '<uuid>';   -- Student's context
+SET app.current_role = 'authenticated';  -- Or 'admin', 'demo'
+```
+
+## Schema Customization
+
+### Hiding Tables from GraphQL
+
+Use PostgreSQL comments to exclude tables:
+
+```sql
+-- Hide entire table
+COMMENT ON TABLE service_credentials IS '@graphql({"totalCount": {"enabled": false}, "primaryKeyColumns": []})';
+
+-- Or use schema-level config
+COMMENT ON SCHEMA graphql IS '@graphql({"inflect_names": true})';
+```
+
+### Tables to Exclude
+
+- `service_credentials` - API keys/secrets
+- `device_keys` - Auth tokens
+- `admin_impersonation_logs` - Audit trail
+- `retool_keys` - Internal tooling
+- `roles`, `role_permissions` - RBAC internals
+
+## Performance Considerations
+
+### Pagination
+
+Always use pagination for collections:
+
+```graphql
+query {
+  accountsCollection(first: 50, after: "cursor...") {
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+    edges {
+      node { id email }
+    }
+  }
+}
+```
+
+### Partition Awareness
+
+For `service_data` queries, filter by `fetched_at` to hit correct partition:
+
+```graphql
+query {
+  service_data_2025_12Collection(
+    filter: { user_id: { eq: "uuid" } }
+    first: 100
+  ) {
+    edges {
+      node { method data fetched_at }
+    }
+  }
+}
+```
+
+## Testing Queries
+
+### Via Doppler + psql
+
+```bash
+cd .repos/dormway-platform
+doppler run -- bash -c 'psql "$DATABASE_URL" -t -c "
+  SELECT graphql.resolve(\$\$
+    query {
+      accountsCollection(first: 3) {
+        edges { node { id email } }
+      }
+    }
+  \$\$);
+"' | python3 -m json.tool
+```
+
+### Introspection Query
+
+```sql
+SELECT graphql.resolve($$
+  query {
+    __schema {
+      queryType {
+        fields { name }
+      }
+    }
+  }
+$$);
+```
+
+## Security Checklist (Pre-Production)
+
+- [ ] RLS policies enabled on all user-scoped tables
+- [ ] Session variable helper functions created
+- [ ] Sensitive tables excluded from GraphQL schema
+- [ ] Rate limiting on GraphQL endpoint
+- [ ] Query complexity/depth limits configured
+- [ ] Introspection disabled in production (optional)
+
+## Related Documentation
+
+- [Row-Level-Security-RLS-Patterns](/docs/engineering/architecture/row-level-security-rls-patterns) - RLS implementation details
+- [Database-Access-Patterns](/docs/engineering/architecture/row-level-security-rls-patterns) - How tables are queried
+- Authentication-Architecture - JWT/session flow
+
+## References
+
+- [pg_graphql Documentation](https://supabase.github.io/pg_graphql/)
+- [Neon GraphQL Guide](https://neon.tech/docs/extensions/pg_graphql)
+- Linear: DORM-680

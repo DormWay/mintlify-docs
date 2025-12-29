@@ -1,0 +1,149 @@
+---
+title: "DEMO_SEED_RUNNING"
+description: "If you see this error:"
+---
+
+# Running the Demo Data Seeding Script
+
+## ❌ Common Error: Database Connection Failed
+
+If you see this error:
+```
+getaddrinfo ENOTFOUND postgres-local
+```
+
+It means the script can't connect to the database. Here's how to fix it:
+
+## ✅ Solution 1: Start Local PostgreSQL Database (Recommended for Development)
+
+The script expects a local PostgreSQL database running in Docker.
+
+### Step 1: Start the Database
+```bash
+cd .repos/dormway-platform
+docker-compose -f infrastructure/docker/docker-compose.local-db.yml up -d
+```
+
+### Step 2: Verify Database is Running
+```bash
+docker ps | grep postgres-local
+```
+
+You should see a container named `dormway-postgres-local` or similar.
+
+### Step 3: Run the Seeding Script
+```bash
+cd services/api-router
+npx ts-node src/scripts/seed-demo-data.ts
+```
+
+## ✅ Solution 2: Use Environment Variables
+
+If you want to connect to a different database (e.g., localhost PostgreSQL):
+
+```bash
+export POSTGRES_HOST=localhost
+export POSTGRES_PORT=5432
+export POSTGRES_DB=dormway
+export POSTGRES_USER=dormway_admin
+export POSTGRES_PASSWORD=localdev_password
+
+cd .repos/dormway-platform/services/api-router
+npx ts-node src/scripts/seed-demo-data.ts
+```
+
+## ✅ Solution 3: Use Aurora Database
+
+If you have Aurora configured:
+
+```bash
+export USE_AURORA=true
+export AURORA_DB_HOST=your-aurora-host
+export AURORA_DB_PORT=5432
+export AURORA_DB_NAME=dormway
+export AURORA_DB_USER=your-user
+export AURORA_DB_PASSWORD=your-password
+
+cd .repos/dormway-platform/services/api-router
+npx ts-node src/scripts/seed-demo-data.ts
+```
+
+## 🔍 Troubleshooting
+
+### Check if Database is Running
+```bash
+# Check Docker containers
+docker ps
+
+# Check if postgres-local container exists
+docker ps | grep postgres
+
+# Check database logs
+docker logs dormway-postgres-local
+```
+
+### Test Database Connection Manually
+```bash
+# Connect to database via Docker
+docker exec -it dormway-postgres-local psql -U dormway_admin -d dormway
+
+# Or if using localhost
+psql -h localhost -p 5432 -U dormway_admin -d dormway
+```
+
+### Verify Demo User Exists
+```bash
+# In psql
+SELECT id, email FROM accounts WHERE LOWER(email) = 'demo@dormway.app';
+```
+
+If the user doesn't exist, you need to:
+1. Create the user in Clerk first (`demo@dormway.app`)
+2. The user should automatically sync to the `accounts` table via Clerk webhook
+
+## 📝 Quick Start (Full Workflow)
+
+```bash
+# 1. Start database
+cd .repos/dormway-platform
+docker-compose -f infrastructure/docker/docker-compose.local-db.yml up -d
+
+# 2. Wait a few seconds for database to be ready
+sleep 5
+
+# 3. Run seeding script
+cd services/api-router
+npx ts-node src/scripts/seed-demo-data.ts
+
+# 4. Verify data was seeded
+docker exec dormway-postgres-local psql -U dormway_admin -d dormway -c "SELECT COUNT(*) FROM contexts WHERE type = 'course';"
+```
+
+## ✅ Success Indicators
+
+When the script runs successfully, you should see:
+```
+Starting demo data seeding...
+Found existing demo user { userId: '...' }
+Found existing student context { contextId: '...' }
+Created course context { course: 'ECON 301', contextId: '...' }
+...
+Seeded assignment { title: '...', courseCode: '...' }
+Seeded schedule events
+Seeded task { title: '...' }
+Demo data seeding completed successfully!
+```
+
+## 🚨 Common Issues
+
+### Issue: "Demo user not found"
+**Solution**: Create `demo@dormway.app` in Clerk first, then wait for webhook sync or manually insert into `accounts` table.
+
+### Issue: "Cannot connect to database"
+**Solution**: 
+- Ensure Docker is running
+- Start the database container
+- Check environment variables are set correctly
+
+### Issue: "Permission denied" or RLS errors
+**Solution**: The script may need to run with admin privileges or bypass RLS. Check if you're using the correct database user with proper permissions.

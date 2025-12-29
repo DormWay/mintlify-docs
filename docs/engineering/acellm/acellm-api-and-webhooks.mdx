@@ -1,0 +1,79 @@
+---
+title: "AceLLM API and Webhooks"
+description: "AceLLM provides a simple, OpenAI-like API for document indexing and querying, backed by Ragie. The Engine and iOS app should use these endpoints exclusively...."
+---
+
+# AceLLM API and Webhooks
+
+AceLLM provides a simple, OpenAI-like API for document indexing and querying, backed by Ragie. The Engine and iOS app should use these endpoints exclusively. Vectara remains only for legacy Braingains chat routes until fully deprecated.
+
+## Partitions and Scopes
+
+- Partitions:
+  - `user:{userId}` – uploader’s personal partition (default)
+  - `course:{courseContextId}` – course-scoped docs (future mirror)
+  - `org:{organizationId}` – institution-level docs
+- Scopes:
+  - Single: `{ type: 'user'|'course'|'org', id }`
+  - Multi: `{ type: 'multi', scopes: [...] }`
+
+## API Endpoints (Router)
+
+Base: `/api/search`
+
+- `POST /query`
+  - Body: `{ q, scope, filters?, limit?, aiPersonality? }`
+  - Returns: `{ answer, sources[], conversationId }`
+  - Notes: For Ragie, `scope` maps to partitions; supports simple key/value filters.
+
+- `POST /documents` (multipart)
+  - Fields: `title`, optional `partition`, optional `documentId`, optional `metadata` (JSON string)
+  - File: `document`
+  - Behavior: Indexes under `user:{userId}`; always injects `userId` in metadata. Returns `{ id, partitionKey, status, metadata }`.
+
+- `DELETE /documents/:id`
+  - Deletes a document by id within the caller’s `user:{userId}` partition.
+
+- `GET /documents`
+  - Query: `limit?`, `cursor?`, additional string filters
+  - Returns: Ragie list response `{ items: [...], nextCursor? }`
+  - Privacy: Always scoped to caller’s `user:{userId}`; ignores any userId in query.
+
+## Webhooks
+
+Mounted under `/webhooks/s3` router alongside Postmark handlers.
+
+- `POST /webhooks/s3/ragie`
+  - Auth: HMAC `sha256` of the raw JSON body with `RAGIE_WEBHOOK_SECRET`. Header: `x-ragie-signature`.
+  - Expected payload: `{ type, partition, documentId, metadata?, timestamp? }`
+  - Actions:
+    - Extract `userId` from `partition` (prefix `user:`) or `metadata.userId`
+    - For `file.indexed|file.updated|file.deleted|sync.completed`, signal Temporal studentWatcher:
+      - Workflow ID: `student-watcher-{userId}`
+      - Signal: `context_update`
+      - Payload: `{ type: 'activity', data: { originalEventType: 'ragie.{type}', documentId, partition, metadata }, timestamp }`
+
+## Environment
+
+- `RAGIE_API_KEY`: Ragie API key
+- `RAGIE_BASE_URL`: Ragie API base URL
+- `RAGIE_WEBHOOK_SECRET`: Secret for verifying webhooks
+
+Optional tuning (defaults shown):
+- `RAGIE_QUERY_PATH=/v1/query`
+- `RAGIE_INDEX_PATH=/v1/documents`
+- `RAGIE_LIST_PATH=/v1/documents`
+- `RAGIE_DELETE_PATH=/v1/documents/:id`
+- `RAGIE_CONNECT_PATH=/v1/connect/start`
+
+## Security/Privacy
+
+- All endpoints require auth; server derives `userId` from JWT.
+- Listing (`GET /documents`) always uses caller’s `user:{userId}` partition and injects `userId` filter server-side.
+- Webhooks verified via HMAC before processing; non-interesting events are ignored.
+
+## Migration Notes
+
+- Engine and iOS should migrate to AceLLM endpoints.
+- Existing Vectara routes (`/braingains`, `/braingains/chat`) remain until fully deprecated.
+- Phase 2: Implement connectors (`/api/search/connect/start`) and complete webhook event coverage.

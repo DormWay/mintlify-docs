@@ -1,0 +1,145 @@
+---
+title: "Dashboard – End-to-End Architecture (Refined)"
+description: "Contract-first dashboard with ETag + Redis snapshots and ID-addressed Ably deltas. iOS `DashboardStore` is the single source of truth; widgets render via gri..."
+---
+
+# Dashboard – End-to-End Architecture (Refined)
+
+## TL;DR
+
+Contract-first dashboard with ETag + Redis snapshots and ID-addressed Ably deltas. iOS `DashboardStore` is the single source of truth; widgets render via grid; actions execute through a centralized executor. Lock and ship five core widgets first with strict mapping and feature flags. Home is backend-curated and read-only; Campus/Me are user-editable.
+
+## Product Goals
+
+- Next Action always useful; Alerts prominent.
+- Calm tone; suggestion-style CTAs; non-alarming empty/error states.
+- Realtime where it matters: deltas apply to store; polling fallback only on outage.
+- Ship small and right: lock 5 core widgets first.
+
+## High-Level Flow
+
+```
+Data → BFF /dashboard/v1/composite → ETag (Redis) → iOS fetch (If-None-Match)
+                           │
+                           └─→ Ably publish dashboard.delta (baseEtag, seq, ops)
+
+iOS
+DI → Services (Networking, Realtime, Analytics, Sentry)
+DashboardStore (SoT) ← 200/304 + ETag; apply(ops) from Ably
+  TabState: widgets[], placements, etag, lastUpdated, status
+GridRenderer (FlexibleGridView) ← DWWidgets mappers → Widget Views
+WidgetActionExecutor (navigate/openURL/refresh; future: focus/calendar)
+```
+
+## Server (Source of Truth)
+
+- Composite:
+  - Path: `/dashboard/v1/composite?tab=…&context=…`
+  - Response: `DashboardCompositeV1` with widget envelopes; header `ETag`.
+  - Cache: Redis keyed by `(user|tab|context)`; 200 → ETag; 304 on match.
+- Diagnostics:
+  - Admin: `/dashboard/v1/diagnostics?userId=…&tab=…&context=…` returns cached `_etag`, recomputed ETag, adjunct mini‑hashes (schedule/weather), and current delta seq counter to speed triage.
+- Deltas (Ably):
+  - Channels: `user:{userId}:dashboard` + `user:{userId}:dashboard:*` (tab-scoped; subscribe-only on user channels).
+  - Payload: `{ type: "dashboard.delta", baseEtag, seq, ops[], version?, ts? }` (optional version/timestamp).
+  - Ops: `{ op: "upsert"|"remove", id, value?: WidgetEnvelope }`.
+  - Coalescing window ~500ms; ≤2 msgs/sec/user; resync on baseEtag/seq mismatch.
+  - Security: clients cannot publish to user channels; `telemetry` publish allowed; `dev-telemetry` publish non‑prod only.
+  - Adjunct hashing: canonicalized schedule/weather summaries are included in the ETag scope so time‑sensitive changes flip 200 even if widget list is unchanged.
+
+References (canonical):
+- BFF v1: `dormway-platform/services/api-router/docs/bff-dashboard-v1.md:11`
+- Deltas: `dormway-platform/services/api-router/docs/realtime-dashboard-deltas.md:8`
+
+## iOS (Single Source of Truth)
+
+- Networking & ETag:
+  - `DWServices.DashboardService.fetchDashboardV1` sends `If-None-Match` and returns `(DashboardCompositeV1, etag?)`.
+  - Store persists `etag` per `(user|tab|context)` and uses it for delta validation.
+- DashboardStore (SoT):
+  - Holds `TabState { snapshot, etag, status, lastRefreshed }`.
+  - `refresh()` handles 200/304; `applyDelta()` validates `{baseEtag, seq}` and applies ops to snapshot; auto‑resync on mismatch/gap.
+  - No parallel widget maps elsewhere.
+- Realtime:
+  - Ably subscription → decode `dashboard.delta` → `DashboardStore.applyDelta(...)`.
+  - Resync on baseEtag/seq mismatch.
+- App authentication:
+  - App‑level HMAC signing on mobile/anonymous routes (shadow → enforce). Client sends headers `X‑App‑Signature`, `X‑App‑Timestamp`, `X‑App‑Key‑Id`, `X‑App‑Sig‑V`, optional `X‑App‑Nonce`.
+  - String to sign: `timestamp\nMETHOD\npathWithQuery\nbodySha256Hex` over the exact raw bytes; server verifies with skew/TTL and replay guard.
+  - Server time: `/time` returns `{ epoch, iso }` with `Cache‑Control: no-store` for skew calibration.
+- Widget pipeline:
+  - Envelope → `BackendDataMappers` (strict per‑type mapping using fixtures) → DWWidgets models → SwiftUI views (`GridWidgetContainer`).
+  - Strict mapping behind feature flag; on failure: Sentry breadcrumb + drop widget (no silent reshape).
+- Actions:
+  - `WidgetActionExecutor` (MVP: navigate/openURL/refresh). Future: focus/calendar via protocols.
+
+## Data Contracts (Lock 5 First)
+
+WidgetEnvelope (server → client):
+```
+{ "id": string, "type": string,
+  "content": { "displayType"?: string, "data": object } }
+```
+
+Per-type minimal shapes (examples):
+- `action_cta` (`id: next_action`): `{ nextAction{ id, title, actionTime, actionType, priority, ctaText, timeUntil }, urgencyLevel }`
+- `alert` (`id: deviation_alerts`): `{ items: [ { id, type, title, severity, requiresAction? } ] }`
+- `schedule`: `{ items: [ { id, title, start, end, location? } ], nextClass?, isEmpty? }`
+- `weather`: `{ current{ temperature, condition, feelsLike, humidity, windSpeed }, highTemp?, lowTemp?, lastUpdated? }`
+- `context_status`: `{ status, subtitle, confidence, actionable, suggestedAction?, lastUpdated? }`
+
+Map strictly; emit Sentry on failures; skip bad widgets rather than reshaping.
+
+## Improvements (This Pass)
+
+- Delta schema parity: client matches server (no local inventions like `contentUpdate` or `nextEtag`).
+- ETag propagation: use server `ETag` header end-to-end; no client hashes.
+- Single state owner: `DashboardStore` applies deltas; remove parallel maps.
+- Strict mapping without duplicate models: reuse DWWidgets domain types; DTOs only as thin helpers if needed.
+- Actions MVP: compile-safe executor; wire high-value CTAs.
+
+## Observability & Safety
+
+- Analytics: centralized (`WidgetAnalyticsService`).
+- Sentry: map/decoding failures with widget `type/id` and key paths.
+- Privacy: avoid logging payloads in prod; scrub Sentry breadcrumbs.
+- Feature flags: enable strict decode/realtime/actions per environment.
+- Metrics (HMAC): counters for verify/shadow results by reason; latency and skew histograms; text exposition at `/metrics` (guardable).
+
+## Acceptance Checklist
+
+- ETag: first fetch 200 with header ETag stored; second fetch 304 uses cache.
+- Realtime: one `upsert` and one `remove` update the dashboard without manual refresh; resyncs on baseEtag/seq mismatch.
+- Mapping: five core widgets decode from real payloads using strict path.
+- Actions: Next Action/Schedule CTAs navigate/open/refresh via executor.
+- No duplication: only one envelope/content model; store is the single owner.
+ - Home is read‑only; Campus/Me are editable; edit available only when tab is `.ready` and user is authenticated.
+
+## Guardrails
+
+- No invented ETags (Coordinator dedupe uses server `ETag` or applies directly with a warning).
+- Dev mocks behind `#if DEBUG` + feature flag; hard‑off in release builds.
+- Coordinator never owns widget state or edit gating; defers to `DashboardStore`.
+- Attach realtime only for the current tab; detach when switching tabs.
+
+## QA Quick Checks
+
+- Cold start: first fetch 200 (ETag stored) → second fetch 304 (no churn, snapshot reused).
+- Realtime: publish `upsert` then `remove` → UI updates within 250–500ms; baseEtag/seq mismatch triggers resync.
+- Edit: Home shows read‑only chip; Campus/Me edit toggles work; layout persists after exit/relaunch.
+- Mocks: No dev‑mock logs in non‑DEBUG builds.
+
+## Next Steps
+
+- Server: canonicalize `type/id` for the 5 core widgets in the transformer to reduce client alias logic.
+- iOS: extend actions beyond MVP (focus/calendar), add small delta unit test.
+- Expand widget coverage after the five are solid.
+
+## Pointers
+
+- BFF v1 details: `dormway-platform/services/api-router/docs/bff-dashboard-v1.md:11`
+- Realtime deltas spec: `dormway-platform/services/api-router/docs/realtime-dashboard-deltas.md:8`
+- iOS store: `ios-clean/Core/Services/DashboardStore.swift:1`
+- iOS service: `ios-clean/Packages/DWServices/Sources/DWServices/DashboardService.swift:427`
+- Grid renderer: `ios-clean/Packages/DWDashboard/Sources/DWDashboard/Views/FlexibleGridView.swift:1`
+- Widget container: `ios-clean/Packages/DWWidgets/Sources/DWWidgets/UI/GridWidgetContainer.swift:1`

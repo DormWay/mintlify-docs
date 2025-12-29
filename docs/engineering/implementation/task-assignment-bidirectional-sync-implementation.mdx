@@ -1,0 +1,663 @@
+---
+title: "Task Assignment Bidirectional Sync Implementation"
+description: "status: ready_for_implementation priority: high estimated_effort: 4-6 hours owner: backend_team related_docs: [[Tasks vs Assignments - Two-Table Architecture..."
+---
+
+# Task-Assignment Bidirectional Sync Implementation
+
+---
+status: ready_for_implementation
+priority: high
+estimated_effort: 4-6 hours
+owner: backend_team
+related_docs: [Tasks vs Assignments - Two-Table Architecture Decision](/docs/engineering/architecture/tasks-vs-assignments-two-table-architecture-decision), [ASSIGNMENT_COMPLETION_DESIGN](/docs/engineering/architecture/tasks-vs-assignments-two-table-architecture-decision)
+---
+
+## Overview
+
+This document provides implementation guidance for the bidirectional sync logic between `tasks` and `assignment_completion` tables.
+
+**Goal**: Keep tasks and assignments in sync without merging tables.
+
+**Complexity**: ~50 lines of new code across 3 endpoints
+
+---
+
+## Implementation Checklist
+
+- [ ] Update task completion endpoint with assignment prompt logic
+- [ ] Update assignment completion endpoint with task auto-complete logic
+- [ ] Update Canvas webhook handler with task auto-complete logic
+- [ ] Add frontend support for completion prompts
+- [ ] Add monitoring queries to detect inconsistencies
+- [ ] Write tests for sync scenarios
+- [ ] Deploy database constraints (migration 084)
+
+---
+
+## Part 1: Task Completion → Assignment Prompt
+
+### Backend: Update Task Completion Endpoint
+
+**File**: `services/api-router/src/routes/task-routes.ts`
+
+```typescript
+/**
+ * POST /api/mobile/tasks/:taskId/complete
+ * Mark task as completed
+ * 
+ * If task is linked to assignment and all tasks complete,
+ * prompt user to mark assignment complete as well.
+ */
+router.post(
+  '/:taskId/complete',
+  [requireUser],
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const userId = req.user?.id;
+      if (!userId) throw new AppError('User ID is required', 401);
+
+      const { taskId } = req.params;
+
+      // Mark task as complete
+      const { data, error } = await auroraClient.query(`
+        UPDATE tasks
+        SET status = 'completed',
+            completed_at = NOW(),
+            updated_at = NOW()
+        WHERE id = $1 AND user_id = $2 AND status != 'completed'
+        RETURNING *
+      `, [taskId, userId]);
+
+      if (error || !data || data.length === 0) {
+        logger.error('Failed to complete task', { error, userId, taskId });
+        throw new AppError('Task not found or already completed', 404);
+      }
+
+      const completedTask = data[0];
+
+      logger.info('Task completed', {
+        userId,
+        taskId,
+        title: completedTask.title,
+        assignmentId: completedTask.assignment_id,
+      });
+
+      // Invalidate dashboard cache
+      await redisCache.invalidateDashboard(userId);
+
+      // NEW: Check if we should prompt for assignment completion
+      let prompt = null;
+      if (completedTask.assignment_id) {
+        const shouldPrompt = await checkAssignmentCompletionPrompt(
+          userId, 
+          completedTask.assignment_id
+        );
+        
+        if (shouldPrompt.show) {
+          prompt = {
+            type: 'assignment_completion',
+            assignmentId: completedTask.assignment_id,
+            assignmentTitle: shouldPrompt.assignmentTitle,
+            message: `All work sessions complete! Did you also finish submitting "${shouldPrompt.assignmentTitle}"?`,
+            actions: [
+              { id: 'mark_complete', label: 'Yes, mark as complete' },
+              { id: 'not_yet', label: 'No, still working on it' }
+            ]
+          };
+        }
+      }
+
+      res.status(200).json({
+        success: true,
+        task: {
+          id: completedTask.id,
+          status: 'completed',
+          completedAt: completedTask.completed_at,
+        },
+        prompt // Will be null if no prompt needed
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+/**
+ * Helper: Check if we should prompt user to mark assignment complete
+ */
+async function checkAssignmentCompletionPrompt(
+  userId: string, 
+  assignmentId: string
+): Promise<{ show: boolean; assignmentTitle?: string }> {
+  // Get all tasks for this assignment
+  const { data: tasks } = await auroraClient.query(`
+    SELECT id, status, title
+    FROM tasks
+    WHERE user_id = $1 
+      AND assignment_id = $2
+      AND status != 'deleted'
+  `, [userId, assignmentId]);
+
+  if (!tasks || tasks.length === 0) {
+    return { show: false };
+  }
+
+  // Check if all tasks are complete
+  const allComplete = tasks.every((t: any) => t.status === 'completed');
+  
+  if (!allComplete) {
+    return { show: false };
+  }
+
+  // Check if assignment is already marked complete
+  const { data: assignments } = await auroraClient.query(`
+    SELECT is_completed, assignment_id
+    FROM assignment_completion
+    WHERE user_id = $1 AND assignment_id = $2
+  `, [userId, assignmentId]);
+
+  const assignment = assignments?.[0];
+  
+  if (assignment?.is_completed) {
+    return { show: false }; // Already complete
+  }
+
+  // All conditions met - show prompt
+  // Try to get assignment title from deliverables or use generic
+  const assignmentTitle = await getAssignmentTitle(userId, assignmentId) || 'this assignment';
+
+  return { 
+    show: true, 
+    assignmentTitle 
+  };
+}
+
+/**
+ * Helper: Get assignment title from various sources
+ */
+async function getAssignmentTitle(
+  userId: string, 
+  assignmentId: string
+): Promise<string | null> {
+  // Try to get from deliverables widget first
+  const { data } = await auroraClient.query(`
+    SELECT data
+    FROM service_data
+    WHERE user_id = $1 
+      AND method = 'deliverables'
+    ORDER BY created_at DESC
+    LIMIT 1
+  `, [userId]);
+
+  if (data && data[0]?.data) {
+    const deliverables = data[0].data.deliverables || [];
+    const assignment = deliverables.find((d: any) => d.id === assignmentId);
+    if (assignment?.title) {
+      return assignment.title;
+    }
+  }
+
+  // Fallback: generic title
+  return null;
+}
+```
+
+---
+
+## Part 2: Assignment Completion → Auto-Complete Tasks
+
+### Backend: Update Assignment Completion Endpoint
+
+**File**: `services/api-router/src/routes/assignment-completion-routes.ts`
+
+```typescript
+/**
+ * POST /api/academic/assignments/:id/complete
+ * Mark assignment as complete
+ * 
+ * Auto-completes related pending/scheduled tasks
+ */
+router.post('/:id/complete', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const userId = req.user?.id;
+    if (!userId) throw new AppError('Unauthorized', 401);
+
+    const assignmentId = req.params.id;
+    const body = req.body;
+
+    logger.info('Marking assignment complete', {
+      userId,
+      assignmentId,
+      actualMinutes: body.actual_minutes,
+      difficultyRating: body.difficulty_rating
+    });
+
+    // Upsert completion record (idempotent)
+    const result = await auroraClient.query(`
+      INSERT INTO assignment_completion (
+        user_id,
+        assignment_id,
+        context_id,
+        completed_at,
+        is_completed,
+        completion_source,
+        actual_minutes,
+        difficulty_rating,
+        notes
+      )
+      VALUES ($1, $2, $3, NOW(), true, 'manual', $4, $5, $6)
+      ON CONFLICT (user_id, assignment_id)
+      DO UPDATE SET
+        completed_at = NOW(),
+        is_completed = true,
+        completion_source = 'manual',
+        actual_minutes = COALESCE($4, assignment_completion.actual_minutes),
+        difficulty_rating = COALESCE($5, assignment_completion.difficulty_rating),
+        notes = COALESCE($6, assignment_completion.notes),
+        updated_at = NOW()
+      RETURNING id, completed_at
+    `, [
+      userId,
+      assignmentId,
+      body.context_id || null,
+      body.actual_minutes || null,
+      body.difficulty_rating || null,
+      body.notes || null
+    ]);
+
+    if (result.error || !result.data || result.data.length === 0) {
+      logger.error('Failed to mark assignment complete', {
+        userId,
+        assignmentId,
+        error: result.error
+      });
+      throw new AppError('Failed to mark assignment complete', 500);
+    }
+
+    const completion = result.data[0];
+
+    // NEW: Auto-complete related tasks
+    const autoCompletedTasks = await autoCompleteRelatedTasks(userId, assignmentId);
+
+    // Publish real-time event to Ably
+    await publishCompletionEvent(userId, {
+      type: 'assignment_completed',
+      assignmentId,
+      contextId: body.context_id,
+      completedAt: completion.completed_at,
+      source: 'manual',
+      actualMinutes: body.actual_minutes,
+      difficultyRating: body.difficulty_rating,
+      autoCompletedTasks: autoCompletedTasks.length
+    });
+
+    // Track analytics
+    trackEvent({
+      userId,
+      event: 'assignment_marked_complete',
+      properties: {
+        assignmentId,
+        source: 'manual',
+        actualMinutes: body.actual_minutes,
+        difficultyRating: body.difficulty_rating,
+        hasNotes: !!body.notes,
+        autoCompletedTasks: autoCompletedTasks.length
+      }
+    });
+
+    // Invalidate cache
+    await redisCache.invalidateDashboard(userId);
+
+    return res.status(200).json({
+      success: true,
+      completion: {
+        id: completion.id,
+        completedAt: completion.completed_at,
+        autoCompletedTasks: autoCompletedTasks.length
+      }
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * Helper: Auto-complete tasks related to completed assignment
+ */
+async function autoCompleteRelatedTasks(
+  userId: string,
+  assignmentId: string
+): Promise<Array<{ id: string; title: string }>> {
+  // Find related pending/scheduled tasks
+  const { data: tasks, error } = await auroraClient.query(`
+    SELECT id, title, status
+    FROM tasks
+    WHERE user_id = $1
+      AND assignment_id = $2
+      AND status IN ('pending', 'scheduled')
+  `, [userId, assignmentId]);
+
+  if (error || !tasks || tasks.length === 0) {
+    return [];
+  }
+
+  // Auto-complete them
+  const taskIds = tasks.map((t: any) => t.id);
+  
+  await auroraClient.query(`
+    UPDATE tasks
+    SET status = 'completed',
+        completed_at = NOW(),
+        metadata = jsonb_set(
+          COALESCE(metadata, '{}'::jsonb),
+          '{auto_completed_from_assignment}',
+          'true'::jsonb
+        ),
+        updated_at = NOW()
+    WHERE id = ANY($1::uuid[])
+  `, [taskIds]);
+
+  logger.info('Auto-completed related tasks', {
+    userId,
+    assignmentId,
+    taskCount: taskIds.length,
+    taskTitles: tasks.map((t: any) => t.title)
+  });
+
+  return tasks.map((t: any) => ({ id: t.id, title: t.title }));
+}
+```
+
+---
+
+## Part 3: Canvas Webhook → Auto-Complete Tasks
+
+### Backend: Update Canvas Webhook Handler
+
+**File**: `services/api-router/src/routes/webhooks/canvas.ts`
+
+```typescript
+/**
+ * POST /api/webhooks/canvas/submission
+ * Handle Canvas submission webhook
+ */
+router.post('/submission', async (req: Request, res: Response) => {
+  try {
+    const webhookData = req.body;
+    
+    const {
+      assignment_id,
+      user_id,
+      workflow_state,
+      submission_id,
+      graded_at
+    } = webhookData;
+
+    logger.info('Canvas submission webhook received', {
+      assignment_id,
+      user_id,
+      workflow_state
+    });
+
+    // Find DormWay user by Canvas user ID
+    const dormwayUserId = await findUserByCanvasId(user_id);
+    
+    if (!dormwayUserId) {
+      logger.warn('User not found for Canvas ID', { canvasUserId: user_id });
+      return res.status(200).json({ received: true, skipped: 'user_not_found' });
+    }
+
+    // Upsert assignment completion
+    await auroraClient.query(`
+      INSERT INTO assignment_completion (
+        user_id,
+        assignment_id,
+        is_completed,
+        completion_source,
+        external_submission_id,
+        graded_at,
+        completed_at,
+        last_synced_at
+      )
+      VALUES ($1, $2, $3, 'lms_sync', $4, $5, NOW(), NOW())
+      ON CONFLICT (user_id, assignment_id)
+      DO UPDATE SET
+        is_completed = $3,
+        external_submission_id = $4,
+        graded_at = $5,
+        last_synced_at = NOW(),
+        updated_at = NOW()
+    `, [
+      dormwayUserId,
+      assignment_id,
+      workflow_state === 'submitted' || workflow_state === 'graded',
+      submission_id,
+      graded_at || null
+    ]);
+
+    // NEW: If submission is complete, auto-complete related tasks
+    let autoCompletedTasks = [];
+    if (workflow_state === 'submitted' || workflow_state === 'graded') {
+      autoCompletedTasks = await autoCompleteRelatedTasks(dormwayUserId, assignment_id);
+    }
+
+    // Publish real-time update
+    await publishCompletionEvent(dormwayUserId, {
+      type: 'assignment_completed',
+      assignmentId: assignment_id,
+      source: 'lms_sync',
+      completedAt: new Date().toISOString(),
+      autoCompletedTasks: autoCompletedTasks.length
+    });
+
+    // Invalidate cache
+    await redisCache.invalidateDashboard(dormwayUserId);
+
+    logger.info('Canvas submission processed', {
+      dormwayUserId,
+      assignment_id,
+      workflow_state,
+      autoCompletedTasks: autoCompletedTasks.length
+    });
+
+    return res.status(200).json({ 
+      success: true,
+      autoCompletedTasks: autoCompletedTasks.length
+    });
+  } catch (error) {
+    logger.error('Canvas webhook error', { error });
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+```
+
+---
+
+## Part 4: Frontend Support
+
+### Update Frontend Hook
+
+**File**: `services/dormway-lockedin/src/hooks/home/useTasks.ts`
+
+```typescript
+/**
+ * Hook to handle task completion with assignment prompt
+ */
+export function useCompleteTask() {
+  const queryClient = useQueryClient();
+  const [completionPrompt, setCompletionPrompt] = useState<CompletionPrompt | null>(null);
+
+  const completeTask = useMutation({
+    mutationFn: async (taskId: string) => {
+      const response = await authorizedFetch(
+        proxyPath(`/api/mobile/tasks/${taskId}/complete`),
+        { method: 'POST' }
+      );
+      
+      if (!response.ok) {
+        throw new Error('Failed to complete task');
+      }
+      
+      return response.json();
+    },
+    onSuccess: (data) => {
+      // Invalidate queries
+      queryClient.invalidateQueries({ queryKey: ['tasks'] });
+      queryClient.invalidateQueries({ queryKey: ['dashboard-composite'] });
+
+      // Check if we should show prompt
+      if (data.prompt) {
+        setCompletionPrompt(data.prompt);
+      }
+    }
+  });
+
+  return {
+    completeTask,
+    completionPrompt,
+    dismissPrompt: () => setCompletionPrompt(null)
+  };
+}
+
+interface CompletionPrompt {
+  type: 'assignment_completion';
+  assignmentId: string;
+  assignmentTitle: string;
+  message: string;
+  actions: Array<{ id: string; label: string }>;
+}
+```
+
+### Add Prompt Modal Component
+
+**File**: `services/dormway-lockedin/src/components/home/AssignmentCompletionPrompt.tsx`
+
+```typescript
+'use client';
+
+import { Sparkles, CheckCircle } from 'lucide-react';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { authorizedFetch } from '@/lib/authorizedFetch';
+import { proxyPath } from '@/lib/utils';
+
+interface AssignmentCompletionPromptProps {
+  assignmentId: string;
+  assignmentTitle: string;
+  message: string;
+  onClose: () => void;
+}
+
+export function AssignmentCompletionPrompt({
+  assignmentId,
+  assignmentTitle,
+  message,
+  onClose
+}: AssignmentCompletionPromptProps) {
+  const queryClient = useQueryClient();
+
+  const markComplete = useMutation({
+    mutationFn: async () => {
+      const response = await authorizedFetch(
+        proxyPath(`/api/academic/assignments/${assignmentId}/complete`),
+        { method: 'POST' }
+      );
+      return response.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['dashboard-composite'] });
+      onClose();
+    }
+  });
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+      <div className="bg-white dark:bg-gray-800 rounded-2xl p-6 max-w-md mx-4 shadow-2xl">
+        <div className="flex items-center gap-3 mb-4">
+          <Sparkles className="w-6 h-6 text-blue-500" />
+          <h3 className="text-lg font-semibold">All work sessions complete!</h3>
+        </div>
+
+        <p className="text-gray-600 dark:text-gray-300 mb-4">
+          {message}
+        </p>
+
+        <div className="flex gap-3">
+          <button
+            onClick={() => markComplete.mutate()}
+            disabled={markComplete.isPending}
+            className="flex-1 bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded-lg font-medium transition-colors disabled:opacity-50"
+          >
+            <CheckCircle className="inline w-4 h-4 mr-2" />
+            Yes, mark as complete
+          </button>
+          <button
+            onClick={onClose}
+            className="flex-1 bg-gray-200 hover:bg-gray-300 dark:bg-gray-700 dark:hover:bg-gray-600 px-4 py-2 rounded-lg font-medium transition-colors"
+          >
+            Not yet
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+## Testing Checklist
+
+### Unit Tests
+
+- [ ] Test `checkAssignmentCompletionPrompt` returns correct prompt
+- [ ] Test `autoCompleteRelatedTasks` updates all pending tasks
+- [ ] Test Canvas webhook auto-completes tasks
+
+### Integration Tests
+
+- [ ] Complete all tasks → see prompt → accept → assignment marked complete
+- [ ] Complete all tasks → see prompt → dismiss → assignment stays incomplete
+- [ ] Mark assignment complete → related tasks auto-complete
+- [ ] Canvas webhook → assignment + tasks both complete
+
+### Edge Cases
+
+- [ ] Complete task when no assignment link → no prompt
+- [ ] Complete task when assignment already complete → no prompt
+- [ ] Complete task when other tasks still pending → no prompt
+- [ ] Mark assignment complete when no tasks exist → works normally
+
+---
+
+## Monitoring
+
+### Add Monitoring Query Job
+
+Run this query daily to detect inconsistencies:
+
+```sql
+-- Check for issues needing attention
+SELECT * FROM task_assignment_consistency;
+```
+
+### Alerting
+
+Set up alerts for:
+- More than 10 assignments with all tasks complete but assignment incomplete
+- More than 5 completed assignments with pending tasks
+
+---
+
+## Rollout Plan
+
+1. **Phase 1**: Deploy database constraints (migration 084)
+2. **Phase 2**: Deploy backend sync logic
+3. **Phase 3**: Deploy frontend prompt support
+4. **Phase 4**: Monitor for 1 week, fix any issues
+5. **Phase 5**: Add Canvas webhook auto-complete
+
+---
+
+**Status**: Ready for implementation  
+**Next Action**: Begin with Phase 1 (database constraints)

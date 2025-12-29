@@ -1,0 +1,840 @@
+---
+title: "workspace presets spec"
+description: "status: spec last_reviewed: 2025-09-27 owner: engineering implementation_status: pending related_feature: today-vertical-slice component_type: preferences_sy..."
+---
+
+# Workspace Presets - Component Specification
+
+---
+status: spec
+last_reviewed: 2025-09-27
+owner: engineering
+implementation_status: pending
+related_feature: today-vertical-slice
+component_type: preferences_system
+---
+
+## Overview
+
+Workspace presets allow users to configure per-course layouts that automatically activate when entering class contexts. Reduces setup time and creates consistent focus environments for different academic subjects.
+
+## Core Components
+
+### WorkspacePresetManager
+**Purpose**: Main interface for creating and managing course-specific workspace configurations
+
+```typescript
+interface WorkspacePresetManagerProps {
+  courseId: string;
+  currentPreset?: WorkspacePreset;
+  onSave: (preset: WorkspacePreset) => void;
+  onDelete: () => void;
+  onPreview: (preset: WorkspacePreset) => void;
+}
+
+interface WorkspacePreset {
+  id: string;
+  courseId: string;
+  name: string;
+  modules: WorkspaceModule[];
+  layout: LayoutConfiguration;
+  activationRules: ActivationRule[];
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+interface WorkspaceModule {
+  type: ModuleType;
+  enabled: boolean;
+  position: ModulePosition;
+  configuration: ModuleConfig;
+}
+
+type ModuleType =
+  | 'notes'
+  | 'email'
+  | 'files'
+  | 'mini_schedule'
+  | 'quick_capture'
+  | 'syllabus'
+  | 'assignments'
+  | 'links';
+```
+
+### ModuleSelector
+**Purpose**: Grid interface for enabling/disabling workspace modules
+
+```typescript
+interface ModuleSelectorProps {
+  availableModules: ModuleDefinition[];
+  selectedModules: WorkspaceModule[];
+  onModuleToggle: (moduleType: ModuleType) => void;
+  onModuleConfig: (moduleType: ModuleType, config: ModuleConfig) => void;
+}
+
+const ModuleSelector: React.FC<ModuleSelectorProps> = ({
+  availableModules,
+  selectedModules,
+  onModuleToggle,
+  onModuleConfig,
+}) => {
+  return (
+    <div className="module-grid">
+      {availableModules.map(module => {
+        const isSelected = selectedModules.some(m => m.type === module.type);
+
+        return (
+          <ModuleCard
+            key={module.type}
+            module={module}
+            isSelected={isSelected}
+            onToggle={() => onModuleToggle(module.type)}
+            onConfigure={(config) => onModuleConfig(module.type, config)}
+          />
+        );
+      })}
+    </div>
+  );
+};
+```
+
+### ModuleCard
+**Purpose**: Individual module configuration tile
+
+```typescript
+interface ModuleCardProps {
+  module: ModuleDefinition;
+  isSelected: boolean;
+  onToggle: () => void;
+  onConfigure: (config: ModuleConfig) => void;
+}
+
+const ModuleCard: React.FC<ModuleCardProps> = ({
+  module,
+  isSelected,
+  onToggle,
+  onConfigure,
+}) => {
+  const [showConfig, setShowConfig] = useState(false);
+
+  return (
+    <div className={cn("module-card", { selected: isSelected })}>
+      <div className="module-header">
+        <div className="module-icon">{module.icon}</div>
+        <h3 className="module-title">{module.title}</h3>
+        <Switch checked={isSelected} onChange={onToggle} />
+      </div>
+
+      <p className="module-description">{module.description}</p>
+
+      {isSelected && module.configurable && (
+        <button
+          onClick={() => setShowConfig(true)}
+          className="configure-button"
+        >
+          Configure
+        </button>
+      )}
+
+      {showConfig && (
+        <ModuleConfigDialog
+          module={module}
+          onSave={onConfigure}
+          onClose={() => setShowConfig(false)}
+        />
+      )}
+    </div>
+  );
+};
+```
+
+### ActivationRuleEditor
+**Purpose**: Configure when workspace presets automatically activate
+
+```typescript
+interface ActivationRuleEditorProps {
+  rules: ActivationRule[];
+  onRulesChange: (rules: ActivationRule[]) => void;
+}
+
+interface ActivationRule {
+  type: 'time_based' | 'location_based' | 'event_based' | 'manual';
+  enabled: boolean;
+  configuration: RuleConfiguration;
+}
+
+type RuleConfiguration =
+  | TimeBasedRule
+  | LocationBasedRule
+  | EventBasedRule
+  | ManualRule;
+
+interface TimeBasedRule {
+  type: 'time_based';
+  schedule: {
+    daysOfWeek: number[]; // 0-6, Sun-Sat
+    startTime: string; // HH:mm
+    endTime: string; // HH:mm
+  }[];
+}
+
+interface LocationBasedRule {
+  type: 'location_based';
+  triggers: {
+    wifiNetworks: string[];
+    geofences: {
+      latitude: number;
+      longitude: number;
+      radius: number; // meters
+    }[];
+  };
+}
+
+interface EventBasedRule {
+  type: 'event_based';
+  triggers: {
+    beforeClass: number; // minutes
+    duringClass: boolean;
+    afterClass: number; // minutes
+  };
+}
+```
+
+### WorkspaceActivator
+**Purpose**: Service component that monitors activation rules and applies presets
+
+```typescript
+class WorkspaceActivator {
+  private activePreset: WorkspacePreset | null = null;
+  private ruleMonitors: RuleMonitor[] = [];
+
+  constructor(
+    private presets: WorkspacePreset[],
+    private onActivate: (preset: WorkspacePreset) => void,
+    private onDeactivate: () => void
+  ) {
+    this.initializeMonitors();
+  }
+
+  private initializeMonitors() {
+    this.presets.forEach(preset => {
+      preset.activationRules.forEach(rule => {
+        if (!rule.enabled) return;
+
+        switch (rule.type) {
+          case 'time_based':
+            this.ruleMonitors.push(
+              new TimeBasedMonitor(rule.configuration, preset)
+            );
+            break;
+          case 'location_based':
+            this.ruleMonitors.push(
+              new LocationBasedMonitor(rule.configuration, preset)
+            );
+            break;
+          case 'event_based':
+            this.ruleMonitors.push(
+              new EventBasedMonitor(rule.configuration, preset)
+            );
+            break;
+        }
+      });
+    });
+  }
+
+  start() {
+    this.ruleMonitors.forEach(monitor => monitor.start());
+  }
+
+  stop() {
+    this.ruleMonitors.forEach(monitor => monitor.stop());
+  }
+
+  activatePreset(preset: WorkspacePreset) {
+    if (this.activePreset?.id === preset.id) return;
+
+    this.activePreset = preset;
+    this.onActivate(preset);
+  }
+
+  deactivatePreset() {
+    if (!this.activePreset) return;
+
+    this.activePreset = null;
+    this.onDeactivate();
+  }
+}
+```
+
+## Module Definitions
+
+### Available Modules
+
+```typescript
+const MODULE_DEFINITIONS: Record<ModuleType, ModuleDefinition> = {
+  notes: {
+    type: 'notes',
+    title: 'Notes',
+    description: 'Course-specific note taking interface',
+    icon: '📝',
+    configurable: true,
+    defaultConfig: {
+      autoCreate: true,
+      template: 'course_default',
+      syncEnabled: true,
+    },
+  },
+
+  email: {
+    type: 'email',
+    title: 'Email',
+    description: 'Quick access to instructor communication',
+    icon: '📧',
+    configurable: true,
+    defaultConfig: {
+      defaultRecipients: 'instructor',
+      templates: ['question', 'absence', 'meeting_request'],
+    },
+  },
+
+  mini_schedule: {
+    type: 'mini_schedule',
+    title: 'Mini Schedule',
+    description: 'Compact view of today\'s timeline',
+    icon: '📅',
+    configurable: false,
+    defaultConfig: {},
+  },
+
+  files: {
+    type: 'files',
+    title: 'Course Files',
+    description: 'Quick access to syllabus, slides, and resources',
+    icon: '📁',
+    configurable: true,
+    defaultConfig: {
+      showRecent: true,
+      fileTypes: ['pdf', 'docx', 'pptx'],
+      syncFolders: [],
+    },
+  },
+
+  quick_capture: {
+    type: 'quick_capture',
+    title: 'Quick Capture',
+    description: 'Fast note taking during lectures',
+    icon: '⚡',
+    configurable: true,
+    defaultConfig: {
+      format: 'bullets',
+      autoTimestamp: true,
+      voiceRecording: false,
+    },
+  },
+
+  syllabus: {
+    type: 'syllabus',
+    title: 'Syllabus',
+    description: 'Course requirements and schedule reference',
+    icon: '📋',
+    configurable: false,
+    defaultConfig: {},
+  },
+
+  assignments: {
+    type: 'assignments',
+    title: 'Assignments',
+    description: 'Upcoming tasks and deadlines for this course',
+    icon: '✅',
+    configurable: true,
+    defaultConfig: {
+      showCompleted: false,
+      sortBy: 'due_date',
+      daysAhead: 14,
+    },
+  },
+
+  links: {
+    type: 'links',
+    title: 'Quick Links',
+    description: 'Course-specific bookmarks and resources',
+    icon: '🔗',
+    configurable: true,
+    defaultConfig: {
+      customLinks: [],
+      showLMSLink: true,
+      showSyllabusLink: true,
+    },
+  },
+};
+```
+
+### Module Configurations
+
+```typescript
+interface NotesModuleConfig {
+  autoCreate: boolean;
+  template: 'course_default' | 'lecture' | 'lab' | 'discussion';
+  syncEnabled: boolean;
+  defaultTags?: string[];
+}
+
+interface EmailModuleConfig {
+  defaultRecipients: 'instructor' | 'tas' | 'both';
+  templates: EmailTemplate[];
+  signature?: string;
+}
+
+interface FilesModuleConfig {
+  showRecent: boolean;
+  fileTypes: string[];
+  syncFolders: string[];
+  autoDownload: boolean;
+}
+
+interface QuickCaptureConfig {
+  format: 'bullets' | 'paragraphs' | 'outline';
+  autoTimestamp: boolean;
+  voiceRecording: boolean;
+  imageCapture: boolean;
+}
+
+interface AssignmentsModuleConfig {
+  showCompleted: boolean;
+  sortBy: 'due_date' | 'priority' | 'course';
+  daysAhead: number;
+  groupByWeek: boolean;
+}
+
+interface LinksModuleConfig {
+  customLinks: CustomLink[];
+  showLMSLink: boolean;
+  showSyllabusLink: boolean;
+  categories: string[];
+}
+```
+
+## Layout System
+
+### Layout Configurations
+
+```typescript
+interface LayoutConfiguration {
+  type: 'grid' | 'tabs' | 'sidebar';
+  regions: LayoutRegion[];
+  responsive: ResponsiveLayout;
+}
+
+interface LayoutRegion {
+  id: string;
+  modules: ModuleType[];
+  size: RegionSize;
+  position: RegionPosition;
+  collapsible: boolean;
+}
+
+interface RegionSize {
+  width?: number | string;
+  height?: number | string;
+  minWidth?: number;
+  minHeight?: number;
+  maxWidth?: number;
+  maxHeight?: number;
+}
+
+interface RegionPosition {
+  row?: number;
+  column?: number;
+  span?: { rows?: number; columns?: number };
+}
+
+interface ResponsiveLayout {
+  breakpoints: {
+    mobile: LayoutConfiguration;
+    tablet: LayoutConfiguration;
+    desktop: LayoutConfiguration;
+  };
+}
+```
+
+### Default Layouts
+
+```typescript
+const DEFAULT_LAYOUTS: Record<string, LayoutConfiguration> = {
+  focused: {
+    type: 'grid',
+    regions: [
+      {
+        id: 'main',
+        modules: ['notes', 'quick_capture'],
+        size: { width: '70%' },
+        position: { column: 1 },
+        collapsible: false,
+      },
+      {
+        id: 'sidebar',
+        modules: ['mini_schedule', 'assignments', 'files'],
+        size: { width: '30%' },
+        position: { column: 2 },
+        collapsible: true,
+      },
+    ],
+    responsive: {
+      breakpoints: {
+        mobile: {
+          type: 'tabs',
+          regions: [
+            {
+              id: 'tabs',
+              modules: ['notes', 'assignments', 'files'],
+              size: { width: '100%' },
+              position: { row: 1 },
+              collapsible: false,
+            },
+          ],
+        },
+        tablet: {
+          type: 'sidebar',
+          regions: [
+            {
+              id: 'main',
+              modules: ['notes'],
+              size: { width: '100%' },
+              position: { row: 1 },
+              collapsible: false,
+            },
+            {
+              id: 'drawer',
+              modules: ['assignments', 'files', 'mini_schedule'],
+              size: { width: '320px' },
+              position: { row: 1 },
+              collapsible: true,
+            },
+          ],
+        },
+        desktop: {
+          type: 'grid',
+          regions: [
+            {
+              id: 'main',
+              modules: ['notes', 'quick_capture'],
+              size: { width: '70%' },
+              position: { column: 1 },
+              collapsible: false,
+            },
+            {
+              id: 'sidebar',
+              modules: ['mini_schedule', 'assignments', 'files'],
+              size: { width: '30%' },
+              position: { column: 2 },
+              collapsible: true,
+            },
+          ],
+        },
+      },
+    },
+  },
+
+  communication: {
+    type: 'grid',
+    regions: [
+      {
+        id: 'email',
+        modules: ['email'],
+        size: { width: '50%' },
+        position: { column: 1 },
+        collapsible: false,
+      },
+      {
+        id: 'context',
+        modules: ['syllabus', 'assignments', 'links'],
+        size: { width: '50%' },
+        position: { column: 2 },
+        collapsible: false,
+      },
+    ],
+    responsive: {
+      // Similar responsive configurations...
+    },
+  },
+};
+```
+
+## Activation Rule Monitors
+
+### TimeBasedMonitor
+```typescript
+class TimeBasedMonitor implements RuleMonitor {
+  private timer: NodeJS.Timeout | null = null;
+
+  constructor(
+    private rule: TimeBasedRule,
+    private preset: WorkspacePreset
+  ) {}
+
+  start() {
+    this.checkSchedule();
+    // Check every minute
+    this.timer = setInterval(() => this.checkSchedule(), 60000);
+  }
+
+  stop() {
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+  }
+
+  private checkSchedule() {
+    const now = new Date();
+    const currentDay = now.getDay();
+    const currentTime = now.getHours() * 60 + now.getMinutes();
+
+    const isActive = this.rule.schedule.some(schedule => {
+      if (!schedule.daysOfWeek.includes(currentDay)) return false;
+
+      const [startHour, startMin] = schedule.startTime.split(':').map(Number);
+      const [endHour, endMin] = schedule.endTime.split(':').map(Number);
+
+      const startTime = startHour * 60 + startMin;
+      const endTime = endHour * 60 + endMin;
+
+      return currentTime >= startTime && currentTime <= endTime;
+    });
+
+    if (isActive) {
+      this.activatePreset();
+    }
+  }
+
+  private activatePreset() {
+    // Dispatch activation event
+    window.dispatchEvent(new CustomEvent('workspace:activate', {
+      detail: { preset: this.preset, trigger: 'time_based' }
+    }));
+  }
+}
+```
+
+### LocationBasedMonitor
+```typescript
+class LocationBasedMonitor implements RuleMonitor {
+  private watchId: number | null = null;
+
+  constructor(
+    private rule: LocationBasedRule,
+    private preset: WorkspacePreset
+  ) {}
+
+  start() {
+    this.checkWiFi();
+    this.checkGeolocation();
+
+    // Monitor WiFi changes
+    window.addEventListener('online', () => this.checkWiFi());
+    window.addEventListener('offline', () => this.checkWiFi());
+  }
+
+  stop() {
+    if (this.watchId) {
+      navigator.geolocation.clearWatch(this.watchId);
+      this.watchId = null;
+    }
+  }
+
+  private async checkWiFi() {
+    try {
+      // Note: WiFi network detection is limited in browsers
+      // This would require a native app or browser extension
+      const connection = (navigator as any).connection;
+      if (connection && connection.type === 'wifi') {
+        // Check if SSID matches (if available)
+        // Limited browser support for WiFi SSID detection
+      }
+    } catch (error) {
+      console.warn('WiFi detection not supported');
+    }
+  }
+
+  private checkGeolocation() {
+    if (!navigator.geolocation) return;
+
+    this.watchId = navigator.geolocation.watchPosition(
+      (position) => {
+        const { latitude, longitude } = position.coords;
+
+        const inGeofence = this.rule.triggers.geofences.some(fence => {
+          const distance = this.calculateDistance(
+            latitude,
+            longitude,
+            fence.latitude,
+            fence.longitude
+          );
+          return distance <= fence.radius;
+        });
+
+        if (inGeofence) {
+          this.activatePreset();
+        }
+      },
+      (error) => console.warn('Geolocation error:', error),
+      { enableHighAccuracy: false, timeout: 30000, maximumAge: 300000 }
+    );
+  }
+
+  private calculateDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
+    // Haversine formula for distance calculation
+    const R = 6371e3; // Earth's radius in meters
+    const φ1 = lat1 * Math.PI / 180;
+    const φ2 = lat2 * Math.PI / 180;
+    const Δφ = (lat2 - lat1) * Math.PI / 180;
+    const Δλ = (lon1 - lon2) * Math.PI / 180;
+
+    const a = Math.sin(Δφ/2) * Math.sin(Δφ/2) +
+              Math.cos(φ1) * Math.cos(φ2) *
+              Math.sin(Δλ/2) * Math.sin(Δλ/2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+
+    return R * c;
+  }
+
+  private activatePreset() {
+    window.dispatchEvent(new CustomEvent('workspace:activate', {
+      detail: { preset: this.preset, trigger: 'location_based' }
+    }));
+  }
+}
+```
+
+### EventBasedMonitor
+```typescript
+class EventBasedMonitor implements RuleMonitor {
+  private subscription: (() => void) | null = null;
+
+  constructor(
+    private rule: EventBasedRule,
+    private preset: WorkspacePreset
+  ) {}
+
+  start() {
+    // Subscribe to schedule events
+    this.subscription = subscribeToScheduleEvents((event) => {
+      if (event.courseId !== this.preset.courseId) return;
+
+      const now = new Date();
+      const eventStart = new Date(event.startTime);
+      const eventEnd = new Date(event.endTime);
+
+      const beforeStart = new Date(eventStart.getTime() - this.rule.triggers.beforeClass * 60000);
+      const afterEnd = new Date(eventEnd.getTime() + this.rule.triggers.afterClass * 60000);
+
+      let shouldActivate = false;
+
+      // Before class
+      if (this.rule.triggers.beforeClass > 0 && now >= beforeStart && now < eventStart) {
+        shouldActivate = true;
+      }
+
+      // During class
+      if (this.rule.triggers.duringClass && now >= eventStart && now <= eventEnd) {
+        shouldActivate = true;
+      }
+
+      // After class
+      if (this.rule.triggers.afterClass > 0 && now > eventEnd && now <= afterEnd) {
+        shouldActivate = true;
+      }
+
+      if (shouldActivate) {
+        this.activatePreset();
+      }
+    });
+  }
+
+  stop() {
+    if (this.subscription) {
+      this.subscription();
+      this.subscription = null;
+    }
+  }
+
+  private activatePreset() {
+    window.dispatchEvent(new CustomEvent('workspace:activate', {
+      detail: { preset: this.preset, trigger: 'event_based' }
+    }));
+  }
+}
+```
+
+## Data Storage
+
+### Preset Storage Schema
+```typescript
+interface StoredWorkspacePreset {
+  id: string;
+  userId: string;
+  courseId: string;
+  name: string;
+  modules: WorkspaceModule[];
+  layout: LayoutConfiguration;
+  activationRules: ActivationRule[];
+  isDefault: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+```
+
+### API Endpoints
+```typescript
+// Workspace preset CRUD
+GET /api/v1/workspace-presets
+GET /api/v1/workspace-presets/:id
+POST /api/v1/workspace-presets
+PUT /api/v1/workspace-presets/:id
+DELETE /api/v1/workspace-presets/:id
+
+// Course-specific presets
+GET /api/v1/courses/:courseId/workspace-preset
+PUT /api/v1/courses/:courseId/workspace-preset
+
+// Activation events
+POST /api/v1/workspace-presets/:id/activate
+POST /api/v1/workspace-presets/:id/deactivate
+```
+
+## Testing Strategy
+
+### Unit Tests
+- Module configuration validation
+- Layout calculation algorithms
+- Activation rule evaluation
+- Time/location calculation utilities
+
+### Integration Tests
+- Preset creation and modification flows
+- Activation rule triggering
+- Module state persistence
+- Cross-device synchronization
+
+### E2E Tests
+- Complete preset setup workflow
+- Automatic activation scenarios
+- Module interaction patterns
+- Responsive layout behavior
+
+## Performance Considerations
+
+### Lazy Loading
+- Load module components only when activated
+- Defer non-critical activation rule monitoring
+- Progressive enhancement for advanced features
+
+### Memory Management
+- Clean up geolocation watchers when presets disabled
+- Unsubscribe from event listeners on component unmount
+- Limit number of concurrent activation monitors
+
+### Battery Optimization
+- Reduce geolocation polling frequency
+- Use passive event listeners where possible
+- Throttle activation rule checks

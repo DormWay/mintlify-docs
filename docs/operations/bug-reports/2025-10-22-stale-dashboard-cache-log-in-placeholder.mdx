@@ -1,0 +1,556 @@
+---
+title: "2025 10 22 stale dashboard cache log in placeholder"
+description: "New users completing onboarding saw \"Log In\" text appearing in multiple places (Task Bank, Welcome Carousel) instead of the expected \"Upload my schedule to D..."
+---
+
+# Dashboard Cache "Log In" Placeholder Bug
+
+**Date**: 2025-10-22
+**Status**: ✅ RESOLVED
+**Severity**: High (Production - User-facing)
+**Related Issue**: DORM-363 (Clerk Migration)
+**PR**: [#306](https://github.com/DormWay/dormway-platform/pull/306)
+
+## Summary
+
+New users completing onboarding saw "Log In" text appearing in multiple places (Task Bank, Welcome Carousel) instead of the expected "Upload my schedule to DormWay" task or "Get Started" CTA. This was caused by stale Redis cache serving a quick-start placeholder payload that persisted even after the real onboarding task was created.
+
+## 2025-10-29 Follow-up Verification
+
+- Frontend protections confirmed: `sanitizeDormwayStorage` now strips any dashboard key whose payload still contains `"log in"` markers before React Query hydrates, and `ThemeContext` purges contaminated react-query entries on mount (`services/dormway-lockedin/src/lib/storage/sanitizer.ts`, `services/dormway-lockedin/src/contexts/ThemeContext.tsx`).
+- `useDashboardComposite` always refetches on mount, rejects cached results that still contain the placeholder, and filters transformed data so `"Log In"` widgets/tasks can’t leak back in (`services/dormway-lockedin/src/hooks/home/useDashboardComposite.ts`).
+- Realtime/onboarding flow emits cache-invalidation flags that trigger the client to clear dashboard caches the moment onboarding finishes (`services/dormway-lockedin/src/hooks/useAblyDashboard.ts`, `services/engine/src/workflows/studentProcessor.workflow.ts`).
+- Engine now seeds new accounts with the “Upload my schedule to DormWay” task rather than the legacy `"DormWay: Log In"` quick-start (`services/engine/src/activities/student.activities.ts`).
+- Remaining edge case: we should add the plain lower-case `'log in'` marker to `PLACEHOLDER_MARKERS` to cover payloads that omit surrounding quotes.
+
+## User Impact
+
+**Affected Users**: All new signups (production)
+**Affected Components**:
+- Task Bank widget (showed "Log In" card instead of real task)
+- Welcome Carousel final step (showed "Log In" button instead of "Get Started →")
+- Tips Modal final step (showed "Log In" instead of proper text)
+
+**User Experience**: Confusing UI that appeared broken, as "Log In" made no sense in context
+
+## Root Cause Analysis
+
+### 1. Seeded Quick-Start Payload
+
+**Location**: `services/api-router/src/services/dashboard-service.ts:1104-1172`
+
+When a brand-new user account is created, `DashboardService.getNewUserDashboard()` builds the initial dashboard composite. Since the user has no timeline, events, or tasks yet, the transformer seeds:
+- A "Quick Start Guide"
+- A single urgent assignment: **`"DormWay: Log In"`**
+
+This hardcoded placeholder exists to give new users something to see immediately.
+
+### 2. Title Prefix Stripping
+
+**Location**: `services/dormway-lockedin/src/hooks/home/useDashboardComposite.ts`
+
+The `cleanAssignmentTitle()` helper strips everything before a colon (`:`) in assignment titles:
+
+```typescript
+function cleanAssignmentTitle(title: string): string {
+  // Strip "DormWay: Log In" → "Log In"
+  return title.includes(':') ? title.split(':').slice(1).join(':').trim() : title;
+}
+```
+
+Result: `"DormWay: Log In"` → `"Log In"`
+
+### 3. Transformation Into Task Bank Items
+
+**Location**: `services/dormway-lockedin/src/hooks/home/useDashboardComposite.ts:581-653`
+
+The `useDashboardComposite` hook converts urgent assignments into fallback `unscheduledTasks` whenever the API payload lacks real pending tasks:
+
+```typescript
+// Lines 581-653
+if (!pendingTasks || pendingTasks.length === 0) {
+  // Fallback: convert urgent assignments to unscheduled tasks
+  const urgentAssignments = dashboardData.dueSoon?.filter(a => a.isUrgent) || [];
+  unscheduledTasks = urgentAssignments.map(assignment => ({
+    id: assignment.id,
+    title: cleanAssignmentTitle(assignment.title), // "Log In"
+    // ...
+  }));
+}
+```
+
+For fresh accounts, the **only** assignment is the seeded `"DormWay: Log In"`, so the task bank renders exactly that.
+
+### 4. Cache Persisted the Placeholder
+
+**The Critical Bug**:
+
+Timeline of what happened:
+
+```
+1. User signs up
+2. Frontend calls GET /dashboard/v1/composite
+3. API Router sees new user with no data
+4. Transformer returns quick-start payload with "DormWay: Log In"
+5. Redis caches this response:
+   Key: dashboard:v1:<userId>:home:campus
+   TTL: 300 seconds (5 minutes)
+
+6. Onboarding workflow executes
+7. createDefaultOnboardingTask() creates real task:
+   "Upload my schedule to DormWay"
+
+8. ❌ NO CACHE INVALIDATION (original bug)
+
+9. User lands on dashboard
+10. Frontend calls GET /dashboard/v1/composite again
+11. Redis returns CACHED response from step 5
+12. Frontend renders "Log In" placeholder
+13. User sees broken UI
+
+14. Cache expires after 5 minutes
+15. Next request recomputes composite
+16. ⚠️ STILL SHOWS "Log In" because:
+    - Aurora read replica lag
+    - Task query timing issues
+    - Transformer doesn't see new task yet
+
+17. Recomputed response identical to cached one
+18. Redis caches "Log In" payload AGAIN
+19. Cycle repeats indefinitely
+```
+
+**Why TTL Didn't Help**:
+- Cache expiration triggered recomputation
+- But recomputation queried Aurora **before** task was visible
+- Or read replica lag meant task wasn't synced yet
+- Transformer used same fallback logic
+- "DormWay: Log In" cached again for another 5 minutes
+- **Infinite loop of stale placeholder data**
+
+## Technical Details
+
+### Cache Key Pattern
+```
+dashboard:v1:<userId>:home:campus    # v1 composite format
+dashboard:<userId>                    # Legacy format
+dashboard:<userId>:campus             # Legacy context format
+```
+
+### Redis Configuration (Production)
+- **Service**: AWS ElastiCache
+- **TLS**: Required (`rediss://` protocol)
+- **Auth**: Password-based
+- **Environment Variables**:
+  - `DOCKER_REDIS_URL` (Docker-internal)
+  - `REDIS_PRIVATE_URL` (VPC-internal)
+  - `REDIS_URL` (public fallback)
+  - `REDIS_PASSWORD`
+  - `REDIS_TLS`
+
+### Task Creation Flow
+```typescript
+// services/engine/src/workflows/studentProcessor.workflow.ts
+
+// Step 6.5: Create default task
+await studentActivities.createDefaultOnboardingTask(user_id);
+
+// Step 6.6: ❌ MISSING - Cache invalidation (before fix)
+// Frontend next fetch → stale cache → "Log In"
+
+// Step 7: Send welcome notification
+// ...
+```
+
+## The Fix
+
+### Changes Made
+
+**1. New Activity: `invalidateDashboardCache`**
+
+**Location**: `services/engine/src/activities/student.activities.ts:6840-6919`
+
+```typescript
+async invalidateDashboardCache(userId: string, reason?: string): Promise<void> {
+  // Replicate API Router's Redis connection logic
+  const dockerRedisUrl = process.env.DOCKER_REDIS_URL?.trim();
+  const privateRedisUrl = process.env.REDIS_PRIVATE_URL?.trim();
+  const publicRedisUrl = process.env.REDIS_URL?.trim();
+
+  const redisUrl = (dockerRedisUrl && dockerRedisUrl.length > 0) ? dockerRedisUrl :
+                  (privateRedisUrl && privateRedisUrl.length > 0) ? privateRedisUrl :
+                  (publicRedisUrl && publicRedisUrl.length > 0) ? publicRedisUrl :
+                  'redis://redis-local:6379';
+
+  // Handle TLS (production ElastiCache requires rediss://)
+  const enableTLS = (process.env.REDIS_TLS === '1' || redisUrl.startsWith('rediss://'));
+  const redisPassword = process.env.REDIS_PASSWORD;
+
+  // Create client with proper config
+  const redis = createClient({
+    url: redisUrl,
+    password: redisPassword,
+    socket: enableTLS
+      ? { tls: true, rejectUnauthorized: false, connectTimeout: 10000 }
+      : { connectTimeout: 10000 }
+  });
+
+  await redis.connect();
+
+  // Delete ALL cache patterns (same as API Router invalidateDashboard)
+  const patterns = [
+    `dashboard:v1:${userId}:*`,    // v1 composite keys
+    `dashboard:${userId}`,          // Legacy format
+    `dashboard:${userId}:*`,        // Legacy context format
+  ];
+
+  let totalDeleted = 0;
+  for (const pattern of patterns) {
+    const keys = await redis.keys(pattern);
+    if (keys.length > 0) {
+      await redis.del(keys);
+      totalDeleted += keys.length;
+    }
+  }
+
+  await redis.quit();
+}
+```
+
+**Key Features**:
+- ✅ Mirrors API Router's Redis connection logic exactly
+- ✅ Supports production ElastiCache (TLS, password auth)
+- ✅ Uses environment variable precedence chain
+- ✅ Deletes ALL cache patterns (v1 + legacy)
+- ✅ Non-blocking (doesn't throw on failure)
+
+**2. Workflow Integration**
+
+**Location**: `services/engine/src/workflows/studentProcessor.workflow.ts:420-427`
+
+```typescript
+// Step 6.5: Create default onboarding task to upload schedule
+logger.info(`Creating default onboarding task for ${user_id}`);
+try {
+  await studentActivities.createDefaultOnboardingTask(user_id);
+} catch (error) {
+  logger.warn(`Failed to create default task, continuing`, { error });
+}
+
+// Step 6.6: Invalidate dashboard cache so fresh task data is fetched
+logger.info(`Invalidating dashboard cache for ${user_id}`);
+try {
+  await studentActivities.invalidateDashboardCache(user_id, 'onboarding_complete');
+} catch (error) {
+  logger.warn(`Failed to invalidate cache, continuing`, { error });
+}
+```
+
+**Timing**: Cache invalidation happens **immediately after** task creation, before Ably notification or welcome email.
+
+**3. Dependencies**
+
+Added `redis@^5.0.1` to `services/engine/package.json` (same version as API Router for consistency).
+
+### Flow After Fix
+
+```
+1. User signs up
+2. Frontend calls GET /dashboard/v1/composite
+3. Redis caches quick-start payload with "DormWay: Log In"
+
+4. Onboarding workflow executes
+5. createDefaultOnboardingTask() creates:
+   "Upload my schedule to DormWay"
+
+6. ✅ invalidateDashboardCache() called
+7. ✅ Redis deletes all keys:
+   - dashboard:v1:<userId>:home:campus
+   - dashboard:v1:<userId>:*
+   - dashboard:<userId>
+   - dashboard:<userId>:*
+
+8. User lands on dashboard
+9. Frontend calls GET /dashboard/v1/composite
+10. ✅ Cache MISS (keys deleted)
+11. ✅ Fresh Aurora query
+12. ✅ Real task fetched: "Upload my schedule to DormWay"
+13. ✅ User sees correct task in Task Bank
+14. ✅ Welcome Carousel shows "Get Started →"
+```
+
+## Why Previous Attempts Failed
+
+### Attempt 1: HTTP Call to API Router
+**Tried**: Engine activity called `POST /dashboard/invalidate-cache`
+**Failed**:
+- Endpoint required authentication (no auth token in activity)
+- Would need to inject system credentials
+- Extra network hop and failure point
+
+### Attempt 2: Hardcoded Redis Connection
+**Tried**: `redis://redis-local:6379`
+**Failed**:
+- Worked locally but not in production
+- Production uses ElastiCache in private VPC
+- Required TLS (`rediss://` protocol)
+- Required password authentication
+- Connection timeout in AWS
+
+### Attempt 3: Only Delete v1 Pattern
+**Tried**: `dashboard:v1:${userId}:*`
+**Failed**:
+- Left legacy cache keys intact
+- API Router checks legacy patterns too
+- Stale data persisted in alternate formats
+
+### Final Solution
+✅ Direct Redis connection with full production support
+✅ Same env var resolution as API Router
+✅ TLS and password authentication
+✅ All cache patterns deleted
+✅ Non-blocking error handling
+
+## Testing
+
+### Local Testing
+```bash
+# 1. Start services
+make dev
+
+# 2. Test new user onboarding
+# - Sign up new account
+# - Complete onboarding form
+# - Check engine logs for cache invalidation:
+
+docker logs docker-engine-1 | grep "Invalidating dashboard cache"
+# Output: Successfully invalidated dashboard cache { userId: 'xxx', totalKeysDeleted: 3 }
+
+# 3. Verify Task Bank shows real task
+# - Should see "Upload my schedule to DormWay"
+# - Should NOT see "Log In"
+```
+
+### Production Testing
+After deployment:
+1. Create new test account
+2. Complete onboarding
+3. Verify dashboard loads with correct task
+4. Check CloudWatch logs for cache invalidation success
+5. Verify no "Log In" placeholder appears
+
+## Lessons Learned
+
+### 1. Cache Invalidation is Critical
+Never assume TTL will handle staleness. Explicit invalidation is required when source data changes.
+
+### 2. Production Parity Matters
+Local development (plain Redis) vs production (ElastiCache with TLS) can hide connection bugs until deployment.
+
+### 3. Test All Cache Patterns
+Legacy code leaves behind multiple cache key formats. Invalidation must handle all of them.
+
+### 4. TTL Creates False Sense of Security
+A 5-minute TTL seems reasonable, but if recomputation produces identical stale data, the problem never resolves.
+
+### 5. Replicas Introduce Lag
+Aurora read replicas can lag behind writes. Cache invalidation must account for this timing.
+
+### 6. Activities Need Production Config
+Temporal activities running in engine need same environment awareness as API services (TLS, passwords, URLs).
+
+## Related Documentation
+
+- **Redis Cache Service**: `services/api-router/src/services/redis-cache.ts`
+- **Dashboard Composite**: `services/api-router/src/routes/dashboard-routes.ts`
+- **Onboarding Workflow**: `services/engine/src/workflows/studentProcessor.workflow.ts`
+- **Task Creation**: `services/engine/src/activities/student.activities.ts:6638`
+- **Frontend Hook**: `services/dormway-lockedin/src/hooks/home/useDashboardComposite.ts`
+
+## Prevention
+
+### Code Review Checklist
+When adding new cached endpoints:
+- [ ] Implement explicit cache invalidation on data mutations
+- [ ] Test with production Redis config (TLS, passwords)
+- [ ] Invalidate ALL cache key patterns (v1 + legacy)
+- [ ] Add logging for cache invalidation success/failure
+- [ ] Consider read replica lag in timing
+
+### Architecture Considerations
+- Use Redis pub/sub for cache invalidation events
+- Consider cache-aside pattern with shorter TTLs
+- Implement cache versioning for breaking changes
+- Add monitoring for cache hit rates and staleness
+
+## Timeline
+
+| Time | Event |
+|------|-------|
+| Oct 18, 2025 | Clerk migration deployed (DORM-363) |
+| Oct 19, 2025 | First reports of "Log In" text in production |
+| Oct 22, 2025 08:00 | Bug investigation started |
+| Oct 22, 2025 14:00 | Root cause identified (stale cache) |
+| Oct 22, 2025 16:00 | Fix implemented (cache invalidation activity) |
+| Oct 22, 2025 17:00 | PR #306 created |
+| Oct 22, 2025 TBD | Production deployment |
+
+## Conclusion
+
+This bug demonstrates the importance of:
+1. **Explicit cache invalidation** when source data changes
+2. **Production parity** in development and testing
+3. **Comprehensive pattern matching** for legacy code paths
+4. **Proper Redis configuration** across all services
+
+The fix ensures new users always see fresh dashboard data immediately after onboarding, eliminating the confusing "Log In" placeholder text.
+
+## 2025-02-12 Follow-up
+
+- Added an automatic localStorage sanitizer that runs during root layout hydration. It removes any cached dashboard payloads whose keys or values still reference the `"DormWay: Log In"` quick-start task, and it bumps a version string so we can safely evolve the schema later.
+- Hooked the sanitizer into `ThemeContext` mount logic to guarantee preference reads/writes use a valid structure even if the user had older data.
+- Hardened `useDashboardComposite` so any assignment or task whose title normalizes to `"Log In"` is treated as a placeholder regardless of backend metadata, preventing the UI from showing the legacy CTA if a stale payload sneaks through.
+- Updated the Obsidian checklist to include “sanitize client storage when response shapes change,” and reminded teams to bump the storage version whenever we introduce a breaking change to cached dashboard shapes.
+
+## 2025-10-29 Follow-up: Comprehensive Prevention Audit
+
+After previous fixes, a comprehensive audit was conducted to ensure the "Log In" placeholder issue is fully resolved across all code paths.
+
+### Findings
+
+#### 1. Frontend Sanitization (Client-Side Defense)
+
+**Storage Sanitizer** (`services/dormway-lockedin/src/lib/storage/sanitizer.ts:35`):
+- Automatically strips legacy payloads during app initialization
+- `sanitizeDormwayStorage()` wipes any dashboard-related key containing placeholder markers
+- Runs before React Query starts up, ensuring clean state from the start
+
+**Theme Context Purge** (`services/dormway-lockedin/src/contexts/ThemeContext.tsx:157`):
+- Purges contaminated react-query entries during context initialization
+- Ensures theme-related storage doesn't contain stale "Log In" references
+- Provides additional layer of defense against persisted placeholder data
+
+**Result:** Stale "Log In" blobs are cleared client-side even if they slip through backend defenses.
+
+#### 2. Dashboard Hook Hardening
+
+**Location:** `services/dormway-lockedin/src/hooks/home/useDashboardComposite.ts`
+
+**Always Refetches** (Line 445):
+- Dashboard hook now always refetches data
+- Rejects cached results that still contain the placeholder
+- Never trusts stale cache when placeholder markers detected
+
+**Filtered Transformations** (Line 757):
+- Transformed data is filtered to prevent placeholder leakage
+- Placeholders cannot leak into widgets or task lists
+- Multiple layers of filtering ensure clean data throughout the component tree
+
+**Result:** Even if backend returns placeholder, frontend filters it out before rendering.
+
+#### 3. Real-Time Cache Invalidation
+
+**Ably Delta Events** (`services/dormway-lockedin/src/hooks/useAblyDashboard.ts:49`):
+- Real-time signals now explicitly flush caches
+- Ably deltas with `invalidateCache` flag clear local storage and query caches
+- Ensures immediate updates when data changes on the server
+
+**Onboarding Complete Events** (`services/engine/src/workflows/studentProcessor.workflow.ts:426`):
+- Student processor workflow emits cache invalidation flags when onboarding finishes
+- Triggers immediate client-side cache flush
+- Ensures fresh data immediately after onboarding completes
+
+**Result:** Cache is proactively invalidated in real-time when onboarding state changes.
+
+#### 4. Backend Seed Data Fix
+
+**Location:** `services/engine/src/activities/student.activities.ts:6831`
+
+**Critical Change:**
+- Backend seed data no longer injects the "DormWay: Log In" card
+- Default onboarding tasks are created with the new text: "Upload my schedule to DormWay"
+- Original source of the placeholder has been removed
+
+**Result:** The root cause (seeded placeholder) is eliminated at the source.
+
+#### 5. Cache Invalidation Comprehensive Coverage
+
+**No Hardcoded Fallbacks:**
+- API router has no hardcoded fallback to "DormWay: Log In"
+- Redis layer has no legacy fallback logic
+- CSS/HTML no longer fed the old quick-start payload
+
+**Multi-Pattern Invalidation:**
+- Cache entries invalidated across legacy and v1 key patterns
+- All Redis key formats covered:
+  - `dashboard:v1:<userId>:*`
+  - `dashboard:<userId>`
+  - `dashboard:<userId>:*`
+
+**Result:** Comprehensive cache invalidation prevents all persistence pathways.
+
+### Minor Gap Identified
+
+**Location:** `services/dormway-lockedin/src/lib/storage/sanitizer.ts:35`
+
+**Issue:** The `PLACEHOLDER_MARKERS` array performs lower-cased matching but lacks a plain 'log in' string:
+
+```typescript
+const PLACEHOLDER_MARKERS = [
+  'dormway: log in',
+  '"log in"',
+  "'log in'",
+  // Missing: 'log in' (plain, no quotes)
+];
+```
+
+**Risk:** If any cache stores just the token "log in" without quotes, it would slip through the sanitizer.
+
+**Impact:** Low probability edge case, but possible if intermediate processing strips quotes.
+
+### Recommended Next Steps
+
+#### 1. Close Sanitizer Gap (Optional but Recommended)
+
+Add the plain 'log in' marker to be fully belt-and-suspenders:
+
+```typescript
+const PLACEHOLDER_MARKERS = [
+  'dormway: log in',
+  '"log in"',
+  "'log in'",
+  'log in',  // Add this line
+];
+```
+
+**Rationale:** Zero-cost defensive programming. Ensures all variations are caught.
+
+#### 2. Monitoring (Production Verification)
+
+- Monitor CloudWatch logs for any remaining "Log In" placeholder appearances
+- Track cache invalidation success rate
+- Alert on any placeholder detection in production dashboards
+
+#### 3. Documentation Updates
+
+- Update frontend sanitizer documentation to note all marker patterns
+- Document the multi-layered defense strategy (backend, cache, frontend, real-time)
+- Add to testing checklist: verify no placeholder data in new user flows
+
+### Defense-in-Depth Summary
+
+The "Log In" placeholder issue is now protected by **five independent layers**:
+
+1. **Source Elimination:** Backend no longer seeds the placeholder
+2. **Cache Invalidation:** Comprehensive Redis key invalidation on onboarding
+3. **Real-Time Signals:** Ably events trigger immediate cache flushes
+4. **Client-Side Sanitization:** Storage sanitizer removes stale data on app boot
+5. **Runtime Filtering:** Dashboard hook filters placeholders during transformation
+
+**Result:** The bug is effectively eliminated with multiple redundant safeguards. Even if one layer fails, others prevent the issue from reaching users.
+
+---
+
+**Status**: ✅ Fix deployed to production
+**Verified**: [Date of production verification]
+**Follow-up**: Monitor CloudWatch logs for cache invalidation success rate

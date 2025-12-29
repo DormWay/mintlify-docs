@@ -1,0 +1,519 @@
+---
+title: "Auth0 Actions Implementation"
+description: "This document contains all Auth0 Actions code and the corresponding API endpoints needed in dormway-api-router to support Auth0 integration."
+---
+
+# Auth0 Actions Implementation Guide
+
+## Overview
+This document contains all Auth0 Actions code and the corresponding API endpoints needed in dormway-api-router to support Auth0 integration.
+
+## Auth0 Actions
+
+### 1. Post-User Registration Action
+
+```javascript
+/**
+ * Handler that will be called during the execution of a PostUserRegistration flow.
+ * Creates user profile in DormWay system and Amplitude (which syncs to Customer.io)
+ *
+ * @param {Event} event - Details about the context and user that registered.
+ * @param {PostUserRegistrationAPI} api - Interface that allows actions to be performed.
+ */
+exports.onExecutePostUserRegistration = async (event, api) => {
+  const { user } = event;
+  
+  try {
+    // 1. Create user profile in DormWay database
+    const userProfileResponse = await fetch(`${event.secrets.API_GATEWAY_URL}/users/create`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${event.secrets.SYSTEM_API_KEY}`,
+        'X-Auth0-Action': 'post-registration'
+      },
+      body: JSON.stringify({
+        auth0_id: user.user_id,
+        email: user.email,
+        email_verified: user.email_verified || false,
+        full_name: user.name || user.nickname || '',
+        given_name: user.given_name || '',
+        family_name: user.family_name || '',
+        picture: user.picture || '',
+        created_at: new Date().toISOString(),
+        onboarding_status: 'pending',
+        metadata: {
+          signup_source: event.connection.name,
+          signup_ip: event.request.ip,
+          signup_user_agent: event.request.userAgent
+        }
+      })
+    });
+
+    if (!userProfileResponse.ok) {
+      console.error('Failed to create user profile:', await userProfileResponse.text());
+      // Don't throw - allow registration to continue
+    }
+
+    // 2. Identify user in Amplitude (which syncs to Customer.io)
+    const amplitudeIdentifyResponse = await fetch(
+      'https://api2.amplitude.com/identify',
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
+        body: JSON.stringify({
+          api_key: event.secrets.AMPLITUDE_API_KEY,
+          identification: [{
+            user_id: user.user_id,
+            user_properties: {
+              email: user.email,
+              first_name: user.given_name || '',
+              last_name: user.family_name || '',
+              full_name: user.name || user.nickname || '',
+              auth0_id: user.user_id,
+              signup_source: event.connection.name,
+              onboarding_status: 'pending',
+              platform: 'auth0',
+              created_at: new Date().toISOString(),
+              email_verified: user.email_verified || false
+            }
+          }]
+        })
+      }
+    );
+
+    if (!amplitudeIdentifyResponse.ok) {
+      console.error('Failed to identify user in Amplitude:', await amplitudeIdentifyResponse.text());
+      // Don't throw - allow registration to continue
+    }
+
+    // 3. Track registration event in Amplitude (which syncs to Customer.io)
+    const amplitudeEventResponse = await fetch(
+      'https://api2.amplitude.com/2/httpapi',
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
+        body: JSON.stringify({
+          api_key: event.secrets.AMPLITUDE_API_KEY,
+          events: [{
+            user_id: user.user_id,
+            event_type: 'user_registered',
+            time: Date.now(),
+            event_properties: {
+              signup_method: event.connection.name,
+              ip_address: event.request.ip,
+              user_agent: event.request.userAgent,
+              source: 'auth0_action'
+            },
+            user_properties: {
+              email: user.email,
+              first_name: user.given_name || '',
+              last_name: user.family_name || '',
+              full_name: user.name || user.nickname || ''
+            }
+          }]
+        })
+      }
+    );
+
+    if (!amplitudeEventResponse.ok) {
+      console.error('Failed to track registration event in Amplitude:', await amplitudeEventResponse.text());
+      // Don't throw - allow registration to continue
+    }
+
+  } catch (error) {
+    console.error('Post-registration action error:', error);
+    // Don't throw - allow registration to continue even if actions fail
+  }
+};
+```
+
+### 2. Post-Login Action
+
+```javascript
+/**
+ * Handler that will be called during the execution of a PostLogin flow.
+ * Adds custom claims, updates last login, and tracks events
+ *
+ * @param {Event} event - Details about the user and the context in which they are logging in.
+ * @param {PostLoginAPI} api - Interface that allows actions to be performed.
+ */
+exports.onExecutePostLogin = async (event, api) => {
+  const { user } = event;
+  
+  try {
+    // 1. Fetch user context and profile from DormWay API
+    const contextResponse = await fetch(
+      `${event.secrets.API_GATEWAY_URL}/api/users/${user.user_id}/context`,
+      {
+        headers: {
+          'Authorization': `Bearer ${event.secrets.SYSTEM_API_KEY}`,
+          'X-Auth0-Action': 'post-login'
+        }
+      }
+    );
+
+    if (contextResponse.ok) {
+      const userData = await contextResponse.json();
+      
+      // Add custom claims to tokens
+      const namespace = 'https://dormway.app/';
+      
+      // Access token claims (for API authorization)
+      api.accessToken.setCustomClaim(`${namespace}user_id`, user.user_id);
+      api.accessToken.setCustomClaim(`${namespace}roles`, userData.roles || ['user']);
+      api.accessToken.setCustomClaim(`${namespace}school_id`, userData.school_id || null);
+      api.accessToken.setCustomClaim(`${namespace}context_id`, userData.context_id || null);
+      api.accessToken.setCustomClaim(`${namespace}onboarding_status`, userData.onboarding_status || 'pending');
+      
+      // ID token claims (for client-side user info)
+      api.idToken.setCustomClaim(`${namespace}user_profile`, {
+        full_name: userData.full_name || user.name || '',
+        avatar_url: userData.avatar_url || user.picture || '',
+        school_name: userData.school_name || '',
+        onboarding_status: userData.onboarding_status || 'pending'
+      });
+    }
+
+    // 2. Update last login timestamp
+    await fetch(
+      `${event.secrets.API_GATEWAY_URL}/api/users/${user.user_id}/last-login`,
+      {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${event.secrets.SYSTEM_API_KEY}`,
+          'X-Auth0-Action': 'post-login'
+        },
+        body: JSON.stringify({
+          last_login_at: new Date().toISOString(),
+          login_count: (user.logins_count || 0) + 1,
+          login_ip: event.request.ip,
+          login_user_agent: event.request.userAgent
+        })
+      }
+    );
+
+    // 3. Track login event in Amplitude (which syncs to Customer.io)
+    const amplitudeEventResponse = await fetch(
+      'https://api2.amplitude.com/2/httpapi',
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
+        body: JSON.stringify({
+          api_key: event.secrets.AMPLITUDE_API_KEY,
+          events: [{
+            user_id: user.user_id,
+            event_type: 'user_login',
+            time: Date.now(),
+            event_properties: {
+              login_method: event.connection.name,
+              ip_address: event.request.ip,
+              user_agent: event.request.userAgent,
+              login_count: (user.logins_count || 0) + 1,
+              source: 'auth0_action'
+            }
+          }]
+        })
+      }
+    );
+
+    if (!amplitudeEventResponse.ok) {
+      console.error('Failed to track login event in Amplitude:', await amplitudeEventResponse.text());
+      // Don't throw - allow login to continue
+    }
+
+    // 4. Check if user needs to complete onboarding
+    if (userData?.onboarding_status === 'pending') {
+      api.user.setUserMetadata('needs_onboarding', true);
+    }
+
+  } catch (error) {
+    console.error('Post-login action error:', error);
+    // Don't throw - allow login to continue even if actions fail
+  }
+};
+```
+
+## Required API Endpoints for dormway-api-router
+
+### 1. Create User Endpoint
+
+```typescript
+// src/routes/users.ts
+import { Router } from 'express';
+import { createUser, getUserContext, updateLastLogin } from '../controllers/userController';
+import { requireSystemAuth } from '../middleware/auth';
+
+const router = Router();
+
+// System endpoints (called by Auth0 Actions)
+router.post('/api/users/create', requireSystemAuth, createUser);
+router.get('/api/users/:userId/context', requireSystemAuth, getUserContext);
+router.put('/api/users/:userId/last-login', requireSystemAuth, updateLastLogin);
+
+export default router;
+```
+
+### 2. User Controller Implementation
+
+```typescript
+// src/controllers/userController.ts
+import { Request, Response } from 'express';
+import { supabase } from '../services/supabase';
+import { logger } from '../utils/logger';
+
+export async function createUser(req: Request, res: Response) {
+  try {
+    const {
+      auth0_id,
+      email,
+      email_verified,
+      full_name,
+      given_name,
+      family_name,
+      picture,
+      created_at,
+      onboarding_status,
+      metadata
+    } = req.body;
+
+    // Check if user already exists
+    const { data: existingUser } = await supabase
+      .from('accounts')
+      .select('id')
+      .eq('auth0_id', auth0_id)
+      .single();
+
+    if (existingUser) {
+      return res.status(200).json({ 
+        message: 'User already exists', 
+        user_id: existingUser.id 
+      });
+    }
+
+    // Create new user account
+    const { data: newUser, error } = await supabase
+      .from('accounts')
+      .insert({
+        auth0_id,
+        email,
+        email_verified,
+        name: full_name,
+        given_name,
+        family_name,
+        picture_url: picture,
+        onboarding_status: onboarding_status || 'pending',
+        metadata: metadata || {},
+        is_personal_account: true,
+        primary_owner_user_id: auth0_id, // Using auth0_id as the primary owner
+        created_at: created_at || new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      })
+      .select()
+      .single();
+
+    if (error) {
+      logger.error('Failed to create user:', error);
+      return res.status(500).json({ error: 'Failed to create user' });
+    }
+
+    res.status(201).json({ 
+      message: 'User created successfully', 
+      user_id: newUser.id,
+      auth0_id: newUser.auth0_id
+    });
+
+  } catch (error) {
+    logger.error('Create user error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+}
+
+export async function getUserContext(req: Request, res: Response) {
+  try {
+    const { userId } = req.params;
+
+    // Fetch user account with related context data
+    const { data: account, error } = await supabase
+      .from('accounts')
+      .select(`
+        *,
+        student_contexts!primary_owner_user_id (
+          id,
+          school_id,
+          schools (
+            id,
+            name,
+            campus_id
+          )
+        )
+      `)
+      .eq('auth0_id', userId)
+      .single();
+
+    if (error || !account) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Format response
+    const context = {
+      user_id: account.auth0_id,
+      email: account.email,
+      full_name: account.name,
+      avatar_url: account.picture_url,
+      roles: account.public_data?.roles || ['user'],
+      onboarding_status: account.onboarding_status,
+      context_id: account.student_contexts?.[0]?.id || null,
+      school_id: account.student_contexts?.[0]?.school_id || null,
+      school_name: account.student_contexts?.[0]?.schools?.name || null
+    };
+
+    res.json(context);
+
+  } catch (error) {
+    logger.error('Get user context error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+}
+
+export async function updateLastLogin(req: Request, res: Response) {
+  try {
+    const { userId } = req.params;
+    const { last_login_at, login_count, login_ip, login_user_agent } = req.body;
+
+    const { error } = await supabase
+      .from('accounts')
+      .update({
+        last_login_at,
+        login_count,
+        last_login_ip: login_ip,
+        last_login_user_agent: login_user_agent,
+        updated_at: new Date().toISOString()
+      })
+      .eq('auth0_id', userId);
+
+    if (error) {
+      logger.error('Failed to update last login:', error);
+      return res.status(500).json({ error: 'Failed to update last login' });
+    }
+
+    res.json({ message: 'Last login updated successfully' });
+
+  } catch (error) {
+    logger.error('Update last login error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+}
+```
+
+### 3. System Authentication Middleware
+
+```typescript
+// src/middleware/auth.ts
+import { Request, Response, NextFunction } from 'express';
+import jwt from 'jsonwebtoken';
+
+// For Auth0 Actions to authenticate with the API
+export function requireSystemAuth(req: Request, res: Response, next: NextFunction) {
+  const authHeader = req.headers.authorization;
+  const auth0Action = req.headers['x-auth0-action'];
+  
+  if (!authHeader || !auth0Action) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  const token = authHeader.split(' ')[1];
+  
+  try {
+    // Verify system API key (simple bearer token for Auth0 Actions)
+    if (token !== process.env.SYSTEM_API_KEY) {
+      return res.status(401).json({ error: 'Invalid API key' });
+    }
+    
+    next();
+  } catch (error) {
+    return res.status(401).json({ error: 'Invalid token' });
+  }
+}
+```
+
+### 4. Database Schema Updates
+
+```sql
+-- Add Auth0-specific columns to accounts table
+ALTER TABLE public.accounts 
+ADD COLUMN IF NOT EXISTS auth0_id VARCHAR(255) UNIQUE,
+ADD COLUMN IF NOT EXISTS given_name VARCHAR(255),
+ADD COLUMN IF NOT EXISTS family_name VARCHAR(255),
+ADD COLUMN IF NOT EXISTS email_verified BOOLEAN DEFAULT false,
+ADD COLUMN IF NOT EXISTS onboarding_status VARCHAR(50) DEFAULT 'pending',
+ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMP WITH TIME ZONE,
+ADD COLUMN IF NOT EXISTS login_count INTEGER DEFAULT 0,
+ADD COLUMN IF NOT EXISTS last_login_ip VARCHAR(45),
+ADD COLUMN IF NOT EXISTS last_login_user_agent TEXT,
+ADD COLUMN IF NOT EXISTS metadata JSONB DEFAULT '{}';
+
+-- Index for faster lookups
+CREATE INDEX IF NOT EXISTS idx_accounts_auth0_id ON public.accounts(auth0_id);
+CREATE INDEX IF NOT EXISTS idx_accounts_onboarding_status ON public.accounts(onboarding_status);
+```
+
+## Environment Variables
+
+### Auth0 Dashboard Action Secrets
+```
+API_GATEWAY_URL=https://bp67gdk1c5.execute-api.us-east-1.amazonaws.com
+SYSTEM_API_KEY=your-secure-system-api-key
+AMPLITUDE_API_KEY=your-amplitude-api-key
+```
+
+### dormway-api-router .env
+```
+# System API Key (for Auth0 Actions)
+SYSTEM_API_KEY=your-secure-system-api-key
+
+# Supabase (existing)
+SUPABASE_URL=your-supabase-url
+SUPABASE_SERVICE_KEY=your-supabase-service-key
+```
+
+## Implementation Steps
+
+1. **Update Database Schema**
+   - Run the SQL migrations to add Auth0-specific columns
+
+2. **Add API Endpoints**
+   - Create the user routes and controller in dormway-api-router
+   - Deploy to AWS through API Gateway
+
+3. **Configure Auth0 Actions**
+   - Go to Auth0 Dashboard → Actions
+   - Create Post-User Registration action
+   - Create Post-Login action
+   - Add the required secrets
+
+4. **Test the Flow**
+   - Register a new user
+   - Check database for user creation
+   - Login and verify custom claims in token
+   - Check Amplitude for user identification and events
+   - Verify Customer.io receives data via Amplitude sync
+
+## Notes
+
+- The system uses a simple bearer token for Auth0 Actions authentication
+- All Auth0 Action errors are logged but don't block the auth flow
+- Amplitude integration is fire-and-forget to avoid blocking auth
+- Amplitude automatically syncs user data and events to Customer.io
+- The onboarding workflow is triggered from the iOS app, not Auth0
+- User context is fetched on each login to ensure fresh data in tokens

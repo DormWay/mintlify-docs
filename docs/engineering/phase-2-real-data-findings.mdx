@@ -1,0 +1,632 @@
+---
+title: "Phase 2 Real Data Findings"
+description: "1. ✅ Real database data samples 2. ✅ Complete Canvas API documentation (canvas-routes.ts) 3. ✅ Complete assignment completion API (assignment-completion-rout..."
+---
+
+# Phase 2: Real Data Findings & API Coverage
+**Date:** 2025-11-09
+**Related:** [Database-Schema-Investigation-2025-11-09](/docs/engineering/database-schema-investigation-2025-11-09), [Feature-Parity-Analysis](/docs/engineering/feature-parity-analysis)
+
+---
+
+## Executive Summary
+
+**Phase 2 completed analysis of:**
+1. ✅ Real database data samples
+2. ✅ Complete Canvas API documentation (canvas-routes.ts)
+3. ✅ Complete assignment completion API (assignment-completion-routes.ts)
+4. ✅ iOS API usage patterns
+
+**Key Discoveries:**
+- **DayPlan structure** shows timeline data DOES exist in `service_data`
+- **User preferences** use simple key-value structure (appBehavior, calendar, notifications, preferences, privacy)
+- **Canvas integration** has 3 connection methods: OAuth, Personal Access Token, ICS feed
+- **Assignment completion** has full tracking: start, complete, dismiss, bulk operations
+- **iOS uses same dashboard BFF** (`/dashboard/v1/composite`)
+
+---
+
+## 1. REAL DATA SAMPLES
+
+### 1.1 DayPlan Data (Service Data Method: `dayplan`)
+
+**Sample from database:**
+```json
+{
+  "date": "2025-11-09",
+  "events": [
+    {
+      "id": "df5023e4-be28-482a-a248-9b64f180e0a1",
+      "type": "rest",
+      "source": "calendar",
+      "startTime": "2025-11-09T07:00:00-05:00",
+      "endTime": "2025-11-09T08:00:00-05:00",
+      "priority": 1,
+      "confidence": 1,
+      "metadata": {
+        "title": "Wake Up and Morning Routine",
+        "location": null,
+        "description": "Start the day with personal hygiene and getting ready.",
+        "isRecurring": false,
+        "suggestions": []
+      }
+    },
+    {
+      "id": "f8866235-e8a2-4b54-8983-660a9d7c15fa",
+      "type": "meal",
+      "source": "prediction",
+      "startTime": "2025-11-09T08:00:00-05:00",
+      "endTime": "2025-11-09T08:30:00-05:00",
+      "priority": 3,
+      "confidence": 0.9,
+      "metadata": {
+        "title": "Breakfast",
+        "location": null,
+        "description": "Fuel up for the day ahead.",
+        "isRecurring": false,
+        "suggestions": []
+      }
+    },
+    {
+      "id": "a4bda0c4-973d-4e04-b65f-d327da50bacf",
+      "type": "transit",
+      "source": "prediction",
+      "startTime": "2025-11-09T08:30:00-05:00",
+      "endTime": "2025-11-09T09:00:00-05:00",
+      "priority": 2,
+      "confidence": 0.8,
+      "metadata": {
+        "title": "Travel to Campus",
+        "location": "Campus",
+        "description": "Commute to campus for study activities.",
+        "isRecurring": false,
+        "suggestions": []
+      }
+    }
+    // ... more events throughout the day
+  ]
+}
+```
+
+**Event Types Found:**
+- `rest` - Wake up, sleep, breaks
+- `meal` - Breakfast, lunch, dinner
+- `transit` - Commute, travel
+- `free` - Free time, breaks
+- (Likely more: `class`, `study`, `work`, `social`, etc.)
+
+**Event Sources:**
+- `calendar` - From Google Calendar or similar
+- `prediction` - AI-generated suggestions
+
+**Timeline Conclusion:**
+✅ **Academic Timeline data EXISTS in backend** as `dayplan` service_data
+- This is the "3-week lookahead" timeline
+- AI-generated daily schedule with events
+- Stored in `service_data` table with method='dayplan'
+- **Available for iOS implementation**
+
+---
+
+### 1.2 User Preferences Data
+
+**Sample from database:**
+```json
+// Key: appBehavior
+{
+  "fontSize": "medium",
+  "accentColor": "emerald",
+  "sidebarCollapsed": true
+}
+
+// Other keys observed: calendar, notifications, preferences, privacy
+```
+
+**Preference Keys in Database:**
+1. `appBehavior` - UI preferences (fontSize, accentColor, sidebar state)
+2. `calendar` - Calendar sync preferences
+3. `notifications` - Notification settings
+4. `preferences` - General user preferences
+5. `privacy` - Privacy settings
+
+**iOS Preference Mapping Needed:**
+iOS has MORE granular preference views:
+- `AICommunicationPreferencesView` → Maps to `preferences.ai_communication`?
+- `AcademicPreferencesView` → Maps to `preferences.academic`?
+- `ContentPreferencesView` → Maps to `preferences.content`?
+- `WellnessPreferencesView` → Maps to `preferences.wellness`?
+- `SocialPreferencesView` → Maps to `preferences.social`?
+
+**Investigation Status:**
+⚠️ Need to sample `preferences` and `privacy` keys to see nested structure
+
+---
+
+### 1.3 Notes Data
+
+**Sample from database:**
+```
+id: cda8e915-fd0e-478f-ad40-f33ad808bc77
+title: "Oct 31"
+content preview:
+  this
+
+  > who
+
+  *yo*
+
+
+  **bold**
+
+  aoiewfoawoiehf
+
+---
+
+id: 0f4a1fba-5934-423c-8cc7-fcf757828c34
+title: "Nov 1"
+content preview:
+  # ASTRO 104
+
+  hey
+
+  * pretty cool
+
+  *italics*
+
+  **bold**
+
+  > callout
+
+  ## heading 2
+
+  ### heading 3
+
+  # head
+```
+
+**Notes Schema Features:**
+- Markdown formatting (headings, bold, italics, lists, quotes)
+- Course association via metadata
+- Revision tracking
+- Content hashing for deduplication
+
+**Notes Count:** 12 notes in database
+
+---
+
+### 1.4 BrainGains Documents
+
+**Document counts:**
+- 11 syllabi
+- 23 general documents
+- Total: 34 documents
+
+**Document Types Available:**
+- `syllabus`
+- `lecture_notes`
+- `assignment`
+- `textbook`
+- `presentation`
+- `research_paper`
+- `general`
+
+---
+
+### 1.5 Service Data Methods (30 types)
+
+```
+braingains_crew_execution
+braingains_cross_course_insights
+braingains_early_warnings
+braingains_schedule_conflict_detection
+braingains_semester_planning
+braingains_semester_workload_analysis
+calendar_sync_status
+context_prediction_request
+context_prediction_response
+context_update
+dayplan ← TIMELINE DATA
+dayplan_context_update
+dayplan_generation_warning
+fetch_forecast
+fetch_ics_calendar
+fetch_news
+fetch_transit
+fetch_weather
+location_campus_detection
+mobile_calendar_save
+normalized_term_course_data
+processed_campus_events
+processed_campus_events_crew
+processed_campus_logistics_crew
+processed_campus_news_crew
+processed_city_context
+processed_city_news_context
+processed_city_weather_context
+processed_parking_context
+processed_perplexity_campus_data
+```
+
+**Key Findings:**
+- `dayplan` = Daily timeline with events (THIS IS THE TIMELINE FEATURE!)
+- `braingains_semester_workload_analysis` = Semester capacity planning
+- `context_prediction_response` = Context-aware predictions
+- Multiple processed campus/city data types for widgets
+
+---
+
+## 2. CANVAS API ENDPOINTS (Complete Documentation)
+
+### 2.1 OAuth Flow
+| Method | Endpoint | Purpose |
+|--------|----------|---------|
+| GET | `/canvas/oauth/authorize` | Redirect to Canvas OAuth |
+| GET | `/canvas/oauth/callback` | Handle OAuth callback, store tokens |
+
+### 2.2 Personal Access Token (PAT) Connection
+| Method | Endpoint | Purpose |
+|--------|----------|---------|
+| POST | `/canvas/connect/manual` | Connect via PAT (primary method, works at all universities) |
+
+### 2.3 ICS Calendar Feed Connection (DORM-430)
+| Method | Endpoint | Purpose |
+|--------|----------|---------|
+| POST | `/canvas/connect-ics` | Connect via ICS feed (universal LMS support) |
+| POST | `/canvas/sync-ics` | Manual ICS sync |
+| DELETE | `/canvas/disconnect-ics` | Disconnect ICS feed |
+
+**Supported LMS Types:**
+- `canvas`
+- `moodle`
+- `blackboard`
+- `google_classroom`
+- `brightspace`
+- `schoology`
+
+### 2.4 Canvas Data Endpoints
+| Method | Endpoint | Purpose |
+|--------|----------|---------|
+| GET | `/canvas/status` | Check connection status (PAT or ICS) |
+| GET | `/canvas/stats` | Get integration stats (courses, assignments, last sync) |
+| GET | `/canvas/courses` | Get user's Canvas courses |
+| GET | `/canvas/assignments` | Get assignments (all courses or specific course) |
+| GET | `/canvas/upcoming` | Get upcoming assignments (next 7 days, incomplete only) |
+| POST | `/canvas/sync` | Trigger manual sync (PAT or ICS) |
+| DELETE | `/canvas/disconnect` | Disconnect Canvas account |
+
+### 2.5 LTI Sessionless Launch
+| Method | Endpoint | Purpose |
+|--------|----------|---------|
+| POST | `/canvas/lti/sessionless-launch` | Generate LTI launch URL for assignment (rate-limited: 10/min) |
+
+### Canvas Assignment Fields
+```typescript
+{
+  id: uuid,
+  canvas_assignment_id: bigint,
+  name: string,
+  description: text,
+  due_at: timestamptz,
+  points_possible: numeric,
+  submission_types: text[],
+  html_url: text,
+  preview_url: text,
+  is_lti_assignment: boolean,
+  external_tool_tag_attributes: jsonb,
+  course_name: string,
+  course_code: string,
+  context_id: uuid, // Course context
+  score: numeric,
+  grade: string,
+  submission_status: string, // workflow_state
+  submitted_at: timestamptz,
+  missing: boolean,
+  late: boolean,
+  excused: boolean,
+  late_policy_status: string,
+  seconds_late: bigint,
+  points_deducted: numeric,
+  graded_at: timestamptz,
+  computed_status: string // UI-friendly status
+}
+```
+
+**Computed Status Values:**
+- `excused` - Excused from assignment
+- `graded` - Graded and returned
+- `submitted` - Submitted, awaiting grading
+- `missing` - Not submitted, past due, marked missing by instructor
+- `past_due` - Past due date, not submitted
+- `upcoming` - Due in future
+- `pending` - No due date or other status
+
+---
+
+## 3. ASSIGNMENT COMPLETION API (Complete Documentation)
+
+### 3.1 Assignment Actions
+| Method | Endpoint | Purpose |
+|--------|----------|---------|
+| POST | `/api/academic/assignments/:id/start` | Mark assignment as started (idempotent) |
+| POST | `/api/academic/assignments/:id/dismiss` | Dismiss from view (soft delete, idempotent) |
+| POST | `/api/academic/assignments/:id/complete` | Mark complete (idempotent) |
+| PATCH | `/api/academic/assignments/:id/complete` | Undo completion |
+| GET | `/api/academic/assignments/completion-status?ids=id1,id2` | Bulk status check (max 100 ids) |
+| POST | `/api/academic/assignments/bulk-complete` | Bulk complete for onboarding (max 500) |
+
+### 3.2 Completion Fields
+```typescript
+{
+  id: uuid,
+  user_id: uuid,
+  assignment_id: text, // Handles numeric and UUID
+  context_id: uuid, // Course context
+  completed_at: timestamptz,
+  is_completed: boolean,
+  completion_source: string, // 'manual', 'lms_sync', 'inferred', 'onboarding_bulk', 'migration_assumed'
+  external_submission_id: text,
+  submission_url: text,
+  graded_at: timestamptz,
+  last_synced_at: timestamptz,
+  actual_minutes: integer,
+  difficulty_rating: integer, // 1-5
+  notes: text,
+  started_at: timestamptz,
+  dismissed: boolean,
+  dismissed_at: timestamptz
+}
+```
+
+### 3.3 Real-Time Events (Ably)
+Published to channel: `user:{userId}:academic`
+
+**Event types:**
+- `assignment_started`
+- `assignment_dismissed`
+- `assignment_completed`
+- `assignment_uncompleted`
+- `bulk_assignments_completed`
+
+### 3.4 Features
+- ✅ **Idempotent operations** - Multiple POSTs return 200 OK
+- ✅ **Conflict resolution** - FOR UPDATE locks prevent race conditions
+- ✅ **Partitioned table** - Monthly partitions for scalability
+- ✅ **Real-time updates** - Ably pub/sub
+- ✅ **Analytics tracking** - Amplitude integration hooks
+- ✅ **Bulk operations** - Onboarding workflow support
+
+---
+
+## 4. iOS API USAGE MAPPING
+
+### 4.1 iOS API Endpoints Found
+```swift
+// DashboardService.swift
+/dashboard/v1/composite ✅ MATCHES WEB
+/api/v1/layouts
+/api/v1/layouts/:layoutId
+
+// CampusTypeaheadService.swift
+/api/mobile/campus/typeahead
+
+// CampusMetadataService.swift
+/api/campus/:campusId/metadata
+/api/campus/by-code/:campusId/metadata
+/api/campus/:campusId/housing
+```
+
+### 4.2 Shared Endpoints (iOS + Web)
+| Endpoint | iOS Usage | Web Usage | Notes |
+|----------|-----------|-----------|-------|
+| `/dashboard/v1/composite` | ✅ DashboardService | ✅ Dashboard BFF | ✅ PARITY |
+
+### 4.3 iOS-Specific Endpoints
+| Endpoint | Purpose | Backend Status |
+|----------|---------|----------------|
+| `/api/mobile/campus/typeahead` | Campus search | ✅ Exists |
+| `/api/campus/:id/metadata` | Campus metadata | ✅ Exists |
+| `/api/campus/:id/housing` | Housing info | ✅ Exists |
+| `/api/v1/layouts` | Widget layouts | ⚠️ Needs investigation |
+
+### 4.4 Web-Specific Endpoints (Not Found in iOS)
+| Endpoint | Purpose | iOS Gap |
+|----------|---------|---------|
+| `/api/notes/*` | Notes CRUD | ❌ NOT USED BY iOS |
+| `/api/canvas/*` | Canvas integration | ⚠️ Needs check |
+| `/api/academic/assignments/*` | Assignment completion | ⚠️ Needs check |
+| `/api/braingains/*` | Ace/BrainGains | ⚠️ Needs check |
+
+**Next:** Search iOS codebase for Canvas, notes, and assignment API calls
+
+---
+
+## 5. FEATURE BACKEND STATUS (Updated)
+
+### ✅ CONFIRMED BACKEND-READY
+
+| Feature | Database | API | Data Sample | iOS Ready? |
+|---------|----------|-----|-------------|------------|
+| **Timeline (DayPlan)** | ✅ `service_data` (method=dayplan) | ✅ Dashboard composite | ✅ Sampled | ✅ YES |
+| **Notes System** | ✅ `notes`, `note_revisions` | ✅ `/api/notes/*` | ✅ Sampled | ⚠️ Check iOS usage |
+| **Canvas Integration** | ✅ Full schema | ✅ 15+ endpoints | ✅ Exists | ⚠️ Check iOS usage |
+| **Assignment Completion** | ✅ `assignment_completion` | ✅ 6 endpoints | ✅ Partitioned | ⚠️ Check iOS usage |
+| **User Preferences** | ✅ `user_preferences` | ✅ Generic API | ✅ Sampled | ⚠️ Map iOS keys |
+| **BrainGains Documents** | ✅ `braingains_documents` | ✅ `/api/braingains/*` | ✅ 34 docs | ⚠️ Check iOS usage |
+
+### ❌ CONFIRMED NOT BACKEND-READY
+
+| Feature | Status | Reason |
+|---------|--------|--------|
+| **Inbox/Messages** | ❌ NO SUPPORT | No tables, no API |
+| **Course Policies (dedicated)** | ⚠️ IN JSONB | Stored in `syllabus_analysis.analysis_data` |
+
+---
+
+## 6. CRITICAL FINDINGS
+
+### 6.1 Timeline Feature EXISTS in Backend! ✅
+
+**Endpoint:** `/dashboard/v1/composite` returns `dayPlan` data
+
+**Data structure (from `service_data`):**
+- Daily schedule with AI-generated events
+- Event types: rest, meal, transit, free, class, study
+- Sources: calendar (real), prediction (AI)
+- Confidence scores for predictions
+- Priority levels (1-3)
+
+**Implementation path for iOS:**
+1. ✅ API already exists (dashboard composite)
+2. ✅ iOS already fetches this data (DashboardService)
+3. ⚠️ iOS may not be DISPLAYING timeline view
+4. **Action:** Check iOS UI code for timeline/dayplan rendering
+
+### 6.2 Gradebook Data is in Canvas Submissions ✅
+
+**Fields available:**
+- `score` (points earned)
+- `grade` (letter or percentage)
+- `points_possible` (from assignment)
+- `graded_at`, `posted_at`
+- `late`, `missing`, `excused`
+- `late_policy_status`, `points_deducted`, `seconds_late`
+
+**Web Gradebook Tab:**
+- Uses Canvas submissions data
+- Calculates weighted averages client-side (or via API)
+- Shows "Awaiting Grading" section
+
+**iOS Gap:**
+- iOS has `AcademicWidget` - does it show grades?
+- Check if iOS queries `/canvas/assignments` endpoint
+- Check if weighted average calculation exists
+
+### 6.3 Capacity Planning Likely Client-Side ✅
+
+**No dedicated API found, but all data exists:**
+
+**Needed Hours:**
+```sql
+SELECT SUM(estimated_duration_minutes) FROM tasks WHERE user_id = $1 AND status = 'pending';
+```
+
+**Scheduled Hours:**
+```sql
+SELECT SUM(EXTRACT(EPOCH FROM (end_time - start_time)) / 3600) as scheduled_hours
+FROM student_time_blocks
+WHERE user_id = $1
+  AND start_time >= $2
+  AND end_time <= $3
+  AND lifecycle_status = 'active'
+  AND metadata->>'course_context_id' = $4;
+```
+
+**Gap Hours:** `needed - scheduled`
+
+**Implementation:**
+- ✅ Both iOS and web can calculate this client-side
+- ⚠️ Or create API endpoint: `/api/academic/capacity`
+
+### 6.4 User Preference Schema Needs Mapping ⚠️
+
+**Current keys (observed):**
+- `appBehavior` - UI settings
+- `calendar` - Calendar sync
+- `notifications` - Notification settings
+- `preferences` - General (structure unknown)
+- `privacy` - Privacy (structure unknown)
+
+**iOS has MORE preferences:**
+- AI Communication, Academic, Content, Wellness, Social
+
+**Action Required:**
+1. Sample `preferences` and `privacy` keys for structure
+2. Map iOS preference views to backend keys
+3. Test sync between iOS and web
+
+---
+
+## 7. NEXT INVESTIGATION STEPS (Phase 3)
+
+### Immediate (2-4 hours)
+1. **Search iOS for API usage:**
+   ```bash
+   grep -r "/api/canvas" ios-clean/
+   grep -r "/api/notes" ios-clean/
+   grep -r "/api/academic/assignments" ios-clean/
+   grep -r "/api/braingains" ios-clean/
+   grep -r "dayplan\|timeline" ios-clean/App/Views/
+   ```
+
+2. **Sample remaining preference data:**
+   ```sql
+   SELECT value FROM user_preferences WHERE key = 'preferences' LIMIT 1;
+   SELECT value FROM user_preferences WHERE key = 'privacy' LIMIT 1;
+   ```
+
+3. **Check for policy structure:**
+   ```sql
+   SELECT analysis_data FROM braingains_analysis LIMIT 1;
+   SELECT metadata FROM canvas_assignments WHERE metadata IS NOT NULL LIMIT 1;
+   ```
+
+### Medium Priority (4-8 hours)
+4. **Create iOS implementation specs** for backend-ready features:
+   - Timeline view (uses existing dayplan data)
+   - Gradebook view (uses Canvas submissions)
+   - Capacity indicator (client-side calculation)
+   - Notes browsing UI (API exists, needs UI)
+
+5. **Test API endpoints with real user:**
+   ```bash
+   # Get demo user token
+   USER_ID="06ea6226-c327-483b-9bc6-e554af6a22a1"
+
+   # Test endpoints
+   curl localhost:3001/api/notes/recent -H "x-user-id: $USER_ID"
+   curl localhost:3001/api/canvas/assignments -H "x-user-id: $USER_ID"
+   curl localhost:3001/dashboard/v1/composite?tab=home -H "x-user-id: $USER_ID"
+   ```
+
+6. **Map iOS widget data sources** to backend APIs
+
+---
+
+## 8. UPDATED FEATURE PARITY MATRIX
+
+| Feature | Backend Ready | iOS API Integrated | iOS UI Implemented | Priority |
+|---------|---------------|-------------------|-------------------|----------|
+| **Timeline (DayPlan)** | ✅ YES | ✅ YES (in composite) | ❌ NO UI | P0 |
+| **Gradebook** | ✅ YES | ⚠️ CHECK | ⚠️ CHECK | P0 |
+| **Notes System** | ✅ YES | ❌ NO | ❌ NO | P1 |
+| **Assignment Completion** | ✅ YES | ⚠️ CHECK | ⚠️ CHECK | P0 |
+| **Canvas Integration** | ✅ YES | ⚠️ CHECK | ⚠️ CHECK | P0 |
+| **Capacity Planning** | ✅ YES (data) | ⚠️ CHECK | ❌ NO | P1 |
+| **User Preferences** | ✅ YES | ⚠️ PARTIAL | ⚠️ PARTIAL | P1 |
+| **Inbox/Messages** | ❌ NO | N/A | N/A | BLOCKED |
+| **Course Policies** | ⚠️ JSONB | ⚠️ CHECK | ❌ NO | P1 |
+
+---
+
+## 9. CONCLUSIONS
+
+### Major Breakthroughs ✅
+1. **Timeline feature EXISTS** - It's the `dayplan` data in service_data, already fetched by iOS dashboard
+2. **All academic data backend-ready** - Canvas, assignments, grades, completion tracking all exist
+3. **Notes system fully implemented** - Just needs iOS UI
+4. **Capacity planning is possible** - All data exists, needs calculation logic
+
+### Remaining Questions ⚠️
+1. Does iOS use Canvas API endpoints?
+2. Does iOS use assignment completion API?
+3. Where does iOS display timeline/dayplan data (if at all)?
+4. What's the full structure of user preferences?
+
+### Next Document
+**Phase-3-iOS-API-Integration-Audit.md** - Grep iOS codebase for API usage, create integration matrix
+
+---
+
+**Last Updated:** 2025-11-09
+**Phase:** 2 of 5
+**Status:** Data collection complete, moving to iOS audit

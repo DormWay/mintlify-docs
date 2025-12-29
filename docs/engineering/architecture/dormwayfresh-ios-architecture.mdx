@@ -1,0 +1,511 @@
+---
+title: "DormWayFresh iOS Architecture"
+description: "1. #architectural-principles|Architectural Principles 2. #package-structure|Package Structure 3. #dependency-injection-system|Dependency Injection System 4...."
+---
+
+# DormWayFresh iOS Architecture
+
+**Overview**: DormWayFresh is the next-generation iOS application for DormWay, built from the ground up with modern SwiftUI patterns, protocol-based dependency injection, and comprehensive real-time communication capabilities.
+
+## Table of Contents
+
+1. #architectural-principles|Architectural Principles
+2. #package-structure|Package Structure
+3. #dependency-injection-system|Dependency Injection System
+4. #real-time-communication|Real-time Communication
+5. #data-collection-framework|Data Collection Framework
+6. #service-layer-architecture|Service Layer Architecture
+7. #integration-with-backend-services|Integration with Backend Services
+
+## Architectural Principles
+
+### Core Design Philosophy
+
+```mermaid
+graph TB
+    subgraph "DormWayFresh Architecture"
+        A[Protocol-Based DI] --> B[No Singletons]
+        A --> C[@MainActor Thread Safety]
+        A --> D[Environment Injection]
+        
+        E[Modular Packages] --> F[Clear Boundaries]
+        E --> G[Testable Components]
+        E --> H[Reusable Services]
+        
+        I[Real-time First] --> J[Ably Integration]
+        I --> K[Offline Support]
+        I --> L[Background Processing]
+    end
+```
+
+**Key Principles:**
+1. **No Singletons**: Services injected via DI container; Ably/Clerk clients scoped per session.
+2. **Protocol-Based**: Services defined by protocols, not concrete types.
+3. **@MainActor**: UI-touching services marked @MainActor; background services use dedicated queues.
+4. **Environment Injection**: Container passed through SwiftUI environment.
+5. **Modular Design**: Clear separation of concerns across packages.
+
+## Package Structure
+
+```mermaid
+graph LR
+    subgraph "Core App"
+        Core[Core Module]
+        App[App Layer]
+        Views[Views & UI]
+    end
+    
+    subgraph "Service Packages"
+        DWServices[DWServices]
+        DWDataCollection[DWDataCollection]
+        DWContext[DWContext]
+        DWNetworking[DWNetworking]
+    end
+    
+    subgraph "UI Packages"
+        DWDesign[DWDesign]
+        DWWidgets[DWWidgets]
+    end
+    
+    Core --> DWServices
+    Core --> DWDataCollection
+    Core --> DWContext
+    DWServices --> DWNetworking
+    App --> Core
+    Views --> DWDesign
+    Views --> DWWidgets
+```
+
+### Package Responsibilities
+
+#### Core Module (`/Core`)
+- **DependencyInjection/**: Central DI container and service protocols
+- **Services/**: Core app services (AuthService, APIService)
+- **Models/**: Core data models shared across the app
+
+#### DWServices Package
+- **Network Services**: HTTP networking, Supabase, Ably integration
+- **Real-time Services**: RealtimeUpdatesService, presence management
+- **User Services**: Profile management, context services
+- **External Integrations**: Campus data, majors data
+
+#### DWDataCollection Package
+- **Telemetry Services**: TelemetryService with dual Ably/HTTP approach
+- **Data Collectors**: Health, Location, ScreenTime, Calendar
+- **Performance Monitoring**: PerformanceGuardian for resource protection
+
+#### DWContext Package
+- **Context Processing**: ContextEngine, ContextService
+- **LLM Integration**: Context prediction and analysis
+
+#### DWDesign Package
+- **Design System**: Typography, colors, components
+- **UI Components**: Reusable SwiftUI components
+
+#### DWWidgets Package
+- **Widget Management**: WidgetEngine, widget configuration
+- **Widget Types**: Various widget implementations
+
+## Dependency Injection System
+
+### Container Architecture
+
+```mermaid
+classDiagram
+    class DIContainer {
+        +services: [String: Any]
+        +registerServices()
+        +initializeServices()
+        +resolve<T>() -> T?
+    }
+    
+    class ServiceProtocols {
+        <<protocol>> AuthServiceProtocol
+        <<protocol>> NetworkServiceProtocol
+        <<protocol>> AblyServiceProtocol
+    }
+    
+    class ServiceAdapters {
+        +AuthServiceAdapter
+        +NetworkServiceAdapter
+        +AblyServiceAdapter
+    }
+    
+    DIContainer --> ServiceProtocols
+    DIContainer --> ServiceAdapters
+    ServiceAdapters --> ServiceProtocols
+```
+
+### Service Registration Flow
+
+```mermaid
+sequenceDiagram
+    participant App
+    participant Container
+    participant Services
+    participant Adapters
+    
+    App->>Container: Initialize()
+    Container->>Services: Create concrete services
+    Container->>Adapters: Wrap in adapters
+    Container->>Container: Register protocols
+    App->>Container: Inject via environment
+    Note over App,Adapters: Services available throughout app
+```
+
+### Example Service Registration
+
+```swift
+// 1. Define Protocol
+@MainActor
+public protocol RealtimeUpdatesServiceProtocol {
+    func startListening(userId: String) async
+    func stopListening()
+}
+
+// 2. Create Service in Package
+@MainActor
+public final class RealtimeUpdatesService: ObservableObject {
+    // Implementation in DWServices package
+}
+
+// 3. Create Adapter in Core
+@MainActor
+final class RealtimeUpdatesServiceAdapter: RealtimeUpdatesServiceProtocol {
+    private let service: RealtimeUpdatesService
+    // Adapter implementation
+}
+
+// 4. Register in Container
+let realtimeService = RealtimeUpdatesService(ablyService: ablyService)
+registerSingleton(RealtimeUpdatesServiceProtocol.self, 
+                 implementation: RealtimeUpdatesServiceAdapter(realtimeService))
+```
+
+## Real-time Communication
+
+### Ably Channel Architecture
+
+```mermaid
+graph TB
+    subgraph "iOS App"
+        Tel[TelemetryService]
+        Updates[RealtimeUpdatesService]
+        Debug[Debug Views]
+    end
+    
+    subgraph "Ably Channels"
+        TelCh[telemetry]
+        UserCh[user:userid:updates]
+        SysCh[system:broadcast]
+        DebugCh[user:userid:debug]
+    end
+    
+    subgraph "Backend Services"
+        API[API Router]
+        Relay[Ably Relay]
+        Temporal[Temporal Engine]
+    end
+    
+    Tel -->|publish + presence| TelCh
+    TelCh --> Relay
+    Relay --> Temporal
+    
+    API --> UserCh
+    UserCh -->|subscribe + presence| Updates
+    
+    API --> SysCh
+    SysCh -->|subscribe| Updates
+    
+    Updates --> Debug
+```
+
+### Message Flow Architecture
+
+```mermaid
+sequenceDiagram
+    participant iOS as iOS App
+    participant Ably as Ably Service
+    participant Relay as Ably Relay
+    participant API as API Router
+    participant Temporal as Temporal Engine
+    
+    Note over iOS,Temporal: Telemetry Flow (iOS → Backend)
+    iOS->>Ably: Publish telemetry data
+    Ably->>Relay: Forward telemetry
+    Relay->>Temporal: Dispatch to workflow
+    
+    Note over iOS,Temporal: Update Flow (Backend → iOS)
+    Temporal->>API: Context update ready
+    API->>Ably: Publish to user channel
+    Ably->>iOS: Deliver update
+    iOS->>iOS: Process & update UI
+    
+    Note over iOS,Temporal: Presence Tracking
+    iOS->>Ably: Enter presence
+    Ably->>Relay: Presence event
+    Relay->>Temporal: User online signal
+```
+
+### Channel Permissions
+
+```typescript
+const capability: TokenParams['capability'] = {
+  [`user:${userId}:*`]: ['subscribe', 'publish', 'presence', 'history'],
+  'telemetry': ['publish', 'presence'],
+  [`user:${userId}:updates`]: ['subscribe', 'presence'],
+  'system:broadcast': ['subscribe'],
+};
+```
+
+## Data Collection Framework
+
+### Collector Architecture
+
+```mermaid
+graph TB
+    subgraph "Data Collectors"
+        Health[HealthDataCollector]
+        Location[LocationDataCollector]
+        Screen[ScreenTimeDataCollector]
+        Calendar[CalendarDataCollector]
+    end
+    
+    subgraph "Telemetry Pipeline"
+        Tel[TelemetryService]
+        Queue[Failed Queue]
+        Perf[PerformanceGuardian]
+    end
+    
+    subgraph "Transport Layer"
+        Ably[Ably Real-time]
+        HTTP[HTTP API]
+    end
+    
+    Health --> Tel
+    Location --> Tel
+    Screen --> Tel
+    Calendar --> Tel
+    
+    Tel --> Perf
+    Perf --> Ably
+    Perf --> HTTP
+    
+    Tel --> Queue
+    Queue --> HTTP
+```
+
+### Telemetry Event Types
+
+```mermaid
+graph LR
+    subgraph "Location Events"
+        A[location.update]
+        B[location.significant_change]
+        C[location.campus_entry]
+        D[location.building_entry]
+    end
+    
+    subgraph "Health Events"
+        E[health.update]
+        F[health.workout_start]
+        G[health.sleep_analysis]
+    end
+    
+    subgraph "App Events"
+        H[app.launch]
+        I[app.background]
+        J[user.action]
+    end
+    
+    subgraph "Screen Time Events"
+        K[screentime.update]
+        L[screentime.focus_start]
+    end
+```
+
+### Performance Guardian
+
+```mermaid
+stateDiagram-v2
+    [*] --> Monitoring
+    Monitoring --> CheckingResources
+    CheckingResources --> Normal : CPU < 50%, Memory < 80%
+    CheckingResources --> Throttled : CPU > 50% OR Memory > 80%
+    Normal --> Monitoring
+    Throttled --> DelayProcessing
+    DelayProcessing --> Monitoring : After delay
+    Throttled --> SkipNonCritical
+    SkipNonCritical --> Monitoring
+```
+
+## Service Layer Architecture
+
+### Service Dependencies
+
+```mermaid
+graph TB
+    subgraph "Authentication Layer"
+        Auth[AuthService]
+        Supabase[SupabaseService]
+    end
+    
+    subgraph "Network Layer"
+        Network[NetworkService]
+        API[APIService]
+    end
+    
+    subgraph "Real-time Layer"
+        Ably[AblyService]
+        Realtime[RealtimeUpdatesService]
+        Telemetry[TelemetryService]
+    end
+    
+    subgraph "Data Layer"
+        Profile[UserProfileService]
+        Context[UserContextService]
+        Campus[CampusDataService]
+    end
+    
+    Auth --> Supabase
+    API --> Network
+    API --> Auth
+    
+    Realtime --> Ably
+    Telemetry --> Ably
+    Telemetry --> Network
+    
+    Profile --> Network
+    Context --> Network
+    Campus --> Network
+```
+
+### Service Lifecycle
+
+```mermaid
+sequenceDiagram
+    participant App
+    participant Container
+    participant Services
+    participant Ably
+    
+    App->>Container: App Launch
+    Container->>Services: Register all services
+    Container->>Services: Initialize core services
+    
+    Note over Services: Authentication phase
+    Services->>Services: AuthService initializes
+    Services->>Services: NetworkService configures
+    
+    Note over Services: Post-auth initialization
+    Services->>Ably: Configure Ably with tokens
+    Services->>Services: Start real-time services
+    Services->>Services: Begin data collection
+    
+    App->>App: App ready for user interaction
+```
+
+## Integration with Backend Services
+
+### API Router Integration
+
+```mermaid
+graph LR
+    subgraph "iOS App"
+        Auth[AuthService]
+        Network[NetworkService]
+        Profile[ProfileService]
+    end
+    
+    subgraph "API Router"
+        JWT[JWT Middleware]
+        Routes[API Routes]
+        Ably[Ably Token Gen]
+    end
+    
+    subgraph "Backend Services"
+        Supabase[Supabase Auth]
+        DB[(Database)]
+        Relay[Ably Relay]
+    end
+    
+    Auth -->|JWT tokens| JWT
+    Network -->|API requests| Routes
+    Routes --> DB
+    Routes --> Ably
+    Ably --> Relay
+    
+    JWT --> Supabase
+```
+
+### Authentication Flow
+
+```mermaid
+sequenceDiagram
+    participant iOS
+    participant Supabase
+    participant APIRouter
+    participant AblyRelay
+    
+    iOS->>Supabase: OAuth sign-in
+    Supabase->>iOS: JWT + session
+    iOS->>APIRouter: Create/update profile
+    APIRouter->>APIRouter: Generate Ably token
+    APIRouter->>iOS: Profile + Ably token
+    iOS->>iOS: Configure Ably service
+    iOS->>AblyRelay: Enter presence
+    AblyRelay->>AblyRelay: Track user session
+```
+
+### Error Handling Strategy
+
+```mermaid
+graph TB
+    subgraph "Error Types"
+        A[Network Errors]
+        B[Authentication Errors]
+        C[Ably Connection Errors]
+        D[Data Validation Errors]
+    end
+    
+    subgraph "Handling Strategies"
+        E[Retry with Backoff]
+        F[Fallback to Cache]
+        G[Queue for Later]
+        H[User Notification]
+    end
+    
+    subgraph "Recovery Actions"
+        I[Refresh Tokens]
+        J[Reconnect Ably]
+        K[Sync When Online]
+        L[Reset Service State]
+    end
+    
+    A --> E
+    A --> F
+    B --> I
+    B --> H
+    C --> J
+    C --> G
+    D --> H
+    D --> L
+    
+    E --> K
+    G --> K
+```
+
+## Next Steps
+
+1. **Widget Intelligence**: Implement context-aware widget system
+2. **Offline Synchronization**: Enhanced offline support with conflict resolution
+3. **Performance Optimization**: Fine-tune data collection and real-time updates
+4. **Analytics Integration**: Comprehensive user behavior tracking
+5. **Testing Framework**: Unit and integration test coverage
+
+## Related Documentation
+
+- Real-time Updates Strategy
+- [Ably Relay Service](/docs/engineering/architecture/ably-relay-service-architecture)
+- API Router Integration
+- Mobile Architecture Overview

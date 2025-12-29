@@ -1,0 +1,150 @@
+---
+title: "Plan for DORM-303, DORM-334, DORM-336, DORM-329"
+description: "This document captures the coordinated plan for the following Linear issues:"
+---
+
+# Overview
+
+This document captures the coordinated plan for the following Linear issues:
+
+| Issue | Title | Category | Current Status |
+| --- | --- | --- | --- |
+| [DORM-303](https://linear.app/dormwayllc/issue/DORM-303) | Location widget styling needs improvement | Dashboard UI | ✅ Shipped (merged) |
+| [DORM-334](https://linear.app/dormwayllc/issue/DORM-334) | Regression: context/location call missing from dashboard | Dashboard Regression | ✅ Shipped (merged) |
+| [DORM-336](https://linear.app/dormwayllc/issue/DORM-336) | Align onboarding status criteria between worker maintenance and P1 detection | Engine / Maintenance | Todo |
+| [DORM-329](https://linear.app/dormwayllc/issue/DORM-329) | Show Canvas onboarding CTA instead of PDF/image fallback | Onboarding UX | Todo |
+
+Two branches are already open:
+
+- ~~`chore/dorm-303-dorm-334` (based on `bff-dashboard-v1`) – dashboard polish + regression.~~ **Merged to `bff-dashboard-v1`**
+- `feature/dorm-336-dorm-329` (based on `bff-dashboard-v1`) – maintenance alignment + Canvas onboarding experience.
+
+# Goals
+
+1. **Dashboard polish (DORM-303)** – ship the updated location widget that matches the design system, with responsive behavior and accessible states.
+2. **Regression fix (DORM-334)** – ensure the context/location API call is restored, wired to the widget, and covered by automated checks.
+3. **Maintenance alignment (DORM-336)** – bring `workerMaintenance` activities and the `get_workflows_needing_attention()` SQL function into alignment so P1 detections and auto-start logic use the same onboarding status rules.
+4. **Canvas onboarding CTA (DORM-329)** – replace the PDF/image fallback with a CTA when Canvas metadata is present, including telemetry to monitor adoption and UX copy alignment.
+5. **Operational hygiene** – update documentation, add tests, and ensure post-deploy monitoring is ready.
+
+# Requirements & Clarifications
+
+| Topic | Details / Open Questions | Owner |
+| --- | --- | --- |
+| Location widget styling | Confirm final design tokens, hover/active states, and “fallback” styling in case location context is unavailable. | Design + Frontend |
+| Context/location API | Validate endpoint contract (payload, auth). Confirm caching behavior to avoid rate limits. | Backend |
+| Onboarding status taxonomy | Inventory all values found in production (`pending`, `completed`, `admin_bootstrapped`, etc.). Decide canonical “completed” set and document transitions. <br/>_2025-10-11 audit (local):_ `pending` (6), `completed` (4). <br/>_Process note:_ until the next production deployment, any migrations merged into `bff-dashboard-v1` must also be listed in `scripts/database/apply-post-prod-migrations.sh` so post-prod hydration stays aligned. | Platform |
+| Canvas CTA content | Confirm copy, localized strings, and telemetry event names. Identify Canvas metadata fields delivered in DORM-328. | Product + Frontend |
+
+# Work Breakdown
+
+## 1. DORM-303 – Location Widget Styling
+
+Status: **Completed** via PR [DormWay/dormway-platform#213](https://github.com/DormWay/dormway-platform/pull/213). Tasks retained below for historical reference.
+
+| Task | Owner | Branch | Notes |
+| --- | --- | --- | --- |
+| Implement new location widget styles (desktop & mobile) | Frontend | `chore/dorm-303-dorm-334` | Use new design tokens, ensure accessible color contrast. |
+| Update iconography/context pill (if not already shipped) | Frontend |  | Confirm alignment with design system (avatars vs. pills). |
+| Add Storybook/Screenshot regression coverage | Frontend |  | Optional but recommended. |
+| QA review (visual + responsive) | QA |  | Validate across browsers; focus on empty/error states. |
+| Update release notes / docs | Frontend |  | Document widget update for internal changelog. |
+
+## 2. DORM-334 – Restore Context/Location Call
+
+Status: **Completed** via PR [DormWay/dormway-platform#213](https://github.com/DormWay/dormway-platform/pull/213). Tasks retained below for historical reference.
+
+| Task | Owner | Branch | Notes |
+| --- | --- | --- | --- |
+| Re-introduce API call in dashboard load sequence | Frontend | `chore/dorm-303-dorm-334` | Ensure data feeds new widget; handle errors gracefully. |
+| Integration test for location fetch | QA/Eng |  | Add Playwright or Cypress test to assert API call. |
+| Verify API router contract | Backend |  | Double-check response shape; update mocks. |
+| Manual regression test | QA |  | Validate both success + failure scenarios. |
+
+## 3. DORM-336 – Maintenance/P1 Alignment
+
+| Task | Owner | Branch | Notes |
+| --- | --- | --- | --- |
+| Audit `accounts.onboarding_status` values (prod + staging) | Backend | `feature/dorm-336-dorm-329` | ✅ Local dev snapshot: `pending` (6), `completed` (4). Repeat in staging/prod. |
+| Define canonical statuses & document transitions | Product + Platform |  | Status list drafted (`completed`, `true`, `admin_bootstrapped`, `manual_completed`); formal documentation still pending. |
+| Update `checkWorkerHealth` and `startMissingWorkers` filters | Backend |  | ✅ Implemented shared `READY_ONBOARDING_STATUSES` helper (2025-10-11). |
+| Update `get_workflows_needing_attention()` SQL function | Backend |  | ✅ New migration aligns SQL + exposes `get_worker_onboarding_ready_statuses()`. |
+| Add constraints/validation | Backend |  | Consider check constraint or background job to normalize values. |
+| Document onboarding status lifecycle | Platform |  | Add to `DormWay/Engineering/Technical/` (canonical). |
+| QA maintenance workflow | QA |  | Confirm P1 issues clear automatically and no false positives. |
+
+## 4. DORM-329 – Canvas Onboarding CTA
+
+| Task | Owner | Branch | Notes |
+| --- | --- | --- | --- |
+| Pull Canvas metadata from DORM-328 schema | Backend | `feature/dorm-336-dorm-329` | ✅ New `/api/mobile/campus/:id/canvas-info` route returns seeded Canvas data without LLM. |
+| Build Canvas CTA component | Frontend |  | In progress – CTA renders Canvas instructions + PAT form; needs final UX copy sign-off. |
+| Wire CTA into onboarding flow | Frontend |  | In progress – Canvas-enabled campuses prompted for personal access token via new `canvas-info` endpoint; legacy upload retained otherwise. |
+| Implement animated step transitions with Framer Motion | Frontend |  | Introduce forward/backward slide variants, manage transition direction state, and guard against duplicate auto-advances. |
+| Ensure manual schedule upload fallback stays accessible for Canvas campuses | Frontend |  | ✅ Toggle between Canvas sync and manual PDF/ICS/screenshot uploads when Canvas is available. |
+| Add telemetry events (view/click/dismiss) | Backend + Frontend |  | ✅ `canvas_cta_viewed`, `canvas_cta_clicked`, `canvas_cta_confirmed` events wired; ensure dashboards configured. |
+| QA Canvas path vs legacy path | QA |  | Test with Canvas-enabled and non-enabled schools. |
+| Update onboarding documentation | Product/Support |  | Include CTA explanation for support team. |
+
+## 5. Consolidation & Release
+
+| Task | Owner | Notes |
+| --- | --- | --- |
+| ~~Code review + merge `chore/dorm-303-dorm-334`~~ | Frontend lead | ✅ Completed (merged to `bff-dashboard-v1`). |
+| Code review + merge `feature/dorm-336-dorm-329` | Platform + Frontend leads | Validate tests and docs complete. |
+| Rebase onto `bff-dashboard-v1` and main | Eng | Resolve conflicts, rerun tests. |
+| Release notes / change log | Product | Summarize dashboard changes + onboarding updates. |
+| Post-deploy checks | On-call | Monitor maintenance dashboards, CTA telemetry, and logs. |
+
+# Testing Strategy
+
+- **Unit Tests**
+  - Worker maintenance helpers (status filtering, startMissingWorkers).
+  - Canvas CTA component logic + telemetry dispatch.
+
+- **Integration Tests**
+  - API router maintenance routes (health check/restart).
+  - Dashboard data fetching (context/location call returning expected payload).
+
+- **E2E/UI Tests**
+  - Playwright/Cypress coverage for location widget rendering and API call.
+  - Onboarding flow ensuring CTA appears/disappears correctly, step transitions animate without duplicate advances, and Canvas campuses can switch between Canvas sync and manual uploads.
+
+- **Temporal & DB Monitoring**
+  - Confirm maintenance worker automatically restarts missing workflows in staging.
+  - Validate `workflow_health_checks` + `workflow_maintenance_log` show new entries post-maintenance.
+
+- **Telemetry Validation**
+  - Ensure CTA events flow through analytics pipeline (e.g., Segment/Amplitude).
+  - Add temporary dashboards/alerts for new events.
+
+# Risks & Mitigations
+
+| Risk | Impact | Mitigation |
+| --- | --- | --- |
+| Status misalignment persists | P1 workers remain stuck | Add automated tests comparing SQL and TS filters; document canonical list. |
+| Location widget regressions | Dashboard look-and-feel degrade | Use Storybook snapshots; design QA before merge. |
+| Canvas CTA shows for wrong users | Onboarding confusion | Gate on Canvas metadata + add unit tests for decision logic. |
+| Telemetry not captured | Can't measure CTA adoption | Validate events in staging; add monitoring alerts. |
+| Merge conflicts between branches | Slow release | Rebase regularly and coordinate merge order. |
+
+# Monitoring & Deployment Checklist
+
+- Temporal worker logs show maintenance health-check, batch-restart, and start-missing activity.
+- Dormway-admin dashboard displays “System Health” and “Workers Needing Attention” accurately after full maintenance.
+- CTA telemetry events visible in staging dashboards.
+- Post-deploy script hits context/location endpoint, onboarding CTA flow, and maintenance API endpoints.
+
+# Current Status Snapshot (2025-10-11)
+
+- `chore/dorm-303-dorm-334` – branch created; need design/QA verification before merge.
+- `feature/dorm-336-dorm-329` – branch created; implementation pending.
+- Temporary mitigation for DORM-336 applied manually (updated onboarding statuses for admin/demo accounts) – permanent fix tracked in this plan.
+
+# Next Steps
+
+1. Assign owners for each task above and add dates.
+2. Complete outstanding requirement clarifications (status taxonomy, CTA copy, telemetry names).
+3. Execute tasks on respective branches; open PRs referencing the Linear issues.
+4. QA each stream (dashboard + maintenance + onboarding) in staging.
+5. Merge into `bff-dashboard-v1`, then into main; monitor after deploy and close Linear issues.

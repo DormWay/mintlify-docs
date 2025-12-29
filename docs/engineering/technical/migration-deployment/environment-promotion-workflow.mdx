@@ -1,0 +1,232 @@
+---
+title: "Environment Promotion Workflow"
+description: "1. Feature branch → PR → merge into `release/staging` (protected). 2. CI deploys to staging (Vercel alias + ECS staging cluster) and runs smoke tests. 3. Rel..."
+---
+
+# Environment Promotion Workflow
+
+## Purpose & Scope
+- Document how DormWay promotes changes across development, staging, and production for both web (Vercel) and backend (AWS) surfaces.
+- Capture the gaps in today's staging story and outline the hardening work needed before we open up broader releases or partner integrations.
+- Serve as the anchor page that links to deeper runbooks, checklists, and automation docs within the vault.
+
+## Audience
+- Platform engineering, backend, and web application teams
+- Release managers, QA partners, and on-call responders
+- Product stakeholders coordinating staged feature rollouts
+
+## Environment Landscape
+- DormWay currently runs a single AWS production cluster (`dormway-cluster`) while staging validation happens through selective deploys and feature gating.
+- Vercel hosts marketing (`dormway.app`), LockedIn (`services/dormway-lockedin`), and admin (`services/dormway-admin`) surfaces with preview builds per pull request.
+- Secrets and configuration flow through Doppler; ECS tasks hydrate from Doppler injectors and Vercel mirrors the required public values.
+- Zuplo (`relay.dormway.app`) fronts the public API; the legacy CloudFront endpoint (`api.dormway.app`) remains available for specific integrations.
+
+| Environment | Primary Purpose | Web Entry Points | Backend Endpoints | Data Sources |
+|-------------|----------------|------------------|-------------------|--------------|
+| Local       | Feature development, rapid prototyping | `http://localhost:3000` (LockedIn), `http://localhost:3004` (Admin), preview builds | `http://localhost:3001` (API Router), `http://localhost:3030` (Engine) | Docker Postgres & Redis, optional Supabase emulation |
+| Staging _(target state)_ | Pre-production validation, partner demos, load rehearsal | `https://staging.dormway.app` → rewrites for LockedIn/Syllabus/Admin | `https://staging.dormway.app` (Zuplo staging edge) → isolated ECS services | Sanitized Aurora snapshot, staging Redis, staging S3 buckets |
+| Production  | Customer-facing workloads, analytics | `https://dormway.app`, `https://lockedin.dormway.app`, `https://admin.dormway.app` | `https://relay.dormway.app`, `https://api.dormway.app` | Aurora prod, Elasticache, Temporal Cloud, production S3 |
+
+### Web Surfaces (Vercel)
+- `services/dormway-lockedin` (Next.js) and `services/dormway-admin` (Vite) ship via Vercel; `services/dormway-admin/vercel.json` enforces SPA rewrites.
+- The marketing deployment (`dormway.app`) rewrites `/lockedin/*` and `/syllabus/*` to the application projects (see `Notes/Worklogs/2025/09-16`).
+- Critical environment variables: `NEXT_PUBLIC_API_BASE_URL`, `LOCKEDIN_BASE_URL`, `SYLLABUS_BASE_URL`, Auth0 client metadata, analytics/OTEL keys.
+- **Staging plan**
+  - Create a protected `release/staging` branch mapped to a Vercel staging alias (`staging.dormway.app`).
+  - Mirror doppler `staging` config into the Vercel staging environment.
+  - Restrict staging promotions to release managers; require checklist completion before production promotion.
+
+### Backend & Services (AWS)
+- Terraform (`infrastructure/terraform`) provisions ECS services (`dormway-api-router`, `dormway-engine`, `dormway-crews`, etc.), ECR repos, ALB, security groups, SSM parameters.
+- A modular refactor (`infrastructure/terraform-new`) is underway to enable per-environment stacks with shared modules for network, ECS, ALB, SSM, plugin runner, and canvas sync.
+- GitHub Actions build Docker images, push to ECR, and update ECS definitions on merges to `main` (`[Deployment Guide](/docs/engineering/technical/migration-deployment/deployment-guide)`, `[CI-CD Pipeline Docker to AWS](/docs/engineering/technical/migration-deployment/ci-cd-pipeline-docker-to-aws)`).
+- **Staging plan**
+  - Instantiate a dedicated staging stack via `terraform-new` (cluster, load balancer listeners, Redis, S3 prefixes, SSM parameters).
+  - Publish `staging-<sha>` image tags and update staging ECS services automatically when `release/staging` advances.
+  - Route `staging.dormway.app` through Zuplo staging gateway (`relay-staging.dormway.app`) to the staging ALB.
+
+### Shared Services & Tooling
+- Zuplo provides consistent edge auth; Auth0 RS256 tokens are mandatory outside local development.
+- Temporal Cloud (`dormway.wvrom`) orchestrates workflows; API keys and namespaces remain environment-specific.
+- Aurora PostgreSQL, Elasticache Redis, S3 syllabus buckets, Postmark, Customer.io, Ably, Dash0 telemetry, and Intercom support the product stack.
+- VPN automation (`scripts/vpn`) supports multi-environment access; staging hardening will rely on distinct VPN configs and access reviews.
+
+## Source Control & Branching Model
+- Feature branches (`feature/*`, `bugfix/*`) raise PRs against the release branches; CI ensures lint, type check, unit tests, Docker build, and vulnerability scan.
+- Today, `main` auto-deploys to production (Vercel + ECS) immediately after merge.
+- **Proposed promotion flow**
+  1. Feature branch → PR → merge into `release/staging` (protected).
+  2. CI deploys to staging (Vercel alias + ECS staging cluster) and runs smoke tests.
+  3. Release manager approves promotion → merge or cherry-pick into `main`.
+  4. `main` triggers production deploys (Vercel + ECS) and post-deploy verification.
+
+## CI/CD Pipelines
+
+### Backend (GitHub Actions → ECR/ECS)
+- Workflows build and push Docker images, apply Terraform, and update ECS task definitions on merges to `main`.
+- Manual staging deploys currently use `./scripts/deploy-to-ecr.sh` + `aws ecs update-service`.
+- **Next steps**
+  - Parameterize workflows by branch → environment mapping (`release/staging`, `main`).
+  - Publish environment-specific image tags (`staging-<sha>`, `prod-<sha>`).
+  - Terraform workspaces or dedicated state files keep staging and production drift-free.
+
+### Web (Vercel)
+- Each push generates a preview deployment; `main` promotes to production automatically.
+- `dormway.app` handles rewrites to LockedIn/Syllabus deployments; admin runs as a separate Vercel project with SPA fallback routing.
+- **Next steps**
+  - Bind `release/staging` to a Vercel staging alias.
+  - Require manual promotion from preview → staging → production with release manager approval.
+  - Export required Doppler secrets (Auth0, OTEL, analytics) into the staging alias before go-live.
+
+## Deployment Workflow
+
+### Local & Developer Sandboxes
+- `make dev` boots the Dockerized stack with Doppler-injected secrets, Zuplo gateway, and supporting services.
+- nginx exposes friendly routes (`http://localhost/lockedin`, `/api`, `/admin`); direct ports remain available for debugging.
+- ngrok tunnels support Auth0 callbacks and mobile device testing; developers validate migrations/feature flags before PRs.
+
+### Shared Dev Environment
+- Short-lived Vercel previews and optional manual ECS deploys support integration testing today.
+- Once staging isolation lands, reassess the need for a persistent shared dev stack (potentially lightweight ECS services or Vercel branch deploys).
+
+### Staging Environment
+- **Current**: deploy selected services to production infrastructure with staging Doppler config, run nuclear cleanup scripts, and share preview URLs manually.
+- **Target**
+  - Dedicated staging stack via `infrastructure/terraform-new` with its own ECS cluster, ALB listeners, Redis, S3, and SSM parameter set.
+  - Aurora staging database refreshed from sanitized production snapshots on a scheduled cadence; automated scrub scripts protect PII.
+  - Vercel staging alias (`staging.dormway.app`) with Auth0 staging tenant + VPN/IP allow-list gating.
+  - Zuplo staging gateway forwarding to staging ALB.
+  - Automated smoke tests (HTTP health, Canvas OAuth, Temporal workflow kickoffs) and monitoring before promotion.
+
+### Production Environment
+- Triggered on merge to `main`; GitHub Actions and Vercel run production deploys.
+- Post-deploy checks include Dash0 traces, Sentry alerts, Zuplo metrics, Customer.io deliverability, and manual web/API spot checks.
+- Feature flags ship disabled by default; rollout occurs via staged flag activation.
+
+## Staging Environment Hardening Plan
+
+### Access & Networking Controls
+- Create staging-specific security groups, load balancer listeners, and IAM roles; deny cross-environment networking by default.
+- Require staging VPN enrollment or allow-listed IPs for backend/API access; gate Vercel staging alias behind Auth0 staging tenant or password.
+- Configure WAF rate limits and logging distinct from production so load tests stay isolated.
+
+### Data Management & Refresh Strategy
+- Automate nightly sanitized snapshots from production Aurora into staging; scrub sensitive data while preserving representative workloads.
+- Maintain versioned seed data for demo accounts, campuses, and course contexts under version control.
+- Document and schedule nuclear cleanup + reseed workflows (leveraging existing scripts and Temporal jobs).
+
+### Migration & Schema Management Enhancements
+
+**Migration Tracking System**:
+- All migrations tracked in `migration_history` table with automatic schema versioning
+- Each migration records: filename, checksum (SHA-256), execution timestamp, success status, and error details
+- Old schema (`migration_name` column) automatically migrated to new schema (`filename`) on first run
+- Migration script detects environment (local Docker vs. production Aurora) and uses appropriate connection method
+- Checksums detect modified migration files to prevent silent schema drift
+
+**Migration Workflow**:
+```bash
+# Preview pending migrations (dry-run)
+make db-migrate-dry
+# OR
+./scripts/database/run-migrations.sh --dry-run
+
+# Apply all pending migrations
+make db-migrate
+# OR
+./scripts/database/run-migrations.sh
+
+# Check migration history and status
+docker exec dormway-postgres-local psql -U dormway_admin -d dormway -c \
+  "SELECT filename, success, executed_at FROM migration_history ORDER BY executed_at DESC LIMIT 10;"
+```
+
+**Key Features**:
+- **Environment detection**: Supports both AURORA_DB_* (production) and DATABASE_* (local) env var prefixes
+- **Docker auto-detection**: Uses Docker exec if psql not available locally
+- **Idempotent execution**: Skips already-executed migrations based on history table
+- **Failure tracking**: Records error messages for failed migrations in database
+- **Checksum validation**: Detects if migration files have been modified after execution
+- **Production safety**: Requires explicit environment variables to prevent accidental localhost connections over VPN
+
+**Migration File Naming Convention**:
+- Forward-only, timestamped migrations with descriptive names
+- Format: `NNN_descriptive_name.sql` (e.g., `082_add_roadmap_features.sql`)
+- OR date-based: `YYYYMMDD_descriptive_name.sql` (e.g., `20251022_add_roadmap_features.sql`)
+
+**CI/CD Integration**:
+- Add CI job that boots ephemeral Postgres, applies all migrations, runs drift detection
+- Every migration PR must include:
+  - Dry-run test: `make db-migrate-dry`
+  - Local verification: `make db-migrate`
+  - Smoke queries to validate schema changes
+  - Rollback plan (if applicable)
+
+**Staging Promotion**:
+- After migrations pass in CI, auto-deploy to staging via `release/staging` pipeline
+- Run smoke queries and integration tests against staging database
+- Capture sanitized production snapshots post-release
+- Archive snapshots alongside migration metadata for schema bisection
+
+**Production Deployment**:
+- Use production-ready migration script with AURORA_DB_* environment variables
+- Script automatically connects to Aurora over VPN (requires VPN active)
+- Review migration history before and after deployment
+- Monitor for failed migrations and error messages in `migration_history` table
+
+### Local Development Database Sync
+- Nightly Temporal job exports a sanitized production snapshot (PG dump) and uploads it to a restricted S3 bucket (`dormway-db-snapshots/staging`).
+- Provide a helper script (`scripts/db/sync-sanitized-prod.sh`) that:
+  1. Authenticates via Doppler to fetch temporary AWS credentials.
+  2. Downloads the latest snapshot, verifies checksum, and stores it under `~/.cache/dormway-db`.
+  3. Drops/recreates the local Docker Postgres, restores the snapshot, and reapplies outstanding migrations.
+- Expose the workflow through `make db-sync-sanitized` so developers can refresh local data in one command.
+- Add documentation on expected anonymization (strip PII, hash emails, keep curated demo accounts) and how to request temporary opt-outs for focused debugging.
+
+### Configuration & Secrets Hygiene
+- Keep Doppler as source-of-truth; sync `staging` config into Vercel, Zuplo, ECS SSM parameters, and VPN automation.
+- Ensure environment-specific values for `LOCKEDIN_BASE_URL`, `SYLLABUS_BASE_URL`, `NEXT_PUBLIC_API_BASE_URL`, Auth0 credentials, Ably, Customer.io, Postmark, OTEL, and push notification keys.
+- Audit webhooks and signing secrets so staging integrations (Postmark, Customer.io, Canvas, Google OAuth) never reach production endpoints.
+
+### Testing & Observability Gates
+- Extend Vitest/unit coverage with integration suites that run against staging endpoints post-deploy.
+- Stand up synthetic monitors for key staging flows (Auth0 login, Canvas OAuth, Temporal workflow health, Ably realtime, Zuplo rate limits).
+- Require manual QA checklist covering web, mobile API, admin, and notifications before production promotion.
+
+## Promotion Gates & Checklists
+- CI pipeline green (lint, tests, security scan, Docker build).
+- Database migrations applied to staging and verified via smoke queries.
+- Automated smoke tests and synthetic monitors passing for ≥30 minutes.
+- Manual QA sign-off recorded (web, mobile API, admin, notifications, analytics).
+- Sentry/Dash0 dashboards show no new errors or regressions.
+- Release manager approves promotion; decision logged in release notes.
+- Feature flag rollout plan documented (default off, targeted cohorts, rollback switches).
+
+## Rollback & Recovery Playbooks
+
+### Vercel Surfaces
+- Use `vercel rollback` or `vercel alias set <deployment> staging.dormway.app` to revert staging; confirm navigation before promoting fix forward.
+- Track build IDs ↔ git SHAs in release notes; keep last-known-good deployment noted for each surface.
+- If staging validation fails, freeze staging alias, revert, and raise a hotfix branch targeting `release/staging`.
+
+### AWS Services
+- Roll back ECS services by pinning previous task definition revisions (`aws ecs update-service --task-definition <rev> --force-new-deployment`).
+- Re-run Terraform with earlier image tags when needed; use per-environment state to prevent cross-talk.
+- Leverage Aurora snapshots and reversible migrations for database rollback; rehearse staging rollback workflows before production use.
+
+## Outstanding Questions & Follow-Ups
+- Confirm canonical hosting for admin/marketing surfaces (all on Vercel vs. AWS Amplify remnants) and update DNS plan accordingly.
+- Decide on Zuplo staging gateway strategy (new subdomain, shared gateway with path routing, or separate project).
+- Define automated scrub rules and toolchain for staging data refresh (fields to anonymize, demo users to preserve).
+- Assign ownership for staging VPN onboarding, periodic access reviews, and credential rotation.
+- Evaluate need for persistent shared dev environment once staging isolation is complete.
+- Scope and implement a `scripts/db/sync-sanitized-prod.sh` helper that downloads the latest scrubbed snapshot from S3, restores it to local Docker Postgres, and replays recent migrations.
+- ~~Align on long-term schema registry tooling (Atlas, Sqitch, or Prisma migrate) and document the migration approval flow end-to-end.~~ **RESOLVED**: Custom migration script with `migration_history` tracking, checksum validation, and dry-run mode implemented (see Migration & Schema Management Enhancements section).
+
+## References
+- [Deployment Guide](/docs/engineering/technical/migration-deployment/deployment-guide)
+- [CI-CD Pipeline Docker to AWS](/docs/engineering/technical/migration-deployment/ci-cd-pipeline-docker-to-aws)
+- Notes/Worklogs/2025/09-16
+- Engineering/Technical/Authentication/Email Verification Enforcement Plan
+- `scripts/vpn/README.md`
+- `infrastructure/terraform/` & `infrastructure/terraform-new/`

@@ -1,0 +1,150 @@
+---
+title: "Setup Status Endpoint"
+description: "The setup status endpoint returns post-onboarding setup flags for the Quick Start widget. It shows users which setup tasks remain after completing initial on..."
+---
+
+# Setup Status Endpoint
+
+## Overview
+
+The setup status endpoint returns post-onboarding setup flags for the Quick Start widget. It shows users which setup tasks remain after completing initial onboarding.
+
+## Endpoints
+
+```
+GET /api/v2/setup/status
+GET /v2/students/me/setup-status   # gateway alias
+GET /api/setup/status              # legacy/full response
+```
+
+**Authentication:** JWT required (Clerk)
+**Roles:** `user`, `authenticated`, `admin`
+
+## Response (v2 setup/status)
+
+```json
+{
+  "success": true,
+  "data": {
+    "flags": {
+      "schedule_uploaded": true,
+      "canvas_connected": false,
+      "syllabi_uploaded": true,
+      "integrations_connected": false
+    },
+    "timestamps": {
+      "checked_at": "2025-12-25T19:13:00Z"
+    }
+  }
+}
+```
+
+## Response (legacy /api/setup/status)
+
+```json
+{
+  "success": true,
+  "data": {
+    "flags": {
+      "schedule_uploaded": true,
+      "canvas_connected": false,
+      "syllabi_uploaded": true,
+      "integrations_connected": false
+    },
+    "timestamps": {
+      "schedule_uploaded_at": "2025-12-23T22:36:34.973Z"
+    },
+    "integration_details": {
+      "google_calendar": true
+    },
+    "progress": {
+      "completed": 2,
+      "total": 4,
+      "percentage": 50
+    }
+  }
+}
+```
+
+## Flag Definitions
+
+| Flag | Description | Set By |
+|------|-------------|--------|
+| `schedule_uploaded` | User has uploaded a class schedule (ICS, PDF, or image) | `scheduleImportWorkflow` |
+| `canvas_connected` | User has connected their Canvas LMS account | Canvas integration flow |
+| `syllabi_uploaded` | User has uploaded at least one syllabus | `syllabusProcessorWorkflow` |
+| `integrations_connected` | User has connected calendar or email integrations | Integration settings |
+
+## Implementation Details
+
+### Data Storage
+
+Flags are stored in `accounts.metadata.setup_flags` as JSONB:
+
+```sql
+SELECT metadata->'setup_flags' FROM accounts WHERE id = $1;
+-- Returns: {"schedule_uploaded": true, "canvas_connected": false, ...}
+```
+
+Timestamps are stored in `accounts.metadata.setup_timestamps`:
+
+```sql
+SELECT metadata->'setup_timestamps' FROM accounts WHERE id = $1;
+-- Returns: {"schedule_uploaded_at": "2025-12-23T22:36:34.973Z", ...}
+```
+
+### How Flags Are Set
+
+Flags are updated by Temporal workflows via `updateSetupFlag` activity in `setupStatus.activities.ts`:
+
+```typescript
+// In scheduleImportWorkflow (after successful import):
+await updateSetupFlag(userId, 'schedule_uploaded', true);
+
+// In syllabusProcessorWorkflow (after successful processing):
+await updateSetupFlag(userId, 'syllabi_uploaded', true);
+```
+
+### Factory Method (legacy /api/setup/status)
+
+The endpoint uses `StudentFactory.getSetupStatus()` from `@dormway/core`:
+
+```typescript
+const factory = getStudentFactory();
+const result = await factory.getSetupStatus(userId);
+```
+
+## Usage
+
+### iOS (Swift)
+
+```swift
+// In SetupStatusService.swift
+public func fetchSetupStatus() async throws -> SetupStatusResponse {
+    let response: SetupStatusAPIResponse = try await networkService.request(
+        endpoint: "/api/v2/setup/status",
+        method: "GET",
+        authType: .jwt
+    )
+    return response.data
+}
+```
+
+### Web (TypeScript)
+
+```typescript
+// Using fetch or axios
+const response = await fetch('/api/v2/setup/status', {
+  headers: { Authorization: `Bearer ${token}` }
+});
+const { data } = await response.json();
+// data.flags.schedule_uploaded, etc.
+```
+
+## Related
+
+- [Bootstrap Onboarding Flow (DORM-738)](/docs/engineering/technical/engine/bootstrap-onboarding-flow-dorm-738)
+- Quick Start Widget
+- `services/engine/src/activities/setupStatus.activities.ts`
+- `services/shared/dormway-core/src/entities/student/student.factory.ts`
+- `services/api-router/src/routes/v2/students.routes.ts`

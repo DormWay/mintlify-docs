@@ -1,0 +1,691 @@
+---
+title: "OpenTelemetry and Dash0 Implementation"
+description: "DormWay platform implements comprehensive distributed tracing and observability using **OpenTelemetry (OTEL)** for instrumentation and **Dash0** as the telem..."
+---
+
+# OpenTelemetry and Dash0 Implementation
+
+**Last Updated:** 2025-10-03
+**Status:** ✅ Production Ready
+**Branch:** `feat/otel-instrumentation-all-services`
+
+## Overview
+
+DormWay platform implements comprehensive distributed tracing and observability using **OpenTelemetry (OTEL)** for instrumentation and **Dash0** as the telemetry backend. This implementation provides:
+
+- Server-side distributed tracing across all Node.js and Python services
+- Browser-side Real User Monitoring (RUM) with automatic error tracking
+- Unified observability across web applications, APIs, and backend services
+- Performance monitoring and bottleneck identification
+- User session tracking and behavior analytics
+
+## Architecture
+
+```mermaid
+graph TD
+    subgraph "Browser Applications"
+        A1[dormway-lockedin Browser]
+        A2[syllabus-webviewer Browser]
+        A3[dormway-admin Browser]
+    end
+
+    subgraph "Server Applications"
+        B1[dormway-lockedin Server]
+        B2[syllabus-webviewer Server]
+        B3[dormway-api-router]
+        B4[dormway-engine]
+        B5[dormway-crews Python]
+    end
+
+    A1 -->|Dash0 Web SDK| D[Dash0 OTLP Ingress]
+    A2 -->|Dash0 Web SDK| D
+    A3 -->|Dash0 Web SDK| D
+
+    B1 -->|OTEL Node SDK| D
+    B2 -->|OTEL Node SDK| D
+    B3 -->|OTEL Node SDK| D
+    B4 -->|OTEL Node SDK| D
+    B5 -->|OTEL Python SDK| D
+
+    D -->|Traces, Spans, Metrics| E[Dash0 Dashboard]
+
+    style A1 fill:#81C784
+    style A2 fill:#81C784
+    style A3 fill:#81C784
+    style B1 fill:#4CAF50
+    style B2 fill:#4CAF50
+    style B3 fill:#4CAF50
+    style B4 fill:#4CAF50
+    style B5 fill:#FF9800
+    style D fill:#9C27B0
+    style E fill:#7B1FA2
+```
+
+## Implementation by Service
+
+### 1. dormway-lockedin (Next.js 14)
+
+**Server-Side Instrumentation:**
+- **File:** `services/dormway-lockedin/instrumentation.ts`
+- **SDK:** `@opentelemetry/sdk-node@0.53.0`
+- **Auto-Instrumentation:** HTTP, Express, Next.js routes
+- **Configuration:**
+  - Service Name: `dormway-lockedin`
+  - OTLP Endpoint: `https://ingress.us-west-2.aws.dash0.com/v1/traces`
+  - Ignores: `/_next/`, `/api/health`, `/__nextjs`
+
+**Browser-Side Instrumentation:**
+- **File:** `services/dormway-lockedin/src/components/Dash0BrowserProvider.tsx`
+- **SDK:** `@dash0/sdk-web@0.16.0`
+- **Features:**
+  - Real User Monitoring (RUM)
+  - Automatic error tracking
+  - User session tracking
+  - Custom events support
+  - Performance metrics
+
+**Integration:**
+```tsx
+// services/dormway-lockedin/src/app/layout.tsx
+import Dash0BrowserProvider from '@/components/Dash0BrowserProvider';
+
+export default function RootLayout({ children }) {
+  return (
+    <html>
+      <body>
+        {children}
+        <Dash0BrowserProvider />
+      </body>
+    </html>
+  );
+}
+```
+
+**Environment Variables:**
+```bash
+# Server-side (Next.js instrumentation.ts)
+OTEL_SERVICE_NAME=dormway-lockedin
+OTEL_EXPORTER_OTLP_ENDPOINT=https://ingress.us-west-2.aws.dash0.com
+OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer auth_CATCgL7EudldnewDs7tETNn2LpkqcGV7
+
+# Browser-side (Dash0BrowserProvider)
+NEXT_PUBLIC_OTEL_SERVICE_NAME=dormway-lockedin-browser
+NEXT_PUBLIC_OTEL_EXPORTER_OTLP_ENDPOINT=https://ingress.us-west-2.aws.dash0.com
+NEXT_PUBLIC_OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer auth_CATCgL7EudldnewDs7tETNn2LpkqcGV7
+```
+
+**Deployment:** Vercel (requires `NEXT_PUBLIC_*` env vars in Vercel project settings)
+
+---
+
+### 2. syllabus-webviewer (Next.js 15)
+
+**Server-Side Instrumentation:**
+- **File:** `services/syllabus-webviewer/instrumentation.ts`
+- **SDK:** `@opentelemetry/sdk-node@0.53.0`
+- **Auto-Instrumentation:** HTTP, Next.js API routes
+- **Configuration:**
+  - Service Name: `syllabus-webviewer`
+  - OTLP Endpoint: `https://ingress.us-west-2.aws.dash0.com/v1/traces`
+
+**Browser-Side Instrumentation:**
+- **File:** `services/syllabus-webviewer/src/components/Dash0BrowserProvider.tsx`
+- **SDK:** `@dash0/sdk-web@0.16.0`
+- **Features:** Same as dormway-lockedin
+
+**Integration:**
+```tsx
+// services/syllabus-webviewer/src/app/layout.tsx
+import Dash0BrowserProvider from '@/components/Dash0BrowserProvider';
+
+export default function RootLayout({ children }) {
+  return (
+    <html>
+      <body>
+        <AmplitudeProvider>
+          {children}
+        </AmplitudeProvider>
+        <Footer />
+        <Analytics />
+        <SpeedInsights />
+        <Dash0BrowserProvider />
+      </body>
+    </html>
+  );
+}
+```
+
+**Environment Variables:**
+```bash
+# Server-side
+OTEL_SERVICE_NAME=syllabus-webviewer
+OTEL_EXPORTER_OTLP_ENDPOINT=https://ingress.us-west-2.aws.dash0.com
+OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer auth_CATCgL7EudldnewDs7tETNn2LpkqcGV7
+
+# Browser-side
+NEXT_PUBLIC_OTEL_SERVICE_NAME=syllabus-webviewer-browser
+NEXT_PUBLIC_OTEL_EXPORTER_OTLP_ENDPOINT=https://ingress.us-west-2.aws.dash0.com
+NEXT_PUBLIC_OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer auth_CATCgL7EudldnewDs7tETNn2LpkqcGV7
+```
+
+**Deployment:** AWS Amplify (configure env vars in Amplify Console)
+
+**Note:** Removed deprecated `instrumentationHook: true` from `next.config.ts` (no longer needed in Next.js 15)
+
+---
+
+### 3. dormway-admin (Vite/React)
+
+**Browser-Only Instrumentation:**
+- **File:** `services/dormway-admin/src/dash0.ts`
+- **SDK:** `@dash0/sdk-web@0.16.0`
+- **Features:** RUM, error tracking, session tracking
+
+**Integration:**
+```tsx
+// services/dormway-admin/src/main.tsx
+import { initializeDash0 } from './dash0';
+
+// Initialize Dash0 Web SDK
+initializeDash0();
+
+ReactDOM.createRoot(document.getElementById('root')!).render(
+  <React.StrictMode>
+    <Auth0Provider ...>
+      <App />
+    </Auth0Provider>
+  </React.StrictMode>
+);
+```
+
+**Environment Variables:**
+```bash
+VITE_OTEL_SERVICE_NAME=dormway-admin
+VITE_OTEL_EXPORTER_OTLP_ENDPOINT=https://ingress.us-west-2.aws.dash0.com
+VITE_OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer auth_CATCgL7EudldnewDs7tETNn2LpkqcGV7
+```
+
+**Deployment:** Vercel (requires `VITE_*` env vars in Vercel project settings)
+
+---
+
+### 4. dormway-crews (Python/FastAPI)
+
+**Server-Side Instrumentation:**
+- **File:** `services/dormway-crews/instrumentation.py`
+- **SDK:** OpenTelemetry Python SDK
+- **Auto-Instrumentation:** FastAPI, requests, httpx
+
+**Configuration:**
+```python
+# services/dormway-crews/main.py
+from instrumentation import init_telemetry
+
+# Initialize telemetry
+init_telemetry()
+
+app = FastAPI()
+```
+
+**Environment Variables:**
+```bash
+OTEL_SERVICE_NAME=dormway-crews
+OTEL_EXPORTER_OTLP_ENDPOINT=https://ingress.us-west-2.aws.dash0.com/v1/traces
+OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer auth_CATCgL7EudldnewDs7tETNn2LpkqcGV7
+OTEL_METRICS_EXPORTER=otlp
+OTEL_PYTHON_LOGGING_AUTO_INSTRUMENTATION_ENABLED=true
+```
+
+**Deployment:** Docker Compose (local), ECS (production)
+
+---
+
+### 5. dormway-api-router (Node.js/Express)
+
+**Server-Side Instrumentation:**
+- **SDK:** `@opentelemetry/sdk-node@0.53.0`
+- **Auto-Instrumentation:** HTTP, Express, Temporal client
+
+**Environment Variables:**
+```bash
+OTEL_SERVICE_NAME=dormway-api-router
+OTEL_EXPORTER_OTLP_ENDPOINT=https://ingress.us-west-2.aws.dash0.com
+OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer auth_CATCgL7EudldnewDs7tETNn2LpkqcGV7
+```
+
+---
+
+### 6. dormway-engine (Temporal Worker)
+
+**Server-Side Instrumentation:**
+- **SDK:** `@opentelemetry/sdk-node@0.53.0`
+- **Auto-Instrumentation:** HTTP, Temporal workflows, activities
+
+**Environment Variables:**
+```bash
+OTEL_SERVICE_NAME=dormway-engine
+OTEL_EXPORTER_OTLP_ENDPOINT=https://ingress.us-west-2.aws.dash0.com
+OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer auth_CATCgL7EudldnewDs7tETNn2LpkqcGV7
+```
+
+---
+
+## Package Versions
+
+### Node.js Services
+
+**Server-Side OTEL (All Next.js & Node services):**
+```json
+{
+  "@opentelemetry/api": "^1.9.0",
+  "@opentelemetry/auto-instrumentations-node": "^0.53.0",
+  "@opentelemetry/exporter-trace-otlp-http": "^0.53.0",
+  "@opentelemetry/resources": "^1.26.0",
+  "@opentelemetry/sdk-node": "^0.53.0",
+  "@opentelemetry/sdk-trace-base": "^1.26.0",
+  "@opentelemetry/semantic-conventions": "^1.27.0"
+}
+```
+
+**Browser-Side (dormway-lockedin, syllabus-webviewer, dormway-admin):**
+```json
+{
+  "@dash0/sdk-web": "^0.16.0"
+}
+```
+
+**Why version 0.53.0?**
+- Compatibility across all OpenTelemetry packages
+- Fixed import issues with semantic conventions
+- Stable BatchSpanProcessor from sdk-trace-base
+
+### Python Services
+
+**Python OTEL (dormway-crews):**
+```
+opentelemetry-api
+opentelemetry-sdk
+opentelemetry-instrumentation-fastapi
+opentelemetry-instrumentation-requests
+opentelemetry-instrumentation-httpx
+opentelemetry-exporter-otlp
+```
+
+---
+
+## Configuration Patterns
+
+### Header Parsing (OTEL_EXPORTER_OTLP_HEADERS)
+
+**Supported Formats:**
+```bash
+# Format 1: Key=Value (most common)
+OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer auth_CAT..."
+
+# Format 2: Direct Bearer token
+OTEL_EXPORTER_OTLP_HEADERS="Bearer auth_CAT..."
+
+# Format 3: Plain token
+OTEL_EXPORTER_OTLP_HEADERS="auth_CAT..."
+```
+
+**Extraction Logic:**
+```typescript
+const trimmedToken = authToken.trim();
+
+if (trimmedToken.match(/^Bearer\s+/i)) {
+  // Format 2: "Bearer <token>"
+  extractedToken = trimmedToken.replace(/^Bearer\s+/i, '').trim();
+} else if (trimmedToken.includes('=')) {
+  // Format 1: "Authorization=Bearer <token>"
+  const firstEquals = trimmedToken.indexOf('=');
+  const headerValue = trimmedToken.substring(firstEquals + 1);
+  extractedToken = headerValue.replace(/^Bearer\s+/i, '').trim();
+} else {
+  // Format 3: Plain token
+  extractedToken = trimmedToken;
+}
+```
+
+**Why this approach?**
+- Handles tokens containing `=` characters (common in base64-encoded tokens)
+- Supports both key=value and direct token formats
+- Prevents silent authentication failures from incorrect parsing
+
+### Server-Side Instrumentation Pattern
+
+**Next.js services** (`instrumentation.ts`):
+```typescript
+export async function register() {
+  if (process.env.NEXT_RUNTIME === 'nodejs') {
+    const { NodeSDK } = await import('@opentelemetry/sdk-node');
+    const { getNodeAutoInstrumentations } = await import('@opentelemetry/auto-instrumentations-node');
+    const { Resource } = await import('@opentelemetry/resources');
+    const { SEMRESATTRS_SERVICE_NAME } = await import('@opentelemetry/semantic-conventions');
+    const { OTLPTraceExporter } = await import('@opentelemetry/exporter-trace-otlp-http');
+    const { BatchSpanProcessor } = await import('@opentelemetry/sdk-trace-base');
+
+    const traceExporter = new OTLPTraceExporter({
+      url: process.env.OTEL_EXPORTER_OTLP_ENDPOINT
+        ? `${process.env.OTEL_EXPORTER_OTLP_ENDPOINT}/v1/traces`
+        : 'http://localhost:4318/v1/traces',
+      headers: process.env.OTEL_EXPORTER_OTLP_HEADERS
+        ? Object.fromEntries(
+            process.env.OTEL_EXPORTER_OTLP_HEADERS.split(',')
+              .map(header => {
+                const [key, ...valueParts] = header.split('=');
+                const trimmedKey = key.trim();
+                const trimmedValue = valueParts.join('=').trim();
+                return [trimmedKey, trimmedValue];
+              })
+              .filter(([key, value]) => key && value !== undefined)
+          )
+        : {},
+    });
+
+    const resource = new Resource({
+      [SEMRESATTRS_SERVICE_NAME]: process.env.OTEL_SERVICE_NAME || 'service-name',
+    });
+
+    const sdk = new NodeSDK({
+      resource,
+      instrumentations: [
+        getNodeAutoInstrumentations({
+          '@opentelemetry/instrumentation-fs': { enabled: false },
+          '@opentelemetry/instrumentation-http': {
+            ignoreIncomingRequestHook: (request) => {
+              const ignorePaths = ['/_next/', '/api/health', '/__nextjs'];
+              const url = request.url || '';
+              return ignorePaths.some(path => url.includes(path));
+            },
+          },
+        }),
+      ],
+      spanProcessors: [new BatchSpanProcessor(traceExporter)],
+    });
+
+    sdk.start();
+  }
+}
+```
+
+### Browser-Side Instrumentation Pattern
+
+**Dash0BrowserProvider component:**
+```typescript
+'use client';
+
+import { useEffect } from 'react';
+
+export default function Dash0BrowserProvider() {
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const serviceName = process.env.NEXT_PUBLIC_OTEL_SERVICE_NAME || 'app-browser';
+    const endpoint = process.env.NEXT_PUBLIC_OTEL_EXPORTER_OTLP_ENDPOINT;
+    const authToken = process.env.NEXT_PUBLIC_OTEL_EXPORTER_OTLP_HEADERS;
+
+    if (!endpoint || !authToken) {
+      console.warn('Dash0 Web SDK not initialized: Missing endpoint or auth token');
+      return;
+    }
+
+    // Extract Bearer token (handles multiple formats)
+    let extractedToken = '';
+    const trimmedToken = authToken.trim();
+
+    if (trimmedToken.match(/^Bearer\s+/i)) {
+      extractedToken = trimmedToken.replace(/^Bearer\s+/i, '').trim();
+    } else if (trimmedToken.includes('=')) {
+      const firstEquals = trimmedToken.indexOf('=');
+      const headerValue = trimmedToken.substring(firstEquals + 1);
+      extractedToken = headerValue.replace(/^Bearer\s+/i, '').trim();
+    } else {
+      extractedToken = trimmedToken;
+    }
+
+    // Dynamically import and initialize Dash0 SDK
+    import('@dash0/sdk-web').then(({ init }) => {
+      init({
+        serviceName,
+        endpoint: {
+          url: endpoint,
+          authToken: extractedToken,
+        },
+      });
+      console.log('Dash0 Web SDK initialized:', serviceName);
+    }).catch(err => {
+      console.error('Failed to initialize Dash0 Web SDK:', err);
+    });
+  }, []);
+
+  return null;
+}
+```
+
+---
+
+## Environment Configuration
+
+### Local Development (Doppler)
+
+**Doppler Config:** `dev_ethan`
+
+```bash
+# Server-side (all services)
+OTEL_SERVICE_NAME=<service-name>
+OTEL_EXPORTER_OTLP_ENDPOINT=https://ingress.us-west-2.aws.dash0.com
+OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer auth_CATCgL7EudldnewDs7tETNn2LpkqcGV7
+
+# Browser-side Next.js (dormway-lockedin, syllabus-webviewer)
+NEXT_PUBLIC_OTEL_SERVICE_NAME=<service-name>-browser
+NEXT_PUBLIC_OTEL_EXPORTER_OTLP_ENDPOINT=https://ingress.us-west-2.aws.dash0.com
+NEXT_PUBLIC_OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer auth_CATCgL7EudldnewDs7tETNn2LpkqcGV7
+
+# Browser-side Vite (dormway-admin)
+VITE_OTEL_SERVICE_NAME=dormway-admin
+VITE_OTEL_EXPORTER_OTLP_ENDPOINT=https://ingress.us-west-2.aws.dash0.com
+VITE_OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer auth_CATCgL7EudldnewDs7tETNn2LpkqcGV7
+
+# Python (dormway-crews)
+OTEL_METRICS_EXPORTER=otlp
+OTEL_PYTHON_LOGGING_AUTO_INSTRUMENTATION_ENABLED=true
+```
+
+### Production Deployments
+
+| Service | Platform | Environment Variables | Location |
+|---------|----------|----------------------|----------|
+| dormway-lockedin | Vercel | `NEXT_PUBLIC_OTEL_SERVICE_NAME`<br>`NEXT_PUBLIC_OTEL_EXPORTER_OTLP_ENDPOINT`<br>`NEXT_PUBLIC_OTEL_EXPORTER_OTLP_HEADERS` | Vercel Project Settings |
+| syllabus-webviewer | AWS Amplify | `NEXT_PUBLIC_OTEL_SERVICE_NAME`<br>`NEXT_PUBLIC_OTEL_EXPORTER_OTLP_ENDPOINT`<br>`NEXT_PUBLIC_OTEL_EXPORTER_OTLP_HEADERS` | Amplify Console |
+| dormway-admin | Vercel | `VITE_OTEL_SERVICE_NAME`<br>`VITE_OTEL_EXPORTER_OTLP_ENDPOINT`<br>`VITE_OTEL_EXPORTER_OTLP_HEADERS` | Vercel Project Settings |
+| dormway-api-router | AWS ECS | `OTEL_SERVICE_NAME`<br>`OTEL_EXPORTER_OTLP_ENDPOINT`<br>`OTEL_EXPORTER_OTLP_HEADERS` | ECS Task Definition |
+| dormway-engine | AWS ECS | `OTEL_SERVICE_NAME`<br>`OTEL_EXPORTER_OTLP_ENDPOINT`<br>`OTEL_EXPORTER_OTLP_HEADERS` | ECS Task Definition |
+| dormway-crews | AWS ECS | `OTEL_SERVICE_NAME`<br>`OTEL_EXPORTER_OTLP_ENDPOINT`<br>`OTEL_EXPORTER_OTLP_HEADERS`<br>`OTEL_METRICS_EXPORTER`<br>`OTEL_PYTHON_LOGGING_AUTO_INSTRUMENTATION_ENABLED` | ECS Task Definition |
+
+---
+
+## Common Issues & Troubleshooting
+
+### 1. Token Extraction Fails
+
+**Symptom:** SDK initializes but no traces appear in Dash0
+
+**Causes:**
+- Token contains `=` characters (e.g., base64 padding)
+- Token format not recognized (no `Bearer` prefix, no `=` separator)
+- Whitespace in token value
+
+**Fix:** Use robust token extraction (see Configuration Patterns above)
+
+### 2. Headers with Empty Values Dropped
+
+**Symptom:** Valid headers with empty string values are missing
+
+**Cause:** Filter using `key && value` (falsy check)
+
+**Fix:**
+```typescript
+.filter(([key, value]) => key && value !== undefined)
+```
+
+### 3. Next.js instrumentationHook Warning
+
+**Symptom:** Warning about deprecated `instrumentationHook` in Next.js 15+
+
+**Fix:** Remove from `next.config.ts`:
+```typescript
+// Remove this:
+experimental: {
+  instrumentationHook: true,
+}
+```
+
+### 4. Dash0 Web SDK Not Loading
+
+**Symptom:** Browser console shows SDK not initialized
+
+**Causes:**
+- Missing `NEXT_PUBLIC_*` or `VITE_*` environment variables
+- Variables not exposed to browser (missing prefix)
+- Invalid token format
+
+**Debug:**
+```typescript
+console.log('Endpoint:', process.env.NEXT_PUBLIC_OTEL_EXPORTER_OTLP_ENDPOINT);
+console.log('Token:', process.env.NEXT_PUBLIC_OTEL_EXPORTER_OTLP_HEADERS);
+```
+
+### 5. Server-Side Traces Not Appearing
+
+**Symptom:** No server-side traces in Dash0
+
+**Causes:**
+- `instrumentation.ts` not created
+- Missing OTEL environment variables
+- Incorrect endpoint URL (missing `/v1/traces`)
+
+**Fix:**
+```typescript
+const traceExporter = new OTLPTraceExporter({
+  url: `${process.env.OTEL_EXPORTER_OTLP_ENDPOINT}/v1/traces`, // ✓ Correct
+  // NOT: process.env.OTEL_EXPORTER_OTLP_ENDPOINT (missing /v1/traces)
+});
+```
+
+---
+
+## Dash0 Web SDK Features
+
+### Real User Monitoring (RUM)
+
+**Automatic Metrics:**
+- Page load times
+- Time to First Byte (TTFB)
+- First Contentful Paint (FCP)
+- Largest Contentful Paint (LCP)
+- Cumulative Layout Shift (CLS)
+- First Input Delay (FID)
+- Interaction to Next Paint (INP)
+
+### Error Tracking
+
+**Automatic Capture:**
+- JavaScript exceptions
+- Unhandled promise rejections
+- Resource loading errors
+- Network failures
+
+### User Session Tracking
+
+**Session Data:**
+- User agent
+- Screen resolution
+- Viewport size
+- Geographic location (anonymized)
+- Referrer
+- Session duration
+
+### Custom Events (Future)
+
+```typescript
+// Example: Track custom business events
+import { recordEvent } from '@dash0/sdk-web';
+
+// Track user action
+recordEvent('course_enrolled', {
+  courseId: '123',
+  semester: 'Fall 2025',
+});
+
+// Track performance milestone
+recordEvent('data_loaded', {
+  dataSize: 1024,
+  duration: 250,
+});
+```
+
+---
+
+## Benefits of Dash0 Web SDK vs. Generic OTEL
+
+| Feature | Generic OTEL Browser SDK | Dash0 Web SDK |
+|---------|-------------------------|---------------|
+| RUM Metrics | ❌ Manual instrumentation | ✅ Automatic |
+| Error Tracking | ❌ Manual setup | ✅ Automatic |
+| User Identification | ❌ Custom code | ✅ Built-in |
+| Session Tracking | ❌ Custom code | ✅ Automatic |
+| Performance Overhead | Higher (generic tracing) | Lower (optimized) |
+| Custom Events | ⚠️ Limited | ✅ Full support |
+| Setup Complexity | High | Low |
+
+---
+
+## Next Steps
+
+### Immediate
+- [ ] Deploy environment variables to Vercel (dormway-lockedin, dormway-admin)
+- [ ] Deploy environment variables to AWS Amplify (syllabus-webviewer)
+- [ ] Verify traces flowing to Dash0 in production
+- [ ] Set up Dash0 dashboard views for each service
+
+### Short-term
+- [ ] Configure user identification in Dash0BrowserProvider
+- [ ] Add custom events for critical user flows (signup, onboarding, course enrollment)
+- [ ] Set up alerting for error rates and performance degradation
+- [ ] Create Dash0 dashboards for key metrics
+
+### Long-term
+- [ ] Implement distributed tracing across microservices
+- [ ] Add custom instrumentation for Temporal workflows
+- [ ] Configure sampling strategies for high-traffic endpoints
+- [ ] Integrate with incident management (PagerDuty, Opsgenie)
+
+---
+
+## Related Documentation
+
+- [Amplitude Web Event Tracking Implementation](/docs/engineering/technical/telemetry-and-analytics/amplitude-web-event-tracking-implementation) - User behavior analytics
+- [iOS Telemetry Events Inventory](/docs/engineering/technical/telemetry-and-analytics/ios-telemetry-events-inventory) - Mobile app telemetry
+- 2025-10-03-worklog - Implementation worklog
+- [Dash0 Documentation](https://www.dash0.com/docs)
+- [OpenTelemetry JS Docs](https://opentelemetry.io/docs/languages/js/)
+- [OpenTelemetry Python Docs](https://opentelemetry.io/docs/languages/python/)
+
+---
+
+## Maintenance
+
+**Owner:** Platform Engineering
+**Review Cadence:** Quarterly
+**Last Reviewed:** 2025-10-03
+
+**Package Updates:**
+- Monitor for new Dash0 Web SDK releases
+- Update OpenTelemetry packages together (keep versions aligned)
+- Test in staging before production deployment
+
+**Dash0 Token Rotation:**
+- Rotate auth token every 90 days
+- Update in all deployment platforms
+- Verify traces continue flowing after rotation

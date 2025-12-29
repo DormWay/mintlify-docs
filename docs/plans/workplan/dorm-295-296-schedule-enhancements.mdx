@@ -1,0 +1,87 @@
+---
+title: "DORM 295 296 Schedule Enhancements"
+---
+
+# DORM-295 / DORM-296 — Schedule Management & Calendar Integrations
+
+## Goals
+- Give students an iterative schedule workflow: allow manual text edits, reuploads, and course removals without rebooting onboarding.
+- Keep DormWay’s canonical course graph and `student_time_blocks` in sync when users append or prune sections.
+- Surface Google Calendar connection state and controls directly on the schedule page so sync is part of the planning loop.
+
+## Current State & Discovery Notes
+- **Schedule intake** lives in `services/api-router/src/routes/mobile-routes.ts` via `/schedule/import` and `/calendar/upload-courses`. Both trigger `scheduleImportWorkflow` in Temporal (`services/engine/src/workflows/scheduleImport.workflow.ts`) and currently assume a “full ingest” flow started from onboarding.
+- The schedule UI (`services/dormway-lockedin/src/app/dashboard/schedule/page.tsx`) exposes an import CTA + modal, but it doesn’t let students tweak parsed text or see deltas before writing.
+- Course removal today is limited to archive/drop utilities in `services/api-router/src/routes/syllabus-routes.ts` and isn’t wired into the schedule page UX.
+- Google Calendar OAuth + status endpoints already exist under `/v1/calendar/google/*` (`services/api-router/src/routes/calendar-routes.ts`); the status widget is not visible on `/dashboard/schedule`.
+
+## Implementation Plan
+
+### 1. Backend foundations
+- **Diff + preview endpoint**: add `POST /api/schedule/preview` in api-router that accepts free-form text (and opt-in ICS) and returns:
+  - Parsed sections (reuse `scheduleImportWorkflow` parsing activities in a `dryRun` mode).
+  - Diff summary vs the student’s active `student_time_blocks` + course contexts (added, updated, dropped exposures).
+- **Transcript persistence**: on confirmed imports, persist the raw schedule transcript (and last-uploaded artifact metadata) so subsequent previews can prefill the editor and audit diffs as amendments instead of restarts.
+- **Workflow updates** (`scheduleImportWorkflow`):
+  - Support `input.previewOnly` and short-circuit before persisting to Aurora while still running GPT/ICS parsing.
+  - When applying changes, compute granular mutations: append new sections, update meeting times, and delete blocks flagged for removal by the client.
+  - Persist the latest transcript snapshot alongside the change summary so the UI can offer “resume editing” context.
+  - Emit change summary payload so the UI can acknowledge success and analytics can tag `schedule_amendment` vs `initial_import`.
+- **Course removal API**: expose a targeted route (likely `POST /api/schedule/remove`) that wraps existing `mark-dropped` logic and prunes associated `student_time_blocks` while leaving the academic context in a dropped state. Reuse `CourseActivities` or create a minimal Temporal activity to keep data in sync.
+- **Telemetry**: extend event tracker activities to record `schedule_edit_preview`, `schedule_edit_confirmed`, and `schedule_course_removed` for funnel health.
+
+### 2. Schedule page UX
+- **Schedule Management panel** in `page.tsx`:
+  - Free-form textarea (prefilled with last uploaded transcript when available) + drag-and-drop file option.
+  - Preview button calling the new `/api/proxy/schedule/preview` to render change diff (added courses, updated meeting times, conflicts, removals).
+  - Confirmation modal summarising changes; confirm action should POST to an updated `/api/proxy/schedule/import` with `applyChanges` + set of intended removals.
+- Inline conflict callouts in the diff panel should highlight overlapping blocks and feed a new warning state to the schedule grid.
+- **Course removal controls**: add an action menu per class card (and a bulk manager) to trigger the new removal endpoint and visually soft-delete entries.
+- **Busy and error states**: reuse the existing `schedule_import_progress` realtime channel for diff/apply phases; add empty state copy for students without schedules yet.
+
+### 3. Google Calendar quick access (DORM-296)
+- Insert a `CalendarSyncCard` near the schedule header:
+  - Fetch `/api/proxy/v1/mobile/calendar/google/status` (existing integrations route) to show connected status, last sync, and provider badge.
+  - Offer “Connect Google Calendar” CTA when disconnected (calls `/api/proxy/calendar/google/auth` and redirects to OAuth).
+  - Display re-sync / revoke controls and quick link to preferences when connected.
+- Wire telemetry so connections triggered from schedule emit a distinct event property (`source: 'schedule_page'`).
+
+## Implementation Progress
+- Engine workflow now supports preview + apply phases end-to-end: previews surface `ScheduleDiffSummary` and conflicts, while confirmations persist raw transcripts, annotate time blocks with `transcript_id`, and emit final progress payloads with change summaries.
+- Supabase activities expose `getTimeBlocks` for diff snapshots and the new `saveScheduleTranscript` helper so confirmed imports retain the latest raw transcript + metadata in `service_data`.
+- API router adds `POST /schedule/preview` that synchronously invokes Temporal via the new `temporalClient.runWorkflow`, returning parsed courses, diff summary, conflicts, and transcript metadata for the frontend.
+- Temporal client grows a synchronous `runWorkflow` helper to support preview requests outside the long-running import path.
+- Engine now tags removed courses by calling `markCourseDropped` during apply, clearing schedule_import time blocks and keeping context history intact for future removals UX.
+- Added `scheduleRemovalWorkflow` + `/api/schedule/remove` route so the schedule page can drop courses on-demand while pruning campus/student time blocks.
+- Schedule page mounts the Google Calendar status card; it now hits `/api/proxy/v1/mobile/calendar/google/status` (same contract the integrations view uses) and normalizes `connected`/`is_connected`, `has_refresh_token`, `has_sync_token`, and `access_token_valid`. When the API reports a refresh token, the badge shows "Connected" and the warning banner stays hidden—matching the integrations screen.
+- Schedule preview now leaves manually-added meetings in the "Add" bucket instead of reclassifying them as updates, so the confirmation modal mirrors the original upload flow.
+- Schedule page now invalidates and refetches the cached term event preload after an import completes, and weekly loads fall back to live calendar queries whenever that cache predates the latest realtime event—newly added meetings show up immediately instead of waiting for a hard refresh.
+- `fetchGoogleCalendar` reads the stored `service_credentials` payload (client id/secret + refresh token) before refreshing access tokens; we fall back to config/env only if the row is missing fields, which unblocks token refresh when Zuplo stored Google client metadata.
+- Manual schedule parsing now tolerates entries without an explicit end time (e.g., `F 2:30PM`), defaulting to a one-hour duration so those meetings still materialize in `time_blocks`/`student_time_blocks`.
+
+### Outstanding Follow-ups
+- Highlight conflicts directly on the schedule grid (and surface warning badges on affected cards) using preview payload data.
+- Land amplitude schema for `schedule_edit_preview` / `schedule_edit_confirmed` / `schedule_course_removed` so the UI and engine can emit structured analytics beyond the interim calendar telemetry.
+- Add bulk removal/undo affordances and richer success messaging once design finalizes the management panel UX.
+- Investigate the preview flow regression that bubbles "Preview response missing data" despite showing diff summaries, and ensure the confirmation modal includes the term/time-period context called out in specs.
+- Add regression coverage (or at least a smoke test) around the term-event cache refresh to ensure import completions keep schedule data current.
+
+## Testing & QA
+- **Unit**: add coverage for new preview/diff helpers in api-router (mock Temporal call), and workflow branch tests for `previewOnly` guard.
+- **Integration**: run the Temporal workflow locally with sample text (existing `services/engine/src/tests/scheduleImport.test.ts` can be extended) to ensure time blocks update correctly.
+- **UI**: add React Testing Library coverage for the new panel; perform manual QA for:
+  - Append-only change.
+  - Removing a course.
+  - Conflict detection (overlapping meetings).
+  - Google Calendar connect/disconnect flows from schedule (ensure the card reflects `has_refresh_token` and last sync timestamps from `/v1/mobile/calendar/google/status`).
+- **Regression**: smoke-test Zuplo gateway routes to confirm `/v1/mobile/calendar/google/status` remains available while new `/v1/calendar/health` work is staged; add a lightweight API test that asserts `calendarService.status` returns `hasRefreshToken=true` when the DB row holds a refresh token.
+
+## Decisions
+- Persist the user’s raw schedule transcript (plus last-upload metadata) on each confirmed import so the workflow treats changes as amendments.
+- Removing a class marks the context as dropped; the API and UI hide it without destroying historical data.
+- Conflict diffs highlight overlapping meetings both in the preview panel and on the schedule grid to direct follow-up edits.
+
+## Dependencies & Follow-ups
+- Coordinate with workflow owners to ensure `scheduleImportWorkflow` updates won’t break onboarding flows (possibly feature flag the new pathways).
+- Align copy/UX with design for the diff + confirmation surfaces.
+- After launch, monitor Amplitude funnels for new events and adjust copy based on engagement.

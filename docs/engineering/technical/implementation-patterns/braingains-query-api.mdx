@@ -1,0 +1,276 @@
+---
+title: "BrainGains Query API"
+description: "The BrainGains Query API provides semantic search capabilities across user documents stored in Vectara. This enables AI-powered question answering over sylla..."
+---
+
+# BrainGains Query API
+
+The BrainGains Query API provides semantic search capabilities across user documents stored in Vectara. This enables AI-powered question answering over syllabus documents, notes, and other educational content.
+
+## Overview
+
+The query functionality uses Vectara's RAG (Retrieval Augmented Generation) capabilities to:
+- Search across all user documents semantically
+- Generate AI-powered answers based on document content
+- Return relevant source snippets with confidence scores
+
+## Workflows
+
+### queryBrainGains
+
+The primary workflow for querying documents programmatically.
+
+**Parameters:**
+- `userId` (string, required): The user's UUID
+- `query` (string, required): The search query or question
+- `documentTypes` (string[], optional): Filter by document types (e.g., ['syllabus', 'notes'])
+- `limit` (number, optional): Maximum number of results (default: 5)
+- `queryOptions` (object, optional): Advanced filtering options
+  - `contentType` ('raw_document' | 'processed_insight' | 'all'): Filter by content type (default: 'all')
+  - `insightType` (string): Filter by specific insight type (e.g., 'assignments', 'grading', 'policies')
+
+**Example:**
+```typescript
+const result = await workflowClient.execute(queryBrainGains, {
+  args: [
+    "3e2ab120-5c35-44bc-9ec7-94f5950de4a5",
+    "What are the grading components?",
+    ["syllabus"],
+    10,
+    {
+      contentType: "processed_insight",
+      insightType: "grading"
+    }
+  ],
+  workflowId: `query-${Date.now()}`,
+  taskQueue: 'braingains-processor'
+});
+```
+
+### queryBrainGainsWithParams
+
+A wrapper workflow designed for Temporal Web UI compatibility that accepts a single object parameter.
+
+**Parameters (as object):**
+```typescript
+{
+  userId: string;
+  query: string;
+  documentTypes?: string[];
+  limit?: number;
+  queryOptions?: {
+    contentType?: 'raw_document' | 'processed_insight' | 'all';
+    insightType?: string;
+  };
+}
+```
+
+**Example for Temporal Web UI:**
+```json
+{
+  "userId": "3e2ab120-5c35-44bc-9ec7-94f5950de4a5",
+  "query": "When are the exams scheduled?",
+  "documentTypes": ["syllabus"],
+  "limit": 10,
+  "queryOptions": {
+    "contentType": "processed_insight",
+    "insightType": "important_dates"
+  }
+}
+```
+
+## Response Format
+
+Both workflows return the same response structure:
+
+```typescript
+{
+  success: boolean;
+  response?: string;        // AI-generated answer
+  sources?: Array<{
+    documentId: string;     // Document ID in braingains_documents
+    documentType: string;   // Type of document (syllabus, notes, etc.)
+    snippet: string;        // Relevant text snippet
+    score: number;          // Relevance score (0-1)
+  }>;
+  error?: string;          // Error message if success is false
+}
+```
+
+## Content Types and Metadata Filtering
+
+As of June 25, 2025, BrainGains supports enhanced RAG capabilities with both raw documents and processed insights stored in the same corpus.
+
+### Content Types
+- **`raw_document`**: Original uploaded documents (PDFs, text files, etc.)
+- **`processed_insight`**: AI-processed structured data extracted from documents
+- **`all`**: Query both raw documents and processed insights (default)
+
+### Insight Types
+When filtering by `processed_insight`, you can further filter by specific insight types:
+- **`course_details`**: Course information, instructor details, schedule
+- **`assignments`**: Assignment details, due dates, weights
+- **`important_dates`**: Exam dates, project deadlines, key milestones
+- **`policies`**: Course policies, attendance requirements, late policies
+- **`grading`**: Grading breakdown, scale, components
+- **`insights`**: AI-generated insights and summaries
+- **`cost_estimation`**: Textbook and material costs
+- **`web_experience`**: Web-friendly summaries
+
+### Query Examples with Filters
+
+```typescript
+// Query only processed insights about assignments
+const assignmentInsights = await queryBrainGains(
+  userId,
+  "What assignments are due in March?",
+  ["syllabus"],
+  10,
+  { contentType: "processed_insight", insightType: "assignments" }
+);
+
+// Query only raw documents
+const rawDocQuery = await queryBrainGains(
+  userId,
+  "What does the professor say about collaboration?",
+  ["syllabus"],
+  10,
+  { contentType: "raw_document" }
+);
+
+// Query all content (default behavior)
+const allContent = await queryBrainGains(
+  userId,
+  "Explain the grading policy",
+  ["syllabus"],
+  10
+);
+```
+
+## Corpus Key Format
+
+The system uses a standardized corpus key format for Vectara:
+- Format: `DW-${userId}`
+- Example: `DW-3e2ab120-5c35-44bc-9ec7-94f5950de4a5`
+
+This corpus key is:
+- Created automatically when the first document is uploaded
+- Stored in the `vectara_corpus_key` field of `braingains_documents` table
+- Used for all subsequent document uploads and queries
+- Contains both raw documents and processed insights with metadata differentiation
+
+## Example Queries
+
+Here are some effective query examples for syllabus content:
+
+### Course Information
+- "What is the course schedule?"
+- "Who is the instructor and what are their office hours?"
+- "What textbooks do I need for this course?"
+
+### Grading and Assessment
+- "What are the grading components and their weights?"
+- "When are the exams and what do they cover?"
+- "What is the late assignment policy?"
+- "How is attendance graded?"
+
+### Course Content
+- "What topics will be covered in this course?"
+- "What are the learning objectives?"
+- "Are there any prerequisites I should know?"
+
+### Policies
+- "What is the academic integrity policy?"
+- "Can I use AI tools for assignments?"
+- "What is the attendance requirement?"
+
+### Costs
+- "How much will textbooks cost?"
+- "Are there any additional course fees?"
+- "What materials do I need to purchase?"
+
+## Implementation Details
+
+### Document Storage
+Documents are stored in the `braingains_documents` table with:
+- `document_type`: Identifies the type (syllabus, notes, etc.)
+- `vectara_corpus_key`: The user's corpus key
+- `vectara_document_id`: The document ID in Vectara
+- `processing_status`: Current status (pending, processing, indexed, failed)
+
+### Query Flow
+1. Workflow receives query parameters
+2. `queryUserDocuments` activity retrieves the user's corpus key
+3. Query is sent to Vectara with the corpus key
+4. Vectara performs semantic search and generates response
+5. Results are formatted and returned to the caller
+
+### Error Handling
+- If no corpus key exists, the system attempts to create one
+- If no documents are found, a helpful message is returned
+- Network errors are retried based on activity retry configuration
+
+## Usage Notes
+
+1. **First-time users**: The first document upload creates the user's corpus
+2. **Document types**: Use the `documentTypes` filter to narrow results
+3. **Query quality**: More specific questions yield better results
+4. **Response time**: Queries typically complete in 1-3 seconds
+5. **Usage tracking**: Each query is tracked for analytics
+
+## REST API Endpoint
+
+The query functionality is exposed via the REST API:
+
+### Query Documents
+`GET /api/braingains/query`
+
+**Query Parameters:**
+- `q` (string, required): The search query
+- `documentTypes` (string, optional): Comma-separated list of document types
+- `contentType` (string, optional): Filter by content type (`raw_document`, `processed_insight`, `all`)
+- `insightType` (string, optional): Filter by insight type when using `processed_insight`
+- `limit` (number, optional): Maximum results (1-50, default: 10)
+
+**Examples:**
+```bash
+# Query all content
+GET /api/braingains/query?q=final+exam+date
+
+# Query only raw syllabus documents
+GET /api/braingains/query?q=attendance+policy&documentTypes=syllabus&contentType=raw_document
+
+# Query only assignment insights
+GET /api/braingains/query?q=group+projects&contentType=processed_insight&insightType=assignments
+
+# Complex query with multiple filters
+GET /api/braingains/query?q=exam+weights&documentTypes=syllabus&contentType=processed_insight&insightType=grading&limit=5
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "query": "final exam date",
+  "response": "Based on your syllabus, the final exam is scheduled for...",
+  "sources": [
+    {
+      "documentId": "syllabus_1234_1719331200000_important_dates",
+      "documentType": "syllabus_insight",
+      "text": "Final Exam: December 15, 2025 at 2:00 PM in Room 301",
+      "score": 0.92,
+      "metadata": {
+        "content_type": "processed_insight",
+        "insight_type": "important_dates",
+        "courseCode": "CS 101"
+      }
+    }
+  ]
+}
+```
+
+## Related Documentation
+- BrainGains Syllabus Processing
+- Vectara Integration
+- Document Processing Workflows
+- [BrainGains Architecture](/docs/engineering/architecture/braingains-rag-architecture)

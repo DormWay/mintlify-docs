@@ -1,0 +1,498 @@
+---
+title: "Temporal Engine Customer.io Integration"
+description: "This document details the integration of Customer.io into the Temporal Engine, enabling event-driven communication workflows and unified push notification de..."
+---
+
+# Temporal Engine Customer.io Integration
+
+**Last Updated:** June 20, 2025  
+**Owner:** Engineering Team  
+**Feature:** Customer.io Event Tracking & Push Notifications
+
+## Overview
+
+This document details the integration of Customer.io into the Temporal Engine, enabling event-driven communication workflows and unified push notification delivery.
+
+## Student Activities Updates
+
+### Core Implementation
+
+**File:** `/engine/src/activities/student.activities.ts`
+
+```typescript
+import { Context } from '@temporalio/activity';
+import { ApplicationFailure } from '@temporalio/common';
+import fetch from 'node-fetch';
+
+export interface PushNotificationPayload {
+  title?: string;
+  content?: string;
+  data?: Record<string, string>;
+  silent?: boolean;
+}
+
+export interface CustomerIOEventData {
+  userId: string;
+  event: string;
+  data: Record<string, any>;
+}
+
+/**
+ * Updated push notification method using Customer.io
+ * Lines 2381-2448 replacement
+ */
+export async function sendPushNotification(
+  studentId: string, 
+  payload: PushNotificationPayload
+): Promise<void> {
+  const API_ROUTER = process.env.API_ROUTER_URL || 'http://localhost:4000';
+  const TEMPORAL_API_KEY = process.env.TEMPORAL_API_KEY;
+
+  if (!TEMPORAL_API_KEY) {
+    throw ApplicationFailure.nonRetryable('TEMPORAL_API_KEY not configured');
+  }
+
+  try {
+    // Get user context for the student
+    const { contextData } = await this.getStudentContext(studentId);
+    const userId = contextData.user_id;
+
+    if (!userId) {
+      throw ApplicationFailure.nonRetryable('User ID not found for student');
+    }
+
+    // Track event in Customer.io if type is specified
+    if (payload.data?.type) {
+      await this.trackCustomerIOEvent(userId, `push_${payload.data.type}`, {
+        student_id: studentId,
+        workflow_id: Context.current().info.workflowExecution.workflowId,
+        ...payload.data
+      });
+    }
+
+    // Send push via API Router (which uses Customer.io)
+    const response = await fetch(`${API_ROUTER}/api/push/send`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-temporal-worker-auth': TEMPORAL_API_KEY
+      },
+      body: JSON.stringify({
+        userId,
+        title: payload.title,
+        body: payload.content,
+        data: payload.data,
+        silent: payload.silent || false
+      })
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw ApplicationFailure.retryable(`Push notification failed: ${error}`);
+    }
+
+    const result = await response.json();
+    console.log(`Push notification sent to user ${userId}:`, result);
+
+  } catch (error) {
+    if (error instanceof ApplicationFailure) {
+      throw error;
+    }
+    throw ApplicationFailure.retryable(`Failed to send push notification: ${error.message}`);
+  }
+}
+
+/**
+ * New method: Track events in Customer.io
+ */
+export async function trackCustomerIOEvent(
+  userId: string, 
+  event: string, 
+  data: Record<string, any>
+): Promise<void> {
+  const API_ROUTER = process.env.API_ROUTER_URL || 'http://localhost:4000';
+  const TEMPORAL_API_KEY = process.env.TEMPORAL_API_KEY;
+
+  if (!TEMPORAL_API_KEY) {
+    throw ApplicationFailure.nonRetryable('TEMPORAL_API_KEY not configured');
+  }
+
+  try {
+    const response = await fetch(`${API_ROUTER}/api/events/track-internal`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-temporal-worker-auth': TEMPORAL_API_KEY
+      },
+      body: JSON.stringify({
+        userId,
+        event,
+        data: {
+          ...data,
+          timestamp: new Date().toISOString(),
+          source: 'temporal_workflow'
+        }
+      })
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      // Event tracking is non-critical, log but don't fail workflow
+      console.error(`Failed to track event ${event}:`, error);
+    } else {
+      console.log(`Event tracked: ${event} for user ${userId}`);
+    }
+
+  } catch (error) {
+    // Don't fail workflows due to tracking errors
+    console.error(`Error tracking event ${event}:`, error);
+  }
+}
+
+/**
+ * Enhanced method: Send transactional email via Customer.io
+ */
+export async function sendTransactionalEmail(
+  userId: string,
+  templateId: string,
+  data: Record<string, any>
+): Promise<void> {
+  const API_ROUTER = process.env.API_ROUTER_URL || 'http://localhost:4000';
+  const TEMPORAL_API_KEY = process.env.TEMPORAL_API_KEY;
+
+  if (!TEMPORAL_API_KEY) {
+    throw ApplicationFailure.nonRetryable('TEMPORAL_API_KEY not configured');
+  }
+
+  try {
+    const response = await fetch(`${API_ROUTER}/api/email/send-transactional`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-temporal-worker-auth': TEMPORAL_API_KEY
+      },
+      body: JSON.stringify({
+        userId,
+        templateId,
+        data
+      })
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw ApplicationFailure.retryable(`Email send failed: ${error}`);
+    }
+
+    console.log(`Transactional email ${templateId} sent to user ${userId}`);
+
+  } catch (error) {
+    if (error instanceof ApplicationFailure) {
+      throw error;
+    }
+    throw ApplicationFailure.retryable(`Failed to send email: ${error.message}`);
+  }
+}
+```
+
+## Workflow Integration Examples
+
+### Syllabus Processing Workflow
+
+**File:** `/engine/src/workflows/syllabus-processing.workflow.ts`
+
+```typescript
+import { proxyActivities } from '@temporalio/workflow';
+import type * as activities from '../activities';
+
+const { 
+  processSyllabus, 
+  sendPushNotification, 
+  trackCustomerIOEvent,
+  sendTransactionalEmail 
+} = proxyActivities<typeof activities>({
+  startToCloseTimeout: '5 minutes',
+  retry: {
+    initialInterval: '1 second',
+    backoffCoefficient: 2,
+    maximumAttempts: 3
+  }
+});
+
+export async function syllabusProcessingWorkflow(
+  studentId: string,
+  syllabusUrl: string
+): Promise<void> {
+  // Track workflow start
+  await trackCustomerIOEvent(studentId, 'syllabus_processing_started', {
+    syllabus_url: syllabusUrl,
+    workflow_id: workflowInfo().workflowId
+  });
+
+  try {
+    // Process the syllabus
+    const result = await processSyllabus(studentId, syllabusUrl);
+
+    // Track successful processing
+    await trackCustomerIOEvent(studentId, 'syllabus_processed', {
+      course_count: result.courses.length,
+      total_credits: result.totalCredits,
+      conflicts_found: result.conflicts.length > 0,
+      processing_time_ms: result.processingTime
+    });
+
+    // Send push notification
+    await sendPushNotification(studentId, {
+      title: 'Syllabus Processed!',
+      content: `Found ${result.courses.length} courses. Tap to view details.`,
+      data: {
+        type: 'syllabus_processed',
+        course_count: String(result.courses.length),
+        has_conflicts: String(result.conflicts.length > 0)
+      }
+    });
+
+    // Send detailed email
+    await sendTransactionalEmail(studentId, 'syllabus-processed', {
+      courses: result.courses,
+      totalCredits: result.totalCredits,
+      conflicts: result.conflicts,
+      recommendations: result.recommendations
+    });
+
+  } catch (error) {
+    // Track failure
+    await trackCustomerIOEvent(studentId, 'syllabus_processing_failed', {
+      error: error.message,
+      syllabus_url: syllabusUrl
+    });
+
+    // Notify user of failure
+    await sendPushNotification(studentId, {
+      title: 'Processing Failed',
+      content: 'We couldn\'t process your syllabus. Please try again.',
+      data: {
+        type: 'syllabus_failed',
+        error_type: error.name
+      }
+    });
+
+    throw error;
+  }
+}
+```
+
+### Context Update Workflow
+
+**File:** `/engine/src/workflows/context-update.workflow.ts`
+
+```typescript
+export async function contextUpdateWorkflow(
+  studentId: string,
+  contextData: any
+): Promise<void> {
+  // Track context update
+  await trackCustomerIOEvent(studentId, 'context_updated', {
+    location_status: contextData.locationStatus,
+    academic_period: contextData.academicPeriod,
+    weather_condition: contextData.weather?.condition
+  });
+
+  // Send silent push to update app
+  await sendPushNotification(studentId, {
+    silent: true,
+    data: {
+      type: 'context_update',
+      context_version: String(contextData.version),
+      location_status: contextData.locationStatus
+    }
+  });
+
+  // If significant change, send visible notification
+  if (contextData.significantChange) {
+    await sendPushNotification(studentId, {
+      title: 'Campus Update',
+      content: contextData.changeMessage,
+      data: {
+        type: 'context_change',
+        change_type: contextData.changeType
+      }
+    });
+  }
+}
+```
+
+## Event Catalog
+
+### Standard Events to Track
+
+```typescript
+// User Lifecycle Events
+'user_registered'
+'user_logged_in'
+'user_logged_out'
+'onboarding_started'
+'onboarding_completed'
+'account_deleted'
+
+// Academic Events
+'syllabus_uploaded'
+'syllabus_processing_started'
+'syllabus_processed'
+'syllabus_processing_failed'
+'course_added'
+'course_dropped'
+'schedule_conflict_detected'
+'calendar_synced'
+
+// Engagement Events
+'dashboard_viewed'
+'feature_used'
+'push_notification_opened'
+'email_opened'
+'app_backgrounded'
+'app_foregrounded'
+
+// Context Events
+'context_updated'
+'location_changed'
+'academic_period_changed'
+'weather_alert'
+
+// System Events
+'workflow_started'
+'workflow_completed'
+'workflow_failed'
+'background_sync_completed'
+```
+
+## Configuration
+
+### Environment Variables
+
+```bash
+# Required for Temporal Engine
+API_ROUTER_URL=http://localhost:4000
+TEMPORAL_API_KEY=your-temporal-api-key
+
+# Customer.io configuration is in API Router
+```
+
+### Retry Configuration
+
+```typescript
+// Activity retry policy for Customer.io operations
+const customerIORetryPolicy = {
+  initialInterval: '1 second',
+  backoffCoefficient: 2,
+  maximumInterval: '30 seconds',
+  maximumAttempts: 5,
+  nonRetryableErrorTypes: ['ApplicationFailure']
+};
+```
+
+## Testing
+
+### Unit Tests
+
+```typescript
+describe('Customer.io Activities', () => {
+  it('should track event with proper data', async () => {
+    const userId = 'test-user-123';
+    const event = 'test_event';
+    const data = { test: true };
+
+    await trackCustomerIOEvent(userId, event, data);
+
+    expect(fetch).toHaveBeenCalledWith(
+      expect.stringContaining('/api/events/track-internal'),
+      expect.objectContaining({
+        method: 'POST',
+        body: expect.stringContaining(event)
+      })
+    );
+  });
+
+  it('should not fail workflow on tracking error', async () => {
+    fetch.mockRejectedValueOnce(new Error('Network error'));
+
+    // Should not throw
+    await expect(
+      trackCustomerIOEvent('user', 'event', {})
+    ).resolves.not.toThrow();
+  });
+});
+```
+
+### Integration Tests
+
+```typescript
+describe('Syllabus Processing Workflow', () => {
+  it('should track all events during processing', async () => {
+    const studentId = 'student-123';
+    
+    await syllabusProcessingWorkflow(studentId, 'http://example.com/syllabus.pdf');
+
+    // Verify events were tracked
+    expect(trackCustomerIOEvent).toHaveBeenCalledWith(
+      studentId,
+      'syllabus_processing_started',
+      expect.any(Object)
+    );
+
+    expect(trackCustomerIOEvent).toHaveBeenCalledWith(
+      studentId,
+      'syllabus_processed',
+      expect.any(Object)
+    );
+  });
+});
+```
+
+## Monitoring
+
+### Temporal UI
+
+Monitor workflow executions and activity failures in Temporal UI:
+- Failed push notifications
+- Event tracking errors
+- Retry attempts
+
+### Customer.io Dashboard
+
+Track event flow and engagement:
+- Event volume by type
+- Push delivery rates
+- User engagement metrics
+
+### Logging
+
+All Customer.io operations are logged:
+```
+[2025-06-20T10:30:45Z] Push notification sent to user abc123: { success: true }
+[2025-06-20T10:30:46Z] Event tracked: syllabus_processed for user abc123
+[2025-06-20T10:30:47Z] Transactional email syllabus-processed sent to user abc123
+```
+
+## Best Practices
+
+1. **Event Naming**: Use consistent snake_case naming
+2. **Error Handling**: Don't fail workflows on tracking errors
+3. **Data Size**: Keep event data under 100KB
+4. **Idempotency**: Include workflow ID in event data
+5. **Testing**: Mock external calls in unit tests
+
+## Migration Checklist
+
+- [ ] Update all workflows using push notifications
+- [ ] Add event tracking to key user actions
+- [ ] Configure retry policies
+- [ ] Update workflow tests
+- [ ] Deploy to staging environment
+- [ ] Monitor error rates
+- [ ] Remove old push code
+
+## Related Documentation
+
+- [Customer.io Service Implementation](/docs/engineering/technical/customerio/customerio-event-implementation-guide)
+- API Router Push Routes
+- Temporal Workflows Guide

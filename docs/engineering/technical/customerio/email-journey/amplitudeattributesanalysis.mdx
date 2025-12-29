@@ -1,0 +1,156 @@
+---
+title: "AMPLITUDE_ATTRIBUTES_ANALYSIS"
+description: "This document analyzes all email campaign flows defined in the journey diagrams and identifies which Amplitude **user properties** (not just events) are requ..."
+---
+
+# Amplitude Attributes Analysis for Email Journey Flows
+
+**Date**: 2025-09-30
+**Status**: Core traits implemented – verify any new features maintain parity
+
+## Executive Summary
+
+This document analyzes all email campaign flows defined in the journey diagrams and identifies which Amplitude **user properties** (not just events) are required to facilitate conditional triggers in Customer.io.
+
+### Key Findings
+
+✅ **Events are being tracked** - We're successfully tracking events like `first_syllabus_uploaded`, `onboarding_completed`, etc.
+
+✅ **Core user properties now set** - Calendar connection, schedule import, communication preferences, and onboarding flags are all mapped to Amplitude traits for Customer.io segmentation.
+
+⚠️ **Continue monitoring new features** - Future launches should add traits at the same time as events (e.g., new AI surfaces) to maintain parity.
+
+---
+
+## Required User Properties for Email Campaigns
+
+Based on `campaign-architecture-diagram.mermaid`, `user-journey-timeline.mermaid`, and `implementation-checklist.md`:
+
+### 1. Onboarding & Setup Flags
+
+| User Property | Type | Purpose | Current Status | Evidence |
+|--------------|------|---------|----------------|----------|
+| `onboarding_completed` | boolean | Skip onboarding emails if true | ⚠️ Event only | Event tracked in studentProcessor.workflow.ts:1078 |
+| `first_syllabus_uploaded` | boolean | Trigger celebration, skip syllabus prompts | ⚠️ Event only | Event tracked in syllabusProcessor.workflow.ts:1456 |
+| `calendar_permission_granted` | boolean | Skip calendar connection prompts | ✅ Set | Calendar OAuth callback launches `updateUserTraitsWorkflow` (`services/api-router/src/routes/calendar-routes.ts:116`) |
+| `schedule_imported` | boolean | Track if user has imported schedule | ✅ Set | `scheduleImportWorkflow` now identifies `schedule_imported: true` (`services/engine/src/workflows/scheduleImport.workflow.ts:407`) |
+| `campus_selected` | boolean | Track if user selected their campus | ✅ Set | Onboarding workflows set flag during identify (`services/engine/src/workflows/studentProcessor.workflow.ts:284`) |
+| `school_verified` | boolean | Track if user's school is verified | ✅ Set | Onboarding workflows set true when campus metadata present (`services/engine/src/workflows/studentProcessor.workflow.ts:284`) |
+
+### 2. Engagement & Activity Tracking
+
+| User Property | Type | Purpose | Current Status | Evidence |
+|--------------|------|---------|----------------|----------|
+| `syllabus_count` | number | Total syllabi uploaded (cumulative) | ✅ Set | Incremented via `incrementUserProperty` after each upload (`services/engine/src/workflows/syllabusProcessor.workflow.ts:1473`) |
+| `last_app_open` | timestamp | Re-engagement triggers (7d, 14d inactive) | ✅ Set | Mobile telemetry route starts trait workflow on `app_opened` (`services/api-router/src/routes/mobile-routes.ts:1021`) |
+| `braingains_activated` | boolean | Track feature adoption | ✅ Set | BrainGains workflow sets trait on successful document processing (`services/engine/src/workflows/brainGainsProcessor.workflow.ts:174`) |
+| `week_plan_generated` | boolean | Track if user has generated week plan | ✅ Set | Weekly wellness review identifies trait after summary (`services/engine/src/workflows/weeklyWellnessReview.workflow.ts:134`) |
+| `days_since_signup` | number | Calculate time-based triggers | ✅ Set | Derived during `app_opened` telemetry handling (`services/api-router/src/routes/mobile-routes.ts:1024`) |
+
+### 3. Communication Preferences
+
+| User Property | Type | Purpose | Current Status | Evidence |
+|--------------|------|---------|----------------|----------|
+| `weekly_digest` | boolean | Opt-in for weekly digest emails | ✅ Set | StudentWatcher + preference sync workflows push trait (`services/engine/src/workflows/studentWatcher.simplified.workflow.ts:484`) |
+| `daily_plan` | boolean | Opt-in for daily plan emails | ✅ Set | Derived from preferences sync (`services/engine/src/workflows/userPreferenceSync.workflow.ts:21`) |
+| `marketing_emails` | boolean | Opt-in for marketing communications | ✅ Set | Derived from preferences sync (`services/engine/src/workflows/userPreferenceSync.workflow.ts:21`) |
+| `product_updates` | boolean | Opt-in for product update emails | ✅ Set | Derived from preferences sync (`services/engine/src/workflows/userPreferenceSync.workflow.ts:21`) |
+
+### 4. Academic Context
+
+| User Property | Type | Purpose | Current Status | Evidence |
+|--------------|------|---------|----------------|----------|
+| `campus_name` | string | Personalize emails with campus | ✅ Set | Set in studentProcessor.workflow.ts:1075 |
+| `academic_year` | string | Personalize content by year | ✅ Set | Set in eventTracker.ts:33 (UserTraits) |
+| `major` | string | Personalize recommendations | ✅ Set | Set in eventTracker.ts:34 (UserTraits) |
+| `course_count` | number | Track how many courses user has | ✅ Set | Schedule import workflow sets `course_count` during identify (`services/engine/src/workflows/scheduleImport.workflow.ts:411`) |
+
+---
+
+## Current Implementation Analysis
+
+### ✅ What's Working
+
+**Event Tracking**: We have comprehensive event tracking in place via EventTracker service:
+```typescript
+// services/engine/src/services/eventTracker.ts
+
+await trackServerEvent(userId, 'first_syllabus_uploaded', { ... });
+await trackServerEvent(userId, 'onboarding_completed', { ... });
+await trackServerEvent(userId, 'schedule_synced', { ... });
+```
+
+**User Identification**: Basic user traits are being set:
+```typescript
+// services/engine/src/workflows/studentProcessor.workflow.ts:1067
+
+await eventTrackerActivities.identifyUser(userId, {
+  email,
+  first_name: firstName,
+  last_name: lastName,
+  campus_name: campusName,
+  academic_year: academicYear,
+  major: major,
+  onboarding_completed: onboardingResult.completed  // ✅ This is good!
+});
+```
+
+### ⚠️ What's Partially Working
+
+**Boolean flags set during identification but not updated later**:
+- `onboarding_completed` is set once during onboarding (studentProcessor.workflow.ts:1078)
+- But it's not updated when the event fires
+
+**Problem**: Customer.io needs user properties to evaluate conditions like:
+```
+if first_syllabus_uploaded = false
+  → Send "Upload Syllabus" reminder email
+```
+
+Currently, we only fire the event `first_syllabus_uploaded`, but we don't set a user property with the same name.
+
+### ✅ Current Coverage
+
+- **Boolean & status flags** – Syllabus, calendar, campus, and schedule traits now update via Temporal workflows or API callbacks.
+- **Cumulative counters** – `syllabus_count` and `course_count` increase in lockstep with ingestion.
+- **Activity timestamps** – `last_app_open` (with `days_since_signup`) refreshes on every `app_opened` telemetry event.
+- **Communication preferences** – Updates to user preferences immediately sync to Amplitude through `syncUserPreferencesWorkflow` and StudentWatcher.
+- **Feature adoption** – `braingains_activated` and `week_plan_generated` flip on when BrainGains and weekly wellness workflows succeed.
+
+---
+
+## Priority Breakdown
+
+### P0 - Critical (Block email campaigns)
+- ✅ `onboarding_completed` – Already implemented
+- ✅ `first_syllabus_uploaded` – Boolean flag set in `syllabusProcessor.workflow.ts`
+- ✅ `syllabus_count` – Incremented per upload via `incrementUserProperty`
+
+### P1 - High (Needed for onboarding series)
+- ✅ `calendar_permission_granted` – Identified after OAuth callback (`calendar-routes.ts`)
+- ✅ `schedule_imported` – Identified once schedule normalization completes
+- ✅ `weekly_digest` – Derived from preference sync workflows
+
+### P2 - Medium (Needed for engagement campaigns)
+- ✅ `last_app_open` – Updated via telemetry handler on `app_opened`
+- ✅ `braingains_activated` – Set when BrainGains document processing succeeds
+- ✅ `daily_plan` – Derived from preference sync workflows
+
+### P3 - Low (Nice to have)
+- ✅ `course_count` – Updated alongside schedule imports
+- ✅ `campus_selected` – Set during onboarding identify
+- ✅ `school_verified` – Set during onboarding identify when campus metadata present
+
+---
+
+## Next Steps
+
+1. **Monitor** new feature launches (e.g., additional AI surfaces) to ensure matching Amplitude traits ship with the events.
+2. **Audit monthly** that preference sync workflows continue to fire; update runbooks for Doppler backfill command if replays are needed.
+3. **Coordinate with Marketing** before enabling new Customer.io automations so segmentation logic references the confirmed trait names above.
+
+---
+
+**Document Owner**: Engineering Team
+**Last Updated**: 2025-10-01
+**Status**: Production instrumentation ✅ (monitor for regressions)

@@ -1,0 +1,200 @@
+---
+title: "Auth0 Post Login Action Simplified"
+description: "This is a simplified Auth0 Post-Login Action that works with the production architecture where the Lambda Authorizer handles Auth0 ID to backend UUID reconci..."
+---
+
+# Auth0 Post-Login Action - Simplified Version (No API Calls)
+
+## Overview
+
+This is a simplified Auth0 Post-Login Action that works with the production architecture where the Lambda Authorizer handles Auth0 ID to backend UUID reconciliation. This version:
+
+1. **Does NOT call any API endpoints** (they don't exist in production)
+2. **Uses app_metadata** to persist backend UUID across logins
+3. **Tracks events in Amplitude** only
+4. **Lets the Lambda Authorizer handle ID mapping**
+
+## Key Architecture Understanding
+
+- **Lambda Authorizer**: Automatically maps Auth0 ID → Backend UUID
+- **No `/users/` endpoints**: These only exist locally, not in API Gateway
+- **App Metadata**: Persists data across Auth0 logins
+
+## Simplified Post-Login Action Code
+
+```javascript
+/**
+ * Handler that will be called during the execution of a PostLogin flow.
+ * Simplified version that doesn't require API calls
+ *
+ * @param {Event} event - Details about the user and the context in which they are logging in.
+ * @param {PostLoginAPI} api - Interface whose methods can be used to change the behavior of the login.
+ */
+exports.onExecutePostLogin = async (event, api) => {
+  const { user } = event;
+  const namespace = 'https://dormway.app';
+
+  console.log(`[Post-Login Action] Processing login for user: ${user.user_id}`);
+
+  try {
+    // Get backend UUID from app_metadata if it exists
+    const backendUserId = user.app_metadata?.backend_user_id;
+    
+    if (backendUserId) {
+      // User has been provisioned - add backend UUID to tokens
+      console.log(`[Post-Login Action] Found backend UUID: ${backendUserId}`);
+      
+      // Add backend UUID to tokens for Lambda Authorizer
+      api.accessToken.setCustomClaim(`${namespace}/user_id`, backendUserId);
+      api.accessToken.setCustomClaim(`${namespace}/backend_user_id`, backendUserId);
+      api.idToken.setCustomClaim(`${namespace}/user_id`, backendUserId);
+      api.idToken.setCustomClaim(`${namespace}/backend_user_id`, backendUserId);
+    } else {
+      // User needs provisioning - iOS app will handle this
+      console.log(`[Post-Login Action] No backend UUID found - user needs provisioning`);
+      api.idToken.setCustomClaim(`${namespace}/needs_provisioning`, true);
+    }
+    
+    // Always add Auth0 ID and basic info
+    api.accessToken.setCustomClaim(`${namespace}/auth0_id`, user.user_id);
+    api.accessToken.setCustomClaim(`${namespace}/email`, user.email);
+    api.idToken.setCustomClaim(`${namespace}/auth0_id`, user.user_id);
+    api.idToken.setCustomClaim(`${namespace}/email`, user.email);
+    api.idToken.setCustomClaim(`${namespace}/email_verified`, user.email_verified || false);
+    
+    // Add user profile to ID token for client use
+    api.idToken.setCustomClaim(`${namespace}/user_profile`, {
+      backend_user_id: backendUserId || null,
+      auth0_id: user.user_id,
+      email: user.email,
+      full_name: user.name || user.nickname || '',
+      needs_provisioning: !backendUserId
+    });
+
+    // Track login event in Amplitude
+    if (event.secrets.AMPLITUDE_API_KEY) {
+      const amplitudeResponse = await fetch(
+        'https://api2.amplitude.com/2/httpapi',
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json'
+          },
+          body: JSON.stringify({
+            api_key: event.secrets.AMPLITUDE_API_KEY,
+            events: [{
+              user_id: backendUserId || user.user_id, // Use backend ID if available
+              event_type: backendUserId ? 'user_login' : 'user_login_needs_provisioning',
+              time: Date.now(),
+              event_properties: {
+                login_method: event.connection.name,
+                ip_address: event.request.ip,
+                user_agent: event.request.userAgent,
+                login_count: (user.logins_count || 0) + 1,
+                auth0_id: user.user_id,
+                backend_user_id: backendUserId || null,
+                source: 'auth0_action'
+              },
+              user_properties: {
+                email: user.email,
+                full_name: user.name || user.nickname || '',
+                auth0_id: user.user_id,
+                has_backend_id: !!backendUserId
+              }
+            }]
+          })
+        }
+      );
+
+      if (!amplitudeResponse.ok) {
+        console.error('[Post-Login Action] Failed to track login event in Amplitude');
+        // Don't throw - allow login to continue
+      }
+    }
+
+    console.log(`[Post-Login Action] Successfully processed login for user: ${user.user_id}`);
+
+  } catch (error) {
+    console.error('[Post-Login Action] Error:', error);
+    
+    // Add minimal claims even on error to allow login to continue
+    api.idToken.setCustomClaim(`${namespace}/auth0_id`, user.user_id);
+    api.idToken.setCustomClaim(`${namespace}/email`, user.email);
+    api.idToken.setCustomClaim(`${namespace}/email_verified`, user.email_verified || false);
+  }
+};
+```
+
+## How This Works
+
+### 1. First-Time Login (No Backend UUID)
+- User logs in with Auth0
+- Action checks `app_metadata.backend_user_id` - it's empty
+- Sets `needs_provisioning: true` in token
+- iOS app detects this and creates backend user
+- iOS app updates Auth0 app_metadata with backend UUID
+
+### 2. Subsequent Logins (Has Backend UUID)
+- User logs in with Auth0
+- Action finds `backend_user_id` in app_metadata
+- Adds backend UUID to tokens
+- Lambda Authorizer uses this for API authentication
+
+### 3. Lambda Authorizer Flow
+- Receives token with Auth0 ID and/or backend UUID
+- Maps Auth0 ID → Backend UUID if needed
+- Authorizes API requests with backend UUID
+
+## Required Auth0 Secrets
+
+- `AMPLITUDE_API_KEY` - Your Amplitude project API key (optional but recommended)
+
+Note: No `API_GATEWAY_URL` or `SYSTEM_API_KEY` needed since we don't make API calls!
+
+## Setting Backend UUID
+
+When the iOS app provisions a user, it should update Auth0's app_metadata:
+
+```swift
+// iOS Code Example
+Auth0.users(token: managementToken)
+    .patch(userId, userMetadata: [:], appMetadata: [
+        "backend_user_id": backendUUID
+    ])
+    .start { result in
+        // Handle result
+    }
+```
+
+## Benefits
+
+1. **No API Dependencies**: Works without any API endpoints
+2. **Simpler Architecture**: No need for system auth endpoints
+3. **Faster Login**: No API calls means faster authentication
+4. **Production Ready**: Works with existing Lambda Authorizer
+5. **Backward Compatible**: Maintains all expected token claims
+
+## Migration Path
+
+1. **Deploy this simplified action** to Auth0
+2. **Remove** the `/users/` endpoints from api-router (they're not used)
+3. **Ensure** iOS app updates app_metadata when creating users
+4. **Lambda Authorizer** continues to handle ID mapping
+
+## Testing
+
+1. **New User**: 
+   - Login → Check `needs_provisioning: true` in token
+   - iOS provisions → Updates app_metadata
+   - Next login → Backend UUID in token
+
+2. **Existing User**:
+   - Login → Backend UUID from app_metadata in token
+   - API calls work via Lambda Authorizer
+
+## Notes
+
+- The Lambda Authorizer handles the heavy lifting of ID reconciliation
+- This action just passes through what's already stored in Auth0
+- Much simpler and more reliable than trying to call non-existent endpoints

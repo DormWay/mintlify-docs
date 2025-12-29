@@ -1,0 +1,613 @@
+---
+title: "Structured Logger"
+description: "import { createStructuredLogger } from '@dormway/core/logger';"
+---
+
+# Structured Logger
+
+## Overview
+
+**StructuredLogger** provides consistent, queryable JSON logging across all DormWay services. It integrates with OpenTelemetry for distributed tracing and supports multiple log levels with rich metadata.
+
+**Purpose**: Replace `console.log` with structured, searchable logs that can be queried in production.
+
+**Location**: `@dormway/core/logger`
+
+---
+
+## Installation
+
+```typescript
+import { createStructuredLogger } from '@dormway/core/logger';
+
+const logger = createStructuredLogger({
+  service: 'api-router',
+  environment: process.env.NODE_ENV || 'development',
+});
+```
+
+---
+
+## Quick Start
+
+```typescript
+import { createStructuredLogger } from '@dormway/core/logger';
+
+const logger = createStructuredLogger({ service: 'engine' });
+
+// Info log
+logger.info('user.login', 'User logged in successfully', {
+  metadata: { userId: 'user-123', ipAddress: '192.168.1.1' },
+});
+
+// Error log
+logger.error('payment.failed', 'Payment processing failed', {
+  error: new Error('Stripe error: card declined'),
+  metadata: { userId: 'user-123', amount: 49.99, currency: 'USD' },
+});
+
+// Workflow log (Temporal)
+logger.info('workflow.started', 'StudentWatcher workflow started', {
+  workflow: {
+    workflowId: 'student-watcher-123',
+    runId: 'abc-def-456',
+    taskQueue: 'student-worker',
+  },
+  metadata: { studentId: 'student-123' },
+});
+```
+
+**Output** (JSON):
+```json
+{
+  "timestamp": "2025-11-23T17:22:26.566Z",
+  "service": "engine",
+  "environment": "development",
+  "level": "info",
+  "event": "user.login",
+  "message": "User logged in successfully",
+  "schemaVersion": "dw-structured-log/v1",
+  "workflow": {},
+  "activity": {},
+  "request": {},
+  "metadata": {
+    "userId": "user-123",
+    "ipAddress": "192.168.1.1"
+  }
+}
+```
+
+---
+
+## Log Levels
+
+```typescript
+logger.debug('event', 'Debug message');    // Detailed debugging (not in production)
+logger.info('event', 'Info message');      // General informational
+logger.warn('event', 'Warning message');   // Warning conditions
+logger.error('event', 'Error message');    // Error conditions
+```
+
+**When to use each level**:
+- **debug**: Verbose debugging, not logged in production
+- **info**: Normal operations, state changes, workflow events
+- **warn**: Unexpected but recoverable conditions, deprecation warnings
+- **error**: Errors, exceptions, failed operations
+
+---
+
+## Event Naming Convention
+
+Use **domain.action.status** pattern:
+
+```typescript
+// Good event names
+logger.info('user.login.success', '...');
+logger.error('payment.process.failed', '...');
+logger.info('dayplan.generate.start', '...');
+logger.info('dayplan.generate.complete', '...');
+logger.warn('cache.miss', '...');
+logger.info('workflow.signal.sent', '...');
+
+// Bad event names
+logger.info('login', '...');           // Too vague
+logger.info('ERROR', '...');           // Not descriptive
+logger.info('user-logged-in', '...');  // Use dots, not dashes
+```
+
+**Benefits**:
+- Searchable by domain: `grep "user." logs.json`
+- Searchable by action: `grep ".generate." logs.json`
+- Consistent formatting
+
+---
+
+## Context Fields
+
+### Service Context (Always Present)
+
+```typescript
+const logger = createStructuredLogger({
+  service: 'api-router',          // Required: service name
+  environment: 'production',      // Optional: environment (default: process.env.NODE_ENV)
+});
+```
+
+### Workflow Context (Temporal)
+
+```typescript
+const logger = createStructuredLogger({
+  service: 'engine',
+  workflow: {
+    workflowId: 'student-watcher-123',
+    runId: 'abc-def',
+    taskQueue: 'student-worker',
+  },
+});
+
+logger.info('workflow.started', 'Workflow started');
+// Output includes workflow.workflowId, workflow.runId, workflow.taskQueue
+```
+
+### Activity Context (Temporal)
+
+```typescript
+const logger = createStructuredLogger({
+  service: 'engine',
+  activity: {
+    name: 'generateDayPlan',
+    type: 'activity',
+  },
+});
+
+logger.info('activity.start', 'Activity started');
+// Output includes activity.name, activity.type
+```
+
+### Request Context (HTTP)
+
+```typescript
+const logger = createStructuredLogger({
+  service: 'api-router',
+  request: {
+    method: 'POST',
+    path: '/api/dayplan',
+    userId: 'user-123',
+    ipAddress: '192.168.1.1',
+  },
+});
+
+logger.info('request.received', 'HTTP request received');
+// Output includes request.method, request.path, etc.
+```
+
+---
+
+## Metadata
+
+Add custom metadata to any log:
+
+```typescript
+logger.info('user.login', 'User logged in', {
+  metadata: {
+    userId: 'user-123',
+    email: 'user@example.com',
+    loginMethod: 'google-oauth',
+    ipAddress: '192.168.1.1',
+    userAgent: 'Mozilla/5.0...',
+  },
+});
+```
+
+**Nested metadata**:
+```typescript
+logger.info('payment.success', 'Payment processed', {
+  metadata: {
+    userId: 'user-123',
+    payment: {
+      amount: 49.99,
+      currency: 'USD',
+      method: 'stripe',
+      transactionId: 'txn_123',
+    },
+    subscription: {
+      planId: 'plan_pro',
+      billingCycle: 'monthly',
+    },
+  },
+});
+```
+
+---
+
+## Error Logging
+
+### With Error Object
+
+```typescript
+try {
+  await processPayment(userId, amount);
+} catch (error) {
+  logger.error('payment.failed', 'Payment processing failed', {
+    error,  // Automatically serialized
+    metadata: {
+      userId,
+      amount,
+      attemptNumber: 3,
+    },
+  });
+  throw error;
+}
+```
+
+**Output**:
+```json
+{
+  "level": "error",
+  "event": "payment.failed",
+  "message": "Payment processing failed",
+  "error": {
+    "name": "StripeError",
+    "message": "Card declined",
+    "stack": "Error: Card declined\n    at processPayment (payment.ts:42:11)\n    ..."
+  },
+  "metadata": {
+    "userId": "user-123",
+    "amount": 49.99,
+    "attemptNumber": 3
+  }
+}
+```
+
+### Error Context
+
+```typescript
+import { serializeError } from '@dormway/core/errors';
+
+try {
+  // ...
+} catch (error) {
+  const serialized = serializeError(error);
+
+  logger.error('operation.failed', 'Operation failed', {
+    error: serialized,
+    metadata: {
+      operationType: 'data-sync',
+      dataSource: 'canvas',
+    },
+  });
+}
+```
+
+---
+
+## Common Patterns
+
+### Pattern 1: Temporal Activity Logging
+
+```typescript
+// activities/dayplan.activities.ts
+import { createStructuredLogger } from '@dormway/core/logger';
+
+export async function generateDayPlan(userId: string, date: string): Promise<DayPlan> {
+  const logger = createStructuredLogger({
+    service: 'engine',
+    activity: { name: 'generateDayPlan' },
+  });
+
+  logger.info('dayplan.start', 'Starting dayplan generation', {
+    metadata: { userId, date },
+  });
+
+  try {
+    // Fetch data
+    logger.info('dayplan.data.fetch', 'Fetching student data');
+    const data = await fetchStudentData(userId, date);
+
+    // Generate dayplan
+    logger.info('dayplan.llm.call', 'Calling LLM for generation');
+    const dayplan = await callLLM(data);
+
+    logger.info('dayplan.complete', 'DayPlan generated successfully', {
+      metadata: { userId, date, planId: dayplan.id },
+    });
+
+    return dayplan;
+  } catch (error) {
+    logger.error('dayplan.error', 'Failed to generate dayplan', {
+      error,
+      metadata: { userId, date },
+    });
+    throw error;
+  }
+}
+```
+
+### Pattern 2: Express Route Logging
+
+```typescript
+// routes/user.routes.ts
+import express from 'express';
+import { createStructuredLogger } from '@dormway/core/logger';
+
+const router = express.Router();
+
+router.post('/login', async (req, res, next) => {
+  const logger = createStructuredLogger({
+    service: 'api-router',
+    request: {
+      method: req.method,
+      path: req.path,
+      ipAddress: req.ip,
+    },
+  });
+
+  logger.info('auth.login.attempt', 'Login attempt', {
+    metadata: { email: req.body.email },
+  });
+
+  try {
+    const user = await authenticateUser(req.body.email, req.body.password);
+
+    logger.info('auth.login.success', 'User logged in successfully', {
+      metadata: { userId: user.id, email: user.email },
+    });
+
+    res.json({ success: true, userId: user.id });
+  } catch (error) {
+    logger.error('auth.login.failed', 'Login failed', {
+      error,
+      metadata: { email: req.body.email },
+    });
+    next(error);
+  }
+});
+
+export default router;
+```
+
+### Pattern 3: Workflow Logging
+
+```typescript
+// workflows/student-watcher.workflow.ts
+import { proxyActivities } from '@temporalio/workflow';
+import { createStructuredLogger } from '@dormway/core/logger';
+
+export async function studentWatcherWorkflow(studentId: string): Promise<void> {
+  const logger = createStructuredLogger({
+    service: 'engine',
+    workflow: {
+      workflowId: `student-watcher-${studentId}`,
+      taskQueue: 'student-worker',
+    },
+  });
+
+  logger.info('workflow.started', 'StudentWatcher workflow started', {
+    metadata: { studentId },
+  });
+
+  const activities = proxyActivities({ startToCloseTimeout: '5m' });
+
+  while (true) {
+    try {
+      logger.info('workflow.sync.start', 'Starting sync cycle');
+
+      await activities.syncStudentData(studentId);
+      await activities.generateDayPlan(studentId);
+
+      logger.info('workflow.sync.complete', 'Sync cycle completed');
+    } catch (error) {
+      logger.error('workflow.sync.error', 'Sync cycle failed', {
+        error,
+        metadata: { studentId },
+      });
+    }
+
+    await sleep('1h');
+  }
+}
+```
+
+### Pattern 4: Performance Logging
+
+```typescript
+const startTime = Date.now();
+
+logger.info('operation.start', 'Starting expensive operation', {
+  metadata: { operationType: 'data-processing' },
+});
+
+// ... expensive operation
+
+const duration = Date.now() - startTime;
+
+logger.info('operation.complete', 'Operation completed', {
+  metadata: {
+    operationType: 'data-processing',
+    durationMs: duration,
+    recordsProcessed: 1000,
+  },
+});
+```
+
+---
+
+## Querying Logs
+
+### In Development (Docker Logs)
+
+```bash
+# View logs
+docker logs docker-engine-1 --tail 50
+
+# Filter by event
+docker logs docker-engine-1 2>&1 | grep "dayplan.start"
+
+# Filter by user
+docker logs docker-engine-1 2>&1 | grep "user-123"
+
+# Pretty print JSON
+docker logs docker-engine-1 2>&1 | jq .
+```
+
+### In Production (CloudWatch, etc.)
+
+```sql
+-- Find all errors
+fields @timestamp, event, message, error.message
+| filter level = "error"
+| sort @timestamp desc
+| limit 100
+
+-- Find slow operations
+fields @timestamp, event, metadata.durationMs
+| filter metadata.durationMs > 5000
+| sort metadata.durationMs desc
+
+-- Find dayplan errors for specific user
+fields @timestamp, event, message, error.message
+| filter event like "dayplan."
+  and level = "error"
+  and metadata.userId = "user-123"
+| sort @timestamp desc
+```
+
+---
+
+## Best Practices
+
+### ✅ Do
+
+- Use structured event names (`domain.action.status`)
+- Include relevant metadata
+- Log at appropriate levels
+- Log workflow/activity context
+- Serialize errors properly
+- Use consistent field names
+
+### ❌ Don't
+
+- Don't log sensitive data (passwords, tokens, SSNs)
+- Don't log PII without anonymization
+- Don't use `console.log` or `console.error`
+- Don't create unstructured logs
+- Don't log excessive data (full request bodies)
+- Don't use dynamic event names
+
+---
+
+## Sensitive Data Handling
+
+```typescript
+// ❌ Bad - logs password
+logger.info('user.created', 'User created', {
+  metadata: { email: 'user@example.com', password: 'secret123' },
+});
+
+// ✅ Good - no sensitive data
+logger.info('user.created', 'User created', {
+  metadata: { email: 'user@example.com', userId: 'user-123' },
+});
+
+// ✅ Good - anonymized PII
+logger.info('user.activity', 'User activity logged', {
+  metadata: {
+    userId: hash(userId),  // Hashed user ID
+    action: 'page_view',
+    page: '/dashboard',
+  },
+});
+```
+
+---
+
+## Performance Considerations
+
+### Avoid Expensive Operations in Logs
+
+```typescript
+// ❌ Bad - expensive JSON.stringify
+logger.info('data.processed', 'Data processed', {
+  metadata: {
+    data: JSON.stringify(hugeObject),  // Don't do this!
+  },
+});
+
+// ✅ Good - log summary
+logger.info('data.processed', 'Data processed', {
+  metadata: {
+    recordCount: records.length,
+    dataSize: records.reduce((sum, r) => sum + r.size, 0),
+  },
+});
+```
+
+### Conditional Debug Logging
+
+```typescript
+// Only log debug in development
+if (process.env.NODE_ENV === 'development') {
+  logger.debug('cache.hit', 'Cache hit', { metadata: { key, value } });
+}
+```
+
+---
+
+## Integration with Dash0 / OpenTelemetry
+
+The logger automatically integrates with OpenTelemetry for distributed tracing:
+
+```typescript
+import { trace } from '@opentelemetry/api';
+
+const logger = createStructuredLogger({ service: 'engine' });
+
+// Trace context automatically added to logs
+const span = trace.getActiveSpan();
+logger.info('operation.start', 'Starting operation');
+// Output includes traceId, spanId from OpenTelemetry
+```
+
+---
+
+## Migration from Console.log
+
+### Before
+
+```typescript
+console.log(`Processing student ${studentId}`);
+console.error(`Failed to process student ${studentId}:`, error);
+console.log(`Duration: ${duration}ms`);
+```
+
+### After
+
+```typescript
+const logger = createStructuredLogger({ service: 'engine' });
+
+logger.info('student.process.start', 'Processing student', {
+  metadata: { studentId },
+});
+
+logger.error('student.process.failed', 'Failed to process student', {
+  error,
+  metadata: { studentId },
+});
+
+logger.info('student.process.complete', 'Student processed', {
+  metadata: { studentId, durationMs: duration },
+});
+```
+
+---
+
+## Related Documentation
+
+- [DormWay Core Library (@dormway-core)](/docs/engineering/technical/dormway-core-library-dormway-core) - Main overview
+- [Migration Guide](/docs/engineering/technical/dormway-core/migration-guide) - Migrating to structured logging
+- [Error Handling](/docs/engineering/technical/dormway-core/utilities/error-handling) - Error classes and serialization
+
+---
+
+**Last Updated**: 2025-11-23
+**Maintainer**: Platform Team

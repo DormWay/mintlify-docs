@@ -1,0 +1,173 @@
+---
+title: "Gateway Auth Middleware"
+description: "Creates gateway authentication middleware for validating requests from the API gateway (Zuplo). This should be applied **before** user authentication."
+---
+
+# Gateway Auth Middleware
+
+## Overview
+
+Creates gateway authentication middleware for validating requests from the API gateway (Zuplo). This should be applied **before** user authentication.
+
+## Factory Signature
+
+```typescript
+createGatewayAuthMiddleware(options: {
+  logger: Logger;
+  gatewayKey: string;
+  internalApiKey?: string;
+  environment?: string;
+}): RequestHandler
+```
+
+## Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `logger` | `Logger` | Yes | Logger instance |
+| `gatewayKey` | `string` | Yes | Expected gateway API key |
+| `internalApiKey` | `string` | No | Internal API key for bypassing gateway |
+| `environment` | `string` | No | Current environment |
+
+## Usage
+
+```typescript
+import { createGatewayAuthMiddleware } from '@dormway/core/middleware';
+import { logger } from './utils/logger';
+
+// Apply BEFORE user authentication
+app.use(createGatewayAuthMiddleware({
+  logger,
+  gatewayKey: process.env.GATEWAY_KEY,
+  internalApiKey: process.env.API_KEY,
+  environment: process.env.NODE_ENV
+}));
+
+// Then apply user authentication
+app.use(authMiddleware);
+```
+
+## Security Model
+
+### Production Environment
+
+- **Requires** `gateway-api-key` header matching `gatewayKey`
+- Rejects requests without valid gateway key (except internal services)
+- Internal services can bypass with `API_KEY`
+
+### Development Environment
+
+- Gateway key is **optional** (warnings logged if missing)
+- Allows direct requests without gateway
+- Useful for local development and testing
+
+## Request Flow
+
+```
+Internet Request
+      ↓
+  Zuplo Gateway (adds gateway-api-key header)
+      ↓
+  API Router (validates gateway-api-key)
+      ↓
+  Your Routes
+```
+
+## Headers
+
+| Header | Description |
+|--------|-------------|
+| `gateway-api-key` | Gateway authentication key |
+| `Authorization` | Internal API key (bypass option) |
+
+## Bypassing Gateway
+
+Internal services can bypass gateway validation:
+
+```typescript
+// Service-to-service call
+await fetch('http://api-router:3001/internal/sync', {
+  headers: {
+    'Authorization': `Bearer ${process.env.API_KEY}`
+  }
+});
+```
+
+## Error Responses
+
+### Missing Gateway Key (Production)
+
+```json
+{
+  "error": "Unauthorized",
+  "statusCode": 401,
+  "message": "Missing gateway authentication"
+}
+```
+
+### Invalid Gateway Key
+
+```json
+{
+  "error": "Forbidden",
+  "statusCode": 403,
+  "message": "Invalid gateway key"
+}
+```
+
+## Environment Behavior
+
+| Environment | Gateway Key | Behavior |
+|-------------|-------------|----------|
+| production | Required | Rejects if missing/invalid |
+| staging | Required | Rejects if missing/invalid |
+| development | Optional | Logs warning if missing |
+| test | Optional | Always passes |
+
+## Complete Example
+
+```typescript
+import express from 'express';
+import {
+  createGatewayAuthMiddleware,
+  createAuthMiddleware,
+  createErrorHandler
+} from '@dormway/core/middleware';
+import { logger } from './utils/logger';
+import { clerkClient } from '@clerk/clerk-sdk-node';
+
+const app = express();
+
+// 1. Gateway validation (first!)
+app.use(createGatewayAuthMiddleware({
+  logger,
+  gatewayKey: process.env.GATEWAY_KEY,
+  internalApiKey: process.env.API_KEY,
+  environment: process.env.NODE_ENV
+}));
+
+// 2. User authentication
+app.use(createAuthMiddleware({
+  logger,
+  clerkClient,
+  internalApiKey: process.env.API_KEY
+}));
+
+// 3. Routes
+app.get('/api/data', (req, res) => {
+  res.json({ data: 'protected' });
+});
+
+// 4. Error handler (last!)
+app.use(createErrorHandler({ logger }));
+```
+
+## Related
+
+- [Middleware Factory Pattern](/docs/engineering/technical/dormway-core/middleware/middleware-factory-pattern) - Overview of factory pattern
+- [Authentication Middleware](/docs/engineering/technical/dormway-core/middleware/authentication-middleware) - User authentication
+- [Zuplo Gateway Migration Guide](/docs/engineering/development/zuplo-gateway-migration) - Gateway setup
+
+---
+
+**Last Updated**: 2025-11-26

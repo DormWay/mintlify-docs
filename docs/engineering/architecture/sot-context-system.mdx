@@ -1,0 +1,65 @@
+---
+title: "Context System"
+---
+
+# SoT - Context System
+
+## Scope
+- Core context graph model (tree via `parent_id` plus directed dependencies via `context_dependencies`).
+- Context graph traversal, caching, and RLS session handling in `@dormway/core`.
+- API router adapters for context graph and contexts services.
+- Onboarding flow that creates/updates student contexts tied to campus.
+- Context history retrieval from `service_data` for context prediction responses.
+
+## Non-goals
+- Context prediction ML/LLM logic (see Context Intelligence docs).
+- Calendar/time block or scheduling data tied to contexts.
+- Client UX behaviors for context selection or display.
+
+## Invariants & Contracts
+- The context system uses a tree (`contexts.parent_id`) and a directed graph (`context_dependencies`) in parallel; both are queryable via ContextGraphService.
+- ContextGraphService applies RLS when a session is provided by setting `app.current_user_id`, `app.current_role`, and optional `app.current_context_id` via `SET LOCAL` in a transaction.
+- Session-scoped cache keys include `userId|role|contextId` to prevent RLS data leakage; `withSession()` is the preferred API (and `setSession()` is deprecated).
+- Default cache TTL for context graph operations is 600 seconds with prefix `context-graph`; API router services use the same TTL and Redis adapter when available.
+- Admin context graph requires `DATABASE_URL_ADMIN` (BYPASSRLS); admin cache prefix is `admin-context-graph`.
+- Creating student contexts without an explicit `externalId` defaults to `student:${userId}`.
+- `createDependency` performs cycle detection, upserts by `(parent_context_id, child_context_id, dependency_type)`, merges metadata, and captures `term_id`, `term_year`, `enrolled_at`; cache invalidation runs on both parent and child contexts.
+- `organizationId` is deprecated in `createDependency` because `context_dependencies` has no `organization_id` column.
+
+## Key Flows (High-Level)
+- API router `getContextGraphService(session)` -> session-bound clone -> context traversal with RLS + cache.
+- Admin routes call `getAdminContextGraphService()` to bypass RLS using the admin pool.
+- Onboarding v2: email domain -> `campus_configs` match -> create or update student context with `parent_id = campus_id`.
+- Context history: `getContextHistory(userId)` reads `service_data` rows where `method = 'context_prediction_response'` ordered by `fetched_at`.
+
+## Data Models / IDs / Terminology
+- `ContextNode`: `id`, `parent_id`, `type`, `metadata`, `user_id`, `is_active`, `created_at`, `updated_at`.
+- Core context types (`@dormway/core`): `country`, `state`, `city`, `campus`, `building`, `student`, `course`, `user`.
+- `ContextDependency`: `parent_context_id`, `child_context_id`, `dependency_type`, `metadata`, plus `term_id`, `term_year`, `enrolled_at`.
+- Dependency types include enrollment and containment relationships (`enrolled_in`, `has_enrolled`, `contains`, etc.).
+- API context types include `student`, `building`, `campus`, `city`, `course`, `organization`, `room`, `event` (used for API responses and TTLs).
+- `RLSSessionContext`: `{ userId, role, contextId? }` for session-scoped queries and caching.
+
+## Key Files (Code + Docs)
+- `services/shared/dormway-core/src/database/context-graph/context-graph.service.ts` (graph traversal, RLS, cache handling)
+- `services/shared/dormway-core/src/database/context-graph/types.ts` (context + dependency type enums)
+- `services/shared/dormway-core/src/domains/contexts/contexts.service.ts` (context CRUD + dependency creation)
+- `services/shared/dormway-core/src/domains/contexts/types.ts` (contexts service options + types)
+- `services/api-router/src/services/context-graph.ts` (API router graph service + admin graph)
+- `services/api-router/src/services/contexts-service.ts` (API router contexts service wrapper)
+- `services/api-router/src/routes/onboarding-v2.ts` (student context creation on onboarding)
+- `services/api-router/src/services/context/context-data-service.ts` (context history from `service_data`)
+- `services/api-router/src/interfaces/context.ts` (API context types + cache TTL map)
+
+## Update Checklist
+- Changing context types or dependency enums: update `context-graph/types.ts` and any API interface mappings.
+- Changing RLS session semantics or cache scoping: update `context-graph.service.ts` and API router wrappers.
+- Changing student context creation defaults: update `contexts.service.ts` and onboarding flows.
+- Changing dependency upsert semantics: update `contexts.service.ts` and confirm cache invalidation behavior.
+- Changing API context TTLs or response shapes: update `interfaces/context.ts` and any context routes using TTLs.
+
+## Known Discrepancies / Risks
+- Context type enums differ between core (`services/shared/dormway-core/src/database/context-graph/types.ts`) and API interface (`services/api-router/src/interfaces/context.ts`); clients and services may diverge if not reconciled.
+
+## Recent Changes
+- 2025-12-22: Populated with code-backed context graph contracts, RLS/caching rules, and onboarding flow.

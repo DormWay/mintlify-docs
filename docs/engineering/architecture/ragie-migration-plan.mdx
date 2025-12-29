@@ -1,0 +1,131 @@
+---
+title: "Ragie Migration Plan"
+description: "Overview"
+---
+
+# Ragie.ai Migration Plan (Replacing Vectara)
+
+Overview
+- Goal: Replace Vectara ingestion, search, and chat usage across Engine, API Router, and Python tools with Ragie.ai.
+- Approach: Introduce a provider abstraction for RAG operations, implement a Ragie provider, run a staged cutover with backfill, and retire Vectara after validation.
+
+Current Vectara Usage (Inventory)
+- Engine
+  - services/engine/src/services/vectara.service.ts
+  - services/engine/src/activities/braingains.activities.ts (storeDocumentInVectara)
+  - services/engine/src/workflows/brainGainsProcessor.workflow.ts
+  - services/engine/src/workflows/syllabusProcessor.workflow.ts
+  - services/engine/src/services/auroraDb.ts (getUserVectaraCorpusKey)
+  - services/engine/src/services/supabaseAdapter.ts (getUserVectaraCorpusKey)
+- API Router
+  - services/api-router/src/services/vectara-service.ts
+  - services/api-router/src/routes/braingains-chat-routes.ts
+  - services/api-router/src/config/index.ts (vectara config)
+- Python Tools
+  - services/dormway-crews/shared/tools/vectara_tools.py
+- Schema/Migrations
+  - database-schema*.sql: columns and functions for vectara_corpus_key, vectara_document_id, get_user_vectara_corpus_key, user_vectara_corpus view.
+
+Ragie Capabilities (high-level)
+- Documents API: Create/ingest documents, lifecycle states: pending → partitioning → partitioned → refined → chunked → indexed → summary_indexed → keyword_indexed → ready → failed; support status polling.
+- Search API: Retrieve relevant chunks/snippets with metadata filtering.
+- Chat: Optional chat API; we can also emulate chat by (search → LLM summarization) to preserve our current behavior and tone.
+- Auth: Bearer token (e.g., Authorization: Bearer <RAGIE_API_KEY>) at https://api.ragie.ai; project/workspace scoped.
+
+Key Differences vs. Vectara
+- Auth headers change (remove x-api-key/customer-id → use Bearer token).
+- Multi-tenancy: Vectara per-user corpus (DW-<userId>); Ragie favors a single index with user-scoped metadata filters. We will prefer metadata-based isolation to reduce index sprawl and complexity.
+- Generation: Vectara includes generation in query; with Ragie we’ll do search and run our own LLM summarization for consistent tone and guardrails. Optionally support Ragie chat later.
+- Streaming: We currently simulate streaming; we can keep this behavior initially and later support Ragie SSE if desired.
+
+Target Architecture
+- Introduce a small RAG provider interface used by Engine and API Router:
+  - ensureUserSpace(userId): Promise<string | void> — no-op for Ragie (metadata approach) unless a per-user space is required.
+  - indexDocument({ userId, documentId, title, text, metadata }): Promise<{ providerDocId: string }>.
+  - deleteDocument(providerDocId: string): Promise<void>.
+  - search({ userId, query, filters?, limit? }): Promise<{ results: Result[] }>.
+  - chat({ userId, query, context?, filters?, personality? }): Promise<{ answer, sources }>. Default implementation: search + LLM summarization with our current prompt.
+- Implement providers:
+  - VectaraProvider: wraps existing code (for fallback/rollout only).
+  - RagieProvider: calls Ragie APIs; relies on metadata-based user filtering.
+- Select provider by env var: RAG_PROVIDER=ragie|vectara.
+
+Indexing Strategy
+- Use a single Ragie index/collection for all users (unless Ragie requires otherwise).
+- Attach metadata to every document: userId, documentType, courseCode, filename, content_type (raw_document|processed_insight), insight_type, parent_document_id, uploadDate, etc.
+- Store returned Ragie document ID in DB (new field). Keep Vectara IDs during migration window.
+
+API Router Changes
+- Replace services/api-router/src/services/vectara-service.ts with ragie-service.ts implementing:
+  - search(query, filters, limit)
+  - chat(query, context?, personality?): performs search → LLM summarize with our existing persona template
+  - indexDocument(text, metadata)
+  - deleteDocument(providerDocId)
+- Update services/api-router/src/routes/braingains-chat-routes.ts to import ragieService and keep response shape stable (answer, sources, conversationId if applicable).
+- Add config section `ragie` and provider toggle in services/api-router/src/config/index.ts.
+
+Engine Changes
+- Add services/engine/src/services/ragie.service.ts that supports:
+  - upload/index text content with metadata; poll until document is ready (if needed) and return providerDocId
+  - search with metadata filter on userId and optional content filters
+- Update services/engine/src/activities/braingains.activities.ts to call the provider abstraction (storeDocumentInRagie); write ragie_document_id on success.
+- Remove/replace ensureUserCorpus logic; metadata-only path is a no-op.
+
+Python Tools (Agents)
+- Create services/dormway-crews/shared/tools/ragie_tools.py mirroring existing vectara_tools.py behaviors but calling Ragie search; keep return shape similar for agents.
+- Update any tool registration to use ragie_tools when RAG_PROVIDER=ragie.
+
+Database Changes
+- Add columns (migration):
+  - braingains_documents.ragie_document_id VARCHAR(255)
+  - Optional: braingains_documents.ragie_index (if multiple collections), else omit
+- Keep existing vectara_corpus_key and vectara_document_id for cutover window.
+- Deprecate get_user_vectara_corpus_key and user_vectara_corpus references post-cutover. No replacement needed with metadata approach.
+
+Config & Secrets
+- New env vars:
+  - RAG_PROVIDER=ragie | vectara
+  - RAGIE_API_KEY=...
+  - RAGIE_BASE_URL=https://api.ragie.ai (default)
+  - RAGIE_INDEX_ID=... (if Ragie requires explicit index/collection id)
+- Update Doppler and .env.local.example; do not commit secrets.
+
+Cutover & Backfill Plan
+- Phase 0: Land provider abstraction with Vectara as default; add env toggle.
+- Phase 1: Implement Ragie provider (ingest + search). Keep simulated streaming. Gate with RAG_PROVIDER=ragie.
+- Phase 2: Backfill
+  - Enumerate braingains_documents and re-index extracted_text + metadata to Ragie.
+  - Store ragie_document_id alongside existing vectara fields.
+  - Optional: Query fallback — try Ragie first, then Vectara, during backfill window.
+- Phase 3: Switch default provider to Ragie for all traffic; remove Vectara fallback.
+- Phase 4: Cleanup Vectara code and DB columns in a later migration.
+
+Validation & Observability
+- Add ingestion logs: request/response ids, document status transitions until ready.
+- Add a health-check (internal) that queries a known test document and validates non-empty result.
+- Compare answer quality/latency on a sample set before global enable.
+
+Risks & Mitigations
+- Result variance: Tune prompt and reranking if needed; test with representative queries.
+- Rate limiting: Implement retries/backoff; tune ingest concurrency.
+- Schema churn: Use metadata to avoid per-user indices; keep Vectara columns during transition.
+- Streaming: Keep simulated streaming initially; adopt SSE later.
+
+Task Checklist
+- Provider abstraction shared by Engine and API Router
+- Ragie provider implementation (ingest, search, optional delete, optional chat)
+- API Router: ragie-service.ts and route swaps
+- Engine: ragie.service.ts, activity updates, DB writes to ragie_document_id
+- Python tools: ragie_tools.py and registration
+- DB migration: add ragie_document_id column
+- Config: env toggles and Doppler updates
+- Backfill workflow (Temporal/scripting) and execution plan
+- Health-check and basic runbook (retry policy, monitoring)
+
+Next Steps (Implementation Order)
+1) Scaffold provider interface and ragie-service.ts in API Router
+2) Add ragie.service.ts to Engine and switch activities via provider
+3) Add env toggles and config wiring; default to Vectara until ready
+4) Prepare DB migration for ragie_document_id
+5) Backfill workflow scaffolding
+6) QA against sample users and enable feature flag

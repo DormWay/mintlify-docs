@@ -1,0 +1,253 @@
+---
+title: "iOS vs Web Auth Flow Comparison"
+description: "This document compares how the iOS app and dormway-lockedin web app handle authentication and resolve the backend user ID."
+---
+
+# iOS vs Web Auth Flow Comparison
+
+This document compares how the iOS app and dormway-lockedin web app handle authentication and resolve the backend user ID.
+
+## Overview
+
+Both platforms use Clerk for authentication. The critical question is: **When is `backend_user_id` available in the user's session?**
+
+### The Backend User ID Problem
+
+The backend creates the `accounts` row and sets `backend_user_id` in Clerk's `publicMetadata` via the `user.created` webhook. This creates a potential race condition:
+
+```
+User signs up → Clerk creates user → Webhook fires → accounts row created → publicMetadata updated
+                      ↑
+                      └── iOS/Web may read user BEFORE this completes!
+```
+
+## iOS Auth Flow
+
+### Files Involved
+
+| File | Purpose |
+|------|---------|
+| `ClerkService.swift` | Clerk SDK wrapper, creates `AuthUser` |
+| `ClerkServiceAdapter.swift` | Converts `AuthUser` → `DWUser` |
+| `AuthService.swift` | Main auth service, stores `currentUser` |
+| `ServiceProtocols.swift` | Defines `DWUser` structure |
+
+### DWUser Structure
+
+```swift
+public struct DWUser: Codable {
+    public let id: String       // Backend UUID (or Clerk ID as fallback)
+    public let clerkId: String  // Always Clerk ID
+    public let email: String?
+    public let name: String?
+    public let campusId: String?
+}
+```
+
+### ID Resolution (ClerkServiceAdapter.swift:165-170)
+
+```swift
+func signIn(email: String, password: String) async throws -> DWUser {
+    guard let authUser = try await service.signIn(email: email, password: password) else {
+        throw NetworkServiceError.notImplemented
+    }
+    // Use backendUserId for id (for Ably channels, Ragie partitions), clerkId for auth operations
+    return DWUser(
+        id: authUser.backendUserId ?? authUser.id,  // ⚠️ Falls back to Clerk ID!
+        clerkId: authUser.id,
+        email: authUser.email ?? "",
+        name: nil
+    )
+}
+```
+
+### Where backendUserId Comes From (ClerkService.swift:379-393)
+
+```swift
+extension AuthUser {
+    init(from clerkUser: User) {
+        // Extract backend_user_id from publicMetadata
+        let backendId = clerkUser.publicMetadata?["backend_user_id"]?.stringValue
+
+        self.init(
+            id: clerkUser.id,           // Clerk ID
+            email: clerkUser.emailAddresses.first?.emailAddress,
+            phone: clerkUser.phoneNumbers.first?.phoneNumber,
+            createdAt: clerkUser.createdAt ?? Date(),
+            backendUserId: backendId    // May be nil if webhook hasn't completed!
+        )
+    }
+}
+```
+
+### Race Condition Risk
+
+If `publicMetadata.backend_user_id` is nil (webhook not yet completed):
+- `DWUser.id` = Clerk ID (not backend UUID!)
+- Schedule/syllabus uploads would use wrong ID
+- Ably channels would use wrong ID
+- All user-specific operations would reference wrong ID
+
+## dormway-lockedin Auth Flow
+
+### Files Involved
+
+| File | Purpose |
+|------|---------|
+| `lib/backendUser.ts` | `resolveBackendUserId()` helper |
+| `lib/proxy-auth.ts` | API proxy authentication |
+| `middleware.ts` | Route protection, onboarding check |
+| `contexts/AblyContext.tsx` | Real-time connections |
+
+### ID Resolution (lib/backendUser.ts)
+
+```typescript
+const BACKEND_ID_CLAIMS = [
+  'https://dormway.app/backend_user_id',
+  'https://dormway.app/user_id',
+  'backend_user_id',
+];
+
+export async function resolveBackendUserId(user: any): Promise<string | null> {
+  // Check publicMetadata
+  if (publicMeta?.backend_user_id) {
+    return String(publicMeta.backend_user_id).trim();
+  }
+
+  // Check unsafeMetadata
+  if (unsafeMeta?.backend_user_id) {
+    return String(unsafeMeta.backend_user_id).trim();
+  }
+
+  // Check JWT claims
+  for (const claim of BACKEND_ID_CLAIMS) {
+    const value = claims[claim];
+    if (value !== undefined && value !== null) {
+      return String(value).trim();
+    }
+  }
+
+  // ⚠️ Final fallback: use Clerk user ID
+  const clerkUserId = (user as any)?.id;
+  if (clerkUserId) {
+    return String(clerkUserId).trim();
+  }
+
+  return null;
+}
+```
+
+### API Proxy Pattern (lib/proxy-auth.ts:83-86)
+
+```typescript
+const backendUserId =
+  (sessionClaims?.backend_user_id as string) || userId;
+
+authHeaders["x-user-id"] = String(backendUserId);
+```
+
+## Comparison Table
+
+| Aspect | iOS | dormway-lockedin |
+|--------|-----|------------------|
+| Auth Provider | Clerk | Clerk |
+| Primary ID Source | `publicMetadata.backend_user_id` | `publicMetadata.backend_user_id` |
+| Fallback | Clerk ID (`authUser.id`) | Clerk ID (`user.id`) |
+| Where resolved | `ClerkServiceAdapter` | `resolveBackendUserId()` |
+| Used for | `DWUser.id`, Ably channels | API headers, Ably channels |
+
+## When Backend User ID Becomes Available
+
+```
+1. User signs up on platform
+2. Clerk creates user (has Clerk ID)
+3. Clerk fires `user.created` webhook → api-router/clerk-routes.ts
+4. Webhook handler:
+   a. Creates accounts row with new UUID
+   b. Updates Clerk publicMetadata with { backend_user_id: uuid }
+   c. Starts StudentWatcher workflow
+5. Platform reads user from Clerk
+   - If after step 4b: has backend_user_id ✅
+   - If before step 4b: uses Clerk ID fallback ⚠️
+```
+
+## Onboarding Flow Differences
+
+### iOS Onboarding
+
+| Step | View | Backend User ID Required? |
+|------|------|---------------------------|
+| 1 | Welcome | No |
+| 2 | Campus Selection | No (but saves to backend) |
+| 3 | Housing | No |
+| 4 | Personality | No |
+| 5 | QuickStart (Schedule/Syllabus) | **YES** - uploads need correct ID |
+| 6 | Complete | Yes |
+
+### Web Onboarding (dormway-lockedin)
+
+| Step | Component | Backend User ID Required? |
+|------|-----------|---------------------------|
+| 1 | Campus Selection | No |
+| 2 | Major/Year | No |
+| 3 | Housing | No |
+| 4 | QuickStart (Schedule/Syllabus) | **YES** - uploads need correct ID |
+| 5 | Complete | Yes |
+
+## Recommendations
+
+### 1. Session Reload After Signup (Both Platforms)
+
+After signup/signin, wait for backend_user_id to be available:
+
+```typescript
+// Web
+await session.reload();  // Forces Clerk to refetch publicMetadata
+const backendUserId = await resolveBackendUserId(user);
+```
+
+```swift
+// iOS
+try await clerkService.refreshSession()
+let user = await clerkService.getCurrentUser()
+// user.backendUserId should now be populated
+```
+
+### 2. Polling During Onboarding
+
+If backend_user_id is critical, poll until available:
+
+```typescript
+async function waitForBackendUserId(maxAttempts = 5): Promise<string | null> {
+  for (let i = 0; i < maxAttempts; i++) {
+    await session.reload();
+    const backendId = user.publicMetadata?.backend_user_id;
+    if (backendId) return backendId;
+    await new Promise(r => setTimeout(r, 1000)); // Wait 1 second
+  }
+  return null; // Fall back to Clerk ID if still not available
+}
+```
+
+### 3. Backend Validation
+
+API endpoints should validate that the provided user ID matches the authenticated user:
+
+```typescript
+// api-router
+const userIdFromHeader = req.headers['x-user-id'];
+const clerkId = extractClerkIdFromJWT(req);
+const account = await db.accounts.findOne({ clerk_id: clerkId });
+
+if (userIdFromHeader !== account.id) {
+  // User sent wrong ID - they might have the Clerk ID fallback
+  // Use the correct ID from the database
+}
+```
+
+## Related Documents
+
+- Clerk-Webhook-Handler - How backend_user_id is set
+- iOS-Onboarding-Flow - iOS onboarding steps
+- Web-Onboarding-Flow - Web onboarding steps
+- Authentication-Architecture - Overall auth architecture

@@ -1,0 +1,208 @@
+---
+title: "PostGIS Production Deployment"
+description: "CREATE EXTENSION IF NOT EXISTS postgis; CREATE EXTENSION IF NOT EXISTS postgis_topology;"
+---
+
+# PostGIS Campus Detection - Production Deployment
+
+## 🚨 CRITICAL: Aurora PostGIS Setup Required
+
+### Step 1: Enable PostGIS on Aurora RDS
+
+**Prerequisites:**
+- Aurora PostgreSQL 15+ with PostGIS support
+- Database admin access to run extensions
+- Backup completed before changes
+
+**Enable PostGIS Extension:**
+```sql
+-- Connect to Aurora RDS as admin user
+-- Run these commands in production database:
+
+CREATE EXTENSION IF NOT EXISTS postgis;
+CREATE EXTENSION IF NOT EXISTS postgis_topology;
+
+-- Verify installation
+SELECT PostGIS_Full_Version();
+```
+
+### Step 2: Run Production Migration
+
+**Migration File:** `services/engine/migrations/001_postgis_campus_detection.sql`
+
+**Execute Migration:**
+```bash
+# Option 1: Connect directly to Aurora
+psql -h [AURORA_ENDPOINT] -U [ADMIN_USER] -d dormway < services/engine/migrations/001_postgis_campus_detection.sql
+
+# Option 2: Use Doppler with production secrets
+doppler run --config prod -- psql $DATABASE_URL < services/engine/migrations/001_postgis_campus_detection.sql
+```
+
+**Migration Components:**
+- ✅ Creates `locations` table with PostGIS geometry
+- ✅ Creates `user_locations` table for tracking
+- ✅ Imports 6,252 campuses from existing `campus_registry`
+- ✅ Creates all detection functions
+- ✅ Adds spatial indexes for performance
+
+### Step 3: Verify Migration Success
+
+```sql
+-- Check tables created
+\dt locations
+\dt user_locations
+
+-- Check campus data imported
+SELECT COUNT(*) FROM locations WHERE location_type = 'campus';
+-- Should return: 6252
+
+-- Test detection function
+SELECT detect_campus_from_coordinates(37.8719, -122.2585);
+-- Should return Berkeley campus info
+
+-- Check spatial indexes
+\d locations
+-- Should show GIST index on location column
+```
+
+### Step 4: Deploy Application Services
+
+**Deploy Order:**
+1. **Engine** - Updated workflow and activities
+2. **API Router** - New campus detection endpoint  
+3. **Ably Relay** - Location processing logic
+
+**GitHub Actions Deployment:**
+```bash
+# Create deployment PR with all changes:
+git checkout main
+git pull origin main
+git checkout -b deploy/postgis-campus-detection
+
+# Cherry-pick all commits from feat/user-journey-onboarding-plan
+git cherry-pick [commit-hashes]
+
+# Create PR and merge for auto-deployment
+```
+
+### Step 5: Production Verification
+
+**Test Campus Detection API:**
+```bash
+# Test production endpoint
+curl -X POST https://api.dormway.com/api/mobile/detect-campus \
+  -H "Content-Type: application/json" \
+  -d '{"latitude": 37.8719, "longitude": -122.2585, "accuracy": 10}'
+
+# Expected response:
+{
+  "success": true,
+  "detected": true,
+  "campus": {
+    "id": "uuid",
+    "campusName": "University of California, Berkeley",
+    "confidence": "high"
+  }
+}
+```
+
+**Test Workflow Integration:**
+```bash
+# Trigger onboarding workflow with location
+doppler run --config prod -- temporal workflow execute \
+  --type onboardStudentComplete \
+  --task-queue student-processor \
+  --namespace dormway-prod \
+  --input '{
+    "accountId": "test-id",
+    "location": {
+      "latitude": 37.8719,
+      "longitude": -122.2585,
+      "accuracy": 10
+    }
+  }'
+```
+
+## 🛡️ Rollback Plan
+
+**If Issues Occur:**
+
+### Database Rollback
+```sql
+-- Drop PostGIS objects (keep campus_registry intact)
+DROP TABLE IF EXISTS user_locations CASCADE;
+DROP TABLE IF EXISTS locations CASCADE;
+DROP FUNCTION IF EXISTS detect_campus_from_coordinates CASCADE;
+DROP FUNCTION IF EXISTS save_user_location_with_campus CASCADE;
+DROP FUNCTION IF EXISTS get_distance_from_home_campus CASCADE;
+DROP FUNCTION IF EXISTS set_user_home_campus CASCADE;
+
+-- PostGIS extension can remain (no impact if unused)
+```
+
+### Service Rollback
+- Revert to previous deployment via GitHub Actions
+- New endpoint `/api/mobile/detect-campus` will return 404 (expected)
+- Workflow will skip location detection (graceful degradation)
+
+## 📊 Monitoring After Deployment
+
+### Key Metrics to Watch
+1. **Campus Detection Rate**: % of locations successfully matched
+2. **API Response Times**: `/api/mobile/detect-campus` latency
+3. **Database Performance**: PostGIS query execution times
+4. **Error Rates**: Failed campus detections or API errors
+
+### CloudWatch Alarms
+- API endpoint 4xx/5xx rates
+- Database connection pool exhaustion
+- PostGIS query timeouts (>500ms)
+
+### Success Criteria (First 24 Hours)
+- [ ] No database errors in logs
+- [ ] Campus detection API responding <200ms average
+- [ ] At least 80% detection rate for known campus coordinates
+- [ ] Onboarding workflow completing successfully with location data
+- [ ] No increase in overall system error rates
+
+## 🔍 Post-Deployment Tasks
+
+1. **Monitor Detection Accuracy**
+   - Review campus matches for known university coordinates
+   - Check for false positives in dense urban areas
+
+2. **Performance Optimization**
+   - Monitor PostGIS query performance
+   - Consider Redis caching for frequent detections
+
+3. **Data Quality**
+   - Validate imported campus boundary accuracy
+   - Plan for international campus data expansion
+
+## 📋 Deployment Checklist
+
+**Pre-Deployment:**
+- [ ] Aurora backup completed
+- [ ] PostGIS extension enabled and tested
+- [ ] Migration SQL reviewed and ready
+- [ ] Rollback plan documented and tested
+
+**During Deployment:**
+- [ ] Run migration on Aurora production database
+- [ ] Verify 6,252 campuses imported successfully
+- [ ] Test detection functions with known coordinates
+- [ ] Deploy services via GitHub Actions
+- [ ] Verify API endpoint responds correctly
+
+**Post-Deployment:**
+- [ ] Monitor error rates for 30 minutes
+- [ ] Test end-to-end onboarding flow
+- [ ] Verify location tracking in Ably Relay
+- [ ] Document any issues or optimizations needed
+
+---
+
+**Estimated Deployment Time:** 45-60 minutes
+**Risk Level:** Medium (new database extension, spatial data)
+**Rollback Time:** 10-15 minutes

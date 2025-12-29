@@ -1,0 +1,1470 @@
+---
+title: "AMPLITUDE_EVENT_SCHEMA"
+description: "This document defines the **unified event tracking schema** for DormWay across all platforms (iOS, Web, Server-side). All events are tracked to Amplitude as..."
+---
+
+# Amplitude/CustomerIO Event Schema & Standards
+
+**Version**: 1.0.0
+**Last Updated**: 2025-09-29
+**Status**: Draft for Review
+
+## Overview
+
+This document defines the **unified event tracking schema** for DormWay across all platforms (iOS, Web, Server-side). All events are tracked to Amplitude as the primary analytics platform, with CustomerIO receiving events via Amplitude's native integration for marketing automation.
+
+## Architecture
+
+### Event Flow
+```
+iOS App → Amplitude iOS SDK → Amplitude → CustomerIO (via integration)
+Web App → Amplitude Browser SDK → Amplitude → CustomerIO (via integration)
+Backend → Amplitude Node SDK → Amplitude → CustomerIO (via integration)
+```
+
+### Current Implementation Status
+
+#### ✅ Web (dormway-lockedin)
+- **SDK**: @amplitude/analytics-browser
+- **Features**: Session replay, autocapture, consent management (CookieYes)
+- **File**: `services/dormway-lockedin/src/lib/amplitude.ts`
+- **Status**: Basic implementation exists, needs standardization
+
+#### ✅ Backend (Engine)
+- **SDK**: @amplitude/analytics-node
+- **Service**: Unified EventTracker service
+- **File**: `services/engine/src/services/eventTracker.ts`
+- **Status**: Modern architecture, needs event schema expansion
+
+#### ⚠️ iOS App
+- **SDK**: TBD (needs implementation)
+- **Status**: Not yet integrated with Amplitude
+
+## Event Naming Conventions
+
+### General Rules
+1. **Snake_case**: All event names use `snake_case` (lowercase with underscores)
+2. **Object_Action**: Format: `{object}_{action}` (e.g., `schedule_imported`, `syllabus_uploaded`)
+3. **Past Tense**: Use past tense for completed actions (e.g., `created`, `completed`, `viewed`)
+4. **No Redundant Prefixes**: Don't use "user_" prefix (user context is implicit)
+5. **Specific Not Generic**: Be specific about what happened (`schedule_imported` not `data_synced`)
+
+### Property Naming Conventions
+1. **Snake_case**: All property names use `snake_case`
+2. **Descriptive**: Use clear, unambiguous names (`course_count` not `count`)
+3. **Typed Suffixes**: Use suffixes for clarity:
+   - `_id` for identifiers (e.g., `user_id`, `campus_id`)
+   - `_count` for integers (e.g., `course_count`, `assignment_count`)
+   - `_at` for timestamps (e.g., `created_at`, `completed_at`)
+   - `_url` for URLs (e.g., `referrer_url`)
+   - `_type` for enum values (e.g., `upload_type`, `error_type`)
+
+## Standard Properties
+
+### Required on ALL Events
+Every event MUST include these properties:
+
+```typescript
+{
+  platform: 'ios' | 'web' | 'server',        // Platform origin
+  app_version: string,                        // Semantic version (e.g., '1.2.3')
+  timestamp: string,                          // ISO 8601 timestamp
+  session_id?: string,                        // Session identifier (client-side)
+  user_id?: string,                           // User identifier (when available)
+  screen_name?: string,                       // Current screen/page (client-side)
+}
+```
+
+### User Context Properties (when available)
+```typescript
+{
+  campus_id?: string,                         // User's campus context
+  campus_name?: string,                       // User's campus name
+  academic_year?: string,                     // Freshman, Sophomore, Junior, Senior, Graduate
+  enrollment_status?: string,                 // full_time, part_time
+  major?: string,                             // Primary major
+}
+```
+
+---
+
+## Event Catalog
+
+## 1. Account & Authentication
+
+### account_created
+**When**: User completes signup flow
+**Platforms**: iOS, Web, Server
+
+```typescript
+{
+  // Standard properties
+  platform: 'ios' | 'web' | 'server',
+  timestamp: string,
+
+  // Event-specific
+  signup_method: 'email' | 'google' | 'apple' | 'lms',
+  campus_id?: string,
+  campus_name?: string,
+  email_domain?: string,
+  referral_source?: string,
+  utm_source?: string,
+  utm_campaign?: string,
+  utm_medium?: string,
+}
+```
+
+### account_login
+**When**: User successfully logs in
+**Platforms**: iOS, Web, Server
+
+```typescript
+{
+  platform: 'ios' | 'web' | 'server',
+  timestamp: string,
+
+  login_method: 'email' | 'google' | 'apple' | 'session',
+  session_count?: number,           // Lifetime session count
+  days_since_last_login?: number,
+}
+```
+
+### account_logout
+**When**: User logs out
+**Platforms**: iOS, Web
+
+```typescript
+{
+  platform: 'ios' | 'web',
+  timestamp: string,
+
+  session_duration_seconds: number,
+  logout_type: 'manual' | 'automatic' | 'forced',
+}
+```
+
+### email_verified
+**When**: Email verification completed
+**Platforms**: Web, Server
+
+```typescript
+{
+  platform: 'web' | 'server',
+  timestamp: string,
+
+  verification_method: 'link' | 'code',
+  time_to_verify_seconds: number,
+}
+```
+
+### password_reset_requested
+**When**: User initiates password reset
+**Platforms**: Web, Server
+
+```typescript
+{
+  platform: 'web' | 'server',
+  timestamp: string,
+
+  request_source: 'login_page' | 'settings' | 'expired_session',
+}
+```
+
+### password_reset_completed
+**When**: Password successfully reset
+**Platforms**: Web, Server
+
+```typescript
+{
+  platform: 'web' | 'server',
+  timestamp: string,
+
+  time_to_complete_seconds: number,
+}
+```
+
+---
+
+## 2. Onboarding Flow
+
+### onboarding_started
+**When**: User enters onboarding flow
+**Platforms**: iOS, Web
+
+```typescript
+{
+  platform: 'ios' | 'web',
+  timestamp: string,
+
+  entry_point: 'signup' | 'first_launch' | 'manual',
+  onboarding_version: string,       // A/B test variant
+}
+```
+
+### onboarding_step_completed
+**When**: User completes an onboarding step
+**Platforms**: iOS, Web
+
+```typescript
+{
+  platform: 'ios' | 'web',
+  timestamp: string,
+
+  step_name: string,
+  step_number: number,
+  total_steps: number,
+  time_on_step_seconds: number,
+}
+```
+
+### onboarding_completed
+**When**: User finishes all onboarding steps
+**Platforms**: iOS, Web, Server
+
+```typescript
+{
+  platform: 'ios' | 'web' | 'server',
+  timestamp: string,
+
+  total_duration_seconds: number,
+  steps_completed: number,
+  campus_verified: boolean,
+  schedule_imported: boolean,
+}
+```
+
+### onboarding_abandoned
+**When**: User exits before completing onboarding
+**Platforms**: iOS, Web
+
+```typescript
+{
+  platform: 'ios' | 'web',
+  timestamp: string,
+
+  last_step_completed: string,
+  steps_completed: number,
+  total_steps: number,
+  abandonment_reason?: 'closed' | 'timeout' | 'navigation',
+}
+```
+
+### school_selected
+**When**: User chooses their university
+**Platforms**: iOS, Web
+
+```typescript
+{
+  platform: 'ios' | 'web',
+  timestamp: string,
+
+  campus_id: string,
+  campus_name: string,
+  selection_method: 'search' | 'list' | 'geolocation' | 'email_domain',
+  search_query?: string,
+}
+```
+
+### school_verified
+**When**: University email verified
+**Platforms**: Web, Server
+
+```typescript
+{
+  platform: 'web' | 'server',
+  timestamp: string,
+
+  campus_id: string,
+  campus_name: string,
+  email_domain: string,
+  verification_method: 'email' | 'lms_auth',
+}
+```
+
+### academic_info_entered
+**When**: User adds academic details
+**Platforms**: iOS, Web
+
+```typescript
+{
+  platform: 'ios' | 'web',
+  timestamp: string,
+
+  academic_year: string,
+  major?: string,
+  minor?: string,
+  has_double_major: boolean,
+}
+```
+
+### schedule_source_selected
+**When**: User picks how to import schedule
+**Platforms**: iOS, Web
+
+```typescript
+{
+  platform: 'ios' | 'web',
+  timestamp: string,
+
+  source_type: 'lms' | 'manual' | 'upload' | 'skip',
+  lms_provider?: string,
+}
+```
+
+### lms_connected
+**When**: LMS authentication succeeds
+**Platforms**: iOS, Web, Server
+
+```typescript
+{
+  platform: 'ios' | 'web' | 'server',
+  timestamp: string,
+
+  lms_provider: 'canvas' | 'blackboard' | 'moodle' | 'brightspace' | 'schoology',
+  campus_id: string,
+  campus_name: string,
+  connection_time_seconds: number,
+}
+```
+
+### lms_connection_failed
+**When**: LMS authentication fails
+**Platforms**: iOS, Web, Server
+
+```typescript
+{
+  platform: 'ios' | 'web' | 'server',
+  timestamp: string,
+
+  lms_provider: 'canvas' | 'blackboard' | 'moodle' | 'brightspace' | 'schoology',
+  error_type: 'auth_failed' | 'network_error' | 'timeout' | 'unsupported' | 'user_cancelled',
+  error_message?: string,
+  retry_count: number,
+}
+```
+
+---
+
+## 3. Core Academic Features
+
+### schedule_imported
+**When**: Schedule successfully synced from any source
+**Platforms**: iOS, Web, Server
+
+```typescript
+{
+  platform: 'ios' | 'web' | 'server',
+  timestamp: string,
+
+  source: 'lms' | 'manual' | 'upload' | 'email',
+  lms_provider?: string,
+  course_count: number,
+  has_conflicts: boolean,
+  import_duration_seconds: number,
+}
+```
+
+### schedule_refresh_triggered
+**When**: User manually refreshes schedule
+**Platforms**: iOS, Web
+
+```typescript
+{
+  platform: 'ios' | 'web',
+  timestamp: string,
+
+  source: 'lms' | 'manual',
+  trigger_location: 'schedule_page' | 'dashboard' | 'settings' | 'automatic',
+}
+```
+
+### schedule_refresh_completed
+**When**: Schedule refresh finishes
+**Platforms**: Server
+
+```typescript
+{
+  platform: 'server',
+  timestamp: string,
+
+  source: 'lms' | 'manual',
+  courses_added: number,
+  courses_updated: number,
+  courses_removed: number,
+  refresh_duration_seconds: number,
+  success: boolean,
+}
+```
+
+### syllabus_uploaded
+**When**: User uploads a syllabus
+**Platforms**: iOS, Web, Server
+
+```typescript
+{
+  platform: 'ios' | 'web' | 'server',
+  timestamp: string,
+
+  upload_method: 'email' | 'file_picker' | 'drag_drop' | 'camera',
+  file_type: 'pdf' | 'docx' | 'jpg' | 'png' | 'other',
+  file_size_bytes: number,
+  course_id?: string,
+  course_name?: string,
+}
+```
+
+### syllabus_parsed
+**When**: Syllabus processing completes
+**Platforms**: Server
+
+```typescript
+{
+  platform: 'server',
+  timestamp: string,
+
+  syllabus_id: string,
+  course_id?: string,
+  success: boolean,
+  processing_duration_seconds: number,
+  assignments_extracted: number,
+  exams_extracted: number,
+  grading_policy_found: boolean,
+  confidence_score?: number,
+}
+```
+
+### syllabus_parsing_failed
+**When**: Syllabus processing encounters error
+**Platforms**: Server
+
+```typescript
+{
+  platform: 'server',
+  timestamp: string,
+
+  syllabus_id: string,
+  error_type: 'unreadable' | 'timeout' | 'invalid_format' | 'no_text' | 'ai_error',
+  error_message: string,
+  file_type: string,
+  file_size_bytes: number,
+}
+```
+
+### assignment_created
+**When**: Assignment added (auto or manual)
+**Platforms**: iOS, Web, Server
+
+```typescript
+{
+  platform: 'ios' | 'web' | 'server',
+  timestamp: string,
+
+  source: 'manual' | 'syllabus' | 'lms' | 'ai_prediction',
+  course_id?: string,
+  due_date?: string,
+  has_reminder: boolean,
+  estimated_duration_minutes?: number,
+}
+```
+
+### assignment_completed
+**When**: Assignment marked as done
+**Platforms**: iOS, Web
+
+```typescript
+{
+  platform: 'ios' | 'web',
+  timestamp: string,
+
+  assignment_id: string,
+  course_id?: string,
+  completed_early: boolean,
+  days_early_or_late?: number,
+  completion_time_minutes?: number,
+}
+```
+
+### assignment_deleted
+**When**: Assignment removed
+**Platforms**: iOS, Web
+
+```typescript
+{
+  platform: 'ios' | 'web',
+  timestamp: string,
+
+  assignment_id: string,
+  deletion_reason?: 'completed' | 'cancelled' | 'duplicate' | 'error',
+}
+```
+
+### exam_added
+**When**: Exam date saved
+**Platforms**: iOS, Web
+
+```typescript
+{
+  platform: 'ios' | 'web',
+  timestamp: string,
+
+  source: 'manual' | 'syllabus' | 'lms',
+  course_id?: string,
+  exam_type: 'midterm' | 'final' | 'quiz' | 'other',
+  exam_date: string,
+  has_reminder: boolean,
+}
+```
+
+### grade_predicted
+**When**: Grade prediction generated
+**Platforms**: Server
+
+```typescript
+{
+  platform: 'server',
+  timestamp: string,
+
+  course_id: string,
+  predicted_grade: string,
+  confidence: number,
+  data_points_used: number,
+}
+```
+
+---
+
+## 4. Calendar & Schedule
+
+### calendar_viewed
+**When**: User opens calendar view
+**Platforms**: iOS, Web
+
+```typescript
+{
+  platform: 'ios' | 'web',
+  timestamp: string,
+
+  view_type: 'day' | 'week' | 'month' | 'agenda',
+  has_events: boolean,
+  event_count: number,
+}
+```
+
+### event_created
+**When**: Custom event added
+**Platforms**: iOS, Web
+
+```typescript
+{
+  platform: 'ios' | 'web',
+  timestamp: string,
+
+  event_type: 'study_session' | 'meeting' | 'club' | 'social' | 'other',
+  has_location: boolean,
+  has_reminder: boolean,
+  duration_minutes: number,
+}
+```
+
+### event_edited
+**When**: Event modified
+**Platforms**: iOS, Web
+
+```typescript
+{
+  platform: 'ios' | 'web',
+  timestamp: string,
+
+  event_id: string,
+  fields_changed: string[],
+}
+```
+
+### event_deleted
+**When**: Event removed
+**Platforms**: iOS, Web
+
+```typescript
+{
+  platform: 'ios' | 'web',
+  timestamp: string,
+
+  event_id: string,
+  event_type: string,
+}
+```
+
+### reminder_set
+**When**: Notification reminder created
+**Platforms**: iOS, Web
+
+```typescript
+{
+  platform: 'ios' | 'web',
+  timestamp: string,
+
+  reminder_type: 'assignment' | 'exam' | 'event' | 'custom',
+  minutes_before: number,
+}
+```
+
+### reminder_triggered
+**When**: Notification sent
+**Platforms**: Server
+
+```typescript
+{
+  platform: 'server',
+  timestamp: string,
+
+  reminder_type: 'assignment' | 'exam' | 'event' | 'custom',
+  delivery_method: 'push' | 'email' | 'sms',
+  delivered_successfully: boolean,
+}
+```
+
+---
+
+## 5. Navigation & Discovery (Future - iOS Campus Features)
+
+### campus_map_viewed
+**When**: Map opened
+**Platforms**: iOS
+
+```typescript
+{
+  platform: 'ios',
+  timestamp: string,
+
+  campus_id: string,
+  map_type: '2d' | '3d' | 'indoor',
+  user_location_available: boolean,
+}
+```
+
+### building_searched
+**When**: Building search performed
+**Platforms**: iOS
+
+```typescript
+{
+  platform: 'ios',
+  timestamp: string,
+
+  search_query: string,
+  results_count: number,
+  result_selected: boolean,
+}
+```
+
+### route_calculated
+**When**: Directions requested
+**Platforms**: iOS
+
+```typescript
+{
+  platform: 'ios',
+  timestamp: string,
+
+  from_location: string,
+  to_location: string,
+  distance_meters: number,
+  estimated_duration_minutes: number,
+  route_type: 'walking' | 'biking' | 'transit',
+}
+```
+
+### navigation_started
+**When**: User begins following route
+**Platforms**: iOS
+
+```typescript
+{
+  platform: 'ios',
+  timestamp: string,
+
+  destination: string,
+  distance_meters: number,
+  estimated_duration_minutes: number,
+}
+```
+
+### navigation_completed
+**When**: User arrives at destination
+**Platforms**: iOS
+
+```typescript
+{
+  platform: 'ios',
+  timestamp: string,
+
+  destination: string,
+  actual_duration_minutes: number,
+  route_deviation: boolean,
+}
+```
+
+### place_saved
+**When**: Location bookmarked
+**Platforms**: iOS
+
+```typescript
+{
+  platform: 'ios',
+  timestamp: string,
+
+  place_name: string,
+  place_type: 'building' | 'room' | 'food' | 'study' | 'other',
+}
+```
+
+---
+
+## 6. DormWay Lock (Web App)
+
+### lock_accessed
+**When**: User opens Lock view
+**Platforms**: Web
+
+```typescript
+{
+  platform: 'web',
+  timestamp: string,
+
+  access_method: 'navbar' | 'direct_url' | 'keyboard_shortcut',
+}
+```
+
+### lock_schedule_shared
+**When**: Schedule shared via Lock
+**Platforms**: Web
+
+```typescript
+{
+  platform: 'web',
+  timestamp: string,
+
+  lock_id: string,
+  share_method: 'link' | 'qr_code',
+  schedule_visibility: 'public' | 'private' | 'friends_only',
+}
+```
+
+### lock_view_received
+**When**: Someone views shared Lock page
+**Platforms**: Web, Server
+
+```typescript
+{
+  platform: 'web' | 'server',
+  timestamp: string,
+
+  lock_id: string,
+  lock_owner_id: string,
+  referrer_url?: string,
+  is_authenticated: boolean,
+}
+```
+
+### lock_conversion
+**When**: Lock viewer signs up
+**Platforms**: Web, Server
+
+```typescript
+{
+  platform: 'web' | 'server',
+  timestamp: string,
+
+  source_lock_id: string,
+  lock_owner_id: string,
+  time_to_conversion_seconds: number,
+}
+```
+
+---
+
+## 7. Social & Network (Future)
+
+### friend_added
+**When**: Connection made
+**Platforms**: iOS, Web
+
+```typescript
+{
+  platform: 'ios' | 'web',
+  timestamp: string,
+
+  connection_method: 'search' | 'suggestion' | 'qr_code' | 'contact_sync',
+  mutual_friends_count: number,
+}
+```
+
+### friend_request_sent
+**When**: Request initiated
+**Platforms**: iOS, Web
+
+```typescript
+{
+  platform: 'ios' | 'web',
+  timestamp: string,
+
+  request_method: 'profile' | 'search' | 'suggestion',
+}
+```
+
+### friend_request_accepted
+**When**: Request approved
+**Platforms**: iOS, Web, Server
+
+```typescript
+{
+  platform: 'ios' | 'web' | 'server',
+  timestamp: string,
+
+  time_to_accept_hours: number,
+}
+```
+
+### schedule_compared
+**When**: Schedule overlap viewed
+**Platforms**: iOS, Web
+
+```typescript
+{
+  platform: 'ios' | 'web',
+  timestamp: string,
+
+  friend_user_id: string,
+  shared_courses_count: number,
+  shared_time_blocks_count: number,
+}
+```
+
+### study_group_created
+**When**: Group formed
+**Platforms**: iOS, Web
+
+```typescript
+{
+  platform: 'ios' | 'web',
+  timestamp: string,
+
+  group_size: number,
+  course_id?: string,
+}
+```
+
+### study_group_joined
+**When**: User joins group
+**Platforms**: iOS, Web
+
+```typescript
+{
+  platform: 'ios' | 'web',
+  timestamp: string,
+
+  group_id: string,
+  group_size: number,
+  invitation_method: 'link' | 'invite' | 'search',
+}
+```
+
+---
+
+## 8. Premium & Monetization
+
+### premium_viewed
+**When**: Paywall/premium features shown
+**Platforms**: iOS, Web
+
+```typescript
+{
+  platform: 'ios' | 'web',
+  timestamp: string,
+
+  trigger: 'feature_limit' | 'upgrade_prompt' | 'settings' | 'navigation',
+  feature_blocked?: string,
+}
+```
+
+### premium_upgrade_started
+**When**: Upgrade flow initiated
+**Platforms**: iOS, Web
+
+```typescript
+{
+  platform: 'ios' | 'web',
+  timestamp: string,
+
+  plan_type: 'monthly' | 'annual' | 'lifetime',
+  price: number,
+  currency: string,
+  trigger_source: string,
+}
+```
+
+### premium_purchased
+**When**: Subscription completed
+**Platforms**: iOS, Web, Server
+
+```typescript
+{
+  platform: 'ios' | 'web' | 'server',
+  timestamp: string,
+
+  plan_type: 'monthly' | 'annual' | 'lifetime',
+  price: number,
+  currency: string,
+  payment_method: 'app_store' | 'stripe' | 'paypal',
+  trial_period_days?: number,
+}
+```
+
+### premium_cancelled
+**When**: Subscription ended
+**Platforms**: iOS, Web, Server
+
+```typescript
+{
+  platform: 'ios' | 'web' | 'server',
+  timestamp: string,
+
+  plan_type: 'monthly' | 'annual' | 'lifetime',
+  cancellation_reason?: string,
+  days_subscribed: number,
+  will_auto_renew: boolean,
+}
+```
+
+### deal_viewed
+**When**: Student deal opened
+**Platforms**: iOS, Web
+
+```typescript
+{
+  platform: 'ios' | 'web',
+  timestamp: string,
+
+  deal_id: string,
+  merchant_name: string,
+  deal_type: 'discount' | 'free_trial' | 'cashback',
+}
+```
+
+### deal_clicked
+**When**: Deal CTA clicked
+**Platforms**: iOS, Web
+
+```typescript
+{
+  platform: 'ios' | 'web',
+  timestamp: string,
+
+  deal_id: string,
+  merchant_name: string,
+  deal_value?: string,
+}
+```
+
+### deal_redeemed
+**When**: Deal used
+**Platforms**: iOS, Web, Server
+
+```typescript
+{
+  platform: 'ios' | 'web' | 'server',
+  timestamp: string,
+
+  deal_id: string,
+  merchant_name: string,
+  redemption_code?: string,
+}
+```
+
+---
+
+## 9. Engagement & Retention
+
+### app_opened
+**When**: App launched
+**Platforms**: iOS, Web
+
+```typescript
+{
+  platform: 'ios' | 'web',
+  timestamp: string,
+
+  session_count: number,
+  days_since_install: number,
+  days_since_last_open: number,
+  open_source: 'direct' | 'notification' | 'deeplink' | 'widget',
+}
+```
+
+### app_backgrounded
+**When**: App sent to background
+**Platforms**: iOS
+
+```typescript
+{
+  platform: 'ios',
+  timestamp: string,
+
+  session_duration_seconds: number,
+  screens_viewed: number,
+}
+```
+
+### notification_received
+**When**: Push notification delivered
+**Platforms**: iOS, Server
+
+```typescript
+{
+  platform: 'ios' | 'server',
+  timestamp: string,
+
+  notification_type: 'assignment' | 'exam' | 'social' | 'promotional',
+  message_id: string,
+  delivered_successfully: boolean,
+}
+```
+
+### notification_opened
+**When**: Notification tapped
+**Platforms**: iOS
+
+```typescript
+{
+  platform: 'ios',
+  timestamp: string,
+
+  notification_type: string,
+  message_id: string,
+  time_to_open_seconds: number,
+}
+```
+
+### notification_dismissed
+**When**: Notification cleared
+**Platforms**: iOS
+
+```typescript
+{
+  platform: 'ios',
+  timestamp: string,
+
+  notification_type: string,
+  message_id: string,
+  time_to_dismiss_seconds: number,
+}
+```
+
+### search_performed
+**When**: In-app search executed
+**Platforms**: iOS, Web
+
+```typescript
+{
+  platform: 'ios' | 'web',
+  timestamp: string,
+
+  search_query: string,
+  search_type: 'global' | 'courses' | 'assignments' | 'buildings' | 'people',
+  results_count: number,
+  result_selected: boolean,
+}
+```
+
+### feature_discovered
+**When**: User finds feature for first time
+**Platforms**: iOS, Web
+
+```typescript
+{
+  platform: 'ios' | 'web',
+  timestamp: string,
+
+  feature_name: string,
+  discovery_method: 'navigation' | 'tooltip' | 'search' | 'notification',
+  days_since_install: number,
+}
+```
+
+### help_accessed
+**When**: Support/help opened
+**Platforms**: iOS, Web
+
+```typescript
+{
+  platform: 'ios' | 'web',
+  timestamp: string,
+
+  help_type: 'faq' | 'contact' | 'tutorial' | 'documentation',
+  screen_name: string,
+}
+```
+
+### feedback_submitted
+**When**: User sends feedback
+**Platforms**: iOS, Web
+
+```typescript
+{
+  platform: 'ios' | 'web',
+  timestamp: string,
+
+  feedback_type: 'bug' | 'feature_request' | 'general' | 'complaint',
+  sentiment: 'positive' | 'neutral' | 'negative',
+  screen_name: string,
+  has_screenshot: boolean,
+}
+```
+
+---
+
+## 10. Error & Technical
+
+### error_occurred
+**When**: General application error
+**Platforms**: iOS, Web, Server
+
+```typescript
+{
+  platform: 'ios' | 'web' | 'server',
+  timestamp: string,
+
+  error_type: string,
+  error_message: string,
+  error_code?: string,
+  screen_name?: string,
+  stack_trace?: string,
+  is_fatal: boolean,
+}
+```
+
+### api_request_failed
+**When**: Backend request error
+**Platforms**: iOS, Web, Server
+
+```typescript
+{
+  platform: 'ios' | 'web' | 'server',
+  timestamp: string,
+
+  endpoint: string,
+  http_method: 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH',
+  status_code: number,
+  error_message: string,
+  retry_count: number,
+}
+```
+
+### sync_failed
+**When**: Data sync error
+**Platforms**: iOS, Web, Server
+
+```typescript
+{
+  platform: 'ios' | 'web' | 'server',
+  timestamp: string,
+
+  sync_type: 'schedule' | 'grades' | 'assignments' | 'profile',
+  error_type: string,
+  error_message: string,
+  retry_count: number,
+}
+```
+
+### crash_reported
+**When**: App crash detected
+**Platforms**: iOS
+
+```typescript
+{
+  platform: 'ios',
+  timestamp: string,
+
+  crash_type: string,
+  stack_trace: string,
+  app_version: string,
+  os_version: string,
+  device_model: string,
+}
+```
+
+---
+
+## 11. Viral & Growth
+
+### invite_sent
+**When**: User invites friend
+**Platforms**: iOS, Web
+
+```typescript
+{
+  platform: 'ios' | 'web',
+  timestamp: string,
+
+  invite_method: 'sms' | 'email' | 'link' | 'qr_code' | 'social',
+  invite_count: number,
+}
+```
+
+### invite_opened
+**When**: Invite link clicked
+**Platforms**: iOS, Web, Server
+
+```typescript
+{
+  platform: 'ios' | 'web' | 'server',
+  timestamp: string,
+
+  referrer_id: string,
+  invite_method: string,
+  time_since_sent_hours?: number,
+}
+```
+
+### referral_completed
+**When**: Referred user signs up
+**Platforms**: Server
+
+```typescript
+{
+  platform: 'server',
+  timestamp: string,
+
+  referrer_id: string,
+  referred_user_id: string,
+  invite_method: string,
+  time_to_conversion_hours: number,
+}
+```
+
+### share_initiated
+**When**: Share action triggered
+**Platforms**: iOS, Web
+
+```typescript
+{
+  platform: 'ios' | 'web',
+  timestamp: string,
+
+  content_type: 'schedule' | 'assignment' | 'lock' | 'grade' | 'app',
+  share_method: 'native_sheet' | 'copy_link' | 'direct',
+}
+```
+
+### share_completed
+**When**: Share finished
+**Platforms**: iOS, Web
+
+```typescript
+{
+  platform: 'ios' | 'web',
+  timestamp: string,
+
+  content_type: string,
+  share_platform: 'message' | 'email' | 'twitter' | 'instagram' | 'snapchat' | 'other',
+}
+```
+
+---
+
+## Current Events Being Tracked (Audit)
+
+### ✅ Web (dormway-lockedin) - Existing Events
+```
+ambassador_button_available
+ambassador_button_clicked
+ambassador_form_available
+homepage_viewed
+homepage_demo_clicked
+homepage_inline_file_selected
+homepage_inline_file_dropped
+homepage_inline_upload_submit
+homepage_inline_upload_failed
+homepage_inline_upload_success
+notes_opened
+cmdk_used
+cmdk_result_selected
+schedule_week_changed
+class_drawer_opened
+class_detail_mode
+today_drawer_opened
+keyboard_shortcut_guide_opened
+keyboard_shortcut_used
+post_analysis_cta_clicked
+test_consent_tracking
+```
+
+### ✅ Backend (Engine) - Predefined Events
+```
+user_registered
+onboarding_completed
+first_syllabus_uploaded
+dashboard_generated
+context_prediction_requested
+context_prediction_completed
+context_prediction_background
+weekly_summary_generated
+braingains_completed
+schedule_synced
+milestone_achieved
+```
+
+#### `context_prediction_requested`
+- Fired when a context prediction workflow starts (API router or engine).
+- Standard properties + event-specific:
+  - `prediction_source` (`api_route` | `engine` | `mobile_batch`)
+  - `surface` (`context_api` | `student_watcher` | `unknown`)
+  - `request_id` (string)
+  - `weather_available`, `location_available`, `calendar_available`, `distance_available`, `health_available` (booleans)
+  - `data_sources` (array of `weather` | `calendar` | `distance` | `health`)
+  - `debug_mode` (optional boolean)
+
+#### `context_prediction_completed`
+- Fired when the prediction finishes, regardless of success.
+- Additional properties:
+  - `prediction_source`, `surface`, `request_id` (same as above)
+  - `prediction` (string, optional)
+  - `confidence` (number, optional) + `prediction_confidence_bucket` (`0-0.25`, `0.25-0.5`, `0.5-0.7`, `0.7-0.85`, `0.85-1.0`)
+  - `latency_ms` (number)
+  - `success` (boolean)
+  - `data_sources` (string array)
+  - `weather_available`, `location_available`, `calendar_available`, `distance_available`, `health_available` (booleans)
+  - `error_code`, `error_message` (optional when `success=false`, `error_message` ≤200 chars)
+
+#### `context_prediction_background`
+- Fired by StudentWatcher/engine background runs.
+- Additional properties:
+  - `prediction` (string)
+  - `confidence` (number, optional)
+  - `latency_ms` (number, optional)
+  - `sources_used` (array of `weather` | `calendar` | `distance` | `health`)
+  - `trigger` (`interval` | `event`)
+  - `has_dashboard_refresh` (boolean, optional)
+  - `calendar_available`, `lms_available`, `distance_available`, `weather_available` (booleans, optional)
+
+### ❌ iOS - Not Yet Implemented
+No Amplitude tracking currently in place.
+
+---
+
+## Migration & Implementation Plan
+
+### Phase 1: Documentation & Standards (Week 1)
+- [ ] Review and approve this event schema
+- [ ] Share with iOS, Web, and Backend teams
+- [ ] Create TypeScript types for all events
+- [ ] Update EventTracker service with new event types
+
+### Phase 2: Backend Standardization (Week 1-2)
+- [ ] Add all missing server-side events to EventTracker
+- [ ] Update existing workflows to use standardized event names
+- [ ] Add required standard properties to all events
+- [ ] Test Amplitude ingestion
+
+### Phase 3: Web Standardization (Week 2-3)
+- [ ] Audit all existing `trackEvent()` calls
+- [ ] Rename events to match schema
+- [ ] Add missing standard properties
+- [ ] Implement missing events from schema
+- [ ] Add TypeScript types for event properties
+
+### Phase 4: iOS Implementation (Week 3-4)
+- [ ] Integrate Amplitude iOS SDK
+- [ ] Implement EventTracker wrapper/service
+- [ ] Add all iOS-specific events (navigation, notifications, etc.)
+- [ ] Test and validate
+
+### Phase 5: Validation & Monitoring (Week 4-5)
+- [ ] Set up Amplitude dashboards for key metrics
+- [ ] Validate event flow to CustomerIO integration
+- [ ] Monitor data quality in Amplitude
+- [ ] Document any gaps or issues
+
+---
+
+## Best Practices
+
+### Do's ✅
+- Always include standard properties (platform, timestamp, etc.)
+- Use snake_case for all names
+- Use past tense for completed actions
+- Be specific about what happened
+- Include context properties when available
+- Use typed suffixes (_id, _count, _at, etc.)
+- Test events in development before deploying
+
+### Don'ts ❌
+- Don't use generic event names ("button_clicked")
+- Don't use camelCase or PascalCase
+- Don't track PII without consent
+- Don't create duplicate events with different names
+- Don't add events without documenting in this schema
+- Don't track events without user consent (where required)
+
+---
+
+## Testing & Validation
+
+### Development Testing
+```typescript
+// Web example
+import { trackEvent } from '@/lib/amplitude';
+
+trackEvent('schedule_imported', {
+  platform: 'web',
+  timestamp: new Date().toISOString(),
+  source: 'lms',
+  lms_provider: 'canvas',
+  course_count: 5,
+  has_conflicts: false,
+  import_duration_seconds: 3.2,
+  app_version: '1.2.3',
+  screen_name: 'schedule_page',
+});
+```
+
+```typescript
+// Backend example
+import { eventTracker } from './services/eventTracker';
+
+await eventTracker.track(
+  userId,
+  'syllabus_parsed',
+  {
+    platform: 'server',
+    timestamp: new Date().toISOString(),
+    syllabus_id: 'syllabus_123',
+    success: true,
+    processing_duration_seconds: 12.4,
+    assignments_extracted: 8,
+    exams_extracted: 2,
+    grading_policy_found: true,
+    confidence_score: 0.92,
+  }
+);
+```
+
+### Validation Checklist
+- [ ] Event appears in Amplitude debugger within 60 seconds
+- [ ] All standard properties are present
+- [ ] Properties have correct data types
+- [ ] Event name matches schema exactly (snake_case)
+- [ ] No PII is being tracked without consent
+- [ ] Event forwards to CustomerIO correctly (if needed)
+
+---
+
+## Questions & Support
+
+For questions about this event schema, contact:
+- **Engineering Team**: #engineering on Slack
+- **Product Team**: #product on Slack
+- **Analytics Lead**: TBD
+
+**Last Updated**: 2025-09-29
+**Version**: 1.0.0 (Draft)

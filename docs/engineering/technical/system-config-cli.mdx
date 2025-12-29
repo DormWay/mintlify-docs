@@ -1,0 +1,226 @@
+---
+title: "System Config CLI"
+description: "CLI helper for creating new system configuration entries in the seed migration file."
+---
+
+# System Config CLI
+
+CLI helper for creating new system configuration entries in the seed migration file.
+
+## Overview
+
+The `add-system-config.sh` script generates properly formatted INSERT statements for the `system_config` table, with validation and optional auto-append to the seed migration file.
+
+**Location**: `scripts/database/add-system-config.sh`
+
+**Related Issues**:
+- DORM-692 - Add CLI helper for creating new system config entries
+- DORM-676 - Database-backed system configuration
+
+## Quick Start
+
+```bash
+# Generate INSERT statement (dry-run, default)
+./scripts/database/add-system-config.sh \
+  --key "sync.new_batch_size" \
+  --value 100 \
+  --type number \
+  --description "Batch size for new sync operation" \
+  --min 1 \
+  --max 500
+
+# Auto-append to seed file
+./scripts/database/add-system-config.sh \
+  --key "sync.new_batch_size" \
+  --value 100 \
+  --type number \
+  --description "Batch size for new sync operation" \
+  --min 1 \
+  --max 500 \
+  --append
+```
+
+## Required Options
+
+| Option | Description | Example |
+|--------|-------------|---------|
+| `--key` | Config key in `category.name` format | `sync.max_workers` |
+| `--value` | Default value for the config | `100`, `"gpt-4o-mini"`, `true` |
+| `--type` | Value type: `number`, `string`, `boolean`, `json` | `number` |
+| `--description` | Human-readable description | `"Maximum concurrent workers"` |
+
+## Optional Options
+
+| Option | Description | Valid For |
+|--------|-------------|-----------|
+| `--category` | Override category (extracted from key by default) | All types |
+| `--min` | Minimum value constraint | `number` only |
+| `--max` | Maximum value constraint | `number` only |
+| `--enum` | Comma-separated allowed values | `string` only |
+| `--append` | Append to seed migration file | All types |
+| `--dry-run` | Show what would be generated (default) | All types |
+
+## Valid Categories
+
+```
+sync, processing, student, dayplan, llm, ratelimits,
+batching, limits, canvas, defaults, temporal, workflow
+```
+
+## Examples
+
+### Number Config with Constraints
+
+```bash
+./scripts/database/add-system-config.sh \
+  --key "processing.city_weather_batch_size" \
+  --value 10 \
+  --type number \
+  --description "Number of cities to process per batch" \
+  --min 1 \
+  --max 100
+```
+
+**Output:**
+```sql
+('processing.city_weather_batch_size', '10', 'processing', 'Number of cities to process per batch', 'number', '10', '{"min": 1, "max": 100}')
+```
+
+### String Config with Enum
+
+```bash
+./scripts/database/add-system-config.sh \
+  --key "llm.extraction_model" \
+  --value '"gpt-4o-mini"' \
+  --type string \
+  --description "Model for data extraction" \
+  --enum "gpt-4o-mini,gpt-4o,claude-3-5-sonnet"
+```
+
+**Note**: String values must be JSON-encoded with quotes: `'"value"'` or `'\"value\"'`
+
+**Output:**
+```sql
+('llm.extraction_model', '"gpt-4o-mini"', 'llm', 'Model for data extraction', 'string', '"gpt-4o-mini"', '{"enum": ["gpt-4o-mini", "gpt-4o", "claude-3-5-sonnet"]}')
+```
+
+### Boolean Config
+
+```bash
+./scripts/database/add-system-config.sh \
+  --key "defaults.feature_enabled" \
+  --value "false" \
+  --type boolean \
+  --description "Enable experimental feature"
+```
+
+**Output:**
+```sql
+('defaults.feature_enabled', 'false', 'defaults', 'Enable experimental feature', 'boolean', 'false', NULL)
+```
+
+### JSON Config
+
+```bash
+./scripts/database/add-system-config.sh \
+  --key "workflow.retry_policy" \
+  --value '{"maxAttempts": 3, "backoffCoefficient": 2}' \
+  --type json \
+  --description "Default retry policy for workflows"
+```
+
+**Output:**
+```sql
+('workflow.retry_policy', '{"maxAttempts": 3, "backoffCoefficient": 2}', 'workflow', 'Default retry policy for workflows', 'json', '{"maxAttempts": 3, "backoffCoefficient": 2}', NULL)
+```
+
+## Validation
+
+The script validates:
+
+1. **Key format**: Must be `category.name` pattern using lowercase letters, numbers, and underscores
+2. **Type**: Must be one of `number`, `string`, `boolean`, `json`
+3. **Category**: Must be a valid category (extracted from key or overridden)
+4. **Value**: Must match the declared type
+5. **Constraints**:
+   - `--min`/`--max` only valid for `number` type
+   - `--enum` only valid for `string` type
+   - Value must be within min/max range (for numbers)
+   - Value must be one of enum values (for strings)
+   - Enum values cannot be empty
+
+## Workflow
+
+1. **Generate** - Run with dry-run (default) to preview the INSERT statement
+2. **Review** - Verify the generated SQL is correct
+3. **Append** - Run with `--append` to add to the seed file
+4. **Migrate** - Run `make db-migrate` to apply changes
+5. **Commit** - Commit the updated seed file
+
+```bash
+# Step 1-2: Preview
+./scripts/database/add-system-config.sh --key "sync.new_setting" --value 50 --type number --description "New setting"
+
+# Step 3: Append
+./scripts/database/add-system-config.sh --key "sync.new_setting" --value 50 --type number --description "New setting" --append
+
+# Step 4: Migrate
+make db-migrate
+
+# Step 5: Commit
+git add infrastructure/database/migrations/20251205b_seed_system_config.sql
+git commit -m "feat: add sync.new_setting config"
+```
+
+## Seed File Structure
+
+The seed file (`infrastructure/database/migrations/20251205b_seed_system_config.sql`) is organized by category sections:
+
+```sql
+-- ============================================
+-- Category: sync
+-- ============================================
+INSERT INTO system_config (key, value, category, description, value_type, default_value, constraints)
+VALUES
+('sync.max_concurrent_cities', '2', 'sync', 'Maximum concurrent cities', 'number', '2', '{"min": 1, "max": 10}'),
+('sync.new_setting', '50', 'sync', 'New setting', 'number', '50', NULL)  -- Added by CLI
+ON CONFLICT (key) DO UPDATE SET ...
+```
+
+The `--append` flag automatically:
+- Finds the correct category section
+- Adds a comma to the previous entry if needed
+- Inserts the new entry before `ON CONFLICT`
+
+## Using Config Values in Code
+
+After adding a config, use the helper functions:
+
+```typescript
+import {
+  getConfigNumber,
+  getConfigString,
+  getConfigBoolean,
+  getConfigJson
+} from '@dormway/core/domains/system-config';
+
+// In activities or services
+const batchSize = await getConfigNumber('sync.new_setting', 50);
+const model = await getConfigString('llm.extraction_model', 'gpt-4o-mini');
+const enabled = await getConfigBoolean('defaults.feature_enabled', false);
+const policy = await getConfigJson('workflow.retry_policy', { maxAttempts: 3 });
+```
+
+## Admin UI
+
+Config values can be viewed and modified in the Admin Dashboard:
+- Navigate to **System Settings**
+- Filter by category or search by key
+- Edit values with validation
+- Changes take effect within 60 seconds (cache TTL)
+
+## See Also
+
+- System Config Service - Backend service implementation
+- DORM-676 - Original system config feature
+- DORM-691 - Migration of hardcoded values

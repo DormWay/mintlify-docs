@@ -1,0 +1,572 @@
+---
+title: "Temporal Adapter"
+description: "import { getTemporalClient } from '@dormway/core/adapters/temporal';"
+---
+
+# Temporal Adapter
+
+## Overview
+
+**TemporalAdapter** provides a centralized, connection-pooled client for Temporal workflow operations. It ensures consistent connection management and prevents connection exhaustion.
+
+**Purpose**: Provide a singleton Temporal client that all services can safely reuse without creating new connections.
+
+**Location**: `@dormway/core/adapters/temporal`
+
+---
+
+## Installation
+
+```typescript
+import { getTemporalClient } from '@dormway/core/adapters/temporal';
+
+const client = await getTemporalClient();
+```
+
+---
+
+## Why Use the Adapter?
+
+### ❌ Without Adapter (Bad)
+
+```typescript
+// Creates new connection each time
+import { Client, Connection } from '@temporalio/client';
+
+const connection = await Connection.connect({ address: 'localhost:7233' });
+const client = new Client({ connection });
+
+// Memory leak! Connection never closed
+await client.workflow.start(...);
+```
+
+**Problems**:
+- Creates new connection for each operation
+- Connections never close → memory leaks
+- Slow (connection handshake each time)
+- Eventually exhausts connections
+
+### ✅ With Adapter (Good)
+
+```typescript
+import { getTemporalClient } from '@dormway/core/adapters/temporal';
+
+// Reuses existing connection
+const client = await getTemporalClient();
+
+// Fast, no memory leak
+await client.workflow.start(...);
+```
+
+**Benefits**:
+- Singleton connection (created once, reused forever)
+- Fast (no handshake after first call)
+- No memory leaks
+- Thread-safe
+
+---
+
+## API Reference
+
+### getTemporalClient
+
+Get the singleton Temporal client (creates connection if needed).
+
+**Signature**:
+```typescript
+getTemporalClient(): Promise<Client>
+```
+
+**Configuration** (from environment):
+```typescript
+// Required environment variables
+TEMPORAL_ADDRESS=localhost:7233          // Temporal server address
+TEMPORAL_NAMESPACE=default               // Namespace
+TEMPORAL_TLS_ENABLED=false              // Use TLS
+TEMPORAL_TLS_CERT_PATH=/path/to/cert    // TLS cert (if enabled)
+TEMPORAL_TLS_KEY_PATH=/path/to/key      // TLS key (if enabled)
+```
+
+**Example**:
+```typescript
+import { getTemporalClient } from '@dormway/core/adapters/temporal';
+
+const client = await getTemporalClient();
+console.log('Temporal client ready');
+```
+
+---
+
+## Common Operations
+
+### Start Workflow
+
+```typescript
+import { getTemporalClient } from '@dormway/core/adapters/temporal';
+
+const client = await getTemporalClient();
+
+const handle = await client.workflow.start('studentWatcherWorkflow', {
+  taskQueue: 'student-worker',
+  workflowId: `student-watcher-${studentId}`,
+  args: [studentId],
+});
+
+console.log(`Workflow started: ${handle.workflowId}`);
+```
+
+### Execute Workflow (Wait for Result)
+
+```typescript
+const client = await getTemporalClient();
+
+const result = await client.workflow.execute('processDataWorkflow', {
+  taskQueue: 'data-worker',
+  workflowId: `process-data-${dataId}`,
+  args: [dataId],
+});
+
+console.log('Workflow result:', result);
+```
+
+### Signal Workflow
+
+```typescript
+const client = await getTemporalClient();
+
+await client.workflow.signalWithStart('studentWatcherWorkflow', {
+  workflowId: `student-watcher-${studentId}`,
+  signal: 'updatePreferences',
+  signalArgs: [newPreferences],
+  taskQueue: 'student-worker',
+  args: [studentId],
+});
+
+console.log('Signal sent (workflow started if not running)');
+```
+
+### Query Workflow
+
+```typescript
+const client = await getTemporalClient();
+
+const handle = client.workflow.getHandle(`student-watcher-${studentId}`);
+const state = await handle.query('getState');
+
+console.log('Workflow state:', state);
+```
+
+### Cancel Workflow
+
+```typescript
+const client = await getTemporalClient();
+
+const handle = client.workflow.getHandle(workflowId);
+await handle.cancel();
+
+console.log('Workflow cancelled');
+```
+
+### Terminate Workflow
+
+```typescript
+const client = await getTemporalClient();
+
+const handle = client.workflow.getHandle(workflowId);
+await handle.terminate('Manual termination');
+
+console.log('Workflow terminated');
+```
+
+---
+
+## Usage in Activities
+
+**Pattern**: Use getTemporalClient() in activities to trigger child workflows.
+
+```typescript
+// activities/campus.activities.ts
+import { getTemporalClient } from '@dormway/core/adapters/temporal';
+import { createStructuredLogger } from '@dormway/core/logger';
+
+export async function processCampusStudents(campusId: string): Promise<void> {
+  const logger = createStructuredLogger({
+    service: 'engine',
+    activity: { name: 'processCampusStudents' },
+  });
+
+  const client = await getTemporalClient();
+
+  // Get all students for campus
+  const students = await getStudentsForCampus(campusId);
+
+  logger.info('campus.students.process', 'Processing campus students', {
+    metadata: { campusId, studentCount: students.length },
+  });
+
+  // Start workflow for each student
+  for (const student of students) {
+    try {
+      await client.workflow.signalWithStart('studentWatcherWorkflow', {
+        workflowId: `student-watcher-${student.id}`,
+        signal: 'triggerSync',
+        signalArgs: [],
+        taskQueue: 'student-worker',
+        args: [student.id],
+      });
+
+      logger.info('student.workflow.started', 'Student workflow started', {
+        metadata: { studentId: student.id },
+      });
+    } catch (error) {
+      logger.error('student.workflow.error', 'Failed to start workflow', {
+        error,
+        metadata: { studentId: student.id },
+      });
+    }
+  }
+}
+```
+
+---
+
+## Usage in API Routes
+
+**Pattern**: Trigger workflows from Express routes.
+
+```typescript
+// routes/workflows.routes.ts
+import express from 'express';
+import { getTemporalClient } from '@dormway/core/adapters/temporal';
+import { createStructuredLogger } from '@dormway/core/logger';
+
+const router = express.Router();
+const logger = createStructuredLogger({ service: 'api-router' });
+
+router.post('/trigger-dayplan/:userId', async (req, res, next) => {
+  try {
+    const { userId } = req.params;
+    const { date } = req.body;
+
+    const client = await getTemporalClient();
+
+    // Trigger dayplan generation workflow
+    const handle = await client.workflow.start('generateDayPlanWorkflow', {
+      taskQueue: 'student-worker',
+      workflowId: `dayplan-${userId}-${date}`,
+      args: [userId, date],
+    });
+
+    logger.info('dayplan.triggered', 'DayPlan generation triggered', {
+      metadata: { userId, date, workflowId: handle.workflowId },
+    });
+
+    res.json({
+      success: true,
+      workflowId: handle.workflowId,
+      message: 'DayPlan generation started',
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+export default router;
+```
+
+---
+
+## Common Patterns
+
+### Pattern 1: Signal-with-Start (Idempotent)
+
+Use `signalWithStart` to ensure workflow exists and send signal:
+
+```typescript
+const client = await getTemporalClient();
+
+await client.workflow.signalWithStart('studentWatcherWorkflow', {
+  workflowId: `student-watcher-${studentId}`,
+  signal: 'updatePreferences',
+  signalArgs: [newPreferences],
+  taskQueue: 'student-worker',
+  args: [studentId],
+});
+
+// Benefits:
+// - Starts workflow if not running
+// - Sends signal if already running
+// - Idempotent (safe to call multiple times)
+```
+
+### Pattern 2: Check if Workflow Exists
+
+```typescript
+const client = await getTemporalClient();
+
+try {
+  const handle = client.workflow.getHandle(workflowId);
+  const description = await handle.describe();
+
+  console.log('Workflow exists:', description.status);
+} catch (error) {
+  console.log('Workflow does not exist');
+}
+```
+
+### Pattern 3: Batch Workflow Triggers
+
+```typescript
+const client = await getTemporalClient();
+
+// Trigger workflows in parallel (be careful of rate limits!)
+const promises = studentIds.map(studentId =>
+  client.workflow.start('studentWatcherWorkflow', {
+    taskQueue: 'student-worker',
+    workflowId: `student-watcher-${studentId}`,
+    args: [studentId],
+  }).catch(error => {
+    logger.error('workflow.start.error', 'Failed to start workflow', {
+      error,
+      metadata: { studentId },
+    });
+    return null;
+  })
+);
+
+const results = await Promise.all(promises);
+const successful = results.filter(Boolean).length;
+
+console.log(`Started ${successful}/${studentIds.length} workflows`);
+```
+
+### Pattern 4: Workflow with Retry Policy
+
+```typescript
+const client = await getTemporalClient();
+
+await client.workflow.start('processDataWorkflow', {
+  taskQueue: 'data-worker',
+  workflowId: `process-${dataId}`,
+  args: [dataId],
+  retry: {
+    initialInterval: '1s',
+    backoffCoefficient: 2,
+    maximumInterval: '30s',
+    maximumAttempts: 5,
+  },
+});
+```
+
+---
+
+## Error Handling
+
+### Connection Errors
+
+```typescript
+import { getTemporalClient } from '@dormway/core/adapters/temporal';
+
+try {
+  const client = await getTemporalClient();
+  // Use client...
+} catch (error) {
+  console.error('Failed to connect to Temporal:', error);
+  // Handle connection error (retry, fallback, alert)
+}
+```
+
+### Workflow Not Found
+
+```typescript
+const client = await getTemporalClient();
+
+try {
+  const handle = client.workflow.getHandle(workflowId);
+  await handle.signal('updateData', data);
+} catch (error) {
+  if (error.message.includes('not found')) {
+    console.log('Workflow not running, starting new instance');
+    await client.workflow.start(...);
+  } else {
+    throw error;
+  }
+}
+```
+
+### Workflow Already Running
+
+```typescript
+const client = await getTemporalClient();
+
+try {
+  await client.workflow.start('studentWatcherWorkflow', {
+    taskQueue: 'student-worker',
+    workflowId: `student-watcher-${studentId}`,
+    args: [studentId],
+  });
+} catch (error) {
+  if (error.message.includes('already started')) {
+    console.log('Workflow already running, sending signal instead');
+    await client.workflow.signalWithStart(...);
+  } else {
+    throw error;
+  }
+}
+```
+
+---
+
+## Performance Optimization
+
+### 1. Reuse Client Instance
+
+```typescript
+// ✅ Good - reuses singleton
+import { getTemporalClient } from '@dormway/core/adapters/temporal';
+
+async function triggerWorkflow() {
+  const client = await getTemporalClient();
+  await client.workflow.start(...);
+}
+
+// ❌ Bad - creates new connection each time
+import { Client, Connection } from '@temporalio/client';
+
+async function triggerWorkflow() {
+  const connection = await Connection.connect(...);
+  const client = new Client({ connection });
+  await client.workflow.start(...);
+}
+```
+
+### 2. Batch Operations
+
+```typescript
+// ✅ Good - parallel batch
+const client = await getTemporalClient();
+
+await Promise.all(
+  workflowIds.map(id =>
+    client.workflow.signal(id, 'processData', data)
+  )
+);
+
+// ❌ Bad - sequential
+for (const id of workflowIds) {
+  await client.workflow.signal(id, 'processData', data);
+}
+```
+
+### 3. Use signalWithStart
+
+```typescript
+// ✅ Good - single operation
+await client.workflow.signalWithStart('myWorkflow', {
+  workflowId: 'my-id',
+  signal: 'processData',
+  signalArgs: [data],
+  taskQueue: 'my-queue',
+  args: [],
+});
+
+// ❌ Bad - two operations (check + start/signal)
+try {
+  await client.workflow.getHandle('my-id');
+  await client.workflow.signal('my-id', 'processData', data);
+} catch {
+  await client.workflow.start('myWorkflow', { ... });
+}
+```
+
+---
+
+## Configuration
+
+### Environment Variables
+
+```bash
+# Required
+TEMPORAL_ADDRESS=localhost:7233
+TEMPORAL_NAMESPACE=default
+
+# Optional TLS
+TEMPORAL_TLS_ENABLED=false
+TEMPORAL_TLS_CERT_PATH=/path/to/cert.pem
+TEMPORAL_TLS_KEY_PATH=/path/to/key.pem
+
+# Optional mTLS
+TEMPORAL_MTLS_CLIENT_CERT_PATH=/path/to/client-cert.pem
+TEMPORAL_MTLS_CLIENT_KEY_PATH=/path/to/client-key.pem
+```
+
+### Production Configuration
+
+```typescript
+// Production with mTLS (Temporal Cloud)
+TEMPORAL_ADDRESS=namespace.account.tmprl.cloud:7233
+TEMPORAL_NAMESPACE=namespace.account
+TEMPORAL_TLS_ENABLED=true
+TEMPORAL_MTLS_CLIENT_CERT_PATH=/secrets/temporal-client-cert.pem
+TEMPORAL_MTLS_CLIENT_KEY_PATH=/secrets/temporal-client-key.pem
+```
+
+---
+
+## Troubleshooting
+
+### Problem: "Connection refused"
+
+**Cause**: Temporal server not running or wrong address.
+
+**Solution**:
+```bash
+# Check Temporal server
+docker ps | grep temporal
+
+# Verify address
+echo $TEMPORAL_ADDRESS
+# Should be: localhost:7233 (local) or production address
+```
+
+### Problem: "Workflow already started"
+
+**Cause**: Trying to start workflow with same workflowId.
+
+**Solution**: Use `signalWithStart` instead:
+```typescript
+// ✅ Use signalWithStart (idempotent)
+await client.workflow.signalWithStart('myWorkflow', {
+  workflowId: 'my-id',
+  signal: 'triggerSync',
+  signalArgs: [],
+  taskQueue: 'my-queue',
+  args: [],
+});
+```
+
+### Problem: Memory leak
+
+**Cause**: Creating new connections without closing.
+
+**Solution**: Always use `getTemporalClient()`:
+```typescript
+// ✅ Good - singleton
+import { getTemporalClient } from '@dormway/core/adapters/temporal';
+
+// ❌ Bad - creates new connection
+import { Client, Connection } from '@temporalio/client';
+```
+
+---
+
+## Related Documentation
+
+- [DormWay Core Library (@dormway-core)](/docs/engineering/technical/dormway-core-library-dormway-core) - Main overview
+- Engine Workflow DAG Analysis - Temporal workflows in Engine
+- [Migration Guide](/docs/engineering/technical/dormway-core/migration-guide) - Migrating to dormmway-core
+
+---
+
+**Last Updated**: 2025-11-23
+**Maintainer**: Platform Team

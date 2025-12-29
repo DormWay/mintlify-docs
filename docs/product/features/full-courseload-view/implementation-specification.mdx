@@ -1,0 +1,624 @@
+---
+title: "Implementation Specification"
+description: "The Full Courseload View is an AI-powered analysis system that synthesizes schedule data, syllabus information, and personal calendar events to provide compr..."
+---
+
+# Full Courseload View - Implementation Specification
+*Created: 2025-07-13*
+
+## Overview
+The Full Courseload View is an AI-powered analysis system that synthesizes schedule data, syllabus information, and personal calendar events to provide comprehensive semester workload assessment and optimization recommendations.
+
+## Architecture Overview
+
+### Data Integration using Existing Infrastructure
+
+Following the established pattern from syllabus processing, the Full Courseload View will use the existing `service_data` table with specific method types for different analysis components.
+
+### Service Data Storage Pattern
+```typescript
+interface CourseloadServiceData {
+  user_id: string;
+  document_id: string; // Links to the triggering analysis request
+  method: CourseloadAnalysisMethod;
+  data: CourseloadAnalysisData;
+  created_at: Date;
+}
+
+type CourseloadAnalysisMethod = 
+  | 'courseload_analysis'        // Main semester overview
+  | 'courseload_weekly_breakdown' // Week-by-week workload
+  | 'courseload_recommendations' // Action items and suggestions
+  | 'courseload_conflicts'       // Identified scheduling/workload issues
+  | 'courseload_stress_periods'  // High-intensity periods
+  | 'courseload_course_breakdown' // Per-course analysis
+```
+
+## Data Models
+
+### Main Analysis (method: 'courseload_analysis')
+```typescript
+interface CourseloadAnalysis {
+  semesterId: string;
+  generatedAt: Date;
+  
+  // Overall metrics
+  totalCreditHours: number;
+  estimatedWeeklyHours: number;
+  semesterIntensityScore: number; // 1-10 scale
+  
+  // Data sources used
+  coursesAnalyzed: string[]; // Course context IDs
+  syllabusDataAvailable: string[]; // Courses with syllabus data
+  scheduleDataComplete: boolean;
+  
+  // Summary insights
+  overallAssessment: string;
+  keyInsights: string[];
+  criticalAlerts: string[];
+}
+```
+
+### Weekly Breakdown (method: 'courseload_weekly_breakdown')
+```typescript
+interface WeeklyWorkloadData {
+  weeks: WeeklyWorkload[];
+}
+
+interface WeeklyWorkload {
+  weekNumber: number;
+  startDate: string; // ISO date
+  endDate: string;
+  
+  // Hour breakdowns
+  totalHours: number;
+  classHours: number;
+  studyHours: number;
+  assignmentHours: number;
+  examPreparation: number;
+  
+  // Assessment
+  stressLevel: 'low' | 'medium' | 'high' | 'extreme';
+  stressFactors: string[];
+  majorDeadlines: Deadline[];
+}
+
+interface Deadline {
+  courseCode: string;
+  type: 'assignment' | 'exam' | 'project' | 'quiz';
+  title: string;
+  dueDate: string;
+  estimatedHours: number;
+  importance: 'low' | 'medium' | 'high' | 'critical';
+}
+```
+
+### Recommendations (method: 'courseload_recommendations')
+```typescript
+interface CourseloadRecommendations {
+  recommendations: WorkloadRecommendation[];
+}
+
+interface WorkloadRecommendation {
+  id: string;
+  type: 'schedule_adjustment' | 'study_strategy' | 'time_management' | 'stress_reduction';
+  priority: 'low' | 'medium' | 'high' | 'urgent';
+  title: string;
+  description: string;
+  actionItems: string[];
+  expectedBenefit: string;
+  implementationEffort: 'easy' | 'moderate' | 'challenging';
+  relatedCourses?: string[];
+  timeframe?: {
+    start: string;
+    end: string;
+  };
+}
+```
+
+### Conflicts (method: 'courseload_conflicts')
+```typescript
+interface CourseloadConflicts {
+  conflicts: WorkloadConflict[];
+}
+
+interface WorkloadConflict {
+  id: string;
+  type: 'schedule_overlap' | 'deadline_cluster' | 'exam_conflict' | 'study_time_shortage';
+  severity: 'minor' | 'moderate' | 'major' | 'critical';
+  description: string;
+  affectedCourses: string[];
+  suggestedResolution: string;
+  timeframe: {
+    start: string;
+    end: string;
+  };
+}
+```
+
+## AI Crew Implementation
+
+### Courseload Analysis Crew
+```typescript
+const courseloadAnalysisCrew = new Crew({
+  agents: [
+    new Agent({
+      role: 'Academic Workload Analyst',
+      goal: 'Synthesize schedule and syllabus data to calculate comprehensive semester workload',
+      backstory: 'Expert academic advisor with deep understanding of course workload patterns and student capacity',
+      tools: [workloadCalculationTools],
+      verbose: true
+    }),
+    new Agent({
+      role: 'Schedule Optimization Specialist', 
+      goal: 'Identify scheduling conflicts and optimization opportunities',
+      backstory: 'Systems analyst specializing in academic calendar optimization and efficiency',
+      tools: [scheduleAnalysisTools],
+      verbose: true
+    }),
+    new Agent({
+      role: 'Student Success Strategist',
+      goal: 'Generate actionable recommendations for academic success and stress management',
+      backstory: 'Academic success coach with expertise in student wellbeing and performance optimization',
+      tools: [recommendationTools],
+      verbose: true
+    })
+  ],
+  tasks: [
+    new Task({
+      description: 'Analyze comprehensive semester workload from all data sources',
+      agent: 'Academic Workload Analyst',
+      expected_output: 'Complete workload analysis with weekly breakdowns and intensity scoring'
+    }),
+    new Task({
+      description: 'Identify scheduling conflicts and stress periods',
+      agent: 'Schedule Optimization Specialist', 
+      expected_output: 'Prioritized list of conflicts with severity assessment and timeframes'
+    }),
+    new Task({
+      description: 'Generate personalized optimization recommendations',
+      agent: 'Student Success Strategist',
+      expected_output: 'Actionable recommendations prioritized by impact and feasibility'
+    })
+  ],
+  verbose: 2
+});
+```
+
+### AI Prompts
+```typescript
+const COURSELOAD_ANALYSIS_PROMPT = `
+Analyze the student's complete semester courseload and provide comprehensive assessment:
+
+Input Data:
+- Course schedules with class times and locations
+- Syllabus data with assignments, exams, and policies
+- Historical performance data (if available)
+- Personal calendar events
+
+Analysis Required:
+1. Calculate total weekly time commitment per course
+2. Identify peak workload periods throughout semester
+3. Assess semester intensity on 1-10 scale
+4. Generate week-by-week workload breakdown
+5. Flag potential stress periods and conflicts
+
+Output Format:
+- Overall semester metrics and assessment
+- Weekly workload distribution with hours breakdown
+- Stress level indicators for each week
+- Key insights and summary observations
+
+Consider factors:
+- Course difficulty based on syllabus complexity
+- Assignment clustering and deadline patterns  
+- Exam scheduling and preparation requirements
+- Travel time between classes
+- Study time requirements by course type
+- Personal commitments and constraints
+`;
+
+const CONFLICT_DETECTION_PROMPT = `
+Identify scheduling conflicts and workload bottlenecks:
+
+Analysis Areas:
+1. Schedule Conflicts:
+   - Back-to-back classes with insufficient travel time
+   - Exam scheduling conflicts
+   - Lab/discussion section overlaps
+
+2. Workload Bottlenecks:
+   - Assignment deadline clustering (3+ major items in one week)
+   - Exam preparation periods with insufficient study time
+   - Project milestones overlapping with heavy course load
+
+3. Stress Indicators:
+   - Weeks exceeding 60+ hours total commitment
+   - Multiple high-stakes assessments in short timeframes
+   - Insufficient recovery time between intense periods
+
+Output Requirements:
+- Severity classification (minor/moderate/major/critical)
+- Specific timeframes affected
+- Courses involved in each conflict
+- Suggested resolution strategies
+- Impact assessment if unresolved
+`;
+
+const RECOMMENDATION_GENERATION_PROMPT = `
+Generate personalized recommendations for semester success:
+
+Recommendation Categories:
+1. Schedule Adjustments:
+   - Class section changes to reduce conflicts
+   - Study schedule optimization
+   - Break time allocation improvements
+
+2. Study Strategies:
+   - Course-specific study approaches
+   - Time management techniques
+   - Resource allocation optimization
+
+3. Stress Management:
+   - Workload distribution strategies
+   - Recovery period planning
+   - Support resource identification
+
+4. Academic Planning:
+   - Assignment prioritization methods
+   - Exam preparation scheduling
+   - Long-term project planning
+
+Prioritization Criteria:
+- Impact on academic success (high impact = high priority)
+- Implementation feasibility (easy wins prioritized)
+- Stress reduction potential
+- Time investment required
+- Student's specific constraints and preferences
+
+Output Format:
+- Clear action items with specific steps
+- Expected benefits for each recommendation
+- Implementation difficulty assessment
+- Success metrics where applicable
+`;
+```
+
+## Temporal Workflow Implementation
+
+### Main Courseload Analysis Workflow
+```typescript
+export async function analyzeCourseload(
+  studentId: string,
+  semesterId: string,
+  options: {
+    forceRefresh?: boolean;
+    analysisDepth?: 'basic' | 'comprehensive';
+  } = {}
+): Promise<string> {
+  
+  // Check for existing recent analysis
+  if (!options.forceRefresh) {
+    const existingAnalysis = await checkExistingCourseloadAnalysis(studentId, semesterId);
+    if (existingAnalysis && isRecentEnough(existingAnalysis.created_at)) {
+      return existingAnalysis.document_id;
+    }
+  }
+  
+  // Create analysis document record
+  const documentId = await createAnalysisDocument(studentId, semesterId);
+  
+  // Gather all required data
+  const courseloadData = await aggregateCourseloadData(studentId, semesterId);
+  
+  // Validate data completeness
+  const validation = await validateCourseloadData(courseloadData);
+  if (!validation.isComplete) {
+    await logAnalysisError(documentId, `Incomplete data: ${validation.missingElements.join(', ')}`);
+    throw new Error(`Cannot analyze courseload: ${validation.missingElements.join(', ')}`);
+  }
+  
+  // Process with AI Crew
+  const crewResult = await courseloadAnalysisCrew.kickoff({
+    inputs: {
+      courseloadData,
+      analysisDepth: options.analysisDepth || 'comprehensive',
+      studentId,
+      semesterId
+    }
+  });
+  
+  // Store results in service_data table using established pattern
+  await storeServiceData(studentId, documentId, 'courseload_analysis', crewResult.mainAnalysis);
+  await storeServiceData(studentId, documentId, 'courseload_weekly_breakdown', crewResult.weeklyData);
+  await storeServiceData(studentId, documentId, 'courseload_recommendations', crewResult.recommendations);
+  await storeServiceData(studentId, documentId, 'courseload_conflicts', crewResult.conflicts);
+  
+  // Send notifications for critical findings
+  await processCriticalFindings(studentId, crewResult);
+  
+  return documentId;
+}
+```
+
+### Data Aggregation Activity
+```typescript
+export async function aggregateCourseloadData(
+  studentId: string,
+  semesterId: string
+): Promise<CourseloadDataInput> {
+  
+  // Get course contexts for this student/semester
+  const courses = await getCourseContextsForSemester(studentId, semesterId);
+  
+  // Get schedule data from time_blocks
+  const scheduleData = await getScheduleTimeBlocks(studentId, semesterId);
+  
+  // Get syllabus analysis data from service_data
+  const syllabusData = await getSyllabusAnalyses(studentId, courses.map(c => c.id));
+  
+  // Get personal calendar data from student_time_blocks
+  const personalEvents = await getStudentTimeBlocks(studentId, semesterId);
+  
+  // Get historical performance data if available
+  const historicalData = await getStudentPerformanceHistory(studentId);
+  
+  return {
+    studentId,
+    semesterId,
+    courses,
+    scheduleData,
+    syllabusData,
+    personalEvents,
+    historicalData
+  };
+}
+```
+
+## API Integration
+
+### REST Endpoints
+```typescript
+// Generate new courseload analysis
+POST /api/courseload/analyze
+{
+  "studentId": "uuid",
+  "semesterId": "fall2024",
+  "options": {
+    "forceRefresh": false,
+    "analysisDepth": "comprehensive"
+  }
+}
+Response: { "documentId": "uuid", "status": "processing" }
+
+// Get analysis results
+GET /api/courseload/analysis/:documentId
+Response: {
+  "analysis": CourseloadAnalysis,
+  "weeklyBreakdown": WeeklyWorkloadData,
+  "recommendations": CourseloadRecommendations,
+  "conflicts": CourseloadConflicts
+}
+
+// Get student's latest analysis
+GET /api/courseload/student/:studentId/latest?semester=fall2024
+
+// Mark recommendation as completed
+PATCH /api/courseload/recommendations/:documentId/:recommendationId/complete
+```
+
+### Service Data Queries
+```typescript
+// Retrieve analysis components using existing service_data pattern
+export async function getCourseloadAnalysis(documentId: string): Promise<CourseloadAnalysisResult> {
+  const supabase = getSupabaseService();
+  
+  // Get all service_data entries for this analysis
+  const { data, error } = await supabase
+    .from('service_data')
+    .select('method, data')
+    .eq('document_id', documentId)
+    .in('method', [
+      'courseload_analysis',
+      'courseload_weekly_breakdown', 
+      'courseload_recommendations',
+      'courseload_conflicts'
+    ]);
+    
+  if (error) throw error;
+  
+  // Structure the response
+  const result: CourseloadAnalysisResult = {};
+  data.forEach(entry => {
+    result[entry.method] = entry.data;
+  });
+  
+  return result;
+}
+```
+
+## iOS Integration
+
+### CourseloadService
+```swift
+class CourseloadService: ObservableObject {
+    @Published var currentAnalysis: CourseloadAnalysis?
+    @Published var weeklyBreakdown: [WeeklyWorkload] = []
+    @Published var recommendations: [WorkloadRecommendation] = []
+    @Published var conflicts: [WorkloadConflict] = []
+    @Published var isLoading = false
+    
+    func generateAnalysis(
+        forStudent studentId: String,
+        semester: String,
+        forceRefresh: Bool = false
+    ) async throws -> String {
+        isLoading = true
+        defer { isLoading = false }
+        
+        // Start analysis
+        let response = try await APIClient.shared.request(
+            endpoint: "/api/courseload/analyze",
+            method: .POST,
+            body: [
+                "studentId": studentId,
+                "semesterId": semester,
+                "options": [
+                    "forceRefresh": forceRefresh,
+                    "analysisDepth": "comprehensive"
+                ]
+            ]
+        )
+        
+        let documentId = response.documentId
+        
+        // Poll for completion
+        try await pollForCompletion(documentId: documentId)
+        
+        // Load results
+        try await loadAnalysisResults(documentId: documentId)
+        
+        return documentId
+    }
+    
+    private func loadAnalysisResults(documentId: String) async throws {
+        let response = try await APIClient.shared.request(
+            endpoint: "/api/courseload/analysis/\(documentId)",
+            method: .GET
+        )
+        
+        await MainActor.run {
+            self.currentAnalysis = response.analysis
+            self.weeklyBreakdown = response.weeklyBreakdown.weeks
+            self.recommendations = response.recommendations.recommendations
+            self.conflicts = response.conflicts.conflicts
+        }
+    }
+}
+```
+
+### UI Components
+```swift
+struct CourseloadDashboardView: View {
+    @StateObject private var courseloadService = CourseloadService()
+    @EnvironmentObject private var authService: AuthService
+    
+    var body: some View {
+        NavigationView {
+            ScrollView {
+                LazyVStack(spacing: 20) {
+                    if let analysis = courseloadService.currentAnalysis {
+                        // Semester overview card
+                        SemesterOverviewCard(analysis: analysis)
+                        
+                        // Weekly workload chart
+                        WeeklyWorkloadChart(weeks: courseloadService.weeklyBreakdown)
+                        
+                        // Critical alerts
+                        if !courseloadService.conflicts.isEmpty {
+                            ConflictsSection(conflicts: courseloadService.conflicts)
+                        }
+                        
+                        // Recommendations
+                        RecommendationsSection(recommendations: courseloadService.recommendations)
+                    } else if courseloadService.isLoading {
+                        ProgressView("Analyzing your courseload...")
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else {
+                        EmptyStateView {
+                            Button("Analyze My Courseload") {
+                                Task {
+                                    try await courseloadService.generateAnalysis(
+                                        forStudent: authService.currentUser?.id ?? "",
+                                        semester: "fall2024"
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+                .padding()
+            }
+            .navigationTitle("Courseload Analysis")
+            .task {
+                // Auto-load existing analysis
+                if let userId = authService.currentUser?.id {
+                    try? await courseloadService.loadLatestAnalysis(
+                        forStudent: userId,
+                        semester: "fall2024"
+                    )
+                }
+            }
+        }
+    }
+}
+```
+
+## Implementation Steps
+
+### Phase 1: Core Infrastructure (Week 1)
+1. **Data Aggregation Activities**
+   - Implement `aggregateCourseloadData` activity
+   - Create data validation functions
+   - Test with existing course and syllabus data
+
+2. **AI Crew Setup**
+   - Configure courseload analysis crew with agents and tasks
+   - Implement core analysis prompts
+   - Test crew processing with sample data
+
+3. **Service Data Integration**
+   - Add new courseload method types to service_data workflow
+   - Implement storage functions following existing pattern
+   - Test data persistence and retrieval
+
+### Phase 2: API & Workflow (Week 2)
+1. **Temporal Workflow**
+   - Implement `analyzeCourseload` main workflow
+   - Add error handling and progress tracking
+   - Test end-to-end processing
+
+2. **REST API Endpoints**
+   - Create courseload analysis endpoints
+   - Implement result retrieval functions
+   - Add proper authentication and validation
+
+3. **Testing & Validation**
+   - Unit tests for analysis logic
+   - Integration tests with real student data
+   - Performance testing with multiple courses
+
+### Phase 3: iOS Integration (Week 3)
+1. **Service Layer**
+   - Implement `CourseloadService` with API integration
+   - Add polling for analysis completion
+   - Handle loading states and errors
+
+2. **UI Components**
+   - Create dashboard view with analysis display
+   - Implement weekly workload chart
+   - Add recommendations and conflicts sections
+
+3. **User Experience**
+   - Integrate with existing navigation
+   - Add refresh and manual trigger options
+   - Test with various data scenarios
+
+## Success Metrics
+
+### Technical Performance
+- **Analysis Generation**: < 45 seconds for comprehensive analysis
+- **Data Accuracy**: > 90% correlation with manual assessments
+- **API Performance**: < 2 seconds response time for results retrieval
+
+### User Engagement
+- **Adoption Rate**: > 60% of users with complete schedule + syllabus data
+- **Recommendation Actions**: > 40% users act on high-priority recommendations
+- **Return Usage**: Users check analysis 2+ times per month
+
+### Business Impact
+- **User Retention**: 10% increase in semester-long engagement
+- **Academic Success**: Correlation with improved time management
+- **Feature Differentiation**: Unique capability driving user acquisition
+
+This implementation leverages the existing service_data infrastructure while providing the comprehensive courseload analysis capability that will differentiate DormWay in the academic planning space.

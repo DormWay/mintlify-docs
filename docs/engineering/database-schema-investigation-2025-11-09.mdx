@@ -1,0 +1,995 @@
+---
+title: "Database Schema Investigation 2025 11 09"
+description: "✅ **Notes system exists** - Full schema with revisions ✅ **Syllabus processing exists** - Multiple tables with AI analysis ✅ **BrainGains (Ace) exists** - Co..."
+---
+
+# Database Schema Investigation - Phase 1 Results
+**Date:** 2025-11-09
+**Purpose:** Map actual database schemas to understand feature backend readiness
+**Related:** [Feature-Parity-Analysis](/docs/engineering/feature-parity-analysis)
+
+---
+
+## Executive Summary
+
+**Key Findings:**
+✅ **Notes system exists** - Full schema with revisions
+✅ **Syllabus processing exists** - Multiple tables with AI analysis
+✅ **BrainGains (Ace) exists** - Complete document & chat system
+✅ **Time blocks exist** - `student_time_blocks` table for capacity planning
+✅ **Canvas integration exists** - Assignments, submissions, courses
+✅ **User preferences exist** - Generic key-value store
+❌ **NO inbox/messages tables** - Inbox feature does NOT have database support
+❌ **NO course_policies table** - Policies likely stored in JSONB metadata
+
+---
+
+## 1. NOTES SYSTEM ✅
+
+### Schema: `notes` Table
+```sql
+CREATE TABLE notes (
+  id                uuid PRIMARY KEY,
+  user_id           uuid NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  content           text NOT NULL,
+  content_hash      varchar(64) NOT NULL,
+  metadata          jsonb NOT NULL DEFAULT '{}'::jsonb,
+  revision          integer NOT NULL DEFAULT 1,
+  created_at        timestamptz NOT NULL DEFAULT now(),
+  updated_at        timestamptz NOT NULL DEFAULT now(),
+  client_timestamp  bigint,
+  server_timestamp  bigint
+);
+
+-- Indexes
+idx_notes_class_id: (metadata ->> 'classId')
+idx_notes_content_hash: (user_id, content_hash)
+idx_notes_user_updated: (user_id, updated_at DESC)
+
+-- Related table
+note_revisions (note_id, user_id, revision, content, content_hash, metadata, created_at)
+```
+
+### API Endpoints (from `notes-sync-routes.ts`)
+| Method | Endpoint | Purpose |
+|--------|----------|---------|
+| POST | `/api/notes/sync` | Durable sync with conflict resolution |
+| GET | `/api/notes/recent` | Fetch recent notes (limit, offset, classId filter) |
+| GET | `/api/notes/:noteId` | Get specific note |
+| POST | `/api/notes` | Create new note |
+| DELETE | `/api/notes/:noteId` | Delete note |
+
+### Metadata Fields (JSONB)
+- `title` (string) - Note title
+- `courseContextId` (uuid, optional) - Course association
+- `classId` (uuid, optional) - Backward compatibility
+- `documentType` (enum, optional) - Notes, Essay, Summary, Other
+- `tags` (array of strings, optional) - User tags
+
+### Features
+- ✅ **Conflict resolution**: Last-write-wins with revision tracking
+- ✅ **Revision history**: `note_revisions` table
+- ✅ **Content hash deduplication**: Skips Ragie sync if content unchanged
+- ✅ **Ragie integration**: Auto-syncs notes to AI knowledge base
+- ✅ **Course linking**: Optional courseContextId for context
+
+### iOS Gap Analysis
+**Does iOS have notes?**
+- iOS has `QuickCapture` (quick note-taking widget)
+- NOT confirmed: Full note browsing/editing UI
+- **Investigation needed**: Check if iOS notes API integration exists
+
+---
+
+## 2. ACE AI ASSISTANT (BrainGains) ✅
+
+### Schema: `braingains_*` Tables
+
+#### `braingains_documents`
+```sql
+CREATE TABLE braingains_documents (
+  id                  varchar(255) PRIMARY KEY,
+  user_id             uuid NOT NULL,
+  document_type       varchar(50) DEFAULT 'syllabus', -- 'syllabus', 'lecture_notes', 'assignment', 'textbook', 'presentation', 'research_paper', 'general'
+  filename            varchar(500) NOT NULL,
+  content_url         text NOT NULL,
+  extracted_text      text,
+  metadata            jsonb DEFAULT '{}'::jsonb,
+  processing_status   varchar(50) DEFAULT 'pending', -- 'pending', 'processing', 'completed', 'failed', 'indexed'
+  error               text,
+  vectara_corpus_key  varchar(255),
+  vectara_document_id varchar(255),
+  page_count          integer DEFAULT 0,
+  created_at          timestamptz DEFAULT now(),
+  updated_at          timestamptz DEFAULT now(),
+  dev_tag             varchar(255),
+  ragie_partition_key text,
+  ragie_document_id   text
+);
+
+-- Indexes
+idx_braingains_documents_user_id
+idx_braingains_documents_status
+idx_braingains_documents_type
+idx_braingains_docs_ragie_doc
+```
+
+#### `braingains_chats`
+```sql
+CREATE TABLE braingains_chats (
+  id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id         uuid NOT NULL,
+  conversation_id text,
+  created_at      timestamptz NOT NULL DEFAULT now(),
+  updated_at      timestamptz NOT NULL DEFAULT now()
+);
+
+-- Referenced by braingains_chat_messages (chat_id FK)
+```
+
+#### `braingains_analysis`
+```sql
+CREATE TABLE braingains_analysis (
+  id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  document_id   varchar(255) NOT NULL REFERENCES braingains_documents(id) ON DELETE CASCADE,
+  analysis_data jsonb NOT NULL,
+  created_at    timestamptz DEFAULT now(),
+  dev_tag       varchar(255)
+);
+```
+
+### API Endpoints (from `braingains-routes.ts`)
+
+| Method | Endpoint | Purpose |
+|--------|----------|---------|
+| POST | `/api/braingains/documents` | Upload document (file or text) |
+| POST | `/api/braingains/documents/update-term` | Update syllabus via text classification |
+| GET | `/api/braingains/query` | RAG query across documents |
+| GET | `/api/braingains/documents` | List user's documents |
+| GET | `/api/braingains/documents/my-files` | Get all files (own + shared) |
+| GET | `/api/braingains/documents/:id` | Get specific document |
+| DELETE | `/api/braingains/documents/:id` | Delete document |
+| GET | `/api/braingains/usage` | Usage statistics |
+| GET | `/api/braingains/documents/update-term/:contextId` | Get merged syllabus |
+
+### Document Types (CHECK constraint)
+```typescript
+type DocumentType =
+  | 'syllabus'
+  | 'lecture_notes'
+  | 'assignment'
+  | 'textbook'
+  | 'presentation'
+  | 'research_paper'
+  | 'general';
+```
+
+### Processing Statuses
+```typescript
+type ProcessingStatus =
+  | 'pending'
+  | 'processing'
+  | 'completed'
+  | 'failed'
+  | 'indexed';
+```
+
+### Features
+- ✅ **Document upload**: File or text (25MB limit)
+- ✅ **Syllabus processing**: Routes to `processSyllabus` workflow
+- ✅ **Generic documents**: Routes to `processDocument` workflow
+- ✅ **Ragie integration**: Automatic indexing for AI retrieval
+- ✅ **Course association**: `courseContextId` in metadata
+- ✅ **Shared documents**: `my-files` endpoint shows own + classmates' documents
+- ✅ **Update My Term**: LLM-powered syllabus updates via text
+- ✅ **RAG queries**: Search across indexed documents
+
+### iOS/Web Gap Analysis
+**Web-Only (NOT in iOS API calls):**
+- Write mode API (not found in braingains routes)
+- Separate Documents tab interface
+
+**iOS-Specific:**
+- Camera-based document upload
+- Voice input for chat
+
+**Shared:**
+- Document upload ✅
+- Chat interface ✅
+- Document query ✅
+
+---
+
+## 3. SYLLABUS PROCESSING ✅
+
+### Schema: `syllabus_*` Tables
+
+#### `syllabus_documents`
+```sql
+CREATE TABLE syllabus_documents (
+  id                text PRIMARY KEY,
+  user_id           uuid NOT NULL,
+  filename          varchar(500) NOT NULL,
+  content_url       text NOT NULL,
+  extracted_text    text,
+  metadata          jsonb DEFAULT '{}'::jsonb,
+  processing_status varchar(50) DEFAULT 'pending', -- 'pending', 'processing', 'completed', 'failed'
+  error             text,
+  created_at        timestamptz DEFAULT now(),
+  updated_at        timestamptz DEFAULT now()
+);
+
+-- Indexes
+idx_syllabus_documents_user_id
+idx_syllabus_documents_status
+idx_syllabus_documents_campus: (metadata ->> 'campus_id')
+```
+
+#### `syllabus_analysis`
+```sql
+CREATE TABLE syllabus_analysis (
+  id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  syllabus_id   text NOT NULL,
+  analysis_data jsonb NOT NULL,
+  created_at    timestamptz DEFAULT now()
+);
+
+-- Indexes
+idx_syllabus_analysis_syllabus_id
+idx_syllabus_analysis_created_at
+```
+
+#### `syllabus_embeddings`
+```sql
+CREATE TABLE syllabus_embeddings (
+  -- Schema not shown but referenced by FK constraint
+  syllabus_id text REFERENCES syllabus_documents(id) ON DELETE CASCADE
+);
+```
+
+### Syllabus Workflow Pattern
+```typescript
+// Upload → Workflow Router
+if (documentType === 'syllabus') {
+  workflowName = 'processSyllabus';
+  taskQueue = 'syllabus-processor';
+  workflowArgs = [
+    userEmail,
+    filename,
+    publicUrl,
+    {
+      ...metadata,
+      existingCourseContextId,  // Optional: reuse course context
+      uploadedAt, mimeType, size, userId, userEmail,
+      predefinedDocumentId,
+      ragie: { partitionKey, documentId }
+    },
+    'in-app' // processingMode
+  ];
+}
+```
+
+### Features
+- ✅ **AI extraction**: Course details, assignments, policies, grading rubrics
+- ✅ **Course context linking**: `existingCourseContextId` reuses existing course
+- ✅ **Embeddings**: Vector search capabilities
+- ✅ **Multiple formats**: PDF, DOCX, TXT, MD, PPT, PPTX, images
+- ✅ **Update My Term**: LLM-powered delta updates to syllabi
+
+---
+
+## 4. ACADEMIC INTELLIGENCE (Canvas Integration) ✅
+
+### Schema: `canvas_*` Tables
+
+#### `canvas_assignments`
+```sql
+CREATE TABLE canvas_assignments (
+  id                           uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
+  canvas_assignment_id         bigint NOT NULL,
+  canvas_instance_id           varchar(255) NOT NULL,
+  course_id                    uuid NOT NULL REFERENCES canvas_courses(id) ON DELETE CASCADE,
+  name                         varchar(500) NOT NULL,
+  description                  text,
+  html_url                     text,
+  due_at                       timestamptz,
+  lock_at                      timestamptz,
+  unlock_at                    timestamptz,
+  created_at_canvas            timestamptz,
+  updated_at_canvas            timestamptz,
+  points_possible              numeric(10,2) DEFAULT 0,
+  grading_type                 varchar(50),
+  submission_types             text[],
+  assignment_group_id          bigint,
+  position                     integer,
+  published                    boolean DEFAULT false,
+  has_overrides                boolean DEFAULT false,
+  only_visible_to_overrides    boolean DEFAULT false,
+  needs_grading_count          integer DEFAULT 0,
+  has_submitted_submissions    boolean DEFAULT false,
+  quiz_id                      bigint,
+  discussion_topic_id          bigint,
+  all_dates                    jsonb,
+  overrides                    jsonb,
+  metadata                     jsonb DEFAULT '{}'::jsonb,
+  synced_at                    timestamptz NOT NULL DEFAULT now(),
+  is_active                    boolean DEFAULT true,
+  created_at                   timestamptz NOT NULL DEFAULT now(),
+  updated_at                   timestamptz NOT NULL DEFAULT now(),
+  preview_url                  text,
+  external_tool_tag_attributes jsonb,
+  is_lti_assignment            boolean GENERATED ALWAYS AS (external_tool_tag_attributes IS NOT NULL AND external_tool_tag_attributes <> '{}'::jsonb) STORED
+);
+
+-- Indexes
+idx_canvas_assignments_course
+idx_canvas_assignments_due_at (WHERE is_active = true)
+idx_canvas_assignments_published (WHERE is_active = true)
+idx_canvas_assignments_is_lti (WHERE is_lti_assignment = true)
+```
+
+#### `canvas_submissions`
+```sql
+CREATE TABLE canvas_submissions (
+  id                               uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
+  canvas_submission_id             bigint NOT NULL,
+  canvas_instance_id               varchar(255) NOT NULL,
+  assignment_id                    uuid NOT NULL REFERENCES canvas_assignments(id) ON DELETE CASCADE,
+  user_id                          uuid NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  attempt                          integer DEFAULT 1,
+  submission_type                  varchar(50),
+  submitted_at                     timestamptz,
+  workflow_state                   varchar(50),
+  score                            numeric(10,2),
+  grade                            varchar(50),
+  grader_id                        bigint,
+  graded_at                        timestamptz,
+  grade_matches_current_submission boolean DEFAULT true,
+  posted_at                        timestamptz,
+  late                             boolean DEFAULT false,
+  missing                          boolean DEFAULT false,
+  excused                          boolean DEFAULT false,
+  late_policy_status               varchar(50),
+  points_deducted                  numeric(10,2),
+  seconds_late                     bigint,
+  body                             text,
+  url                              text,
+  preview_url                      text,
+  submission_comments              jsonb DEFAULT '[]'::jsonb,
+  metadata                         jsonb DEFAULT '{}'::jsonb,
+  synced_at                        timestamptz NOT NULL DEFAULT now(),
+  created_at                       timestamptz NOT NULL DEFAULT now(),
+  updated_at                       timestamptz NOT NULL DEFAULT now()
+);
+
+-- Indexes
+idx_canvas_submissions_assignment
+idx_canvas_submissions_user
+idx_canvas_submissions_graded (WHERE graded_at IS NOT NULL)
+idx_canvas_submissions_late (WHERE late = true)
+idx_canvas_submissions_missing (WHERE missing = true)
+```
+
+#### `canvas_courses`
+```sql
+CREATE TABLE canvas_courses (
+  id                    uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
+  canvas_course_id      bigint NOT NULL,
+  canvas_instance_id    varchar(255) NOT NULL,
+  course_context_id     uuid REFERENCES contexts(id) ON DELETE SET NULL,
+  name                  varchar(500) NOT NULL,
+  course_code           varchar(255),
+  workflow_state        varchar(50),
+  account_id            bigint,
+  enrollment_term_id    bigint,
+  start_at              timestamptz,
+  end_at                timestamptz,
+  created_at_canvas     timestamptz,
+  uuid                  varchar(255),
+  root_account_id       bigint,
+  time_zone             varchar(100),
+  default_view          varchar(50),
+  total_students        integer DEFAULT 0,
+  user_enrollment_type  varchar(50),
+  user_enrollment_state varchar(50),
+  synced_at             timestamptz NOT NULL DEFAULT now(),
+  is_active             boolean DEFAULT true,
+  created_at            timestamptz NOT NULL DEFAULT now(),
+  updated_at            timestamptz NOT NULL DEFAULT now(),
+  canvas_account_id     uuid REFERENCES canvas_accounts(id) ON DELETE CASCADE
+);
+
+-- Indexes
+idx_canvas_courses_context (WHERE course_context_id IS NOT NULL)
+idx_canvas_courses_active (WHERE is_active = true)
+idx_canvas_courses_workflow (WHERE workflow_state IN ('available', 'completed'))
+```
+
+### Gradebook Data: Canvas Submissions
+**Key fields for gradebook:**
+- `score` (numeric) - Points earned
+- `grade` (varchar) - Letter grade or percentage
+- `points_possible` - From canvas_assignments
+- `graded_at` - Timestamp of grading
+- `posted_at` - When grade was posted
+- `late`, `missing`, `excused` - Status flags
+- `late_policy_status`, `points_deducted`, `seconds_late` - Late submission handling
+
+### Assignment Completion Tracking
+```sql
+CREATE TABLE assignment_completion (
+  id                     uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id                uuid NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  assignment_id          text NOT NULL,
+  context_id             uuid REFERENCES contexts(id) ON DELETE SET NULL,
+  completed_at           timestamptz,
+  is_completed           boolean DEFAULT false,
+  completion_source      text, -- 'manual', 'lms_sync', 'inferred', 'onboarding_bulk', 'migration_assumed'
+  external_submission_id text,
+  submission_url         text,
+  graded_at              timestamptz,
+  last_synced_at         timestamptz,
+  actual_minutes         integer,
+  difficulty_rating      integer CHECK (difficulty_rating >= 1 AND difficulty_rating <= 5),
+  notes                  text,
+  created_at             timestamptz NOT NULL DEFAULT now(),
+  updated_at             timestamptz DEFAULT now(),
+  started_at             timestamptz,
+  dismissed              boolean DEFAULT false,
+  dismissed_at           timestamptz
+)
+PARTITION BY RANGE (created_at);
+
+-- Partitions by month: assignment_completion_2025_10, assignment_completion_2025_11, etc.
+
+-- Indexes
+idx_completion_active (WHERE is_completed = false)
+idx_completion_context (WHERE context_id IS NOT NULL)
+idx_completion_covering (user_id, assignment_id) INCLUDE (is_completed, completed_at, actual_minutes, difficulty_rating)
+```
+
+### NO Course Policies Table ❌
+**Investigation result:** NO dedicated `course_policies` table found.
+
+**Likely storage locations:**
+1. `syllabus_analysis.analysis_data` (JSONB) - AI-extracted policies from syllabi
+2. `canvas_courses.metadata` (JSONB) - Course-level policies
+3. `canvas_assignments.metadata` (JSONB) - Assignment-specific guardrails
+4. `braingains_analysis.analysis_data` (JSONB) - Document analysis
+
+**Further investigation needed:**
+- Check `syllabus_analysis.analysis_data` structure for policies
+- Review Temporal syllabus processing workflow outputs
+- Check web implementation: `/dashboard/academic` > Policies tab
+
+---
+
+## 5. TIME BLOCKS & CAPACITY PLANNING ✅
+
+### Schema: `student_time_blocks`
+```sql
+CREATE TABLE student_time_blocks (
+  id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id           uuid NOT NULL,
+  status            time_block_status NOT NULL,
+  start_time        timestamptz NOT NULL,
+  end_time          timestamptz NOT NULL,
+  label             text,
+  type              time_block_type,
+  category          text,
+  source            text,
+  confidence        real DEFAULT 1.0,
+  related_event_ids jsonb,
+  metadata          jsonb,
+  merged_events     jsonb,
+  is_deadline       boolean DEFAULT false,
+  original_type     time_block_type,
+  updated_by        text DEFAULT 'workflow'::text,
+  created_at        timestamptz DEFAULT now(),
+  updated_at        timestamptz DEFAULT now(),
+  dev_tag           text,
+  lifecycle_status  time_block_lifecycle_status DEFAULT 'active'::time_block_lifecycle_status,
+  deleted_at        timestamptz,
+  sync_token        text,
+  day_of_week       integer
+);
+
+-- Indexes
+idx_student_time_blocks_user_id
+idx_student_time_blocks_user_source
+idx_student_time_blocks_lifecycle
+idx_student_time_blocks_completed (WHERE lifecycle_status = 'completed')
+idx_student_time_blocks_course_context (metadata ->> 'course_context_id')
+idx_student_time_blocks_sync_token
+unique_time_block_per_source (user_id, start_time, label, source)
+```
+
+### Features
+- ✅ **Multi-source time blocks**: Calendar, manual, inferred, deadlines
+- ✅ **Capacity calculation**: Sum hours by time range
+- ✅ **Course association**: `metadata->>'course_context_id'`
+- ✅ **Lifecycle tracking**: active, completed, deleted
+- ✅ **Conflict detection**: Overlapping time blocks
+
+### Capacity Planning Algorithm (Inferred)
+```typescript
+// Web implementation likely in:
+// src/lib/academic/capacity.ts or similar
+
+// Needed hours = sum(assignment.estimated_duration_minutes)
+// Scheduled hours = sum(student_time_blocks.duration WHERE course_context_id matches)
+// Gap hours = needed - scheduled
+
+SELECT
+  SUM(EXTRACT(EPOCH FROM (end_time - start_time)) / 3600) as scheduled_hours
+FROM student_time_blocks
+WHERE user_id = $1
+  AND start_time >= $2
+  AND end_time <= $3
+  AND lifecycle_status = 'active'
+  AND metadata->>'course_context_id' = $4;
+```
+
+---
+
+## 6. USER PREFERENCES ✅
+
+### Schema: `user_preferences`
+```sql
+CREATE TABLE user_preferences (
+  id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id    uuid NOT NULL,
+  key        text NOT NULL,
+  value      jsonb NOT NULL DEFAULT '{}'::jsonb,
+  created_at timestamptz DEFAULT now(),
+  updated_at timestamptz DEFAULT now(),
+  UNIQUE (user_id, key)
+);
+
+-- Indexes
+idx_user_preferences_user_id
+idx_user_preferences_key (user_id, key)
+```
+
+### Observed Keys (from real database)
+```sql
+SELECT DISTINCT key FROM user_preferences;
+-- Results:
+-- appBehavior
+-- calendar
+-- notifications
+-- preferences
+-- privacy
+```
+
+### Inferred Structure
+```typescript
+interface UserPreferences {
+  appBehavior: {
+    // iOS-specific preferences?
+    // App behavior settings
+  };
+  calendar: {
+    // Calendar sync preferences
+    // Default calendar ID
+    // Sync frequency
+  };
+  notifications: {
+    // Push notification settings
+    // Email notification settings
+    // In-app notification settings
+  };
+  preferences: {
+    // General user preferences
+    // Theme mode?
+    // Timezone?
+  };
+  privacy: {
+    // Data collection preferences
+    // Privacy settings
+  };
+}
+```
+
+### Missing Preference Types (from iOS code)
+iOS has more granular preference views:
+- `AICommunicationPreferencesView` - Ace personality/tone
+- `AcademicPreferencesView` - Academic settings
+- `AppBehaviorPreferencesView` - App-specific behaviors
+- `ContentPreferencesView` - Content filtering
+- `NotificationPreferencesView` - Notification settings
+- `SocialPreferencesView` - Social features
+- `WellnessPreferencesView` - Wellness tracking
+- `PrivacyPreferencesView` - Privacy controls
+
+**Investigation needed:**
+- Check if these are stored under existing keys or need new schema
+- Review web implementation for preference sync
+- Test if iOS preferences are persisted to backend
+
+---
+
+## 7. TASKS & ASSIGNMENT TRACKING ✅
+
+### Schema: `tasks`
+```sql
+CREATE TABLE tasks (
+  id                         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id                    uuid NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  title                      text NOT NULL,
+  estimated_duration_minutes integer NOT NULL DEFAULT 30,
+  priority                   text NOT NULL DEFAULT 'medium'::text CHECK (priority IN ('low', 'medium', 'high', 'urgent')),
+  course_code                text,
+  due_date                   timestamptz,
+  status                     text NOT NULL DEFAULT 'pending'::text CHECK (status IN ('pending', 'scheduled', 'completed', 'deleted')),
+  scheduled_block_id         uuid REFERENCES student_time_blocks(id) ON DELETE SET NULL,
+  completed_at               timestamptz,
+  source                     text NOT NULL DEFAULT 'manual'::text CHECK (source IN ('manual', 'assignment', 'dayplan', 'ai_suggestion')),
+  assignment_id              uuid,
+  metadata                   jsonb DEFAULT '{}'::jsonb,
+  created_at                 timestamptz NOT NULL DEFAULT now(),
+  updated_at                 timestamptz NOT NULL DEFAULT now()
+);
+
+-- Indexes
+idx_tasks_user_pending (WHERE status = 'pending')
+idx_tasks_user_status (WHERE status <> 'deleted')
+idx_tasks_due_date (WHERE status IN ('pending', 'scheduled') AND due_date IS NOT NULL)
+idx_tasks_scheduled_block (WHERE scheduled_block_id IS NOT NULL)
+
+-- Constraints
+tasks_assignment_xor_manual: assignment_id IS NOT NULL AND source = 'assignment' OR assignment_id IS NULL AND source <> 'assignment'
+tasks_completed_at_required: status = 'completed' AND completed_at IS NOT NULL OR status <> 'completed'
+tasks_estimated_duration_minutes_check: estimated_duration_minutes > 0 AND estimated_duration_minutes <= 480
+```
+
+### Features
+- ✅ **Multi-source tasks**: Manual, Canvas assignments, DayPlan, AI suggestions
+- ✅ **Scheduling**: Links to `student_time_blocks` via `scheduled_block_id`
+- ✅ **Priority levels**: low, medium, high, urgent
+- ✅ **Status tracking**: pending, scheduled, completed, deleted
+- ✅ **Duration estimates**: Max 8 hours (480 minutes)
+- ✅ **Course association**: `course_code` field
+
+---
+
+## 8. INBOX / MESSAGES ❌
+
+### Investigation Result: NO TABLES FOUND
+
+**Tables checked:**
+```bash
+docker exec dormway-postgres-local psql -U dormway_admin -d dormway -c "\dt" | grep -i "inbox\|message\|email\|mail"
+# Result: braingains_chat_messages (NOT inbox messages)
+```
+
+**Conclusion:**
+- **Inbox feature does NOT have database support**
+- Web implementation at `/dashboard/inbox` likely uses:
+  - External API integration (Gmail API planned)
+  - Service data aggregation
+  - Temporary in-memory data
+- **NOT a backend-ready feature for iOS**
+
+**Web code to investigate:**
+- `src/app/dashboard/inbox/page.tsx`
+- `src/lib/inbox/bundleBuilders.ts`
+- `src/lib/inbox/types.ts`
+
+---
+
+## 9. DASHBOARD COMPOSITE API ✅
+
+### Endpoint: `GET /dashboard/v1/composite`
+
+From `dashboard-routes.ts`:
+
+```typescript
+router.get('/v1/composite', authMiddleware, async (req, res) => {
+  const targetUserId = req.query.userId || req.user.id;
+  const tab = req.query.tab || 'home';
+  const context = req.query.context || 'unknown';
+  const startDate = req.query.startDate; // NEW: Date range support
+  const endDate = req.query.endDate;
+
+  // Admin can override with campusId for testing
+  const campusOverride = req.query.campusId;
+
+  // Get complete dashboard data (user or campus-based)
+  const complete = await DashboardAuroraService.getCompleteDashboardData(
+    targetUserId,
+    context,
+    { startDate, endDate }
+  );
+
+  // Transform to composite response
+  const body = await transformToDashboardCompositeV1({
+    complete,
+    context,
+    tab,
+    since: req.query.since,
+    requestId: req.headers['x-request-id'],
+    userId: targetUserId
+  });
+
+  // ETag caching with adjuncts
+  const etag = computeDashboardEtag({
+    version: body.version,
+    tab,
+    context,
+    widgets: body.widgets,
+    adjuncts: {
+      scheduleSummary: summarizeScheduleForEtag(body.schedule),
+      weatherSummary: summarizeWeatherForEtag(body.weather),
+      dayPlanSummary: summarizeDayPlanForEtag(complete.data.dayPlan),
+      dueSoonSummary: summarizeDueSoonForEtag(body.dueSoon)
+    }
+  });
+
+  res.setHeader('ETag', etag);
+  res.json(body);
+});
+```
+
+### Data Sources Aggregated
+Based on service code:
+- **User profile** (`accounts` table)
+- **Campus context** (`contexts` where type='campus')
+- **City context** (`contexts` where type='city')
+- **Weather data** (`service_data` with method='processed_city_weather_context')
+- **Schedule** (`student_time_blocks`, `service_data` calendar events)
+- **DayPlan** (`service_data` with method='dayplan')
+- **Due Soon** (canvas_assignments with upcoming due dates)
+- **Student intelligence** (processed AI insights)
+
+### iOS Dashboard Store
+**Does iOS use this API?**
+- iOS has `DashboardStore.swift` with ETag caching
+- Calls `/dashboard/v1/composite?tab=<tab>`
+- Supports tab-specific snapshots (home, campus, me)
+- Merges real-time delta updates from Ably
+
+**Parity:**
+✅ Both use same BFF endpoint
+✅ Both support ETag caching
+✅ Both receive delta updates via Ably
+⚠️ Web may have more tab types or context values
+
+---
+
+## 10. SERVICE DATA (Partitioned) ✅
+
+### Schema: `service_data` (Partitioned by `fetched_at`)
+```sql
+CREATE TABLE service_data (
+  id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  service_id   uuid REFERENCES external_services(id),
+  user_id      uuid,
+  data         jsonb NOT NULL,
+  fetched_at   timestamptz NOT NULL DEFAULT now(),
+  context_id   uuid,
+  method       text,
+  json_version integer NOT NULL DEFAULT 1,
+  dev_tag      text,
+  created_at   timestamptz DEFAULT now(),
+  expires_at   timestamptz
+)
+PARTITION BY RANGE (fetched_at);
+
+-- Partitions (monthly):
+-- service_data_2025_04
+-- service_data_2025_05
+-- service_data_2025_06
+-- service_data_2025_07
+-- service_data_default
+
+-- Indexes
+idx_service_data_context_id
+idx_service_data_method (WHERE method IS NOT NULL)
+idx_service_data_plugin_context_method (context_id, method, fetched_at DESC WHERE context_id IS NOT NULL AND method LIKE 'plugin:%')
+idx_service_data_plugin_alerts_lookup (context_id, method, data->>'id', fetched_at DESC WHERE method LIKE 'plugin:%:alerts')
+idx_service_data_plugin_dining_lookup (context_id, method, data->>'hallId', fetched_at DESC WHERE method LIKE 'plugin:%:dining')
+idx_service_data_plugin_events_lookup (context_id, method, data->>'id', fetched_at DESC WHERE method LIKE 'plugin:%:events')
+```
+
+### Observed Methods
+From dashboard routes and service queries:
+- `processed_city_weather_context` - Weather data
+- `dayplan` - Daily plan with events/actions
+- `dayplan_context_update` - Context change notifications
+- `context_prediction_response` - AI context predictions
+- `processed_syllabus` - Syllabus processing results
+- `plugin:<name>:alerts` - Plugin alert data
+- `plugin:<name>:dining` - Dining hall data
+- `plugin:<name>:events` - Campus events
+- `plugin:<name>:transit` - Transit schedules
+
+### Query Patterns
+```sql
+-- Get recent user service data (efficient with partition pruning)
+SELECT id, method, data, fetched_at
+FROM service_data
+WHERE user_id = $1
+  AND fetched_at >= '2025-11-01'  -- Partition key for fast scan
+ORDER BY fetched_at DESC
+LIMIT 20;
+
+-- Get campus context data (weather, events)
+SELECT data
+FROM service_data
+WHERE context_id = $1
+  AND method = 'processed_city_weather_context'
+ORDER BY fetched_at DESC
+LIMIT 1;
+```
+
+---
+
+## 11. API ENDPOINT INVENTORY
+
+### Notes Endpoints (`/api/notes`)
+| Method | Path | Features |
+|--------|------|----------|
+| POST | `/sync` | Conflict resolution, revision tracking, Ragie sync |
+| GET | `/recent` | Pagination, course filter |
+| GET | `/:noteId` | Single note fetch |
+| POST | `/` | Create note |
+| DELETE | `/:noteId` | Delete + Ragie cleanup |
+
+### BrainGains Endpoints (`/api/braingains`)
+| Method | Path | Features |
+|--------|------|----------|
+| POST | `/documents` | Upload (file/text), workflow routing, Ragie index |
+| POST | `/documents/update-term` | LLM classification, syllabus overlay |
+| GET | `/query` | RAG search across documents |
+| GET | `/documents` | List user documents (pagination) |
+| GET | `/documents/my-files` | Own + shared docs, course filter |
+| GET | `/documents/:id` | Single document |
+| DELETE | `/documents/:id` | Delete doc + S3 cleanup |
+| GET | `/usage` | Usage statistics |
+| GET | `/documents/update-term/:contextId` | Get merged syllabus |
+
+### Dashboard Endpoints (`/dashboard`)
+| Method | Path | Features |
+|--------|------|----------|
+| GET | `/v1/composite` | BFF aggregation, ETag caching, date range |
+| GET | `/activity` | Recent user/school activity |
+| POST | `/invalidate-cache` | Admin cache reset |
+| GET | `/raw-data/:dataType` | Admin raw data access |
+| GET | `/campus-weather/:campusId` | Campus weather (processed or raw) |
+| POST | `/admin/refresh-city-weather/:cityId` | Fetch fresh weather from OpenWeather |
+| POST | `/admin/refresh-campus-weather/:campusId` | Campus weather refresh |
+| GET | `/v1/diagnostics` | Admin ETag diagnostics |
+| POST | `/v1/notify/dayplan` | Admin recompute + delta publish |
+
+### Canvas Endpoints (Inferred from routes)
+Likely in `canvas-routes.ts` (not fully read):
+- Assignment sync
+- Grade sync
+- Course sync
+- OAuth connection flow
+
+### Assignment Completion Endpoints
+Likely in `assignment-completion-routes.ts` (not fully read):
+- Mark complete
+- Get completion status
+- Sync with LMS
+
+### Task Endpoints
+Likely in `task-routes.ts` (not fully read):
+- Create task
+- Update task
+- Delete task
+- Schedule task (link to time block)
+
+---
+
+## 12. MISSING FEATURE BACKENDS
+
+### ❌ Inbox / Messages
+**Status:** NO DATABASE SUPPORT
+**Tables:** None found
+**API:** No endpoints discovered
+**Conclusion:** Feature is either:
+1. Planned but not implemented
+2. Uses external Gmail API without local persistence
+3. Mocked in web UI only
+
+### ❌ Academic Timeline (3-week lookahead)
+**Status:** UNKNOWN
+**Investigation needed:**
+- Check if `service_data` with method='timeline' exists
+- Review web implementation: `/dashboard/academic` > Timeline tab
+- Check if data is computed client-side from assignments
+
+### ❌ Course Policies Table
+**Status:** NO DEDICATED TABLE
+**Likely stored in:**
+- `syllabus_analysis.analysis_data` (JSONB)
+- `canvas_assignments.metadata` (JSONB)
+- `braingains_analysis.analysis_data` (JSONB)
+
+**Investigation needed:**
+- Sample `syllabus_analysis.analysis_data` structure
+- Check Temporal syllabus workflow outputs
+- Review web policies tab implementation
+
+---
+
+## 13. NEXT INVESTIGATION STEPS
+
+### Immediate Priority (Phase 2)
+1. **Sample real data from key tables:**
+   ```sql
+   SELECT analysis_data FROM syllabus_analysis LIMIT 1; -- Check policy structure
+   SELECT data FROM service_data WHERE method = 'dayplan' LIMIT 1; -- Check timeline data
+   SELECT value FROM user_preferences WHERE key = 'preferences' LIMIT 1; -- Check pref structure
+   ```
+
+2. **Map iOS preference keys to backend:**
+   - Check if iOS `AICommunicationPreferences` maps to `user_preferences.preferences`
+   - Test preference sync between iOS and web
+
+3. **Investigate missing features:**
+   - Academic Timeline: Client-computed or server API?
+   - Inbox: Confirm if Gmail API integration exists
+   - Policies: Extract sample from `syllabus_analysis`
+
+4. **Test API endpoints with real data:**
+   ```bash
+   # Notes API
+   curl -X POST localhost:3001/api/notes/recent -H "x-user-id: test-user"
+
+   # BrainGains my-files
+   curl localhost:3001/api/braingains/documents/my-files -H "x-user-id: test-user"
+
+   # Dashboard composite
+   curl "localhost:3001/dashboard/v1/composite?tab=home" -H "x-user-id: test-user"
+   ```
+
+### Medium Priority (Phase 3)
+5. **Review unread API routes:**
+   - `canvas-routes.ts`
+   - `assignment-completion-routes.ts`
+   - `task-routes.ts`
+   - `semester-routes.ts`
+   - `ace-llm-routes.ts`
+
+6. **Check iOS API integration:**
+   - Search iOS codebase for API endpoint usage
+   - Map iOS services to backend routes
+   - Identify missing iOS API calls
+
+7. **Database performance:**
+   - Check query plans for common queries
+   - Verify indexes are used
+   - Test partition pruning on `service_data`
+
+---
+
+## 14. CONCLUSIONS
+
+### ✅ Backend-Ready Features
+1. **Notes System** - Full CRUD, sync, revisions, Ragie integration
+2. **BrainGains/Ace** - Documents, chat, RAG queries, syllabus processing
+3. **Canvas Integration** - Assignments, submissions, grades, courses
+4. **Time Blocks** - Capacity planning, scheduling, conflict detection
+5. **User Preferences** - Generic key-value store (needs structure definition)
+6. **Tasks** - Multi-source task tracking with scheduling
+7. **Dashboard Composite** - BFF with ETag caching, real-time deltas
+
+### ❌ NOT Backend-Ready
+1. **Inbox/Messages** - No database tables, no API endpoints
+2. **Course Policies (dedicated table)** - Stored in JSONB, not separate table
+3. **Academic Timeline (confirmed)** - Unknown if API exists or client-computed
+
+### ⚠️ Needs Investigation
+1. **Academic Timeline** - Check if data exists in `service_data`
+2. **Gradebook (detailed view)** - Canvas submissions have all data, check web UI
+3. **Capacity Bar** - Algorithm likely client-side, verify with web code
+4. **Policy Guardrails** - Extract from `syllabus_analysis` or `braingains_analysis`
+5. **Preference Schema** - Define structure for iOS/web parity
+
+---
+
+**Next Document:** API-Coverage-Matrix - Map features to endpoints with examples

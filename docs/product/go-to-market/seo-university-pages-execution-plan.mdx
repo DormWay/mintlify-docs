@@ -1,0 +1,566 @@
+---
+title: "SEO University Pages   Execution Plan"
+description: "We already have the infrastructure. Just need to: 1. Build Next.js pages at `/universities/[slug]` 2. Connect to existing Temporal workflows 3. Deploy and le..."
+---
+
+# SEO University Pages - Execution Plan
+
+> **Goal**: Deploy 6,134 SEO-optimized university landing pages to capture organic search traffic for "{University} syllabus tools" queries
+
+## Quick Summary
+
+We already have the infrastructure. Just need to:
+1. Build Next.js pages at `/universities/[slug]`
+2. Connect to existing Temporal workflows
+3. Deploy and let automation handle enrichment
+
+## Phase 1: Frontend Pages (Day 1-2)
+
+### 1.1 Create Dynamic Route Structure
+
+```bash
+# Create the directory structure
+mkdir -p services/dormway-lockedin/src/app/universities/[slug]
+```
+
+#### File: `app/universities/[slug]/page.tsx`
+```typescript
+import { Metadata } from 'next';
+import { notFound } from 'next/navigation';
+import { getCampusBySlug, triggerEnrichment } from '@/lib/campus';
+
+export async function generateMetadata({ params }): Promise<Metadata> {
+  const campus = await getCampusBySlug(params.slug);
+  if (!campus) return {};
+
+  return {
+    title: `${campus.name} - Syllabus Management & Semester Planning | DormWay`,
+    description: `DormWay helps ${campus.name} students stay organized with AI-powered syllabus analysis. Upload your syllabus and get instant insights.`,
+    openGraph: {
+      title: `${campus.name} on DormWay`,
+      description: `Join students at ${campus.name} using DormWay for smarter semester planning`,
+      images: [`/api/og?university=${encodeURIComponent(campus.name)}`],
+    },
+  };
+}
+
+export async function generateStaticParams() {
+  // Generate all 6,134 pages at build time
+  const campuses = await db.query(
+    `SELECT id, name FROM contexts WHERE type = 'campus'`
+  );
+
+  return campuses.map(campus => ({
+    slug: generateSlug(campus.name)
+  }));
+}
+
+export default async function UniversityPage({ params }) {
+  const campus = await getCampusBySlug(params.slug);
+
+  if (!campus) notFound();
+
+  // Trigger enrichment if needed (non-blocking)
+  if (!campus.enrichment_data?.lastUpdated) {
+    await triggerEnrichment(campus.id);
+  }
+
+  const enrichment = campus.enrichment_data || {};
+
+  return (
+    <UniversityPageLayout
+      campus={campus}
+      enrichment={enrichment}
+      isEnriched={!!enrichment.lastUpdated}
+    />
+  );
+}
+```
+
+### 1.2 Create Campus Library Functions
+
+#### File: `lib/campus.ts`
+```typescript
+import { getTemporalClient } from '@/lib/temporal';
+
+export function generateSlug(universityName: string): string {
+  return universityName
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/(^-|-$)/g, '');
+}
+
+export async function getCampusBySlug(slug: string) {
+  const result = await db.query(`
+    SELECT
+      c.*,
+      ci.name as city_name,
+      ci.state as state_name,
+      c.enrichment_data
+    FROM contexts c
+    LEFT JOIN contexts ci ON ci.id = c.parent_id AND ci.type = 'city'
+    WHERE c.type = 'campus'
+    AND LOWER(REPLACE(c.name, ' ', '-')) = $1
+  `, [slug]);
+
+  return result.rows[0];
+}
+
+export async function triggerEnrichment(campusId: string) {
+  try {
+    const client = await getTemporalClient();
+
+    // Start workflow but don't wait for completion
+    await client.workflow.start('batchCampusEnrichment', {
+      args: [{
+        campusIds: [campusId],
+        options: {
+          dataTypes: ['metadata', 'calendar', 'housing']
+        }
+      }],
+      taskQueue: 'campus-worker',
+      workflowId: `enrich-campus-${campusId}`,
+    });
+  } catch (error) {
+    // Log but don't block page load
+    console.error('Failed to trigger enrichment:', error);
+  }
+}
+
+export async function getCampusStats(campusId: string) {
+  const result = await db.query(`
+    SELECT
+      COUNT(DISTINCT s.id) as syllabi_count,
+      COUNT(DISTINCT s.user_id) as student_count,
+      array_agg(DISTINCT s.course_code) as popular_courses
+    FROM syllabi s
+    WHERE s.campus_id = $1
+    GROUP BY s.campus_id
+  `, [campusId]);
+
+  return result.rows[0] || {};
+}
+```
+
+### 1.3 Create Page Components
+
+#### File: `components/university/UniversityPageLayout.tsx`
+```typescript
+export function UniversityPageLayout({ campus, enrichment, isEnriched }) {
+  return (
+    <div className="min-h-screen">
+      {/* Hero Section */}
+      <UniversityHero campus={campus} />
+
+      {/* Dynamic Content Based on Enrichment Status */}
+      {isEnriched ? (
+        <EnrichedContent campus={campus} data={enrichment} />
+      ) : (
+        <SkeletonContent campus={campus} />
+      )}
+
+      {/* CTA Section */}
+      <UniversityCTA campus={campus} />
+
+      {/* SEO Footer */}
+      <UniversitySEOFooter campus={campus} />
+    </div>
+  );
+}
+```
+
+#### File: `components/university/SkeletonContent.tsx`
+```typescript
+export function SkeletonContent({ campus }) {
+  return (
+    <div className="container mx-auto px-4 py-12">
+      <div className="grid md:grid-cols-2 gap-8">
+        {/* Basic Info */}
+        <div>
+          <h2 className="text-2xl font-bold mb-4">About {campus.name}</h2>
+          <p className="text-gray-600">
+            {campus.city_name}, {campus.state_name}
+          </p>
+        </div>
+
+        {/* Generic CTA */}
+        <div className="bg-blue-50 p-6 rounded-lg">
+          <h3 className="text-xl font-bold mb-3">
+            Get Your Semester Plan
+          </h3>
+          <p className="mb-4">
+            Upload your {campus.name} syllabus and get instant insights
+          </p>
+          <EmailSyllabusCTA universityName={campus.name} />
+        </div>
+      </div>
+
+      {/* Loading indicator for enrichment */}
+      <div className="mt-8 p-4 bg-gray-100 rounded">
+        <p className="text-sm text-gray-500">
+          📊 Detailed campus data loading...
+        </p>
+      </div>
+    </div>
+  );
+}
+```
+
+#### File: `components/university/EnrichedContent.tsx`
+```typescript
+export function EnrichedContent({ campus, data }) {
+  return (
+    <div className="container mx-auto px-4 py-12">
+      {/* Academic Calendar */}
+      {data.terms && (
+        <AcademicCalendarSection terms={data.terms} />
+      )}
+
+      {/* Campus Stats */}
+      {data.enrollment && (
+        <CampusStatsSection
+          enrollment={data.enrollment}
+          campusType={data.campusType}
+        />
+      )}
+
+      {/* Popular Majors */}
+      {data.popularMajors && (
+        <PopularMajorsSection majors={data.popularMajors} />
+      )}
+
+      {/* Housing Info */}
+      {data.housing && (
+        <HousingSection dorms={data.housing} />
+      )}
+
+      {/* Nearby Universities */}
+      {data.nearbyUniversities && (
+        <NearbyUniversitiesSection
+          universities={data.nearbyUniversities}
+        />
+      )}
+
+      {/* DormWay Stats */}
+      <DormWayStatsSection campusId={campus.id} />
+    </div>
+  );
+}
+```
+
+## Phase 2: Connect to Temporal (Day 2)
+
+### 2.1 Add Temporal Client to Next.js
+
+#### File: `lib/temporal.ts`
+```typescript
+import { Connection, WorkflowClient } from '@temporalio/client';
+
+let client: WorkflowClient | null = null;
+
+export async function getTemporalClient(): Promise<WorkflowClient> {
+  if (!client) {
+    const connection = await Connection.connect({
+      address: process.env.TEMPORAL_ADDRESS || 'localhost:7233',
+    });
+
+    client = new WorkflowClient({
+      connection,
+      namespace: 'default',
+    });
+  }
+
+  return client;
+}
+```
+
+### 2.2 Create API Route for Manual Enrichment
+
+#### File: `app/api/campus/enrich/route.ts`
+```typescript
+export async function POST(request: Request) {
+  const { campusId } = await request.json();
+
+  const client = await getTemporalClient();
+
+  const handle = await client.workflow.start('batchCampusEnrichment', {
+    args: [{
+      campusIds: [campusId],
+      options: {
+        dataTypes: ['metadata', 'calendar', 'housing', 'seo']
+      }
+    }],
+    taskQueue: 'campus-worker',
+    workflowId: `manual-enrich-${campusId}-${Date.now()}`,
+  });
+
+  return Response.json({
+    workflowId: handle.workflowId,
+    status: 'started'
+  });
+}
+```
+
+## Phase 3: Add SEO Activity (Day 2-3)
+
+### 3.1 Create New SEO Enrichment Activity
+
+#### File: `services/engine/src/activities/campusSEO.activities.ts`
+```typescript
+import { PerplexityService } from '../services/perplexity';
+
+export async function fetchCampusSEOContent(
+  campusId: string,
+  campusName: string,
+  city: string,
+  state: string
+): Promise<any> {
+  const perplexity = new PerplexityService();
+
+  // Fetch SEO-specific content
+  const queries = [
+    `What are the most popular majors and programs at ${campusName}?`,
+    `What makes ${campusName} unique compared to other universities?`,
+    `What notable alumni graduated from ${campusName}?`,
+    `List other universities within 50 miles of ${campusName} in ${city}, ${state}`,
+  ];
+
+  const results = await Promise.all(
+    queries.map(q => perplexity.query(q))
+  );
+
+  const seoContent = {
+    popularMajors: parsePrograms(results[0]),
+    uniqueFeatures: parseFeatures(results[1]),
+    notableAlumni: parseAlumni(results[2]),
+    nearbyUniversities: parseNearby(results[3]),
+    lastUpdated: new Date().toISOString(),
+  };
+
+  // Store in enrichment_data JSONB
+  await db.query(`
+    UPDATE contexts
+    SET enrichment_data =
+      COALESCE(enrichment_data, '{}'::jsonb) || $2::jsonb
+    WHERE id = $1
+  `, [campusId, JSON.stringify({ seo: seoContent })]);
+
+  return seoContent;
+}
+```
+
+### 3.2 Add to Workflow
+
+#### File: `services/engine/src/workflows/batchCampusEnrichment.workflow.ts`
+Add to the existing workflow:
+
+```typescript
+// In the dataTypes handling section
+if (dataTypes.includes('seo')) {
+  await enrichmentActivities.fetchCampusSEOContent(
+    campusId,
+    campusDetails.campus_name,
+    campusDetails.city_name,
+    campusDetails.state_name
+  );
+  enrichmentSuccess = true;
+  console.log(`Successfully enriched SEO content for campus ${campusId}`);
+}
+```
+
+## Phase 4: Deploy & Monitor (Day 3)
+
+### 4.1 Build and Deploy
+
+```bash
+# Build the Next.js app with all static pages
+cd services/dormway-lockedin
+npm run build
+
+# This will pre-generate all 6,134 pages at build time
+# Deploy to Vercel/production
+```
+
+### 4.2 Start Background Enrichment
+
+```typescript
+// One-time script to start daily enrichment
+const client = await getTemporalClient();
+
+// Schedule daily enrichment of stale campuses
+await client.workflow.start('enrichStalesCampuses', {
+  args: [7, 500], // Enrich 500 campuses not updated in 7 days
+  taskQueue: 'campus-worker',
+  workflowId: 'daily-campus-enrichment',
+  cronSchedule: '0 2 * * *', // 2 AM daily
+});
+
+// Kick off initial enrichment of top universities
+const topUniversities = [
+  'harvard', 'mit', 'stanford', 'yale', 'princeton',
+  'columbia', 'penn', 'cornell', 'brown', 'dartmouth',
+  // ... add top 100
+];
+
+await client.workflow.start('batchCampusEnrichment', {
+  args: [{
+    campusIds: topUniversities,
+    options: {
+      dataTypes: ['metadata', 'calendar', 'housing', 'seo']
+    }
+  }],
+  taskQueue: 'campus-worker',
+  workflowId: 'initial-top-universities',
+});
+```
+
+### 4.3 Monitor Progress
+
+```sql
+-- Check enrichment progress
+SELECT
+  COUNT(*) as total,
+  COUNT(enrichment_data) as enriched,
+  COUNT(*) - COUNT(enrichment_data) as pending,
+  ROUND((COUNT(enrichment_data)::float / COUNT(*)) * 100, 2) as percent_complete
+FROM contexts
+WHERE type = 'campus';
+
+-- Check recent enrichments
+SELECT
+  name,
+  enrichment_data->>'lastUpdated' as last_updated,
+  jsonb_array_length(enrichment_data->'seo'->'popularMajors') as majors_count
+FROM contexts
+WHERE type = 'campus'
+AND enrichment_data IS NOT NULL
+ORDER BY enrichment_data->>'lastUpdated' DESC
+LIMIT 10;
+```
+
+## Phase 5: SEO Optimization (Ongoing)
+
+### 5.1 Generate Sitemap
+
+#### File: `app/sitemap.ts`
+```typescript
+export default async function sitemap() {
+  const campuses = await db.query(`
+    SELECT name, updated_at
+    FROM contexts
+    WHERE type = 'campus'
+  `);
+
+  const universityPages = campuses.map(campus => ({
+    url: `https://dormway.app/universities/${generateSlug(campus.name)}`,
+    lastModified: campus.updated_at,
+    changeFrequency: 'weekly',
+    priority: 0.8,
+  }));
+
+  return [
+    {
+      url: 'https://dormway.app',
+      priority: 1.0,
+    },
+    {
+      url: 'https://dormway.app/universities',
+      priority: 0.9,
+    },
+    ...universityPages,
+  ];
+}
+```
+
+### 5.2 Create University Index Page
+
+#### File: `app/universities/page.tsx`
+```typescript
+export default async function UniversitiesIndexPage() {
+  const states = await getStatesWithCampusCount();
+
+  return (
+    <div>
+      <h1>Universities on DormWay</h1>
+      <p>6,134 schools across the United States</p>
+
+      {/* State-based navigation for SEO */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        {states.map(state => (
+          <Link
+            key={state.code}
+            href={`/universities/state/${state.code}`}
+          >
+            {state.name} ({state.count} schools)
+          </Link>
+        ))}
+      </div>
+
+      {/* Popular universities for SEO */}
+      <TopUniversitiesList />
+
+      {/* Search box */}
+      <UniversitySearch />
+    </div>
+  );
+}
+```
+
+## Success Metrics & Timeline
+
+### Immediate (Day 1)
+- [ ] Deploy skeleton pages for all 6,134 universities
+- [ ] Basic SEO metadata working
+- [ ] Pages are indexable by Google
+
+### Week 1
+- [ ] Top 100 universities enriched
+- [ ] Temporal workflows running automatically
+- [ ] First organic traffic arriving
+
+### Week 2
+- [ ] 1,000+ universities enriched
+- [ ] Google indexing majority of pages
+- [ ] Conversion tracking in place
+
+### Month 1
+- [ ] 3,000+ universities enriched (50%)
+- [ ] Measurable organic traffic growth
+- [ ] First conversions from university pages
+
+### Month 2
+- [ ] 5,000+ universities enriched (80%)
+- [ ] Ranking for long-tail university queries
+- [ ] Optimize based on traffic data
+
+## Cost Analysis
+
+- **Perplexity API**: ~$0.01 per campus × 6,134 = ~$61 total
+- **Vercel Hosting**: Minimal increase (static pages)
+- **Database Storage**: ~10MB additional JSONB data
+- **Total One-Time Cost**: <$100
+
+## Monitoring Dashboard
+
+```sql
+-- Create view for monitoring
+CREATE VIEW campus_enrichment_status AS
+SELECT
+  DATE(enrichment_data->>'lastUpdated') as enriched_date,
+  COUNT(*) as campuses_enriched,
+  AVG(JSONB_ARRAY_LENGTH(enrichment_data->'seo'->'popularMajors')) as avg_majors,
+  AVG(JSONB_ARRAY_LENGTH(enrichment_data->'seo'->'nearbyUniversities')) as avg_nearby
+FROM contexts
+WHERE type = 'campus'
+AND enrichment_data IS NOT NULL
+GROUP BY DATE(enrichment_data->>'lastUpdated')
+ORDER BY enriched_date DESC;
+```
+
+## Notes
+
+- The Temporal infrastructure already handles rate limiting, retries, and batching
+- Pages will progressively improve as enrichment happens in background
+- Focus manual enrichment on high-traffic universities first
+- Monitor Google Search Console for indexing progress
+- A/B test different CTA placements for conversion optimization

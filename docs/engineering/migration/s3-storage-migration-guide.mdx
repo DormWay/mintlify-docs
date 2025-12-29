@@ -1,0 +1,576 @@
+---
+title: "S3 Storage Migration Guide"
+description: "This guide covers migrating from Supabase Storage to AWS S3 for file storage, including bucket setup, migration process, and application updates."
+---
+
+# S3 Storage Migration Guide
+
+## Overview
+This guide covers migrating from Supabase Storage to AWS S3 for file storage, including bucket setup, migration process, and application updates.
+
+## Current State (Supabase Storage)
+- Storage buckets: avatars, documents, calendars, dining-images
+- Total size: ~5GB (estimate)
+- Access pattern: Public URLs with transformations
+- File types: Images (JPG, PNG), Documents (PDF), Calendar files (ICS)
+
+## Target State (AWS S3)
+- Primary bucket: `dormway-uploads-{env}`
+- CloudFront CDN for delivery
+- Presigned URLs for secure uploads
+- S3 Transfer Acceleration for faster uploads
+
+## S3 Bucket Configuration
+
+### 1. Bucket Creation (Terraform)
+```hcl
+# s3.tf
+resource "aws_s3_bucket" "uploads" {
+  bucket = "dormway-uploads-${var.environment}"
+  
+  tags = {
+    Name        = "DormWay Uploads"
+    Environment = var.environment
+  }
+}
+
+resource "aws_s3_bucket_versioning" "uploads" {
+  bucket = aws_s3_bucket.uploads.id
+  
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+resource "aws_s3_bucket_lifecycle_configuration" "uploads" {
+  bucket = aws_s3_bucket.uploads.id
+  
+  rule {
+    id     = "delete-old-versions"
+    status = "Enabled"
+    
+    noncurrent_version_expiration {
+      noncurrent_days = 30
+    }
+  }
+  
+  rule {
+    id     = "intelligent-tiering"
+    status = "Enabled"
+    
+    transition {
+      days          = 30
+      storage_class = "INTELLIGENT_TIERING"
+    }
+  }
+}
+
+resource "aws_s3_bucket_cors_configuration" "uploads" {
+  bucket = aws_s3_bucket.uploads.id
+  
+  cors_rule {
+    allowed_headers = ["*"]
+    allowed_methods = ["GET", "PUT", "POST", "DELETE", "HEAD"]
+    allowed_origins = [
+      "https://app.dormway.app",
+      "http://localhost:3000",
+      "capacitor://localhost",
+      "ionic://localhost"
+    ]
+    expose_headers  = ["ETag"]
+    max_age_seconds = 3000
+  }
+}
+
+resource "aws_s3_bucket_public_access_block" "uploads" {
+  bucket = aws_s3_bucket.uploads.id
+  
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+```
+
+### 2. CloudFront Distribution
+```hcl
+# cloudfront.tf
+resource "aws_cloudfront_distribution" "uploads_cdn" {
+  origin {
+    domain_name = aws_s3_bucket.uploads.bucket_regional_domain_name
+    origin_id   = "S3-${aws_s3_bucket.uploads.id}"
+    
+    s3_origin_config {
+      origin_access_identity = aws_cloudfront_origin_access_identity.uploads.cloudfront_access_identity_path
+    }
+  }
+  
+  enabled             = true
+  is_ipv6_enabled     = true
+  default_root_object = "index.html"
+  
+  aliases = ["cdn.dormway.app"]
+  
+  default_cache_behavior {
+    allowed_methods  = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]
+    cached_methods   = ["GET", "HEAD", "OPTIONS"]
+    target_origin_id = "S3-${aws_s3_bucket.uploads.id}"
+    
+    forwarded_values {
+      query_string = true
+      headers      = ["Origin", "Access-Control-Request-Headers", "Access-Control-Request-Method"]
+      
+      cookies {
+        forward = "none"
+      }
+    }
+    
+    viewer_protocol_policy = "redirect-to-https"
+    min_ttl                = 0
+    default_ttl            = 3600
+    max_ttl                = 86400
+  }
+  
+  viewer_certificate {
+    acm_certificate_arn = aws_acm_certificate.cdn_cert.arn
+    ssl_support_method  = "sni-only"
+  }
+}
+```
+
+### 3. IAM Policies
+```hcl
+# iam-s3.tf
+resource "aws_iam_policy" "s3_upload_policy" {
+  name = "dormway-s3-upload-policy"
+  
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:PutObject",
+          "s3:PutObjectAcl",
+          "s3:GetObject",
+          "s3:DeleteObject"
+        ]
+        Resource = "${aws_s3_bucket.uploads.arn}/*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:ListBucket"
+        ]
+        Resource = aws_s3_bucket.uploads.arn
+      }
+    ]
+  })
+}
+```
+
+## Migration Process
+
+### 1. Data Export Script
+```javascript
+// scripts/export-supabase-files.js
+const { createClient } = require('@supabase/supabase-js');
+const fs = require('fs');
+const path = require('path');
+
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_KEY
+);
+
+async function exportFiles() {
+  const buckets = ['avatars', 'documents', 'calendars', 'dining-images'];
+  const manifest = [];
+  
+  for (const bucket of buckets) {
+    const { data: files, error } = await supabase.storage
+      .from(bucket)
+      .list('', { limit: 1000, offset: 0 });
+    
+    if (error) {
+      console.error(`Error listing ${bucket}:`, error);
+      continue;
+    }
+    
+    for (const file of files) {
+      const filePath = `${bucket}/${file.name}`;
+      const { data, error } = await supabase.storage
+        .from(bucket)
+        .download(file.name);
+      
+      if (error) {
+        console.error(`Error downloading ${filePath}:`, error);
+        continue;
+      }
+      
+      // Save locally
+      const localPath = path.join('./export', filePath);
+      await fs.promises.mkdir(path.dirname(localPath), { recursive: true });
+      await fs.promises.writeFile(localPath, data);
+      
+      manifest.push({
+        bucket,
+        key: file.name,
+        size: file.metadata?.size,
+        contentType: file.metadata?.mimetype,
+        lastModified: file.updated_at
+      });
+      
+      console.log(`Exported: ${filePath}`);
+    }
+  }
+  
+  // Save manifest
+  await fs.promises.writeFile(
+    './export/manifest.json',
+    JSON.stringify(manifest, null, 2)
+  );
+  
+  console.log(`Exported ${manifest.length} files`);
+}
+
+exportFiles().catch(console.error);
+```
+
+### 2. S3 Import Script
+```javascript
+// scripts/import-to-s3.js
+const AWS = require('aws-sdk');
+const fs = require('fs');
+const path = require('path');
+const mime = require('mime-types');
+
+const s3 = new AWS.S3({
+  region: process.env.AWS_REGION
+});
+
+const BUCKET_NAME = `dormway-uploads-${process.env.ENVIRONMENT}`;
+
+async function importFiles() {
+  const manifest = JSON.parse(
+    await fs.promises.readFile('./export/manifest.json', 'utf8')
+  );
+  
+  for (const file of manifest) {
+    const localPath = path.join('./export', file.bucket, file.key);
+    const s3Key = `${file.bucket}/${file.key}`;
+    
+    try {
+      const fileContent = await fs.promises.readFile(localPath);
+      const contentType = file.contentType || mime.lookup(file.key) || 'application/octet-stream';
+      
+      await s3.putObject({
+        Bucket: BUCKET_NAME,
+        Key: s3Key,
+        Body: fileContent,
+        ContentType: contentType,
+        Metadata: {
+          'original-bucket': file.bucket,
+          'migrated-from': 'supabase',
+          'migrated-at': new Date().toISOString()
+        }
+      }).promise();
+      
+      console.log(`Uploaded: ${s3Key}`);
+    } catch (error) {
+      console.error(`Error uploading ${s3Key}:`, error);
+    }
+  }
+  
+  console.log('Import complete');
+}
+
+importFiles().catch(console.error);
+```
+
+### 3. Database URL Updates
+```sql
+-- Update avatar URLs
+UPDATE users 
+SET avatar_url = REPLACE(
+  avatar_url,
+  'https://your-project.supabase.co/storage/v1/object/public/avatars/',
+  'https://cdn.dormway.app/avatars/'
+)
+WHERE avatar_url LIKE '%supabase.co%';
+
+-- Update document URLs
+UPDATE uploads
+SET file_url = REPLACE(
+  file_url,
+  'https://your-project.supabase.co/storage/v1/object/public/documents/',
+  'https://cdn.dormway.app/documents/'
+)
+WHERE file_url LIKE '%supabase.co%';
+
+-- Update dining place images
+UPDATE dining_places
+SET image_url = REPLACE(
+  image_url,
+  'https://your-project.supabase.co/storage/v1/object/public/dining-images/',
+  'https://cdn.dormway.app/dining-images/'
+)
+WHERE image_url LIKE '%supabase.co%';
+```
+
+## Application Updates
+
+### API Router S3 Integration
+
+#### 1. Install AWS SDK
+```bash
+npm install --save @aws-sdk/client-s3 @aws-sdk/s3-request-presigner
+```
+
+#### 2. S3 Service
+```typescript
+// src/services/s3Service.ts
+import { S3Client, PutObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { v4 as uuidv4 } from 'uuid';
+
+const s3Client = new S3Client({
+  region: process.env.AWS_REGION
+});
+
+const BUCKET_NAME = process.env.S3_UPLOADS_BUCKET;
+const CDN_URL = process.env.CLOUDFRONT_URL;
+
+export class S3Service {
+  // Generate presigned URL for upload
+  async getUploadUrl(
+    userId: string,
+    fileType: string,
+    contentType: string
+  ): Promise<{ uploadUrl: string; fileUrl: string }> {
+    const fileExtension = this.getFileExtension(contentType);
+    const key = `${fileType}/${userId}/${uuidv4()}.${fileExtension}`;
+    
+    const command = new PutObjectCommand({
+      Bucket: BUCKET_NAME,
+      Key: key,
+      ContentType: contentType,
+      Metadata: {
+        'user-id': userId,
+        'uploaded-at': new Date().toISOString()
+      }
+    });
+    
+    const uploadUrl = await getSignedUrl(s3Client, command, {
+      expiresIn: 3600 // 1 hour
+    });
+    
+    const fileUrl = `${CDN_URL}/${key}`;
+    
+    return { uploadUrl, fileUrl };
+  }
+  
+  // Delete file
+  async deleteFile(fileUrl: string): Promise<void> {
+    const key = fileUrl.replace(`${CDN_URL}/`, '');
+    
+    await s3Client.send(new DeleteObjectCommand({
+      Bucket: BUCKET_NAME,
+      Key: key
+    }));
+  }
+  
+  private getFileExtension(contentType: string): string {
+    const extensions: Record<string, string> = {
+      'image/jpeg': 'jpg',
+      'image/png': 'png',
+      'image/gif': 'gif',
+      'application/pdf': 'pdf',
+      'text/calendar': 'ics'
+    };
+    
+    return extensions[contentType] || 'bin';
+  }
+}
+```
+
+#### 3. Upload Endpoint
+```typescript
+// src/routes/upload.ts
+router.post('/upload/presigned-url', requireAuth, async (req, res) => {
+  const { fileType, contentType } = req.body;
+  const userId = getUserInfo(req).userId;
+  
+  try {
+    const s3Service = new S3Service();
+    const { uploadUrl, fileUrl } = await s3Service.getUploadUrl(
+      userId,
+      fileType,
+      contentType
+    );
+    
+    res.json({
+      uploadUrl,
+      fileUrl,
+      expiresIn: 3600
+    });
+  } catch (error) {
+    console.error('Upload URL generation failed:', error);
+    res.status(500).json({ error: 'Failed to generate upload URL' });
+  }
+});
+```
+
+### iOS App S3 Integration
+
+```swift
+// S3UploadService.swift
+import Foundation
+
+class S3UploadService {
+    private let apiClient: APIClient
+    
+    init(apiClient: APIClient) {
+        self.apiClient = apiClient
+    }
+    
+    func uploadFile(
+        data: Data,
+        fileType: String,
+        contentType: String
+    ) async throws -> String {
+        // Get presigned URL from API
+        let presignedResponse: PresignedURLResponse = try await apiClient.request(
+            .post("/upload/presigned-url", body: [
+                "fileType": fileType,
+                "contentType": contentType
+            ])
+        )
+        
+        // Upload directly to S3
+        var request = URLRequest(url: URL(string: presignedResponse.uploadUrl)!)
+        request.httpMethod = "PUT"
+        request.setValue(contentType, forHTTPHeaderField: "Content-Type")
+        request.httpBody = data
+        
+        let (_, response) = try await URLSession.shared.data(for: request)
+        
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+            throw UploadError.s3UploadFailed
+        }
+        
+        return presignedResponse.fileUrl
+    }
+}
+
+// Usage in view model
+func uploadAvatar(imageData: Data) async throws {
+    let fileUrl = try await s3UploadService.uploadFile(
+        data: imageData,
+        fileType: "avatars",
+        contentType: "image/jpeg"
+    )
+    
+    // Update user profile with new avatar URL
+    try await updateUserProfile(avatarUrl: fileUrl)
+}
+```
+
+## Image Transformations
+
+### Before (Supabase)
+```
+https://project.supabase.co/storage/v1/object/public/avatars/user.jpg?width=200&height=200&resize=cover
+```
+
+### After (CloudFront + Lambda@Edge)
+```javascript
+// lambda-edge/image-transform.js
+exports.handler = async (event) => {
+    const request = event.Records[0].cf.request;
+    const params = new URLSearchParams(request.querystring);
+    
+    if (params.has('width') || params.has('height')) {
+        // Route to image processing service
+        request.origin = {
+            custom: {
+                domainName: 'image-processor.dormway.app',
+                port: 443,
+                protocol: 'https'
+            }
+        };
+    }
+    
+    return request;
+};
+```
+
+## Testing Migration
+
+### 1. Upload Test
+```bash
+# Test presigned URL generation
+curl -X POST https://api.dormway.app/upload/presigned-url \
+  -H "Authorization: Bearer TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"fileType": "avatars", "contentType": "image/jpeg"}'
+
+# Test direct S3 upload
+curl -X PUT "PRESIGNED_URL" \
+  -H "Content-Type: image/jpeg" \
+  --data-binary @test-image.jpg
+```
+
+### 2. CDN Test
+```bash
+# Test CDN delivery
+curl -I https://cdn.dormway.app/avatars/test.jpg
+
+# Test CORS headers
+curl -H "Origin: https://app.dormway.app" \
+  -I https://cdn.dormway.app/avatars/test.jpg
+```
+
+### 3. Migration Verification
+```sql
+-- Check for any remaining Supabase URLs
+SELECT COUNT(*) FROM users WHERE avatar_url LIKE '%supabase.co%';
+SELECT COUNT(*) FROM uploads WHERE file_url LIKE '%supabase.co%';
+SELECT COUNT(*) FROM dining_places WHERE image_url LIKE '%supabase.co%';
+```
+
+## Monitoring
+
+### CloudWatch Metrics
+- S3 bucket size
+- CloudFront cache hit ratio
+- 4xx/5xx error rates
+- Data transfer costs
+
+### Alarms
+- High error rate on uploads
+- Excessive data transfer
+- Unauthorized access attempts
+
+## Cost Optimization
+
+### 1. S3 Storage Classes
+- Standard: First 30 days
+- Intelligent Tiering: After 30 days
+- Glacier: Archive after 1 year
+
+### 2. CloudFront Caching
+- Images: 1 year
+- Documents: 1 month
+- Dynamic content: No cache
+
+### 3. Transfer Acceleration
+- Enable only for large files (>10MB)
+- Use multipart uploads
+
+## Rollback Plan
+
+1. Keep Supabase storage active during migration
+2. Dual-write period (write to both S3 and Supabase)
+3. Gradual DNS cutover
+4. Quick revert via environment variables

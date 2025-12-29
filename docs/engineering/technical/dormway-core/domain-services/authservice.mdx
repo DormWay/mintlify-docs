@@ -1,0 +1,160 @@
+---
+title: "AuthService"
+description: "import { AuthService } from '@dormway/core'; import { getConnectionPool } from '@dormway/core/database'; import { createStructuredLogger } from '@dormway/cor..."
+---
+
+# AuthService
+
+## Overview
+
+**AuthService** manages authentication and authorization with Clerk integration.
+
+**Purpose**: JWT validation, user authentication, and role-based access control.
+
+**Location**: `@dormway/core/domains/auth`
+
+---
+
+## Installation
+
+```typescript
+import { AuthService } from '@dormway/core';
+import { getConnectionPool } from '@dormway/core/database';
+import { createStructuredLogger } from '@dormway/core/logger';
+
+const pool = getConnectionPool();
+const logger = createStructuredLogger({ service: 'api-router' });
+
+const auth = new AuthService({
+  pool,
+  logger,
+  clerkSecretKey: process.env.CLERK_SECRET_KEY,
+});
+```
+
+---
+
+## Methods
+
+### verifyToken
+
+Verify Clerk JWT token.
+
+**Signature**:
+```typescript
+verifyToken(token: string): Promise<ServiceResult<TokenPayload>>
+```
+
+**Example**:
+```typescript
+const result = await auth.verifyToken(req.headers.authorization);
+
+if (result.success) {
+  const { userId, email } = result.data;
+}
+```
+
+---
+
+### getUserFromToken
+
+Get user account from JWT token.
+
+**Signature**:
+```typescript
+getUserFromToken(token: string): Promise<ServiceResult<Account>>
+```
+
+**Example**:
+```typescript
+const result = await auth.getUserFromToken(token);
+
+if (result.success) {
+  const user = result.data;
+  console.log(user.email, user.name);
+}
+```
+
+---
+
+### checkPermission
+
+Check if user has required permission.
+
+**Signature**:
+```typescript
+checkPermission(userId: string, permission: string): Promise<ServiceResult<boolean>>
+```
+
+**Example**:
+```typescript
+const result = await auth.checkPermission('user-123', 'admin');
+
+if (result.success && result.data) {
+  // User has admin permission
+}
+```
+
+---
+
+## Common Patterns
+
+### Pattern 1: Auth Middleware
+
+```typescript
+import { AuthService } from '@dormway/core';
+
+async function authMiddleware(req: Request, res: Response, next: NextFunction) {
+  const token = req.headers.authorization?.replace('Bearer ', '');
+
+  if (!token) {
+    return res.status(401).json({ error: 'No token provided' });
+  }
+
+  const result = await auth.verifyToken(token);
+
+  if (!result.success) {
+    return res.status(401).json({ error: 'Invalid token' });
+  }
+
+  req.user = result.data;
+  next();
+}
+```
+
+---
+
+### Pattern 2: Role Check
+
+```typescript
+async function requireAdmin(req: Request, res: Response, next: NextFunction) {
+  const result = await auth.checkPermission(req.user.id, 'admin');
+
+  if (!result.success || !result.data) {
+    return res.status(403).json({ error: 'Admin access required' });
+  }
+
+  next();
+}
+```
+
+---
+
+## Best Practices
+
+### ✅ Do
+- **Verify tokens** on all protected routes
+- **Check permissions** for admin actions
+- **Cache user data** to reduce database queries
+- **Handle token expiration** gracefully
+
+### ❌ Don't
+- **Don't skip token verification**
+- **Don't trust client-provided user IDs**
+- **Don't expose Clerk secrets**
+- **Don't bypass permission checks**
+
+---
+
+**Last Updated**: 2025-11-23
+**Maintainer**: Platform Team

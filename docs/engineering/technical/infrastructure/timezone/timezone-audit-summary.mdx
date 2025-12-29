@@ -1,0 +1,203 @@
+---
+title: "Timezone Audit Summary"
+description: "This document summarizes the comprehensive timezone consistency audit conducted for the DormWay platform. The audit identified several areas where timezone h..."
+---
+
+# Timezone Consistency Audit Summary - DORM-163
+
+## Executive Summary
+
+This document summarizes the comprehensive timezone consistency audit conducted for the DormWay platform. The audit identified several areas where timezone handling could be improved to ensure consistent user experience and data integrity.
+
+## Key Findings
+
+### ✅ Strengths
+1. **Most database tables already use `timestamp with time zone`** - Good foundation for timezone-aware data storage
+2. **Existing timezone detection logic** - Campus-based timezone inference is working well
+3. **Calendar normalization service** - Properly stores timezone information with events
+4. **User timezone storage** - `accounts.public_data.timezone` field exists and is being used
+
+### ⚠️ Areas for Improvement
+1. **Legacy tables still use `timestamp without time zone`** - ~~`app_device_tokens` and `app_notifications`~~ (No longer used)
+2. **Inconsistent API response formats** - Mixed timezone handling across endpoints
+3. **Deprecated notification scheduling code** - Timezone handling needs standardization
+4. **Multiple timezone formatting approaches** - No shared utilities across components
+
+## Solutions Implemented
+
+### 1. Database Migration
+- **File**: `infrastructure/database/migrations/064_fix_timezone_consistency.sql`
+- **Purpose**: Convert legacy tables to use `timestamp with time zone`
+- **Impact**: Ensures all timestamps have proper timezone information
+
+### 2. Shared Timezone Utilities
+- **File**: `services/engine/src/utils/timezone.utils.ts`
+- **Purpose**: Centralized timezone handling functions
+- **Features**:
+  - User timezone retrieval with fallbacks
+  - UTC ↔ Local timezone conversions
+  - Formatting for different contexts (API, LLM, Display)
+  - Timezone validation and DST handling
+  - Batch processing utilities
+
+### 3. Comprehensive Documentation
+- **Timezone Audit**: `docs/TIMEZONE_CONSISTENCY_AUDIT.md`
+- **Developer Guidelines**: `docs/TIMEZONE_DEVELOPER_GUIDELINES.md`
+- **Summary**: `docs/TIMEZONE_AUDIT_SUMMARY.md`
+
+### 4. Testing Framework
+- **File**: `services/engine/src/scripts/test-timezone-utilities.ts`
+- **Purpose**: Validate timezone utilities across different scenarios
+- **Coverage**: Unit tests, integration tests, DST transitions, error handling
+
+## Implementation Guidelines
+
+### Core Principles
+1. **Store in UTC** - All database timestamps in UTC
+2. **Convert for Processing** - Local timezone for LLMs and business logic
+3. **Return with Offsets** - API responses include timezone information
+4. **Display Locally** - UI shows times in user's timezone
+
+### Database Standards
+```sql
+-- ✅ Always use TIMESTAMPTZ
+CREATE TABLE events (
+    start_time TIMESTAMPTZ NOT NULL,
+    end_time TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+```
+
+### Backend Patterns
+```typescript
+// Get user timezone with fallbacks
+const userTimezone = await getUserTimezone(userId, db);
+
+// Convert for LLM processing
+const llmBlocks = convertTimeBlocksForLLM(timeBlocks, userTimezone);
+
+// Format for API responses
+const apiResponse = {
+  start_time: formatForAPIResponse(event.start_time, userTimezone),
+  timezone: userTimezone
+};
+```
+
+### Frontend Patterns
+```typescript
+// Display in user's timezone
+const displayTime = formatForDisplay(event.start_time, userTimezone);
+
+// Handle timezone changes
+useEffect(() => {
+  updateDisplayedTimes(userTimezone);
+}, [userTimezone]);
+```
+
+## Migration Strategy
+
+### Phase 1: Database (Complete)
+- [x] ~~Create migration script for legacy tables~~ (No longer needed - tables deprecated)
+- [x] ~~Update related functions and stored procedures~~ (No longer needed - tables deprecated)
+- [x] ~~Add timezone-aware indexes~~ (No longer needed - tables deprecated)
+
+### Phase 2: Backend (In Progress)
+- [ ] Update notification workflows
+- [ ] Standardize API response formats
+- [ ] Implement shared utilities across services
+
+### Phase 3: Frontend (Pending)
+- [ ] Create shared timezone formatting utilities
+- [ ] Update UI components for consistent display
+- [ ] Implement timezone detection and preferences
+
+### Phase 4: Testing & Validation (Pending)
+- [ ] Comprehensive testing across timezones
+- [ ] DST transition testing
+- [ ] Performance testing
+
+## Files Modified/Created
+
+### New Files
+- `docs/TIMEZONE_CONSISTENCY_AUDIT.md` - Comprehensive audit findings
+- `docs/TIMEZONE_DEVELOPER_GUIDELINES.md` - Developer guidelines
+- `docs/TIMEZONE_AUDIT_SUMMARY.md` - This summary document
+- `services/engine/src/utils/timezone.utils.ts` - Shared timezone utilities
+- `services/engine/src/scripts/test-timezone-utilities.ts` - Test suite
+- `infrastructure/database/migrations/064_fix_timezone_consistency.sql` - Database migration
+
+### Files Requiring Updates
+- `infrastructure/docker/init-scripts/01-schema.sql` - Review for any remaining legacy tables
+- `services/engine/src/workflows/studentWatcher.workflow.ts` - Notification scheduling
+- `services/engine/src/activities/eveningNotificationActivities.ts` - Timezone handling
+- `services/api-router/src/routes/context-intelligence-routes.ts` - API responses
+- `services/dw_testharness/app/studentwatcher/page.tsx` - UI timezone handling
+
+## Success Metrics
+
+### Technical Metrics
+- [x] 100% of database timestamps use `timestamp with time zone` (deprecated tables no longer used)
+- [ ] All API responses include proper timezone information
+- [ ] Consistent timezone handling across all workflows
+- [ ] Zero timezone-related bugs in production
+
+### User Experience Metrics
+- [ ] Users see times in their local timezone consistently
+- [ ] No confusion about event times across timezone changes
+- [ ] Proper handling of daylight saving time transitions
+- [ ] Intuitive timezone selection and preferences
+
+### Developer Experience Metrics
+- [ ] Clear guidelines for timezone handling
+- [ ] Shared utilities reduce code duplication
+- [ ] Comprehensive test coverage for timezone scenarios
+- [ ] Easy migration path for existing code
+
+## Risk Mitigation
+
+### Data Migration Risks
+- **Risk**: Data loss during timestamp column conversion
+- **Mitigation**: Backup before migration, test on staging environment
+- **Rollback Plan**: Restore from backup if issues arise
+
+### Performance Risks
+- **Risk**: Timezone conversions impact performance
+- **Mitigation**: Cache timezone information, batch processing
+- **Monitoring**: Track timezone-related query performance
+
+### User Experience Risks
+- **Risk**: Confusion during timezone changes
+- **Mitigation**: Clear timezone indicators, gradual rollout
+- **Testing**: User acceptance testing across different timezones
+
+## Next Steps
+
+### Immediate (Next Sprint)
+1. ~~Run database migration on staging environment~~ (No longer needed - deprecated tables)
+2. Test timezone utilities with real data
+3. Update one notification workflow as proof of concept
+
+### Short Term (Next 2 Sprints)
+1. Update all notification workflows
+2. Standardize API response formats
+3. Update frontend components
+
+### Medium Term (Next Month)
+1. Comprehensive testing across timezones
+2. Performance optimization
+3. User acceptance testing
+
+### Long Term (Ongoing)
+1. Monitor timezone-related issues
+2. Update documentation as needed
+3. Consider additional timezone features (automatic detection, etc.)
+
+## Conclusion
+
+The timezone consistency audit has identified clear areas for improvement and provided a comprehensive solution framework. The implementation of shared utilities, database migrations, and clear guidelines will ensure consistent timezone handling across the DormWay platform.
+
+The phased approach minimizes risk while providing immediate value through better timezone handling. The comprehensive documentation and testing framework ensure that future development follows best practices for timezone management.
+
+**Status**: ✅ Audit Complete, 🚧 Implementation In Progress
+**Priority**: High (affects user experience and data integrity)
+**Estimated Completion**: 4-6 weeks with phased rollout

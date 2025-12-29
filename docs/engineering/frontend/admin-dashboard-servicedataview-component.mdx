@@ -1,0 +1,153 @@
+---
+title: "Admin Dashboard   ServiceDataView Component"
+description: "The `ServiceDataView` component renders service data for cities and campuses in the dormway-admin dashboard. It displays data from the `service_data` table w..."
+---
+
+# Admin Dashboard - ServiceDataView Component
+
+## Purpose
+
+The `ServiceDataView` component renders service data for cities and campuses in the dormway-admin dashboard. It displays data from the `service_data` table with method-specific renderers for different data types.
+
+## Executive Summary
+
+- Renders service data from `service_data` table in expandable accordion panels
+- Supports **widget-based data** for campus crews and city context
+- Provides **method-specific renderers** for parking, perplexity intelligence, schedule imports, weather, news, events, and more
+- Uses contextId (UUID) to fetch data via `/api/admin/service-data/{contextId}`
+
+## Location
+
+```
+services/dormway-admin/src/components/ServiceDataView.tsx
+```
+
+## Supported Data Methods
+
+### Widget-Based Methods (Campus Crews)
+
+These methods return a `widgets` array and are rendered by `renderWidgetData()`:
+
+| Method | Description | Widget Types |
+|--------|-------------|--------------|
+| `processed_campus_logistics_crew` | Campus logistics (dining, transit, facilities) | header, priority, context, timeline, guidance, weekly |
+| `processed_campus_events_crew` | Campus events | header, priority, timeline, guidance, weekly |
+| `processed_campus_news_crew` | Campus news and safety | header, priority, context, timeline, guidance, weekly |
+| `processed_city_context` | City context dashboard | Same widget types |
+
+### Structured Data Methods
+
+| Method | Description | Key Fields |
+|--------|-------------|------------|
+| `processed_parking_context` | Parking lot availability | `parking_lots[]` with lot_name, availability, restrictions |
+| `processed_perplexity_campus_data` | AI-enriched campus data | `news[]`, `events[]`, `facilities[]`, `safety_alerts[]` |
+| `schedule_import_transcript` | ICS/calendar import results | `metadata` (counts), `format`, `preview` |
+| `fetch_weather` | Current weather | `temperature`, `description`, `humidity`, `wind_speed` |
+| `fetch_forecast` | Weather forecast | `daily[]` with temp, weather, date |
+| `fetch_news` | City news | `news_stories[]` |
+| `fetch_transit` | Transit information | Various transit structures |
+| `processed_syllabus_crew` | Syllabus analysis | `dates[]` with events |
+
+## Widget Data Structure
+
+All campus crew methods return this structure:
+
+```typescript
+{
+  hash: string;
+  widgets: Array<{
+    widget_id: string;
+    widget_type: 'header' | 'priority' | 'context' | 'timeline' | 'guidance' | 'weekly';
+    content: Record<string, unknown>;
+    priority_score?: number;
+    time_relevance?: {
+      valid_start: string;
+      valid_end: string;
+      days?: string[];
+    };
+  }>;
+  page_type: 'campus' | 'city';
+  widget_sets?: Record<string, string[]>;
+  configuration?: Record<string, unknown>;
+  crew_metadata?: Record<string, unknown>;
+}
+```
+
+### Widget Type Content
+
+| Widget Type | Content Fields |
+|-------------|----------------|
+| `header` | `greeting`, `title`, `subtitle` |
+| `priority` | `title`, `message` OR `event` object |
+| `context` | `impacts[]` OR `type`, `message`, `severity` |
+| `timeline` | `title`, `items[]` OR `events[]` |
+| `guidance` | `key_insights[]` OR `tips[]` OR single `message` |
+| `weekly` | `summary` (string or object with `total_events`, `highlighted_events`) |
+
+## Usage
+
+The component is used in campus and city detail modals:
+
+```tsx
+<ServiceDataView
+  contextId={campus?.context_id || campus?.campus_id || ''}
+  contextType="campus"
+  contextName={campus?.campus_name || ''}
+/>
+```
+
+For cities:
+
+```tsx
+<ServiceDataView
+  contextId={city?.context_external_id || city?.city_id || ''}
+  contextType="city"
+  contextName={city?.city_name || ''}
+/>
+```
+
+## API Endpoint
+
+```
+GET /api/admin/service-data/{contextId}
+```
+
+Returns array of `ServiceDataItem`:
+
+```typescript
+interface ServiceDataItem {
+  id: string;
+  method: string;
+  fetched_at: string;
+  data: Record<string, unknown>;
+  context_id: string;
+}
+```
+
+## Adding New Method Renderers
+
+1. Add method to `getMethodIcon()` and `getMethodLabel()` mappings
+2. Add renderer in `renderDataContent()` before the default JSON fallback
+3. Handle all data variations for that method
+
+Example:
+
+```typescript
+if (method === 'new_method_name' && data.key_field) {
+  return (
+    <Stack spacing={2}>
+      {/* Custom rendering */}
+    </Stack>
+  );
+}
+```
+
+## Related Documents
+
+- Campus Metadata View - Renders campus enriched metadata
+- Admin Dashboard Architecture - Overall admin dashboard structure
+
+---
+
+**Last Updated**: 2025-12-26
+**Component Path**: `services/dormway-admin/src/components/ServiceDataView.tsx`

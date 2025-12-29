@@ -1,0 +1,284 @@
+---
+title: "2025 11 Technical Implementation Archive"
+description: "Overview → Weekly forecast, chart, recommendations Timeline → Date pivot, semester phases Risk → Risk cards, conflict analysis Opportunities → Success framew..."
+---
+
+# 2025-11 Technical Implementation Archive
+
+> **Created**: 2025-11-06
+> **Purpose**: Consolidated archive of valuable technical implementations, design decisions, and bug fixes from November 2025 development work
+
+---
+
+## Intelligence View Redesign (DORM-508)
+
+**Context**: Progressive disclosure redesign for the Intelligence View - "Data Geeks" optimization
+
+### Key Design Patterns
+
+**Three-Tier Progressive Disclosure**:
+- **Tier 1 (Quick Scan)**: 3-line bullet summaries in collapsed state
+- **Tier 2 (Moderate Detail)**: Section-level expansion with formatted data
+- **Tier 3 (Deep Analysis)**: Modals/drawers with raw data, tables, exports
+
+**Information Architecture**:
+```
+Overview → Weekly forecast, chart, recommendations
+Timeline → Date pivot, semester phases
+Risk → Risk cards, conflict analysis
+Opportunities → Success framework, synergies
+Diagnostics → Data quality dashboard, sync status
+```
+
+**Data Redundancy Elimination**:
+- Weekly data: Move from Diagnostics to Tier 3 modal
+- Peak weeks: Keep visual indicators, move details to Tier 3
+- Optimization recs: Keep formatted in Overview, remove raw from Diagnostics
+- Class schedule: Extract from Risk section into separate section
+
+**Technical Implementation**:
+- Each `IntelligencePanel` manages own state (no global toggle)
+- New components: `WeeklyDetailsModal`, `RawDataExplorer`, `ClassScheduleSection`
+- Lazy-load Tier 3 components
+- Use virtualization for tables > 100 rows
+
+**Time Estimate**: 24 hours total
+- Phase 1 (Individual controls): 4h
+- Phase 2 (Extract redundancy): 6h
+- Phase 3 (Reorganize sections): 8h
+- Phase 4 (Polish & testing): 6h
+
+---
+
+## Canvas Context Deduplication (FIX_CANVAS_CONTEXT_REGRESSION)
+
+**Problem**: After backfill script, Canvas sync would create duplicate course enrollments
+
+**Root Cause**: `createCourseEnrollments` only checked exact context ID match, didn't remove old enrollments to different contexts for same course code
+
+**Example Scenario**:
+1. User imports schedule → COMM 230 context `abc123`
+2. Canvas sync → enrollment to `abc123`
+3. User reimports schedule → new COMM 230 context `def456`
+4. Backfill updates Canvas courses → point to `def456`
+5. Next Canvas sync → creates new enrollment to `def456` BUT keeps old `abc123`
+6. **Result**: Student enrolled in both contexts!
+
+**Solution Pattern** (in `course.activities.ts:305-388`):
+
+```typescript
+// Build map of new enrollment context IDs
+const newEnrollmentContextIds = new Set(Object.values(courseContextIds));
+
+// For each course code being enrolled
+for (const [courseCode, newContextId] of Object.entries(courseContextIds)) {
+  // Find duplicate enrollments (same course code, different context)
+  const duplicateEnrollments = existingDependencies.filter(dep => {
+    if (dep.dependency_type !== 'enrolled_in') return false;
+    if (dep.target_context_id === newContextId) return false;
+    return !newEnrollmentContextIds.has(dep.target_context_id);
+  });
+
+  // Delete old enrollments
+  for (const dup of duplicateEnrollments) {
+    const { data: oldContext } = await supabase.getContextById(dup.target_context_id);
+    const oldCourseCode = oldContext?.metadata?.courseCode;
+
+    if (oldCourseCode && oldCourseCode === courseCode) {
+      await pool.query(
+        `DELETE FROM context_dependencies
+         WHERE parent_context_id = $1
+           AND child_context_id = $2
+           AND dependency_type = $3`,
+        [studentContextId, dup.target_context_id, 'enrolled_in']
+      );
+    }
+  }
+}
+```
+
+**Key Takeaway**: Always deduplicate context dependencies by courseCode, not just context ID
+
+---
+
+## PDF Schedule Parsing (DORM-521)
+
+**Problem**: PDF uploads were failing silently - workflow reported success but returned empty courses
+
+**Solution**: Implemented native OpenAI Files API support instead of PDF→Image conversion
+
+**Implementation Details**:
+
+1. **New Activity**: `uploadPDFToOpenAI()` - Uploads to OpenAI with `purpose: "assistants"`
+2. **Modified Activity**: `parseScheduleWithGPT5()` - Now supports both `imageData` and `fileId`
+3. **Workflow Updates**: Detects `mode === 'pdf'` and uses Files API path
+4. **Database Tracking**: New table `schedule_parsing_artifacts` for debugging
+
+**API Flow**:
+```
+1. Upload PDF → OpenAI (get file_id)
+2. Parse using file_id with GPT-4o
+3. Cache file_id for retries
+4. Track in schedule_parsing_artifacts table
+```
+
+**Error Handling**:
+- Zero-course responses treated as parsing failures (not silent success)
+- User-friendly error notifications via progress updates
+- Proper error propagation for Temporal retries
+
+---
+
+## Schedule View Design Decisions (SCHEDULE_VIEW_DECISIONS)
+
+**Architecture Decision Record** - Finalized UX patterns
+
+### Tablet Support Strategy ✅ KEEP CURRENT
+- Tablets (768px - 1024px): Use sidebar (NOT bottom nav)
+- Rationale: Sufficient screen space, consistent with desktop
+- Implementation: No changes needed
+
+### FAB (Floating Action Button) ✅ NOT NEEDED
+- Bottom navigation provides sufficient quick access
+- "More" tab can contain additional actions
+- Cleaner UI without FAB
+- Can add later if user feedback indicates need
+
+### Tab Count ✅ 6 TABS IS OPTIMAL
+- Current: Today, Schedule, Academic, Notes, Inbox, More
+- Gen Z UX research: 5-7 tabs ideal
+- Thumb-friendly reach
+- Material Design & iOS HIG: Up to 6 acceptable
+
+---
+
+## Code Quality Improvements (CODE_QUALITY_IMPROVEMENTS)
+
+**Quality Score**: 9/10 (improved from 7/10)
+
+### Key Improvements
+
+**1. Shared Urgency Helpers** (`src/utils/urgencyHelpers.ts`):
+- Single source of truth for urgency logic
+- Theme-aware design tokens
+- Lucide React icons (not emojis)
+- Functions: `getUrgencyInfo()`, `getUrgencyLevel()`, `getUrgencyBorderClass()`
+
+**2. Design Token Usage**:
+```tsx
+// ✅ CORRECT
+className="bg-[var(--ds-button-bg)] text-[var(--ds-button-fg)]"
+
+// ❌ WRONG
+className="bg-indigo-500 text-white"
+```
+
+**3. Icon Usage**:
+```tsx
+// ✅ CORRECT
+import { AlertCircle } from 'lucide-react';
+<AlertCircle className="w-4 h-4" />
+
+// ❌ WRONG
+{urgency.icon} // 🔴
+```
+
+**4. TypeScript Typing**:
+```tsx
+// ✅ CORRECT
+const [data, setData] = useState<SyllabusData | null>(null);
+
+// ❌ WRONG
+const [data, setData] = useState<any>(null);
+```
+
+**5. Gradient Usage**:
+```tsx
+// ✅ CORRECT - Design token
+style={{ background: 'var(--gradient-primary)' }}
+
+// ✅ CORRECT - Inline with tokens
+style={{
+  background: 'linear-gradient(to right, var(--ds-status-success), var(--ds-success))'
+}}
+
+// ❌ WRONG - Hardcoded
+className="bg-gradient-to-r from-purple-500 to-pink-500"
+```
+
+### Metrics Improvement
+
+| Metric | Before | After | Improvement |
+|--------|--------|-------|-------------|
+| Design Token Usage | 60% | 98% | +38% |
+| Hardcoded Colors | 47 | 0 | -100% |
+| Code Duplication | 2 major | 0 | -100% |
+| TypeScript `any` Types | 1 | 0 | -100% |
+| Emoji Usage | 8 | 0 | -100% |
+
+### Files Modified
+1. `src/utils/urgencyHelpers.ts` (NEW)
+2. `src/components/ui/academic/CourseCard.tsx`
+3. `src/components/ui/academic/AcademicCard.tsx`
+4. `src/components/auth/AuthLayout.tsx`
+5. `src/components/GradeCalculator.tsx`
+6. `src/components/syllabus/SyllabusViewer.tsx`
+
+---
+
+## Reference Links
+
+### Linear Issues
+- DORM-508: Intelligence View Redesign
+- DORM-521: PDF Schedule Parsing
+- DORM-527: Related implementation
+- DORM-553: Schedule Parsing Format Fix
+
+### Related Files
+**Canvas Integration**:
+- `services/engine/src/activities/canvas.activities.ts` (lines 467-497)
+- `services/engine/src/activities/course.activities.ts` (lines 187-203, 305-388)
+- `services/engine/src/scripts/backfill-canvas-course-contexts.ts`
+
+**Schedule View**:
+- `services/dormway-lockedin/src/components/BottomNavigation.tsx`
+- `services/dormway-lockedin/src/components/DashboardSidebar.tsx`
+- `services/dormway-lockedin/src/app/dashboard/schedule/page.tsx`
+
+**Code Quality**:
+- `services/dormway-lockedin/src/utils/urgencyHelpers.ts`
+- `services/dormway-lockedin/src/lib/theme-config.ts`
+
+---
+
+## Best Practices Established
+
+### Database & Context Management
+- Always deduplicate context_dependencies by domain keys (courseCode), not just IDs
+- Check for existing contexts before creating new ones
+- Use early returns to skip unnecessary upsert operations
+- Log context resolution for debugging (e.g., "reusing existing" vs "creating new")
+
+### Workflow & Activity Patterns
+- Activities handle all I/O and external API calls
+- Workflows coordinate activities with error handling
+- Database tracking for all external API operations (e.g., schedule_parsing_artifacts)
+- Cache external resource IDs (e.g., OpenAI file_id) for retries
+
+### UI Component Standards
+- Shared utilities for common logic (urgency helpers, date formatting)
+- Design tokens for ALL colors and gradients
+- Professional icons (Lucide React) instead of emojis
+- Proper TypeScript interfaces (no `any` types)
+- Theme-aware styling with CSS variables
+
+### Error Handling
+- Throw errors instead of silent failures
+- User-friendly error messages via progress updates
+- Log detailed error context for debugging
+- Validate zero-result cases (e.g., zero courses parsed)
+
+---
+
+## Tags
+#technical-documentation #implementation #design-decisions #best-practices #canvas #intelligence-view #schedule #code-quality #nov-2025

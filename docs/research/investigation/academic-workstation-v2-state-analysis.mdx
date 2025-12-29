@@ -1,0 +1,446 @@
+---
+title: "Academic Workstation V2   State Analysis"
+description: "The Obsidian documentation created for \"Academic Workstation V2\" describes a **complete implementation that partially exists but was never merged**. The code..."
+---
+
+# Academic Workstation V2 - State Analysis & Discrepancies
+
+**Date:** October 26, 2025
+**Investigator:** Claude (automated investigation)
+**Status:** 🔴 Critical Discrepancies Found
+**Tags:** #investigation #academic #discrepancy #v2
+
+---
+
+## Executive Summary
+
+The Obsidian documentation created for "Academic Workstation V2" describes a **complete implementation that partially exists but was never merged**. The code exists in a backup commit (`457a5438`) but is missing from both the current working branch (`riley/canvas-academic-clean`) and `main`.
+
+**Critical Finding:** Documentation describes features as "✅ Implemented" when they exist only in an un-merged backup commit.
+
+---
+
+## Investigation Timeline
+
+### What I Found
+
+1. **Obsidian Documentation (Created Oct 26, 2025)**
+   - 4 comprehensive docs totaling ~2,500 lines
+   - Status marked as "✅ Shipped" and "✅ Complete"
+   - Describes full implementation including time-blocks API
+
+2. **Backup Commit (`457a5438` - "Backup: Riley's complete work")**
+   - Contains complete Academic Workstation V2 implementation
+   - Includes `time-blocks-routes.ts` (219 lines)
+   - Includes `useTimeBlocks.ts` hook (144 lines)
+   - Routes properly registered in `index.ts`
+   - Academic page V2 with all features
+
+3. **Current Branch (`riley/canvas-academic-clean`)**
+   - Has academic page with CapacityBar component
+   - **MISSING** time-blocks API routes
+   - **MISSING** useTimeBlocks hook
+   - Different implementation than backup
+
+4. **Main Branch**
+   - Academic page **does not exist** at all
+
+---
+
+## Detailed Discrepancy Analysis
+
+### ✅ What EXISTS and MATCHES Documentation
+
+| Item | Location | Status |
+|------|----------|--------|
+| `CapacityBar.tsx` | `services/dormway-lockedin/src/components/ui/academic/` | ✅ Exists |
+| `PlannerDrawer.tsx` | `services/dormway-lockedin/src/components/ui/academic/` | ✅ Exists |
+| `time_blocks` table | Database | ✅ Exists |
+| `student_time_blocks` table | Database | ✅ Exists |
+| FilterRail components | Various | ✅ Exist (in backup) |
+| AcademicInspector | Components | ✅ Exists (in backup) |
+
+### ❌ What is MISSING (documented as implemented)
+
+| Item | Documented Location | Actual Status |
+|------|---------------------|---------------|
+| `time-blocks-routes.ts` | `services/api-router/src/routes/` | ❌ Only in backup commit |
+| `useTimeBlocks.ts` | `services/dormway-lockedin/src/hooks/` | ❌ Only in backup commit |
+| Routes registration | `services/api-router/src/routes/index.ts` | ❌ Only in backup commit |
+| Academic V2 page (complete) | `services/dormway-lockedin/src/app/dashboard/academic/page.tsx` | ⚠️ Different version exists |
+| Deep-linking implementation | Academic page | ❌ Only in backup commit |
+| OR-within/AND-across filters | Academic page | ⚠️ Partial in current branch |
+
+### 🔄 What is CONTRADICTORY
+
+1. **Database Table Usage**
+   - **Documented**: Uses `time_blocks` table with `source_type='manual'`
+   - **Reality**: Both `time_blocks` AND `student_time_blocks` exist
+   - **Issue**: `student_time_blocks` has different schema, used by other systems
+   - **Reference**: Commit `ca15db22` mentions checking `student_time_blocks` for schedule existence
+
+2. **API Endpoint**
+   - **Documented**: `/api/proxy/time-blocks` (POST/GET/DELETE)
+   - **Reality**: Routes registered in backup but not merged
+   - **Current**: No time-blocks routes in `main` or `riley/canvas-academic-clean`
+
+3. **Implementation Status**
+   - **Documented**: "✅ Complete and shipped"
+   - **Reality**: Code exists only in un-merged backup commit `457a5438`
+   - **Current**: Different academic page implementation on `riley/canvas-academic-clean`
+
+---
+
+## Git History Analysis
+
+### Key Commits
+
+```bash
+457a5438 - "Backup: Riley's complete work before syncing with main"
+  - Date: Recent (before Oct 26)
+  - Contains: Complete V2 implementation
+  - Status: NEVER MERGED
+
+75de7f9c - "Merge branch 'main' of https://github.com/DormWay/dormway-platform into riley/canvas-academic-clean"
+  - Current HEAD of riley/canvas-academic-clean
+  - Missing: time-blocks API, useTimeBlocks hook
+
+ca15db22 - "fix: check student_time_blocks (not time_blocks) for schedule existence (DORM-431)"
+  - Suggests student_time_blocks is actively used
+  - Conflicts with documentation's use of time_blocks
+```
+
+### Branch Status
+
+- **`main`**: No academic page exists
+- **`riley/canvas-academic-clean`**: Academic page exists but incomplete compared to backup
+- **Backup commit `457a5438`**: Complete implementation
+
+---
+
+## Database Schema Discrepancies
+
+### time_blocks (Generic Table)
+
+**Schema:**
+```sql
+- source_type: time_block_source_type (enum)
+- source_id: text
+- lifecycle_status: NOT present in current schema
+- user_id: nullable
+- context_id: present
+```
+
+**Documentation says:**
+- `lifecycle_status='active'` for soft deletes
+- `source_type='manual'` for student-created blocks
+
+**Reality:**
+- `lifecycle_status` column **does not exist** in `time_blocks`
+- `lifecycle_status` exists in `student_time_blocks`
+
+### student_time_blocks (Student-Specific)
+
+**Schema:**
+```sql
+- lifecycle_status: time_block_lifecycle_status (✅ EXISTS)
+- deleted_at: timestamp
+- user_id: NOT NULL
+- No source_type column
+```
+
+**Used by:**
+- Schedule upload system (DORM-431)
+- Student workflow system
+- Current production code
+
+---
+
+## Code Comparison: Backup vs Current
+
+### Backup Commit (457a5438) - Academic Page
+
+**Features:**
+- ✅ `useTimeBlocks()` hook imported and used
+- ✅ Deep-linking with `?item=` URL state
+- ✅ OR-within/AND-across filter logic
+- ✅ Optimistic updates for time blocks
+- ✅ Capacity bar integration
+- ✅ Inspector panel (docked, non-blocking)
+
+**Example:**
+```typescript
+import { useTimeBlocks } from '@/hooks/useTimeBlocks';
+
+const { createTimeBlock, getWeekBlocks, getCurrentWeek } = useTimeBlocks();
+
+// Deep-linking
+useEffect(() => {
+  const itemId = searchParams.get('item');
+  if (itemId && deliverables.length > 0 && !selectedDeliverable) {
+    const deliverable = deliverables.find(d => d.id === itemId);
+    if (deliverable) setSelectedDeliverable(deliverable);
+  }
+}, [searchParams, deliverables, selectedDeliverable]);
+
+// Capacity fetch
+useEffect(() => {
+  async function fetchScheduledHours() {
+    const week = getCurrentWeek();
+    const data = await getWeekBlocks(week);
+    if (data) setScheduledHours(data.totalHours);
+  }
+  fetchScheduledHours();
+}, [getCurrentWeek, getWeekBlocks]);
+```
+
+### Current Branch (riley/canvas-academic-clean) - Academic Page
+
+**Features:**
+- ✅ CapacityBar component
+- ✅ PlannerDrawer component
+- ❌ No `useTimeBlocks` import
+- ❌ No deep-linking
+- ❌ No capacity fetch on mount
+- ⚠️ Uses different data hooks (`useAcademicData`, `useAcademicState`)
+
+**Example:**
+```typescript
+import { useAcademicData } from '@/hooks/useAcademicData';
+import { useAcademicState } from '@/hooks/useAcademicState';
+
+const { data, loading, error, refetch } = useAcademicData();
+const {
+  expandedCourseIds,
+  setExpandedCourseIds,
+  plannerOpen,
+  setPlannerOpen,
+  scheduledHours,
+  setScheduledHours,
+  // ...
+} = useAcademicState();
+```
+
+---
+
+## Existing Obsidian Documentation
+
+### Pre-Existing Doc (Not by me)
+
+**File:** `Academic Dashboard and Inbox Upgrade Plan.md`
+
+**Status:** `draft`
+**Date:** `2025-10-20`
+**Key Points:**
+- Mentions **student_time_blocks** (not time_blocks)
+- References `/mobile/planner/blocks` endpoint
+- Suggests using Dashboard BFF v1 composite
+- Plans for "planner-first workflows"
+
+**Conflicts with my documentation:**
+- My docs describe using `time_blocks` table
+- My docs describe custom `/api/proxy/time-blocks` routes
+- My docs say "✅ Implemented" but this doc says "draft" status
+
+---
+
+## What Happened: Reconstruction
+
+Based on git history and file analysis:
+
+1. **Oct 20-25**: Riley worked on Academic Workstation V2
+2. **Backup commit** (`457a5438`): Riley created complete implementation
+3. **Merge conflicts**: Attempted to sync with main, encountered conflicts
+4. **Current state**: Riley's branch (`riley/canvas-academic-clean`) has different version
+5. **Oct 26**: I created Obsidian docs based on conversation summary that described the backup commit's implementation
+6. **Problem**: Documentation describes backup commit's code as if it were merged and deployed
+
+---
+
+## Recommendations: How to Proceed
+
+### Option A: Restore the Backup Implementation ⭐ RECOMMENDED
+
+**Action:**
+1. Cherry-pick commit `457a5438` onto `riley/canvas-academic-clean`
+2. Resolve conflicts between backup and current version
+3. Update routes registration in `index.ts`
+4. Fix database references (use correct table)
+5. Test complete flow
+6. Update documentation to match final implementation
+
+**Pros:**
+- Gets the complete V2 feature set
+- Documentation mostly accurate after small fixes
+- Includes time-blocks API and all features
+
+**Cons:**
+- Need to resolve merge conflicts
+- May conflict with current academic page
+- Requires testing
+
+### Option B: Update Documentation to Match Reality
+
+**Action:**
+1. Mark time-blocks API as "Planned" not "Implemented"
+2. Update Academic Workstation V2 docs to reflect current state
+3. Document what actually exists on `riley/canvas-academic-clean`
+4. Create separate "Future Implementation" section
+
+**Pros:**
+- Documentation matches reality
+- No code changes needed
+- Clear about current vs planned features
+
+**Cons:**
+- Loses the V2 implementation work
+- Documentation becomes less useful
+- Features exist but aren't accessible
+
+### Option C: Implement Missing Pieces Fresh
+
+**Action:**
+1. Keep current academic page as-is
+2. Implement time-blocks API from scratch (using docs as spec)
+3. Create useTimeBlocks hook fresh
+4. Integrate into current page incrementally
+
+**Pros:**
+- Clean implementation
+- Can improve on backup version
+- Controlled integration
+
+**Cons:**
+- Most work to implement
+- Reinventing wheel (code already exists in backup)
+- Time-consuming
+
+---
+
+## Critical Questions to Answer
+
+1. **Which database table should be used?**
+   - `time_blocks` (generic, many source types)
+   - `student_time_blocks` (student-specific, already in use)
+   - Create new table for manual planning?
+
+2. **Which academic page version is correct?**
+   - Backup commit version (full V2)
+   - Current `riley/canvas-academic-clean` version
+   - Merge both?
+
+3. **What happened to the backup implementation?**
+   - Was it intentionally discarded?
+   - Did merge conflicts prevent integration?
+   - Is it waiting to be merged?
+
+4. **Should planner use existing `/mobile/planner/blocks` endpoint?**
+   - Existing endpoint: `/mobile/planner/blocks` (mentioned in other docs)
+   - Documented endpoint: `/api/proxy/time-blocks` (from backup)
+   - Need clarification on which to use
+
+---
+
+## Data Loss Risk
+
+**HIGH RISK**: The backup commit `457a5438` contains valuable implementation work:
+- 219 lines of time-blocks API
+- 144 lines of useTimeBlocks hook
+- Complete academic page V2
+- Proper integration and testing
+
+**Recommendation:** Even if not using this implementation, preserve the code for reference.
+
+---
+
+## Next Steps
+
+### Immediate (Required)
+
+1. ✅ **Clarify with Riley:**
+   - Was the backup implementation intentionally discarded?
+   - Which version of academic page is desired?
+   - Which database table should manual planning use?
+
+2. **Reconcile documentation:**
+   - Update status markers (remove "✅ Shipped")
+   - Add "Current State" vs "Planned" sections
+   - Note discrepancies clearly
+
+3. **Decide on path forward:**
+   - Option A: Restore backup
+   - Option B: Update docs only
+   - Option C: Implement fresh
+
+### Follow-up (After Decision)
+
+**If restoring backup:**
+- Create new branch from backup commit
+- Resolve conflicts with current main
+- Test complete flow
+- Update docs to match final implementation
+
+**If updating docs only:**
+- Mark V2 features as "Planned"
+- Document current state accurately
+- Create implementation roadmap
+
+**If implementing fresh:**
+- Use docs as specification
+- Decide on database table
+- Implement incrementally
+- Test at each step
+
+---
+
+## Files Reference
+
+### In Backup Commit (457a5438) - NOT MERGED
+
+```
+services/api-router/src/routes/time-blocks-routes.ts (219 lines)
+services/dormway-lockedin/src/hooks/useTimeBlocks.ts (144 lines)
+services/dormway-lockedin/src/app/dashboard/academic/page.tsx (970 lines)
+services/dormway-lockedin/src/app/dashboard/academic/page-v1-backup.tsx (659 lines)
+services/dormway-lockedin/src/components/ui/academic/AcademicInspector.tsx (195 lines)
+services/dormway-lockedin/src/components/ui/academic/FilterRail.tsx (188 lines)
+```
+
+### Currently Exist
+
+```
+services/dormway-lockedin/src/app/dashboard/academic/page.tsx (different version)
+services/dormway-lockedin/src/components/ui/academic/CapacityBar.tsx (113 lines)
+services/dormway-lockedin/src/components/ui/academic/PlannerDrawer.tsx (exists)
+```
+
+### Obsidian Documentation (Created Oct 26)
+
+```
+obsidian-vault/DormWay/Product/Features/Dashboard/Academic Workstation V2.md
+obsidian-vault/DormWay/Engineering/Implementation/Academic Workstation V2 Implementation.md
+obsidian-vault/DormWay/Engineering/Architecture/Academic Workstation V2 Architecture.md
+obsidian-vault/DormWay/Engineering/Technical/API/Time Blocks API.md
+```
+
+### Pre-Existing Documentation
+
+```
+obsidian-vault/DormWay/Engineering/Implementation/Academic Dashboard and Inbox Upgrade Plan.md (draft, Oct 20)
+```
+
+---
+
+## Conclusion
+
+The Obsidian documentation I created describes a **complete, well-designed implementation that exists in code but was never merged**. The documentation is technically accurate for commit `457a5438`, but incorrectly marked as "shipped" when it only exists in a backup commit.
+
+**The core issue:** Documentation was created from a conversation summary that described the backup commit's implementation without verifying the current state of the codebase.
+
+**Recommended action:** Restore the backup implementation (Option A) after reviewing with Riley, as it represents significant completed work that shouldn't be lost.
+
+---
+
+**Status:** Investigation Complete
+**Confidence:** High
+**Next Action Required:** User decision on path forward

@@ -1,0 +1,70 @@
+---
+title: "Creating Campus Plugins with the DormWay SDK"
+description: "This guide walks through building a DormWay plugin using the `dw-campus-sdk` repository (`/Users/ethankaplan/Development/GitHub/dw-campus-sdk`). It assumes y..."
+---
+
+This guide walks through building a DormWay plugin using the `dw-campus-sdk` repository (`/Users/ethankaplan/Development/GitHub/dw-campus-sdk`). It assumes you have access to the monorepo and Doppler secrets but do **not** require production credentials.
+
+## 1. Clone & Install
+- Ensure you have Node 20+ and npm 10+.
+- From the repo root run:
+  ```bash
+  cd /Users/ethankaplan/Development/GitHub/dw-campus-sdk
+  npm install --ignore-scripts --no-progress
+  ```
+- `package.json` uses npm workspaces; dependencies are hoisted to the root.
+
+## 2. Understand the Layout
+- `packages/core` — `@dormway/campus-sdk` (manifest builder, helpers, manifest schema).
+- `examples/test-plugin` — minimal reference plugin that can be invoked locally or by the runner.
+- `tsconfig.base.json` — shared TypeScript config; each workspace extends it.
+
+## 3. Scaffold a Plugin
+1. Copy the example plugin (recommended starting point):
+   ```bash
+   cp -R examples/test-plugin examples/<your-plugin-slug>
+   ```
+2. Update `package.json` inside the new folder:
+   - Change `name` to something like `@dormway/example-umich-dining`.
+   - Keep `@dormway/campus-sdk` dependency pointing to `"file:../../packages/core"`.
+3. Edit `src/index.ts`:
+   - Import utilities from `@dormway/campus-sdk`.
+   - Set `pluginId`, `pluginVersion`, and `target` (campus or city).
+   - Implement tasks via `definePlugin({ tasks: [...] })`. Each task receives a `manifest` builder and should write modules such as `dining`, `events`, or `alerts`.
+   - Export `execute()` that wraps `runPlugin`.
+
+## 4. Build & Run Locally
+- Compile:
+  ```bash
+  npm run build --workspace @dormway/example-umich-dining
+  ```
+- Run ad-hoc to view the manifest:
+  ```bash
+  npm run start --workspace @dormway/example-umich-dining
+  ```
+  JSON output mirrors what the runner ingests. Pipe to a file for inspection.
+
+## 5. Coding Guidelines
+- Use 2-space indentation and strict TypeScript.
+- Prefer `new Date().toISOString()` for timestamps unless you require more formatting. For date math, pull in a helper (Luxon can be added per plugin).
+- Modules should return deterministic IDs so ingestion can upsert accurately.
+
+## 6. Testing
+- Plugins can use `vitest` or plain Node assertions. Suggested structure:
+  ```
+  examples/<slug>/src/__tests__/*.test.ts
+  ```
+- Execute with:
+  ```bash
+  npm run test --workspace @dormway/example-umich-dining
+  ```
+
+## 7. Registering with the Runner
+- Add your plugin metadata to the `plugin_registry` table (see `bootloader.md`).
+- Upload assets (zip or container) if the plugin requires compiled code; otherwise the runner will clone from GitHub and build.
+- Confirm the runner microservice has access to any fixtures or proxy calls required (via Zuplo SDK gateway).
+
+## 8. Pull Requests & Review
+- Commit from the plugin repo root using conventional subjects (`Add umich dining plugin skeleton`).
+- Include sample manifest output in the PR description.
+- Link the Linear ticket (e.g., `DORM-332`) and mention downstream bootloader updates if required.

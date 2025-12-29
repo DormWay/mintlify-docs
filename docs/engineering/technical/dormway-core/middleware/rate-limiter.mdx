@@ -1,0 +1,165 @@
+---
+title: "Rate Limiter"
+description: "Creates a rate limiting middleware with Redis support for distributed rate limiting. Falls back to in-memory storage for single-instance deployments."
+---
+
+# Rate Limiter Middleware
+
+## Overview
+
+Creates a rate limiting middleware with Redis support for distributed rate limiting. Falls back to in-memory storage for single-instance deployments.
+
+## Factory Signature
+
+```typescript
+createRateLimiter(options: {
+  cache?: CacheAdapter;
+  windowSec: number;
+  max: number;
+  keyFn?: (req: Request) => string;
+}): RequestHandler
+```
+
+## Parameters
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `cache` | `CacheAdapter` | No | In-memory | Cache adapter for distributed rate limiting |
+| `windowSec` | `number` | Yes | - | Time window in seconds |
+| `max` | `number` | Yes | - | Max requests per window |
+| `keyFn` | `function` | No | IP address | Function to generate rate limit key |
+
+## Usage
+
+### Redis-Backed (Production)
+
+```typescript
+import { createRateLimiter } from '@dormway/core/middleware';
+import { redisCache } from './services/redis-cache';
+
+// Rate limit by user ID (authenticated) or IP (anonymous)
+app.use('/api', createRateLimiter({
+  cache: redisCache,
+  windowSec: 60,          // 1 minute window
+  max: 100,               // 100 requests per minute
+  keyFn: (req) => req.user?.id || req.ip || 'anonymous'
+}));
+```
+
+### In-Memory (Development/Single Instance)
+
+```typescript
+import { createRateLimiter } from '@dormway/core/middleware';
+
+// No cache = in-memory storage
+app.use('/public', createRateLimiter({
+  windowSec: 60,
+  max: 10
+}));
+```
+
+### Different Limits per Route
+
+```typescript
+// Strict limit for auth endpoints
+app.use('/api/auth', createRateLimiter({
+  cache: redisCache,
+  windowSec: 60,
+  max: 5,                // Only 5 attempts per minute
+  keyFn: (req) => req.ip || 'unknown'
+}));
+
+// Relaxed limit for general API
+app.use('/api', createRateLimiter({
+  cache: redisCache,
+  windowSec: 60,
+  max: 100,
+  keyFn: (req) => req.user?.id || req.ip || 'anonymous'
+}));
+
+// Very relaxed for health checks
+app.use('/health', createRateLimiter({
+  windowSec: 1,
+  max: 1000
+}));
+```
+
+## Key Function Examples
+
+### By User ID
+
+```typescript
+keyFn: (req) => `user:${req.user?.id || 'anonymous'}`
+```
+
+### By IP Address
+
+```typescript
+keyFn: (req) => `ip:${req.ip || req.headers['x-forwarded-for'] || 'unknown'}`
+```
+
+### By API Key
+
+```typescript
+keyFn: (req) => `apikey:${req.headers['x-api-key'] || 'none'}`
+```
+
+### Combined (User + Endpoint)
+
+```typescript
+keyFn: (req) => `${req.user?.id || req.ip}:${req.path}`
+```
+
+## Response Headers
+
+When rate limiting is applied, the following headers are set:
+
+| Header | Description |
+|--------|-------------|
+| `X-RateLimit-Limit` | Max requests allowed |
+| `X-RateLimit-Remaining` | Requests remaining in window |
+| `X-RateLimit-Reset` | Unix timestamp when window resets |
+
+## Rate Limit Exceeded Response
+
+```json
+{
+  "error": "Too many requests",
+  "statusCode": 429,
+  "retryAfter": 45
+}
+```
+
+## Cache Adapter Interface
+
+```typescript
+interface CacheAdapter {
+  isRedisConnected(): boolean;
+  client: {
+    incr(key: string): Promise<number>;
+    expire(key: string, seconds: number): Promise<void>;
+  };
+}
+```
+
+## Fallback Behavior
+
+1. If `cache` is not provided, uses in-memory Map
+2. If Redis connection fails, falls back to in-memory
+3. In-memory limits are per-process (not distributed)
+
+## Best Practices
+
+1. **Always use Redis in production** for consistent rate limiting across instances
+2. **Include user ID in key** when authenticated to prevent IP-based collisions
+3. **Set appropriate windows** - shorter for sensitive endpoints, longer for general API
+4. **Log rate limit events** for monitoring and abuse detection
+
+## Related
+
+- [Middleware Factory Pattern](/docs/engineering/technical/dormway-core/middleware/middleware-factory-pattern) - Overview of factory pattern
+- [Cache Adapter](/docs/engineering/technical/dormway-core/adapters/cache-adapter) - Redis cache adapter
+
+---
+
+**Last Updated**: 2025-11-26

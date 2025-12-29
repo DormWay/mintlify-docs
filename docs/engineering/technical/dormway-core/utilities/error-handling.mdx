@@ -1,0 +1,665 @@
+---
+title: "Error Handling"
+description: "import { AppError, NotFoundError, ValidationError, AuthenticationError, serializeError, getErrorStatusCode, } from '@dormway/core/errors';"
+---
+
+# Error Handling
+
+## Overview
+
+**@dormway/core/errors** provides consistent error classes with automatic HTTP status codes, error serialization, and operational error detection.
+
+**Purpose**: Standardize error handling across all services with consistent HTTP responses and debugging information.
+
+**Location**: `@dormway/core/errors`
+
+---
+
+## Installation
+
+```typescript
+import {
+  AppError,
+  NotFoundError,
+  ValidationError,
+  AuthenticationError,
+  serializeError,
+  getErrorStatusCode,
+} from '@dormway/core/errors';
+```
+
+---
+
+## Error Classes
+
+### AppError (Base Class)
+
+Base error class with HTTP status code and details.
+
+**Constructor**:
+```typescript
+new AppError(message: string, details?: Record<string, unknown>, statusCode?: number)
+```
+
+**Example**:
+```typescript
+throw new AppError('Something went wrong', { userId: '123' }, 500);
+```
+
+---
+
+### ValidationError (400 Bad Request)
+
+For invalid input or business logic violations.
+
+**Constructor**:
+```typescript
+new ValidationError(message: string, details?: Record<string, unknown>)
+```
+
+**Examples**:
+```typescript
+// Invalid input
+if (!email || !email.includes('@')) {
+  throw new ValidationError('Invalid email address', { email });
+}
+
+// Business rule violation
+if (age < 18) {
+  throw new ValidationError('Must be 18 or older', { age });
+}
+
+// Multiple validation errors
+throw new ValidationError('Invalid request', {
+  errors: [
+    { field: 'email', message: 'Email is required' },
+    { field: 'password', message: 'Password must be at least 8 characters' },
+  ],
+});
+```
+
+---
+
+### AuthenticationError (401 Unauthorized)
+
+For missing or invalid authentication.
+
+**Constructor**:
+```typescript
+new AuthenticationError(message: string, details?: Record<string, unknown>)
+```
+
+**Examples**:
+```typescript
+// Missing token
+if (!req.headers.authorization) {
+  throw new AuthenticationError('Missing authorization header');
+}
+
+// Invalid token
+if (!isValidToken(token)) {
+  throw new AuthenticationError('Invalid token', { token: token.substring(0, 10) + '...' });
+}
+
+// Expired token
+if (tokenExpired(token)) {
+  throw new AuthenticationError('Token expired', { expiredAt: token.expiresAt });
+}
+```
+
+---
+
+### AuthorizationError (403 Forbidden)
+
+For insufficient permissions.
+
+**Constructor**:
+```typescript
+new AuthorizationError(message: string, details?: Record<string, unknown>)
+```
+
+**Examples**:
+```typescript
+// Missing permission
+if (!user.hasPermission('admin')) {
+  throw new AuthorizationError('Admin access required', { userId: user.id });
+}
+
+// Resource access denied
+if (document.ownerId !== user.id) {
+  throw new AuthorizationError('Cannot access this document', {
+    documentId: document.id,
+    ownerId: document.ownerId,
+    userId: user.id,
+  });
+}
+```
+
+---
+
+### NotFoundError (404 Not Found)
+
+For resources that don't exist.
+
+**Constructor**:
+```typescript
+new NotFoundError(message: string, details?: Record<string, unknown>)
+```
+
+**Examples**:
+```typescript
+// Entity not found
+if (!user) {
+  throw new NotFoundError('User not found', { userId });
+}
+
+// Nested resource not found
+if (!course) {
+  throw new NotFoundError('Course not found', { courseId, studentId });
+}
+```
+
+---
+
+### ConflictError (409 Conflict)
+
+For resource conflicts (duplicate, already exists).
+
+**Constructor**:
+```typescript
+new ConflictError(message: string, details?: Record<string, unknown>)
+```
+
+**Examples**:
+```typescript
+// Duplicate email
+if (existingUser) {
+  throw new ConflictError('Email already registered', { email });
+}
+
+// Already enrolled
+if (enrollment) {
+  throw new ConflictError('Already enrolled in course', {
+    studentId,
+    courseId,
+  });
+}
+```
+
+---
+
+### RateLimitError (429 Too Many Requests)
+
+For rate limit exceeded.
+
+**Constructor**:
+```typescript
+new RateLimitError(message: string, details?: Record<string, unknown>)
+```
+
+**Example**:
+```typescript
+if (requestCount > limit) {
+  throw new RateLimitError('Rate limit exceeded', {
+    limit,
+    current: requestCount,
+    resetAt: resetTime.toISOString(),
+  });
+}
+```
+
+---
+
+### DatabaseError (500 Internal Server Error)
+
+For database operation failures.
+
+**Constructor**:
+```typescript
+new DatabaseError(message: string, details?: Record<string, unknown>)
+```
+
+**Example**:
+```typescript
+try {
+  await pool.query('SELECT * FROM accounts WHERE id = $1', [userId]);
+} catch (error) {
+  throw new DatabaseError('Database query failed', {
+    originalError: String(error),
+    query: 'SELECT * FROM accounts',
+  });
+}
+```
+
+---
+
+### ExternalServiceError (502 Bad Gateway)
+
+For external API failures.
+
+**Constructor**:
+```typescript
+new ExternalServiceError(message: string, details?: Record<string, unknown>)
+```
+
+**Example**:
+```typescript
+try {
+  await axios.get('https://api.external.com/data');
+} catch (error) {
+  throw new ExternalServiceError('Failed to fetch from external API', {
+    service: 'external-api',
+    endpoint: '/data',
+    originalError: error.message,
+  });
+}
+```
+
+---
+
+### ServiceUnavailableError (503 Service Unavailable)
+
+For temporary service unavailability.
+
+**Constructor**:
+```typescript
+new ServiceUnavailableError(message: string, details?: Record<string, unknown>)
+```
+
+**Example**:
+```typescript
+if (isMaintenanceMode()) {
+  throw new ServiceUnavailableError('Service under maintenance', {
+    maintenanceUntil: maintenanceEnd.toISOString(),
+  });
+}
+```
+
+---
+
+### ConfigurationError (500 Internal Server Error)
+
+For configuration or environment issues.
+
+**Constructor**:
+```typescript
+new ConfigurationError(message: string, details?: Record<string, unknown>)
+```
+
+**Example**:
+```typescript
+if (!process.env.DATABASE_URL) {
+  throw new ConfigurationError('Missing DATABASE_URL environment variable');
+}
+```
+
+---
+
+## Utility Functions
+
+### serializeError
+
+Serialize any error to a safe JSON object.
+
+**Signature**:
+```typescript
+serializeError(error: unknown): SerializedError
+```
+
+**Returns**:
+```typescript
+interface SerializedError {
+  name: string;
+  message: string;
+  statusCode: number;
+  stack?: string;
+  details?: Record<string, unknown>;
+  isOperational: boolean;
+}
+```
+
+**Example**:
+```typescript
+try {
+  await processPayment(amount);
+} catch (error) {
+  const serialized = serializeError(error);
+
+  logger.error('payment.failed', 'Payment failed', {
+    error: serialized,
+    metadata: { amount },
+  });
+
+  res.status(serialized.statusCode).json({
+    error: serialized.message,
+    details: serialized.details,
+  });
+}
+```
+
+---
+
+### getErrorStatusCode
+
+Get HTTP status code from any error.
+
+**Signature**:
+```typescript
+getErrorStatusCode(error: unknown): number
+```
+
+**Example**:
+```typescript
+try {
+  await doSomething();
+} catch (error) {
+  const statusCode = getErrorStatusCode(error);  // 404, 400, 500, etc.
+  res.status(statusCode).json({ error: error.message });
+}
+```
+
+---
+
+### isOperationalError
+
+Check if error is operational (expected) vs programming error (bug).
+
+**Signature**:
+```typescript
+isOperationalError(error: unknown): boolean
+```
+
+**Example**:
+```typescript
+try {
+  await processRequest();
+} catch (error) {
+  if (isOperationalError(error)) {
+    // Expected error - log and return to user
+    logger.warn('operational.error', error.message, { error });
+    res.status(getErrorStatusCode(error)).json({ error: error.message });
+  } else {
+    // Programming error - alert team!
+    logger.error('programming.error', 'Unexpected error', { error });
+    res.status(500).json({ error: 'Internal server error' });
+  }
+}
+```
+
+---
+
+### getSafeErrorMessage
+
+Get a safe error message (hides sensitive info in production).
+
+**Signature**:
+```typescript
+getSafeErrorMessage(error: unknown): string
+```
+
+**Example**:
+```typescript
+try {
+  await doSomething();
+} catch (error) {
+  const message = getSafeErrorMessage(error);
+  // Production: "Internal server error"
+  // Development: Full error message
+
+  res.status(500).json({ error: message });
+}
+```
+
+---
+
+## Express Error Middleware
+
+### Basic Error Handler
+
+```typescript
+// middleware/errorHandler.ts
+import { Request, Response, NextFunction } from 'express';
+import { serializeError } from '@dormway/core/errors';
+import { createStructuredLogger } from '@dormway/core/logger';
+
+const logger = createStructuredLogger({ service: 'api-router' });
+
+export function errorHandlerMiddleware(
+  error: unknown,
+  req: Request,
+  res: Response,
+  next: NextFunction
+) {
+  const serialized = serializeError(error);
+
+  // Log error
+  logger.error('request.error', 'Request failed', {
+    error: serialized,
+    request: {
+      method: req.method,
+      path: req.path,
+      userId: req.user?.id,
+    },
+  });
+
+  // Send response
+  res.status(serialized.statusCode).json({
+    error: serialized.message,
+    details: process.env.NODE_ENV === 'development' ? serialized.details : undefined,
+  });
+}
+
+// app.ts
+import express from 'express';
+import { errorHandlerMiddleware } from './middleware/errorHandler';
+
+const app = express();
+
+// Routes...
+
+// Error handler MUST be last middleware
+app.use(errorHandlerMiddleware);
+```
+
+---
+
+## Common Patterns
+
+### Pattern 1: API Route with Error Handling
+
+```typescript
+// routes/users.routes.ts
+import express from 'express';
+import { NotFoundError, ValidationError } from '@dormway/core/errors';
+
+const router = express.Router();
+
+router.get('/users/:userId', async (req, res, next) => {
+  try {
+    const { userId } = req.params;
+
+    // Validation
+    if (!isValidUUID(userId)) {
+      throw new ValidationError('Invalid user ID format', { userId });
+    }
+
+    // Fetch user
+    const user = await getUserById(userId);
+
+    if (!user) {
+      throw new NotFoundError('User not found', { userId });
+    }
+
+    res.json(user);
+  } catch (error) {
+    next(error);  // Pass to error middleware
+  }
+});
+
+export default router;
+```
+
+### Pattern 2: Temporal Activity with Error Handling
+
+```typescript
+// activities/sync.activities.ts
+import { ExternalServiceError, DatabaseError } from '@dormway/core/errors';
+import { createStructuredLogger } from '@dormway/core/logger';
+
+const logger = createStructuredLogger({ service: 'engine', activity: { name: 'syncCanvasData' } });
+
+export async function syncCanvasData(studentId: string): Promise<void> {
+  try {
+    // Fetch from Canvas
+    const data = await fetchCanvasAPI(studentId);
+  } catch (error) {
+    if (error.response?.status === 404) {
+      throw new NotFoundError('Student not found in Canvas', { studentId });
+    }
+
+    throw new ExternalServiceError('Failed to fetch from Canvas', {
+      studentId,
+      originalError: error.message,
+    });
+  }
+
+  try {
+    // Save to database
+    await saveToDatabase(studentId, data);
+  } catch (error) {
+    throw new DatabaseError('Failed to save Canvas data', {
+      studentId,
+      originalError: error.message,
+    });
+  }
+}
+```
+
+### Pattern 3: Service Result with Errors
+
+```typescript
+import { ServiceResult } from '@dormway/core/domains/types';
+import { NotFoundError } from '@dormway/core/errors';
+
+async function getUser(userId: string): Promise<ServiceResult<User>> {
+  try {
+    const user = await fetchUser(userId);
+
+    if (!user) {
+      return {
+        success: false,
+        error: 'User not found',
+        errorDetails: { userId },
+      };
+    }
+
+    return { success: true, data: user };
+  } catch (error) {
+    return {
+      success: false,
+      error: 'Failed to fetch user',
+      errorDetails: { originalError: String(error) },
+    };
+  }
+}
+
+// Usage
+const result = await getUser(userId);
+
+if (!result.success) {
+  throw new NotFoundError(result.error!, result.errorDetails);
+}
+
+const user = result.data!;
+```
+
+---
+
+## Best Practices
+
+### ✅ Do
+
+- **Use specific error classes** (NotFoundError, ValidationError, etc.)
+- **Include helpful details** (IDs, context)
+- **Log errors with context** (user, request, operation)
+- **Serialize errors** before sending to client
+- **Use error middleware** in Express
+- **Check isOperational** to distinguish error types
+
+### ❌ Don't
+
+- **Don't expose sensitive data** in error details (passwords, tokens, internal IDs)
+- **Don't use generic Error** (use specific classes)
+- **Don't throw strings** (throw error objects)
+- **Don't log errors multiple times** (log once, rethrow if needed)
+- **Don't return stack traces** to clients in production
+
+---
+
+## Security Considerations
+
+### Sensitive Data Leakage
+
+```typescript
+// ❌ BAD - exposes sensitive data
+throw new ValidationError('Invalid credentials', {
+  email: 'user@example.com',
+  password: 'secret123',  // NEVER expose passwords!
+  databaseHost: 'db.internal.com',  // NEVER expose internal IPs!
+});
+
+// ✅ GOOD - safe error details
+throw new ValidationError('Invalid credentials', {
+  email: 'user@example.com',  // OK - user knows their email
+});
+```
+
+### Environment-Specific Messages
+
+```typescript
+// Production-safe error messages
+const message = process.env.NODE_ENV === 'production'
+  ? 'An error occurred'
+  : error.message;  // Detailed message in development
+
+res.status(500).json({ error: message });
+```
+
+---
+
+## Testing
+
+### Mock Error Handling
+
+```typescript
+// __tests__/userService.test.ts
+import { NotFoundError } from '@dormway/core/errors';
+
+describe('UserService', () => {
+  it('should throw NotFoundError when user not found', async () => {
+    await expect(getUserById('nonexistent')).rejects.toThrow(NotFoundError);
+  });
+
+  it('should include user ID in error details', async () => {
+    try {
+      await getUserById('user-123');
+    } catch (error) {
+      expect(error).toBeInstanceOf(NotFoundError);
+      expect(error.details).toEqual({ userId: 'user-123' });
+    }
+  });
+});
+```
+
+---
+
+## Related Documentation
+
+- [DormWay Core Library (@dormway-core)](/docs/engineering/technical/dormway-core-library-dormway-core) - Main overview
+- [Structured Logger](/docs/engineering/technical/dormway-core/utilities/structured-logger) - Logging errors
+- [Migration Guide](/docs/engineering/technical/dormway-core/migration-guide) - Migrating to error classes
+
+---
+
+**Last Updated**: 2025-11-23
+**Maintainer**: Platform Team

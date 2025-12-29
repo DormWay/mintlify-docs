@@ -1,0 +1,536 @@
+---
+title: "LockedIn AI Mode System"
+description: "status: spec category: design last_updated: 2025-12-11 created: 2025-12-11 owner: design implementation_status: planning aliases:"
+---
+
+# LockedIn AI Mode System
+
+---
+status: spec
+category: design
+last_updated: 2025-12-11
+created: 2025-12-11
+owner: design
+implementation_status: planning
+aliases:
+  - AI Mode
+  - Green Mode
+  - Ace Assistant
+  - AI Preferences
+  - Eco Mode
+  - AI Toggle
+tags:
+  - '#ai'
+  - '#lockedin'
+  - '#ux'
+  - '#widgets'
+  - '#backend'
+  - '#caching'
+  - '#settings'
+  - '#ace'
+  - '#green-mode'
+  - '#llm'
+cssclass: spec-document
+---
+
+## Executive Summary
+
+- **Three AI modes:** AI On (default), AI Off, Green Mode (eco-conscious)
+- **User control:** Single toggle in Settings → AI Preferences
+- **Conditional UI:** Sidebar, widgets, and features adapt to mode
+- **Green Mode:** Smaller models, caching, reduced frequency for eco-conscious users
+- **No nagging:** Respect user choice without repeated prompts to enable AI
+
+## User Settings Interface
+
+### Location
+`Settings → AI & Focus → AI Features`
+
+### Data Model
+
+```typescript
+interface AIPreferences {
+  // Master toggle
+  aiEnabled: boolean;  // default: true
+
+  // Green Mode (eco-conscious/reliance-aware)
+  greenMode: boolean;  // default: false
+
+  // Per-feature toggles (when aiEnabled: true)
+  features: {
+    aceChat: boolean;           // default: true
+    nextActionWidget: boolean;  // default: true
+    studySuggestions: boolean;  // default: true
+    smartOrganize: boolean;     // default: true
+  };
+
+  // Green Mode specific
+  greenModeSettings: {
+    modelTier: 'eco' | 'standard';  // 'eco' uses smaller models
+    maxTokens: number;               // default: 500 for eco, 2000 for standard
+    cacheAggressive: boolean;        // default: true for eco
+    suggestionsFrequency: 'hourly' | 'daily' | 'manual';
+  };
+}
+```
+
+---
+
+## Three Modes Comparison
+
+| Mode | Sidebar | Widgets | Behavior |
+|------|---------|---------|----------|
+| **AI On** (default) | Shows "Ace" | Next Action, AI suggestions | Full AI features |
+| **AI Off** | Shows "Help" (or nothing) | Hides AI widgets | No AI processing |
+| **Green Mode** | Shows "Ace (Eco)" with 💚 | AI widgets with eco badge | Lighter models, cached responses |
+
+---
+
+## AI On Mode (Default)
+
+### Sidebar
+- Shows "Ace" nav item with sparkles icon
+- Links to `/dashboard/ace`
+
+### Widgets Available
+- **action_cta** (Next Action) - AI-powered priority suggestion
+- **workload** - AI-enhanced workload forecast
+- **attendance** - AI-assisted skip recommendations
+- All standard widgets
+
+### Behavior
+- Full context sent to AI endpoints
+- Real-time suggestions
+- Chat history preserved
+- No restrictions on model usage
+
+---
+
+## AI Off Mode
+
+When user disables AI features entirely.
+
+### Sidebar Changes
+- Replace "Ace" with "Help"
+- Links to `/dashboard/help` (support documentation)
+
+### Widget Changes
+- **Hide:** `action_cta` (Next Action widget)
+- **Modify:** Remove AI suggestions from other widgets
+- **Replace:** AI suggestions with rule-based alternatives
+
+### Data Collection
+- Stop sending data to AI endpoints
+- User preferences stored with `aiEnabled: false`
+- Telemetry still collects usage data (non-AI)
+
+### Onboarding Integration
+- Show option during initial setup: "Would you like AI assistance?"
+- Respect choice without repeated prompts
+- No nagging popups elsewhere in app
+
+### Re-enable Flow
+- Single CTA in Settings: "Enable AI Features"
+- One-click enable from Help page
+- No confirmation dialogs (respect user agency)
+
+---
+
+## Green Mode
+
+### Philosophy
+"Use AI responsibly" - for environmentally-conscious students and those who want to reduce AI reliance.
+
+### Visual Indicators
+
+```tsx
+// Green Mode badge on Ace nav item
+<NavItem>
+  <SparklesIcon />
+  <span>Ace</span>
+  {greenMode && <span className="green-badge">💚</span>}
+</NavItem>
+
+// Widget header with eco badge
+<div className="widget-header">
+  <span>Next Action</span>
+  {greenMode && (
+    <span className="text-xs text-emerald-500 ml-2">
+      💚 Eco
+    </span>
+  )}
+</div>
+
+// Response footer
+{greenMode && (
+  <div className="ai-response-footer">
+    <span className="text-xs text-emerald-500">
+      💚 Green response • {cached ? 'Cached' : 'Fresh'}
+    </span>
+    <button className="boost-button">
+      ⚡ Boost for detailed answer
+    </button>
+  </div>
+)}
+```
+
+### Model Selection
+
+| Mode | Primary Model | Fallback | Max Tokens | Cache TTL |
+|------|---------------|----------|------------|-----------|
+| Standard | claude-sonnet | gpt-4 | 2000 | 1 hour |
+| Green | claude-haiku | gpt-3.5-turbo | 500 | 24 hours |
+| Boost | claude-sonnet | gpt-4 | 2000 | 1 hour |
+
+### Frequency Limits
+
+| Feature | Standard | Green Mode |
+|---------|----------|------------|
+| Next Action refresh | Real-time | Hourly |
+| Study suggestions | On schedule change | Daily or manual |
+| Chat responses | Immediate | Immediate (cached first) |
+| Background processing | Always | User-initiated only |
+
+### Cache Strategy
+
+```typescript
+interface CacheKey {
+  userId: string;
+  promptHash: string;  // Hash of normalized prompt
+  context: {
+    courseIds: string[];
+    dateRange: string;  // 'today' | 'this-week' | 'custom'
+  };
+}
+
+// Pre-defined cacheable prompts
+const CACHEABLE_PROMPTS = [
+  'what_due_this_week',
+  'summarize_course',
+  'attendance_status',
+  'upcoming_deadlines',
+  'study_suggestions'
+];
+
+// Cache invalidation triggers
+const INVALIDATION_EVENTS = [
+  'syllabus_uploaded',
+  'assignment_created',
+  'assignment_completed',
+  'schedule_changed'
+];
+```
+
+### "Boost" Functionality
+
+When users need more detailed responses in Green Mode:
+
+```tsx
+const BoostButton = ({ promptId, onBoost }) => (
+  <button
+    onClick={() => onBoost(promptId)}
+    className="text-xs text-amber-500 hover:text-amber-400"
+  >
+    ⚡ Boost for detailed answer
+  </button>
+);
+
+// Boost bypasses green mode for single request
+const handleBoost = async (promptId: string) => {
+  const response = await aiQuery({
+    promptId,
+    options: {
+      greenMode: false,  // Override for this request
+      maxTokens: 2000,
+      allowCache: false  // Fresh response
+    }
+  });
+  trackEvent('ai_response_boosted', { promptId });
+};
+```
+
+### Transparency Features
+
+Show users their eco impact:
+
+```tsx
+// Settings page stat
+<div className="eco-stats">
+  <h4>Your Eco Impact</h4>
+  <p>AI calls saved this week: 47</p>
+  <p>Cached responses used: 23</p>
+  <p>Est. compute reduction: 68%</p>
+</div>
+```
+
+---
+
+## Widget System Updates
+
+### Widget AI Labeling
+
+```typescript
+interface WidgetDefinition {
+  // ... existing fields ...
+
+  // AI labeling
+  aiPowered: boolean;           // Does this widget use AI?
+  aiOptional: boolean;          // Can it work without AI?
+  greenModeSupported: boolean;  // Does it have green mode variant?
+
+  // Non-AI fallback
+  fallbackBehavior?: 'hide' | 'static' | 'rule-based';
+  fallbackDescription?: string;
+}
+```
+
+### Widget Registry
+
+| Widget | AI Powered | AI Optional | Green Mode | Fallback |
+|--------|------------|-------------|------------|----------|
+| `dayplan` | No | N/A | N/A | N/A |
+| `schedule` | No | N/A | N/A | N/A |
+| `tasks` | No | N/A | N/A | N/A |
+| `deadlines` | No | N/A | N/A | N/A |
+| `attendance` | Partial | Yes | Yes | Rule-based (count skips) |
+| `courses` | No | N/A | N/A | N/A |
+| `quick_links` | No | N/A | N/A | N/A |
+| `syllabus` | No | N/A | N/A | N/A |
+| `action_cta` | **Yes** | No | Yes | Hide |
+| `workload` | Partial | Yes | Yes | Static forecast |
+| `policy_highlights` | Partial | Yes | Yes | Static extraction |
+| `study` | No | N/A | N/A | N/A |
+| `context_status` | No | N/A | N/A | N/A |
+
+### Default Widgets by Mode
+
+**AI On (Default):**
+1. Day Plan (hero)
+2. Tasks
+3. Deadlines
+4. Next Action (AI)
+
+**AI Off:**
+1. Day Plan (hero)
+2. Tasks
+3. Deadlines
+4. Attendance ("Can I Skip?")
+
+**Green Mode:**
+1. Day Plan (hero)
+2. Tasks
+3. Deadlines
+4. Next Action (Eco) - with green badge
+
+---
+
+## Settings UI Specification
+
+### AI Preferences Tab
+
+**Route:** `/dashboard/settings?tab=ai`
+
+```
+┌─────────────────────────────────────────────────────┐
+│  AI Features                                        │
+│  Control how DormWay uses AI                        │
+├─────────────────────────────────────────────────────┤
+│  ┌─────────────────────────────────────────────┐   │
+│  │ AI FEATURES                          [ON]   │   │
+│  │                                             │   │
+│  │ When enabled, DormWay can:                  │   │
+│  │ • Suggest what to work on next              │   │
+│  │ • Answer questions about your courses       │   │
+│  │ • Help with writing and explanations        │   │
+│  │                                             │   │
+│  │ When disabled:                              │   │
+│  │ • No AI processing of your data             │   │
+│  │ • Dashboard shows non-AI widgets only       │   │
+│  │ • Help section replaces Ace in sidebar      │   │
+│  └─────────────────────────────────────────────┘   │
+├─────────────────────────────────────────────────────┤
+│  ┌─────────────────────────────────────────────┐   │
+│  │ GREEN MODE                          [OFF]   │   │
+│  │ 💚 Eco-conscious AI                         │   │
+│  │                                             │   │
+│  │ Reduces AI compute and energy usage:        │   │
+│  │ • Uses smaller, more efficient models       │   │
+│  │ • Caches responses when possible            │   │
+│  │ • Updates suggestions hourly (not instant)  │   │
+│  │ • Limits response length                    │   │
+│  │                                             │   │
+│  │ Great for:                                  │   │
+│  │ • Environmental consciousness               │   │
+│  │ • Reducing AI reliance                      │   │
+│  │ • Faster, simpler responses                 │   │
+│  │                                             │   │
+│  │ You can "Boost" individual responses for    │   │
+│  │ complex questions.                          │   │
+│  └─────────────────────────────────────────────┘   │
+├─────────────────────────────────────────────────────┤
+│  FEATURE TOGGLES (when AI enabled)                 │
+│                                                     │
+│  ☑️ Next Action suggestions                        │
+│  ☑️ Study recommendations                          │
+│  ☑️ Ace chat assistant                             │
+│  ☑️ Smart Organize for dashboard                   │
+├─────────────────────────────────────────────────────┤
+│  [Save AI Preferences]                              │
+└─────────────────────────────────────────────────────┘
+```
+
+---
+
+## Backend Implementation
+
+### API Request Options
+
+```typescript
+// AI request with mode awareness
+interface AIRequestOptions {
+  greenMode?: boolean;
+  maxTokens?: number;
+  allowCache?: boolean;
+  priority?: 'low' | 'normal' | 'high';
+  bypassGreenMode?: boolean;  // For "Boost" feature
+}
+
+// Endpoint: POST /api/ai/query
+interface AIQueryRequest {
+  prompt: string;
+  context: {
+    userId: string;
+    courseIds: string[];
+    dateRange: string;
+  };
+  options: AIRequestOptions;
+}
+```
+
+### Model Selection Logic
+
+```typescript
+const selectModel = (options: AIRequestOptions): ModelConfig => {
+  if (options.bypassGreenMode) {
+    return MODELS.standard;
+  }
+
+  if (options.greenMode) {
+    return {
+      primary: 'claude-haiku',
+      fallback: 'gpt-3.5-turbo',
+      maxTokens: options.maxTokens || 500,
+      cacheTTL: 24 * 60 * 60 * 1000  // 24 hours
+    };
+  }
+
+  return {
+    primary: 'claude-sonnet',
+    fallback: 'gpt-4',
+    maxTokens: options.maxTokens || 2000,
+    cacheTTL: 60 * 60 * 1000  // 1 hour
+  };
+};
+```
+
+### Caching Layer
+
+```typescript
+class AICache {
+  private redis: Redis;
+
+  async get(key: CacheKey): Promise<CachedResponse | null> {
+    const cacheKey = this.buildKey(key);
+    const cached = await this.redis.get(cacheKey);
+
+    if (cached) {
+      return {
+        response: JSON.parse(cached),
+        fromCache: true,
+        cachedAt: await this.redis.get(`${cacheKey}:timestamp`)
+      };
+    }
+
+    return null;
+  }
+
+  async set(key: CacheKey, response: AIResponse, ttl: number): Promise<void> {
+    const cacheKey = this.buildKey(key);
+    await this.redis.setex(cacheKey, ttl, JSON.stringify(response));
+    await this.redis.set(`${cacheKey}:timestamp`, Date.now());
+  }
+
+  async invalidate(userId: string, event: string): Promise<void> {
+    const pattern = `ai:${userId}:*`;
+    const keys = await this.redis.keys(pattern);
+
+    // Only invalidate relevant caches based on event type
+    const keysToInvalidate = keys.filter(key =>
+      INVALIDATION_MAP[event]?.some(prefix => key.includes(prefix))
+    );
+
+    if (keysToInvalidate.length) {
+      await this.redis.del(...keysToInvalidate);
+    }
+  }
+
+  private buildKey(key: CacheKey): string {
+    const contextHash = hash({
+      courses: key.context.courseIds.sort(),
+      dateRange: key.context.dateRange
+    });
+    return `ai:${key.userId}:${key.promptHash}:${contextHash}`;
+  }
+}
+```
+
+---
+
+## Telemetry Events
+
+```typescript
+// AI mode events
+'ai_mode_toggled': {
+  enabled: boolean;
+  source: 'settings' | 'onboarding' | 'help_page';
+}
+
+'green_mode_toggled': {
+  enabled: boolean;
+  source: 'settings' | 'ace_page';
+}
+
+'ai_response_boosted': {
+  promptType: string;
+  wasGreenMode: boolean;
+}
+
+'ai_cache_hit': {
+  promptType: string;
+  cachedAgeMinutes: number;
+}
+
+'ai_model_used': {
+  model: string;
+  greenMode: boolean;
+  tokens: number;
+}
+
+// Page views with AI context
+'help_page_viewed': { aiEnabled: boolean }
+'ace_page_viewed': { greenMode: boolean }
+```
+
+---
+
+## Related Documents
+
+- [LockedIn-UX-Specification](/docs/product/design/lockedin-ux-specification) - Overall UX specification
+- [LockedIn-AI-Cache-Invalidation](/docs/product/design/lockedin-ai-cache-invalidation) - Cache invalidation patterns and event matrix
+- [DormWay-Design-Vision](/docs/product/design/dormway-design-vision) - Visual design principles
+- Product/Features/AI & RAG/ - AI feature documentation
+
+---
+
+**Document History:**
+- 2025-12-11: Initial specification created

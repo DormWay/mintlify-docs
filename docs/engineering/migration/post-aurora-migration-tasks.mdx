@@ -1,0 +1,139 @@
+---
+title: "Post Aurora Migration Tasks"
+description: "With the contexts data successfully migrated to Aurora (1,284 records), we now need to complete the transition away from Supabase and implement Auth0 for aut..."
+---
+
+# Post-Aurora Migration Tasks
+
+## Overview
+With the contexts data successfully migrated to Aurora (1,284 records), we now need to complete the transition away from Supabase and implement Auth0 for authentication.
+
+## Current State
+- ✅ Aurora database is operational with all contexts data
+- ✅ API Router can connect to Aurora via RDS Proxy
+- 🟡 Supabase dependencies still exist throughout codebase
+- 🔴 Authentication still relies on Supabase Auth
+
+## Task 1: Remove Supabase Dependencies
+
+### Files with Supabase Dependencies
+Based on codebase scan, Supabase is used in:
+
+1. **Engine Service** (`/dormway/engine/`)
+   - `src/config.ts` - Supabase client initialization
+   - `src/utils/supabase.ts` - Supabase utility functions
+   - `src/services/notificationContextAggregator.ts` - Database queries
+   - `src/services/eventProcessor.service.ts` - Event processing
+
+2. **API Router** (`/dormway/dormway-api-router/`)
+   - `src/config.ts` - Supabase configuration
+   - `src/routes/mobile-routes.ts` - Auth and database queries
+   - `src/routes/debug-routes.ts` - Debug endpoints
+   - `src/routes/context-intelligence-routes.ts` - Context queries
+   - `src/routes/braingains-routes.ts` - BrainGains data
+   - `src/routes/student-courses-routes.ts` - Course data
+
+3. **Ably Relay** (`/dormway/ably-relay/`)
+   - `src/config/index.ts` - Supabase configuration
+
+4. **Python Crews** (`/dormway/dormway-crews/`)
+   - `shared/supabase_service.py` - Database operations
+
+5. **iOS App** (`/dormway/ios-clean/`)
+   - `Packages/DWNetworking/Sources/DWNetworking/APIConfig.swift`
+
+### Migration Steps
+
+#### Step 1: Update Database Connections
+Replace all Supabase database queries with Aurora connections:
+- Use the existing `auroraDb.ts` module in API Router
+- Create similar Aurora connection modules for other services
+- Update all `.from()` queries to use SQL with the `pg` library
+
+#### Step 2: Remove Supabase Auth
+This requires implementing Auth0 first (see Task 2)
+
+#### Step 3: Remove Supabase Storage
+- Identify any Supabase storage usage
+- Migrate to S3 + CloudFront (already deployed in Terraform)
+
+#### Step 4: Clean up Dependencies
+- Remove `@supabase/supabase-js` from all `package.json` files
+- Remove Supabase environment variables
+- Update `.env.example` files
+
+## Task 2: Implement Auth0 Authentication
+
+### Components to Update
+
+1. **API Router**
+   - Replace Supabase auth middleware with Auth0
+   - Update JWT validation to use Auth0 tokens
+   - Implement Auth0 user management endpoints
+
+2. **iOS App**
+   - Replace Supabase auth SDK with Auth0 SDK
+   - Update login/logout flows
+   - Update token management
+
+3. **Engine Service**
+   - Update user context handling for Auth0 users
+   - Map Auth0 user IDs to internal user records
+
+### Implementation Guide
+See: [Auth0-Integration-Guide](/docs/engineering/migration/auth0-integration-guide)
+
+## Task 3: Update All Services
+
+### Engine Service
+- [ ] Replace Supabase client with Aurora connection
+- [ ] Update all database queries
+- [ ] Remove Supabase dependencies
+
+### API Router
+- [ ] Replace all Supabase queries with Aurora
+- [ ] Implement Auth0 middleware
+- [ ] Update user endpoints
+
+### Ably Relay
+- [ ] Update configuration
+- [ ] Ensure compatibility with new auth system
+
+### Python Crews
+- [ ] Replace `supabase_service.py` with Aurora service
+- [ ] Update all database operations
+
+### iOS App
+- [ ] Implement Auth0 SDK
+- [ ] Update authentication flows
+- [ ] Remove Supabase SDK
+
+## Task 4: Testing & Validation
+
+1. **Database Operations**
+   - Verify all CRUD operations work with Aurora
+   - Test complex queries and joins
+   - Validate data integrity
+
+2. **Authentication Flow**
+   - Test login/logout
+   - Verify JWT tokens
+   - Test role-based access
+
+3. **Integration Testing**
+   - End-to-end user flows
+   - API endpoint testing
+   - Mobile app functionality
+
+## Timeline Estimate
+- Task 1 (Remove Supabase DB): 2-3 days
+- Task 2 (Implement Auth0): 3-4 days
+- Task 3 (Update Services): 2-3 days
+- Task 4 (Testing): 2 days
+- **Total**: ~10-12 days
+
+## Next Immediate Steps
+1. Start with API Router - it's the central service
+2. Create Aurora database connection module for Engine
+3. Begin Auth0 setup and configuration
+4. Update one endpoint at a time for gradual migration

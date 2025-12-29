@@ -1,0 +1,94 @@
+---
+title: "BrainGains Word Document Support"
+description: "Added support for extracting text from Word documents (.doc and .docx files) in the BrainGains activities, enabling syllabus upload for Word documents in add..."
+---
+
+# BrainGains Word Document Support
+
+## Overview
+Added support for extracting text from Word documents (.doc and .docx files) in the BrainGains activities, enabling syllabus upload for Word documents in addition to PDFs.
+
+## Implementation Date
+July 12, 2025
+
+## Purpose
+Enable Journey 2 (Syllabus Upload) to support Word documents, as many professors distribute syllabi in Word format.
+
+## Technical Implementation
+
+### Dependencies
+- Installed `mammoth` npm package for Word document extraction
+- Added import: `import * as mammoth from 'mammoth';`
+
+### Modified Functions
+
+#### `extractGenericDocumentText()`
+Location: `/engine/src/activities/braingains.activities.ts`
+
+```typescript
+// Added Word document support
+else if (lowerUrl.includes('.docx') || lowerUrl.includes('.doc')) {
+  // Extract text from Word document
+  try {
+    const result = await mammoth.extractRawText({ buffer });
+    extractedText = result.value;
+    
+    if (result.messages && result.messages.length > 0) {
+      logger.warn('Word extraction warnings', { 
+        documentId, 
+        messages: result.messages 
+      });
+    }
+    
+    if (!extractedText.trim()) {
+      logger.warn('Word document appears to be empty', { documentId });
+      extractedText = '[Word document contains no extractable text]';
+    }
+  } catch (wordError) {
+    logger.error('Failed to extract text from Word document', { 
+      documentId, 
+      error: wordError 
+    });
+    extractedText = '[Failed to extract text from Word document]';
+  }
+}
+```
+
+#### `extractDocumentText()` 
+- Added identical Word document support for syllabus processing
+- Maintains consistency with PDF extraction pattern
+- Logs extraction progress and any warnings
+
+### Error Handling
+- Catches Word-specific extraction errors
+- Provides clear error messages in logs
+- Falls back to generic error text if extraction fails
+- Logs any warnings from mammoth extraction process
+
+## Processing Flow
+
+1. **File Upload**: User uploads .doc or .docx file
+2. **Download**: File is downloaded as buffer from storage URL
+3. **Extension Check**: System checks for `.doc` or `.docx` extension
+4. **Text Extraction**: Mammoth extracts raw text from the document
+5. **Storage**: Extracted text is stored in the database
+6. **Processing**: Document proceeds through normal BrainGains crew processing
+
+## Benefits
+- Students can now upload syllabi in Word format
+- No need to convert Word docs to PDF first
+- Maintains same processing pipeline as PDFs
+- Improves user experience for Journey 2 (Syllabus Upload)
+- Supports both legacy .doc and modern .docx formats
+
+## Related Files
+- `/engine/src/activities/braingains.activities.ts` - Main implementation
+- `/engine/package.json` - Added mammoth dependency
+
+## Testing
+Created test script at `/engine/src/scripts/test-word-extraction.ts` to verify mammoth installation and API usage.
+
+## Future Enhancements
+- Add support for other document formats (RTF, ODT)
+- Implement style preservation for better formatting detection
+- Add table extraction support for schedule parsing

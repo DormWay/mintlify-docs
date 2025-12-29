@@ -1,0 +1,750 @@
+---
+title: "Notification Engine   Technical Components"
+description: "This document breaks down the Notification Engine into implementable technical components based on our dual-AI architecture (Strategic Planner + Real-time De..."
+---
+
+# Notification Engine - Technical Components
+
+**Last Updated**: 2025-07-17  
+**Status**: 🟡 In Progress - Phase 1 Complete, Phase 2-3 Active
+
+## Overview
+This document breaks down the Notification Engine into implementable technical components based on our dual-AI architecture (Strategic Planner + Real-time Decision Engine).
+
+## Implementation Status Summary
+
+### ✅ Completed
+- Database schema with all notification tables
+- TypeScript type system for notifications
+- NotificationContextAggregator service
+- Morning briefing crew (MorningBriefingCrew)
+- Morning notification Temporal workflow
+- Customer.io integration for delivery
+- AI personality preference injection
+
+### 🟡 In Progress
+- Additional notification crews (study, encouragement, evening)
+- Real-time event processing system
+- Notification decision engine
+- iOS app integration
+
+### 🔴 Not Started
+- Analytics dashboard
+- A/B testing framework
+- ML-based optimization
+
+## Core Components
+
+### 1. Data Models & Database Schema
+
+#### Notification Templates
+```sql
+-- Store reusable notification templates
+CREATE TABLE notification_templates (
+  id UUID PRIMARY KEY,
+  template_key VARCHAR(255) UNIQUE NOT NULL,
+  category VARCHAR(100) NOT NULL, -- 'academic', 'social', 'wellness', 'reminder'
+  priority_base INTEGER DEFAULT 5,
+  title_template TEXT NOT NULL,
+  body_template TEXT NOT NULL,
+  action_templates JSONB, -- Array of possible actions
+  constraints JSONB, -- Time windows, frequency limits
+  metadata JSONB,
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Store user notification preferences
+CREATE TABLE user_notification_preferences (
+  user_id UUID PRIMARY KEY REFERENCES accounts(id),
+  enabled_categories JSONB DEFAULT '["academic", "social", "wellness", "reminder"]',
+  quiet_hours JSONB, -- {"start": "22:00", "end": "08:00"}
+  frequency_limits JSONB, -- {"daily_max": 10, "hourly_max": 2}
+  channel_preferences JSONB, -- {"push": true, "email": false}
+  ai_personality_override JSONB, -- Specific personality for notifications
+  updated_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Track notification history
+CREATE TABLE notification_history (
+  id UUID PRIMARY KEY,
+  user_id UUID REFERENCES accounts(id),
+  template_id UUID REFERENCES notification_templates(id),
+  sent_at TIMESTAMP DEFAULT NOW(),
+  channel VARCHAR(50), -- 'push', 'email', 'in_app'
+  context_snapshot JSONB, -- Context at time of sending
+  engagement JSONB, -- Click-through, dismissal, etc.
+  score DECIMAL, -- Decision engine score
+  crew_execution_id VARCHAR(255), -- Link to crew run
+  metadata JSONB
+);
+
+-- Queue for pending notifications
+CREATE TABLE notification_queue (
+  id UUID PRIMARY KEY,
+  user_id UUID REFERENCES accounts(id),
+  scheduled_for TIMESTAMP NOT NULL,
+  priority INTEGER DEFAULT 5,
+  template_id UUID REFERENCES notification_templates(id),
+  personalization_data JSONB,
+  context_requirements JSONB, -- Required context for delivery
+  status VARCHAR(50) DEFAULT 'pending', -- 'pending', 'sent', 'cancelled'
+  created_at TIMESTAMP DEFAULT NOW()
+);
+```
+
+### 2. Context Aggregator Service
+
+```typescript
+// engine/src/services/notificationContextAggregator.ts
+
+interface NotificationContext {
+  user: {
+    id: string;
+    preferences: UserPreferences;
+    aiPersonality: AIPersonality;
+    currentLocation?: LocationContext;
+    currentActivity?: ActivityContext;
+  };
+  academic: {
+    upcomingDeadlines: Assignment[];
+    todaysClasses: CourseEvent[];
+    recentGrades: Grade[];
+    studyStreak: number;
+  };
+  temporal: {
+    currentTime: Date;
+    dayOfWeek: string;
+    weekInSemester: number;
+    isWeekend: boolean;
+    isExamPeriod: boolean;
+  };
+  behavioral: {
+    lastAppOpen: Date;
+    engagementScore: number;
+    preferredStudyTimes: TimeWindow[];
+    notificationHistory: NotificationSummary;
+  };
+  environmental: {
+    weather?: WeatherData;
+    campusEvents?: CampusEvent[];
+    buildingOccupancy?: number;
+  };
+}
+
+export class NotificationContextAggregator {
+  constructor(
+    private supabase: SupabaseService,
+    private contextService: ContextService,
+    private telemetryService: TelemetryService
+  ) {}
+
+  async aggregateContext(userId: string): Promise<NotificationContext> {
+    // Parallel fetch all context data
+    const [
+      userContext,
+      academicContext,
+      temporalContext,
+      behavioralContext,
+      environmentalContext
+    ] = await Promise.all([
+      this.fetchUserContext(userId),
+      this.fetchAcademicContext(userId),
+      this.fetchTemporalContext(),
+      this.fetchBehavioralContext(userId),
+      this.fetchEnvironmentalContext(userId)
+    ]);
+
+    return {
+      user: userContext,
+      academic: academicContext,
+      temporal: temporalContext,
+      behavioral: behavioralContext,
+      environmental: environmentalContext
+    };
+  }
+
+  private async fetchAcademicContext(userId: string): Promise<AcademicContext> {
+    // Fetch from various sources
+    const [deadlines, classes, grades] = await Promise.all([
+      this.supabase.getUpcomingDeadlines(userId, 7), // Next 7 days
+      this.supabase.getTodaysClasses(userId),
+      this.supabase.getRecentGrades(userId, 7) // Last 7 days
+    ]);
+
+    const studyStreak = await this.calculateStudyStreak(userId);
+
+    return {
+      upcomingDeadlines: deadlines,
+      todaysClasses: classes,
+      recentGrades: grades,
+      studyStreak
+    };
+  }
+
+  // Additional context fetching methods...
+}
+```
+
+### 3. Notification Decision Engine
+
+```typescript
+// engine/src/services/notificationDecisionEngine.ts
+
+interface NotificationCandidate {
+  templateId: string;
+  score: number;
+  reasoning: string;
+  personalizationData: any;
+  timing: {
+    immediate: boolean;
+    scheduledFor?: Date;
+    expiresAt?: Date;
+  };
+}
+
+export class NotificationDecisionEngine {
+  private scoringWeights = {
+    relevance: 0.3,
+    timeliness: 0.25,
+    engagement: 0.2,
+    frequency: 0.15,
+    userPreference: 0.1
+  };
+
+  async evaluateNotificationCandidates(
+    context: NotificationContext,
+    candidates: NotificationTemplate[]
+  ): Promise<NotificationCandidate[]> {
+    const scored = await Promise.all(
+      candidates.map(template => this.scoreCandidate(template, context))
+    );
+
+    // Filter and sort by score
+    return scored
+      .filter(c => c.score > 0.5) // Minimum threshold
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 5); // Top 5 candidates
+  }
+
+  private async scoreCandidate(
+    template: NotificationTemplate,
+    context: NotificationContext
+  ): Promise<NotificationCandidate> {
+    const scores = {
+      relevance: this.calculateRelevanceScore(template, context),
+      timeliness: this.calculateTimelinessScore(template, context),
+      engagement: await this.calculateEngagementScore(template, context.user.id),
+      frequency: this.calculateFrequencyScore(template, context),
+      userPreference: this.calculatePreferenceScore(template, context)
+    };
+
+    const totalScore = Object.entries(scores).reduce(
+      (sum, [key, score]) => sum + score * this.scoringWeights[key as keyof typeof this.scoringWeights],
+      0
+    );
+
+    const personalizationData = await this.generatePersonalizationData(template, context);
+    const timing = this.determineTiming(template, context, totalScore);
+
+    return {
+      templateId: template.id,
+      score: totalScore,
+      reasoning: this.generateReasoning(scores, template),
+      personalizationData,
+      timing
+    };
+  }
+
+  private calculateRelevanceScore(template: NotificationTemplate, context: NotificationContext): number {
+    // Score based on how relevant the notification is to current context
+    let score = 0;
+
+    // Academic relevance
+    if (template.category === 'academic') {
+      if (context.academic.upcomingDeadlines.length > 0) score += 0.3;
+      if (context.temporal.isExamPeriod) score += 0.2;
+      if (context.academic.todaysClasses.length > 0) score += 0.2;
+    }
+
+    // Time-based relevance
+    if (template.constraints?.timeWindows) {
+      const inWindow = this.isInTimeWindow(
+        context.temporal.currentTime,
+        template.constraints.timeWindows
+      );
+      if (inWindow) score += 0.3;
+    }
+
+    return Math.min(score, 1);
+  }
+
+  // Additional scoring methods...
+}
+```
+
+### 4. Notification Delivery Workflow (Temporal)
+
+```typescript
+// engine/src/workflows/notificationDelivery.workflow.ts
+
+import { proxyActivities } from '@temporalio/workflow';
+import type { NotificationActivities } from '../activities/notification.activities';
+
+const activities = proxyActivities<NotificationActivities>({
+  startToCloseTimeout: '30 seconds',
+  retry: {
+    initialInterval: '1 second',
+    backoffCoefficient: 2,
+    maximumAttempts: 3
+  }
+});
+
+export async function notificationDeliveryWorkflow(params: {
+  userId: string;
+  notificationId: string;
+  templateId: string;
+  personalizationData: any;
+  scheduledFor?: Date;
+}): Promise<void> {
+  const { userId, notificationId, templateId, personalizationData, scheduledFor } = params;
+
+  // Wait until scheduled time if specified
+  if (scheduledFor && scheduledFor > new Date()) {
+    await sleep(scheduledFor.getTime() - Date.now());
+  }
+
+  // Re-check context before sending (things may have changed)
+  const currentContext = await activities.fetchCurrentContext(userId);
+  const shouldSend = await activities.validateNotificationStillRelevant(
+    notificationId,
+    currentContext
+  );
+
+  if (!shouldSend) {
+    await activities.cancelNotification(notificationId, 'No longer relevant');
+    return;
+  }
+
+  // Apply AI personality to notification content
+  const personalizedContent = await activities.personalizeNotificationContent(
+    templateId,
+    personalizationData,
+    currentContext.user.aiPersonality
+  );
+
+  // Send via appropriate channel
+  const result = await activities.sendNotification({
+    userId,
+    notificationId,
+    content: personalizedContent,
+    channel: currentContext.user.preferences.primaryChannel || 'push'
+  });
+
+  // Track delivery
+  await activities.trackNotificationDelivery({
+    notificationId,
+    userId,
+    deliveredAt: new Date(),
+    channel: result.channel,
+    contextSnapshot: currentContext
+  });
+}
+```
+
+### 5. Real-time Trigger Monitor
+
+```typescript
+// engine/src/services/realtimeTriggerMonitor.ts
+
+interface TriggerRule {
+  id: string;
+  name: string;
+  eventTypes: string[];
+  conditions: TriggerCondition[];
+  notificationTemplate: string;
+  cooldownMinutes: number;
+}
+
+export class RealtimeTriggerMonitor {
+  private triggerRules: Map<string, TriggerRule> = new Map();
+  private userCooldowns: Map<string, Date> = new Map();
+
+  constructor(
+    private ably: Ably.Realtime,
+    private decisionEngine: NotificationDecisionEngine,
+    private temporalClient: WorkflowClient
+  ) {
+    this.initializeTriggerRules();
+    this.subscribeToEvents();
+  }
+
+  private initializeTriggerRules() {
+    // Define real-time triggers
+    const triggers: TriggerRule[] = [
+      {
+        id: 'assignment_due_soon',
+        name: 'Assignment Due Soon',
+        eventTypes: ['location_change', 'app_opened'],
+        conditions: [
+          { type: 'has_assignment_due_within', hours: 24 },
+          { type: 'not_in_class' },
+          { type: 'location_on_campus' }
+        ],
+        notificationTemplate: 'urgent_assignment_reminder',
+        cooldownMinutes: 120
+      },
+      {
+        id: 'study_buddy_nearby',
+        name: 'Study Buddy Nearby',
+        eventTypes: ['location_enter_building'],
+        conditions: [
+          { type: 'building_type', value: 'library' },
+          { type: 'has_study_group' },
+          { type: 'study_buddy_in_same_building' }
+        ],
+        notificationTemplate: 'study_buddy_alert',
+        cooldownMinutes: 60
+      },
+      {
+        id: 'class_starting_soon',
+        name: 'Class Starting Soon',
+        eventTypes: ['location_change', 'calendar_15min_before'],
+        conditions: [
+          { type: 'has_class_within', minutes: 15 },
+          { type: 'not_in_class_building' },
+          { type: 'location_distance_from_class', maxMinutes: 10 }
+        ],
+        notificationTemplate: 'class_reminder_urgent',
+        cooldownMinutes: 30
+      }
+    ];
+
+    triggers.forEach(t => this.triggerRules.set(t.id, t));
+  }
+
+  private subscribeToEvents() {
+    // Subscribe to telemetry channel for all users
+    const telemetryChannel = this.ably.channels.get('telemetry');
+    
+    telemetryChannel.subscribe(async (message) => {
+      const { userId, eventType, data } = message.data;
+      
+      // Find applicable triggers for this event type
+      const applicableTriggers = Array.from(this.triggerRules.values())
+        .filter(rule => rule.eventTypes.includes(eventType));
+
+      for (const trigger of applicableTriggers) {
+        await this.evaluateTrigger(trigger, userId, data);
+      }
+    });
+  }
+
+  private async evaluateTrigger(
+    trigger: TriggerRule,
+    userId: string,
+    eventData: any
+  ): Promise<void> {
+    // Check cooldown
+    const cooldownKey = `${userId}:${trigger.id}`;
+    const lastTriggered = this.userCooldowns.get(cooldownKey);
+    
+    if (lastTriggered) {
+      const cooldownExpiry = new Date(lastTriggered.getTime() + trigger.cooldownMinutes * 60000);
+      if (new Date() < cooldownExpiry) {
+        return; // Still in cooldown
+      }
+    }
+
+    // Fetch current context
+    const context = await this.fetchMinimalContext(userId);
+    
+    // Evaluate all conditions
+    const allConditionsMet = await Promise.all(
+      trigger.conditions.map(c => this.evaluateCondition(c, context, eventData))
+    ).then(results => results.every(r => r));
+
+    if (!allConditionsMet) {
+      return;
+    }
+
+    // Conditions met - trigger notification workflow
+    this.userCooldowns.set(cooldownKey, new Date());
+    
+    await this.temporalClient.start('notificationDeliveryWorkflow', {
+      workflowId: `notification-${userId}-${trigger.id}-${Date.now()}`,
+      taskQueue: 'notification-queue',
+      args: [{
+        userId,
+        notificationId: `realtime-${trigger.id}-${Date.now()}`,
+        templateId: trigger.notificationTemplate,
+        personalizationData: {
+          triggerEvent: eventData,
+          context: context
+        }
+      }]
+    });
+  }
+
+  private async evaluateCondition(
+    condition: TriggerCondition,
+    context: any,
+    eventData: any
+  ): Promise<boolean> {
+    switch (condition.type) {
+      case 'has_assignment_due_within':
+        return context.academic.upcomingDeadlines.some(
+          (d: any) => d.hoursUntilDue <= condition.hours
+        );
+      
+      case 'not_in_class':
+        return !context.user.currentActivity?.type.includes('class');
+      
+      case 'location_on_campus':
+        return context.user.currentLocation?.type === 'campus';
+      
+      // Additional condition evaluators...
+      
+      default:
+        return false;
+    }
+  }
+}
+```
+
+### 6. Notification Personalization Service
+
+```typescript
+// engine/src/services/notificationPersonalization.ts
+
+export class NotificationPersonalizationService {
+  constructor(
+    private aiService: AIService,
+    private supabase: SupabaseService
+  ) {}
+
+  async personalizeContent(
+    template: NotificationTemplate,
+    data: any,
+    aiPersonality: AIPersonality
+  ): Promise<PersonalizedNotification> {
+    // Apply AI personality to base template
+    const toneAdjustedContent = await this.adjustTone(
+      template,
+      aiPersonality
+    );
+
+    // Fill in personalization variables
+    const personalizedTitle = this.fillTemplate(
+      toneAdjustedContent.title,
+      data
+    );
+    
+    const personalizedBody = this.fillTemplate(
+      toneAdjustedContent.body,
+      data
+    );
+
+    // Generate contextual actions
+    const actions = await this.generateActions(
+      template.actionTemplates,
+      data,
+      aiPersonality
+    );
+
+    return {
+      title: personalizedTitle,
+      body: personalizedBody,
+      actions,
+      metadata: {
+        templateId: template.id,
+        personalizedAt: new Date(),
+        aiPersonality
+      }
+    };
+  }
+
+  private async adjustTone(
+    template: NotificationTemplate,
+    personality: AIPersonality
+  ): Promise<{ title: string; body: string }> {
+    // Use AI to adjust tone while preserving key information
+    const prompt = this.buildToneAdjustmentPrompt(
+      template,
+      personality
+    );
+
+    const adjusted = await this.aiService.complete(prompt);
+    
+    return {
+      title: adjusted.title || template.titleTemplate,
+      body: adjusted.body || template.bodyTemplate
+    };
+  }
+
+  private fillTemplate(template: string, data: any): string {
+    // Replace {{variables}} with actual data
+    return template.replace(/\{\{(\w+)\}\}/g, (match, key) => {
+      return this.getNestedValue(data, key) || match;
+    });
+  }
+
+  private getNestedValue(obj: any, path: string): any {
+    return path.split('.').reduce((curr, key) => curr?.[key], obj);
+  }
+}
+```
+
+## Integration Points
+
+### 1. Temporal Workflows
+- **Morning Planning Crew**: Runs at 6 AM, 12 PM, 6 PM
+- **Notification Delivery**: Individual workflows per notification
+- **Context Refresh**: Periodic updates to user context
+
+### 2. Ably Real-time Events
+- Subscribe to: `telemetry`, `location-updates`, `calendar-events`
+- Publish to: `user:{userId}:notifications`
+
+### 3. Database Triggers
+- On assignment creation/update → evaluate notification need
+- On grade posted → trigger achievement notifications
+- On location context change → evaluate location-based notifications
+
+### 4. External Services
+- Customer.io for email notifications
+- APNs/FCM for push notifications
+- AI service for personality adjustment
+
+## Implementation Priority
+
+1. **Phase 1: Core Infrastructure**
+   - Data models and schema
+   - Context aggregator
+   - Basic decision engine
+
+2. **Phase 2: Delivery System**
+   - Temporal workflows
+   - Notification templates
+   - Basic personalization
+
+3. **Phase 3: Intelligence**
+   - AI personality integration
+   - Advanced scoring algorithms
+   - Real-time triggers
+
+4. **Phase 4: Optimization**
+   - ML-based engagement prediction
+   - A/B testing framework
+   - Performance optimization
+
+## Next Steps
+
+1. ~~Create database migrations for notification tables~~ ✅ DONE
+2. ~~Implement Context Aggregator service~~ ✅ DONE
+3. Build basic Decision Engine with scoring 🟡 IN PROGRESS
+4. ~~Create first Temporal workflow for morning notifications~~ ✅ DONE
+5. Set up real-time event monitoring 🔴 NOT STARTED
+
+## Actual Implementation (as of 2025-07-17)
+
+### Database Implementation ✅
+All tables created in `/engine/supabase/migrations/notification_engine_system.sql`:
+- `notification_templates` with 10 default templates
+- `notification_preferences` with user settings
+- `notification_history` for sent notifications
+- `notification_queue` for pending notifications
+- `notification_analytics` for tracking
+- `notification_triggers` for event definitions
+- `notification_engagement` for user interactions
+- `notification_ab_tests` for experimentation
+
+### Context Aggregator Implementation ✅
+Created `/engine/src/services/notificationContextAggregator.ts`:
+```typescript
+class NotificationContextAggregator {
+  // Parallel data fetching from service_data tables
+  async aggregateContext(userId: string, options?: {
+    userDataDays?: number;
+    campusEventsLimit?: number;
+    cityDataLimit?: number;
+    includeWeather?: boolean;
+    includeCampusEvents?: boolean;
+    includeCityContext?: boolean;
+  }): Promise<NotificationContext>
+  
+  // Fetches and combines:
+  // - User preferences and AI personality
+  // - Academic data (deadlines, classes, grades)
+  // - Temporal context (time, day, semester)
+  // - Behavioral patterns (study times, engagement)
+  // - Environmental data (weather, campus events)
+}
+```
+
+### Morning Briefing Crew Implementation ✅
+Created `/dormway-crews/crews/morning_briefing.py`:
+- 4 agents: Context Synthesizer, Priority Curator, Recommendation Engine, Briefing Composer
+- Pydantic output model: `MorningBriefingOutput`
+- AI personality adaptation built-in
+- 51-second execution with comprehensive output
+
+### Temporal Workflow Implementation ✅
+Created `/engine/src/workflows/morningNotificationWorkflow.ts`:
+```typescript
+export async function morningNotificationWorkflow(args: {
+  userId: string;
+  scheduledSendTime: string;
+  timezone: string;
+}): Promise<void>
+```
+
+Activities in `/engine/src/activities/morningNotificationActivities.ts`:
+- `generateMorningBriefing()` - Calls crew and stores result
+- `deliverMorningNotification()` - Multi-channel delivery via Customer.io
+- `updateNotificationStatus()` - Tracks delivery status
+- `checkUserActiveStatus()` - Validates user still active
+- `calculateUserSendTime()` - Determines optimal send time
+- `scheduleNextMorningNotification()` - Sets up next day
+
+### Helper Methods in SupabaseService ✅
+Added notification helpers:
+```typescript
+async storeNotificationLog(params: {...}): Promise<{ data: any; error: any }>
+async getTodaysMorningBriefing(userId: string): Promise<{ data: any; error: any }>
+async updateNotificationLogStatus(logId: string, status: string, additionalData?: {...}): Promise<{ error: any }>
+async storeInAppNotification(params: {...}): Promise<{ data: any; error: any }>
+```
+
+### Testing Infrastructure ✅
+Created comprehensive test scripts:
+- `test-morning-notification-service.ts` - Tests context aggregation
+- `test-morning-notification-workflow.ts` - Tests Temporal workflow
+- `test-morning-notification-delivery.ts` - Tests delivery pipeline
+- `test-morning-notification-integration.ts` - End-to-end test
+- `test-morning-crew-direct.ts` - Direct crew testing
+
+### Still To Do 🔴
+1. **Real-time Event System**:
+   - Ably event subscriptions
+   - Location change handlers
+   - Academic event processors
+   - Behavioral trigger detection
+
+2. **Decision Engine**:
+   - Scoring algorithm
+   - Rate limiting enforcement
+   - Conflict resolution
+   - Fatigue prevention
+
+3. **Additional Crews**:
+   - Study reminder crew
+   - Encouragement crew
+   - Evening review crew
+   - Smart reminder crew
+
+4. **iOS Integration**:
+   - NotificationManager class
+   - Deep linking handlers
+   - Settings UI
+   - Analytics tracking

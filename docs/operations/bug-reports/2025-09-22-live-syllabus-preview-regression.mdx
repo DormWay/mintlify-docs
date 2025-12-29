@@ -1,0 +1,46 @@
+---
+title: "2025 09 22 live syllabus preview regression"
+description: "During homepage polish work (gradient + metric updates) the live syllabus preview regressed:"
+---
+
+# Bug Report: Live Syllabus Preview Regression
+
+## Summary
+During homepage polish work (gradient + metric updates) the live syllabus preview regressed:
+- real assignment data disappeared
+- fallback strings such as “Assignment” and “Unknown …” leaked into the UI
+- the “Open in Syllabus Viewer” CTA displayed spurious values (e.g., `0` prefix)
+
+the root cause was an incomplete attempt to sanitize the `processed_syllabus_crew` payload:
+1. API change didn’t land cleanly, so `null`/`"Unknown"` values were still returned.
+2. Front-end filter then stripped the entire assignments array when titles were missing, leaving no preview data to render.
+3. With git locked in the sandbox, the bad change wasn’t rolled back immediately, requiring manual fixes (Claude restored from good state).
+
+## Impact
+Marketing homepage lost its PLG value prop; visitors saw empty preview + bogus text. Anything depending on the random syllabus endpoint would have inherited the regression.
+
+## Detection
+Eyeballing the homepage after the change—assignments pane was blank and CTA showed `0 Open in Syllabus Viewer`.
+
+## Timeline
+- 2025‑09‑22 18:20 UTC: Applied gradient + stats patches; attempted to sanitize payloads.
+- 18:25 UTC: Front-end preview emptied out.
+- 18:30 UTC: Manual intervention required (Claude reverted).
+
+## Fix Plan
+1. Sanitize upstream only (API router keeps meaningful records, filters `Unknown*/Assignment`).
+2. Keep the front-end light: only skip rendering when sanitized values are missing – no deep filters.
+3. Add regression test: call `/api/syllabus/random`, ensure assignment titles/due dates return when present.
+4. Document staging steps when git is read-only (avoid half-applied patches).
+
+## Status
+Open – requires clean reimplementation of the sanitizing logic and commit.
+
+## Owners
+- Primary: frontend / API router
+- Co-owner: marketing PLG team (validation)
+
+## Next Steps
+- Reapply sanitized API patch (see notes in commit attempt ~18:15 UTC).
+- Rework front-end to render values defensively (only hide explicit `Unknown`).
+- Stage + commit (ensure index lock is cleared beforehand).

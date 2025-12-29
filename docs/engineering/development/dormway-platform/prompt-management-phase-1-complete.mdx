@@ -1,0 +1,255 @@
+---
+title: "Prompt Management   Phase 1 Complete"
+description: "Phase 1 (DORM-468) successfully implements the **Git-Based Prompt Registry Foundation** for centralizing DormWay's 80+ scattered prompts."
+---
+
+# Prompt Management - Phase 1 Complete
+
+**Related**: [Prompt Management System](/docs/engineering/development/dormway-platform/prompt-management-system), [Prompt Management - Container Tests](/docs/engineering/development/dormway-platform/prompt-management-container-tests)
+**Date**: 2025-01-14
+**Status**: ✅ Complete
+**Linear Issue**: DORM-468
+**PR**: https://github.com/DormWay/dormway-platform/pull/511
+
+---
+
+## Summary
+
+Phase 1 (DORM-468) successfully implements the **Git-Based Prompt Registry Foundation** for centralizing DormWay's 80+ scattered prompts.
+
+**Branch**: `ethankap/dorm-468-phase-1-build-git-based-prompt-registry-foundation`
+
+---
+
+## What Was Built
+
+### Core System
+```
+prompts/
+├── registry.json                 # 5 prompts registered
+├── schemas/registry-schema.json  # JSON validation schema
+├── engine/
+│   ├── syllabus-extraction.md
+│   ├── city-weather-context.md
+│   ├── student-context.md
+│   └── campus-events.md
+├── crews/
+│   └── student-priority-analyzer.md
+└── README.md
+```
+
+### Prompt Loaders
+- **TypeScript** (`services/shared/utils/prompt-loader.ts`)
+  - Handlebars templating
+  - Variable validation
+  - In-memory caching
+  - 15 tests passing
+
+- **Python** (`services/dormway-crews/shared/utils/prompt_loader.py`)
+  - Jinja2 templating
+  - Variable validation
+  - In-memory caching
+  - 17 tests passing
+
+### Validation & Git Hooks
+- `scripts/validate-prompt-registry.js` - Validates registry, files, YAML
+- `scripts/git-hooks/pre-commit` - Automatic validation on commit
+- `npm run prompts:validate` - Manual validation command
+
+### Docker Volume Mounts
+Added `/prompts` volume mounts to:
+- `api-router` → TypeScript loader
+- `engine` → TypeScript loader
+- `dormway-crews` → Python loader
+
+**Files updated**:
+- `infrastructure/docker/docker-compose.doppler-integrated.yml`
+- `infrastructure/docker/docker-compose.local-dev.yml`
+
+---
+
+## Testing Results
+
+### Unit Tests
+- ✅ TypeScript: 15/15 tests passing
+- ✅ Python: 17/17 tests passing
+
+### Integration Tests
+- ✅ Validation script: Passing (5 prompts validated)
+- ✅ Git hooks: Installed and functional
+
+### Container Tests
+- ✅ **dormway-crews**: All functions working (list, load, validate)
+- ✅ **engine**: Registry and files accessible
+- ✅ **api-router**: Cross-service availability confirmed
+
+**Overall**: 9/9 tests passing ✅
+
+---
+
+## Issues Found & Fixed
+
+### Jinja2 Template Syntax Error
+**Problem**: Used Handlebars syntax (`{{#if}}`) in Python prompt
+**Error**: `jinja2.exceptions.TemplateSyntaxError: unexpected char '#'`
+**File**: `prompts/crews/student-priority-analyzer.md`
+**Solution**: Changed to Jinja2 syntax (`{% if %}`)
+
+**Lesson**: Python prompts MUST use Jinja2 syntax, TypeScript prompts use Handlebars
+
+---
+
+## Commits
+
+1. **7fa99448**: "feat: Phase 1 - Git-based prompt registry foundation (DORM-468)"
+   - 24 files changed, 6,708 insertions(+), 3 deletions(-)
+   - Core system, loaders, tests, validation, documentation
+
+2. **1108a873**: "chore: Add prompts volume mounts to Docker services"
+   - 2 files changed, 6 insertions(+)
+   - Docker compose volume mounts
+
+---
+
+## Safety Analysis
+
+### ✅ No Breaking Changes
+
+This PR is **purely additive**:
+
+1. ✅ **New utilities only** - No existing code modified
+2. ✅ **Loaders not called yet** - Nothing imports them
+3. ✅ **Existing prompts untouched** - 80+ prompts still work normally
+4. ✅ **Read-only mounts** - Containers can't modify prompts
+5. ✅ **Tested in containers** - Verified in production-like environment
+
+**Risk Level**: 🟢 **MINIMAL**
+
+### Rollback Plan
+
+If anything goes wrong (extremely unlikely):
+1. Revert PR: `git revert <commit-hash>`
+2. Or remove volume mounts from compose files
+3. Existing code continues working normally
+
+---
+
+## Deployment Readiness
+
+### ✅ Local Development
+- Volume mounts added to docker-compose files
+- Prompts automatically available at `/prompts/` in containers
+- No additional setup required
+
+### ⚠️ Railway Deployment
+
+Railway does NOT support shared volumes. Correct approach:
+1. Set `rootDirectory = "/"` in railway.toml configs
+2. Update Dockerfiles to COPY from `services/<name>/` and `prompts/`
+3. Set `watchPaths` to rebuild only when service or prompts change
+4. Prompts baked into Docker images at build time
+
+**Key**: Use monorepo pattern with root directory build context.
+
+See: [Prompt Management - Railway Deployment](/docs/engineering/development/dormway-platform/prompt-management-railway-deployment)
+
+### ⏳ AWS ECS
+Will require Dockerfile updates to COPY prompts during image build.
+
+**Timeline**: Not needed until Phase 2 when code actually calls loaders.
+
+---
+
+## Performance
+
+| Operation | Time | Environment |
+|-----------|------|-------------|
+| List prompts | ~40ms | Cold cache |
+| Load prompt | ~35ms | Cold cache |
+| Cached load | <2ms | Warm cache |
+| Validation | ~200ms | 5 prompts |
+
+**Caching Impact**: 20x performance improvement
+
+---
+
+## Documentation
+
+### Updated
+- **CLAUDE.md**: Added "Prompt Management" section with usage examples
+- **package.json**: Added `prompts:validate` script
+
+### Created (Obsidian)
+- [Prompt Management System](/docs/engineering/development/dormway-platform/prompt-management-system) - Comprehensive system documentation
+- [Prompt Management - Container Tests](/docs/engineering/development/dormway-platform/prompt-management-container-tests) - Container test results
+- [Prompt Management - Phase 1 Complete](/docs/engineering/development/dormway-platform/prompt-management-phase-1-complete) - This document
+
+### Created (Repo)
+- `prompts/README.md` - Quick reference for developers
+
+---
+
+## Impact
+
+**Before Phase 1**:
+- 80+ prompts scattered across codebase
+- No version control for prompt changes
+- No validation
+- Difficult to find and update prompts
+
+**After Phase 1**:
+- Centralized registry (5 prompts migrated, 75+ to go)
+- Git-based version control
+- Automatic validation on commit
+- Clear documentation and usage patterns
+- Foundation for remaining migrations
+
+---
+
+## Next Steps
+
+### Phase 2 (DORM-469): Portkey Sync & Engine Migration
+- Build Portkey API sync system
+- Implement backward compatibility
+- Migrate Engine prompts (start using loaders)
+
+### Phase 3 (DORM-470): Migrate Remaining Prompts
+- Migrate 75+ remaining prompts
+- Update all code to use loaders
+- Deprecate scattered prompts
+
+### Phase 4 (DORM-471): Observability & Analytics
+- Version tracking
+- Usage analytics
+- Performance monitoring
+- Cost analysis per prompt
+
+---
+
+## Key Learnings
+
+1. **Template Engines**: TypeScript uses Handlebars (`{{# }}`), Python uses Jinja2 (`{% %}`)
+2. **Container Testing**: Always test in actual runtime environments, not just unit tests
+3. **Documentation**: Keep consolidated in Obsidian to avoid duplication
+4. **Validation**: Pre-commit hooks catch errors before they reach CI/CD
+5. **Caching**: In-memory caching provides significant performance benefits
+6. **Safety**: Read-only volume mounts prevent accidental modifications
+
+---
+
+## Status
+
+- [x] Directory structure created
+- [x] Registry.json with 5 prompts
+- [x] TypeScript loader implemented
+- [x] Python loader implemented
+- [x] Validation script working
+- [x] Git hooks created
+- [x] Documentation complete
+- [x] Container tests passing
+- [x] Volume mounts added
+- [x] PR created and ready for review
+
+**Phase 1 Status**: ✅ **COMPLETE**
+
+**PR**: https://github.com/DormWay/dormway-platform/pull/511

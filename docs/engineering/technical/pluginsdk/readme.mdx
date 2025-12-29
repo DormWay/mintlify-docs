@@ -1,0 +1,182 @@
+---
+title: "README"
+description: "This directory tracks the CLI/SDK documentation, onboarding guides, and reference examples for Campus Connect plugins that emit the standardized result docum..."
+---
+
+# Plugin SDK Overview
+
+This directory tracks the CLI/SDK documentation, onboarding guides, and reference examples for Campus Connect plugins that emit the standardized result document described in [DORM-332](https://linear.app/dormwayllc/issue/DORM-332). The SDK perspective focuses on what plugin authors must produce (`dw-plugin run`) and how DormWay consumes the JSON manifest (`dw-plugin validate` + ingestion workflow).
+
+## Plugin Targets & Example Data Sources
+
+Plugins are scoped to either a **campus** or **city** target inside the JSON envelope (`target.type`). Each plugin should declare one or more dataset modules inside the payload (see _Payload Modules_ below) and stick to authoritative upstream APIs.
+
+- **City context**
+  - `weather` — OpenWeatherMap, WeatherAPI
+  - `transit` — City APIs (NextBus, regional GTFS), Google Transit API
+  - `events` — Eventbrite, municipal event feeds
+  - `restaurants` — Yelp API, Google Places API
+  - `news` — local RSS feeds, city data portals
+  - `crimeAlerts` — local PD feeds
+- **Campus context**
+  - `resources` — campus portal/graph API integrations
+  - `dining` — CBORD/Sodexo menus, real-time occupancy feeds (e.g., Waitz)
+  - `recreation` — facility management (InnoSoft Fusion, etc.)
+  - `career` — Handshake API
+  - `tutoring` — campus scheduling services
+  - `crimeAlerts` — campus police notifications
+  - `hours` — building hours endpoints
+  - `academicDates` — registrar add/drop calendars
+
+When selecting new sources, document the API contract and rate limits alongside the plugin implementation.
+
+## Execution Lifecycle
+
+1. **Bootloader ping**: Campus/city sync workflows invoke each plugin on a fixed cadence (Temporal activity). DormWay orchestrates the schedule; plugin authors should not ship their own cron logic.
+2. **Data acquisition**: Plugin code fetches upstream data, applying SDK helpers for retries, auth proxies, or scraping tasks.
+3. **Result build**: Plugin writes the standardized JSON manifest (envelope + payload modules) to the designated output path. Heavy transformations can be cached; expose `instructions.expiresAt` to signal TTLs.
+4. **Ingestion**: DormWay validates the manifest, fans it out to dataset handlers, and records audit metrics. Failures keep the JSON available for replay.
+
+> Periodic background work (e.g., syncing an S3 cache) should happen internally to the plugin, but the emitted manifest must always represent the latest state when the orchestration pings it.
+
+## Result Document Schema
+
+The formal schema lives in [Plugin_Output_Schema_draft](/docs/engineering/technical/plugins/pluginoutputschemadraft). Key sections are summarized here for SDK authors.
+
+### Envelope
+
+| Field | Required | Notes |
+| --- | --- | --- |
+| `pluginId` | ✅ | Matches registry entry (`campus_configs` or city registry). |
+| `pluginVersion` | ✅ | SemVer string. Enables ingestion compatibility checks. |
+| `runId` | ✅ | Unique per execution (timestamp or UUID) for idempotency/audits. |
+| `target` | ✅ | `{ "type": "campus" \| "city", "campusId"?, "cityId"? }`. |
+| `generatedAt` | ✅ | ISO-8601 timestamp of data freshness. |
+| `instructions` | ❌ | `{ "mode": "replace" \| "merge" \| "diff", "expiresAt"?, "upstreamContext"? }`. |
+| `payload` | ✅ | Object containing one or more dataset modules. |
+
+`instructions.mode` guides ingestion behavior:
+- `replace`: treat payload as authoritative snapshot for this plugin.
+- `merge`: apply upserts while retaining previous entries that are absent.
+- `diff`: payload must include `{ add: [...], remove: [...] }` blocks per dataset.
+
+### Payload Modules
+
+Payload keys map to dataset handlers in ingestion. Each module adheres to its own collection schema; sample shapes below are additive to the base draft (`events`, `alerts`, `metadata`).
+
+- `events`: Time-bound happenings for calendars and time blocks.
+- `alerts` / `crimeAlerts`: High-signal notifications ordered by severity.
+- `dining`: Menu rotations and occupancy metadata per hall.
+  ```json
+  {
+    "dining": [
+      {
+        "hallId": "portola-dhall",
+        "displayName": "Portola Dining Hall",
+        "hours": [{ "day": "monday", "open": "07:00", "close": "21:00" }],
+        "menu": [{ "meal": "Lunch", "items": ["BBQ Chicken", "Veggie Tacos"] }],
+        "occupancy": {
+          "source": "waitz",
+          "percent": 68,
+          "capturedAt": "2025-10-12T17:05:00Z"
+        }
+      }
+    ]
+  }
+  ```
+- `transit`: Route, stop, and disruption data.
+  ```json
+  {
+    "transit": {
+      "feeds": [
+        {
+          "agencyId": "sbmtd",
+          "routes": [
+            {
+              "routeId": "24X",
+              "headsign": "UCSB North Hall",
+              "arrivals": [
+                {
+                  "stopId": "nh-01",
+                  "etaMinutes": 5,
+                  "source": { "type": "gtfs-realtime", "url": "…" }
+                }
+              ]
+            }
+          ],
+          "alerts": [
+            {
+              "id": "detour-123",
+              "title": "Isla Vista Detour",
+              "effective": "2025-10-12T16:00:00Z",
+              "expires": "2025-10-13T04:00:00Z"
+            }
+          ]
+        }
+      ]
+    }
+  }
+  ```
+- `news`: Structured list of headlines with source metadata.
+- `hours`: Building schedules and overrides.
+- `academicDates`: Registrar deadlines (e.g., `addDropLastDay`, `withdrawalDeadline`).
+- `resources`: Generic campus services (student portal links, help desks).
+- `metadata`: Branding/colors or other static context for the campus/city profile.
+
+All modules must supply stable `id` fields where deduplication is required. Optional sections may be omitted entirely when there is no new data.
+
+## Scheduling & Cadence Guidance
+
+- **Cadence defaults**: Campus plugins run at least every 15 minutes during local daytime; city plugins follow hourly cadence unless otherwise specified. Define overrides in the plugin manifest (`config/schedule.yaml`) rather than hard-coding timers.
+- **Short-lived data**: Emit `instructions.expiresAt` for feeds like dining occupancy or weather snapshots so ingestion can expire stale rows automatically.
+- **Long-lived data**: Use `instructions.mode = "merge"` with deterministic `id`s for additive feeds such as academic dates.
+- **Rate limits**: Respect upstream SLAs by caching responses and declaring cache lifetimes in the plugin README. The ingestion replay system may re-run a plugin shortly after failure, so fetchers must be idempotent.
+
+### Task orchestration inside plugins
+
+The Temporal handler pings every registered plugin at a fixed cadence (5-15 minutes depending on environment). Plugins stay "dumb": they do not know whether a previous manifest was ingested nor do they communicate with the scheduler. Instead:
+
+- Maintain a lightweight `state.json` (written next to the manifest output) to track the last execution time per task/module.
+- On each ping, evaluate which tasks are due based on the cadence declared in plugin configuration (`config/tasks.yaml`). Skip expensive fetches when the window has not elapsed; return the most recent payload snapshot if nothing ran.
+- Always write the full manifest for tasks that execute. For skipped tasks, either omit the module entirely or include a cached snapshot with `instructions.expiresAt` set to its TTL.
+- Leave dedupe, replay, and downstream expiry to ingestion. A plugin never needs to confirm that an output was picked up; idempotent `runId`s guarantee safe replays.
+- Execution occurs in a dedicated runner microservice (ECS task) launched by the bootloader. Temporal stays orchestration-only, which keeps worker capacity stable even when plugins perform heavy work.
+- The initial runner implementation (see `services/plugin-runner/`) is live with planning/state/manifest persistence and a placeholder runtime. Container execution and secret hydration are tracked in DORM-332 follow-ups.
+- Local development now includes a Dockerized runner (`plugin-runner` service inside `infrastructure/docker/docker-compose.local-dev.yml`). Use `make dev` and `make plugin-runner-logs` to verify the bootloader locally.
+
+## SDK Helper Modules
+
+- **ICS parsing** — use `parseICS` to convert raw `.ics` feeds and `filterEventsByDate` to restrict a window:
+  ```ts
+  import { parseICS, filterEventsByDate } from "@dormway/campus-sdk";
+
+  const calendar = parseICS(icsContents);
+  const nextWeekIso = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+  const upcoming = filterEventsByDate(calendar, new Date().toISOString(), nextWeekIso);
+  ```
+  Each event includes normalized start/end timestamps (`iso`), the raw value, and decoded metadata (summary, location, categories).
+
+- **RSS parsing** — `parseRSS` normalizes news feeds (including Media RSS extensions) into a feed + item list:
+  ```ts
+  import { parseRSS } from "@dormway/campus-sdk";
+
+  const feed = parseRSS(xmlString);
+  const stories = feed.items.map((item) => ({
+    id: item.guid ?? item.link,
+    title: item.title,
+    publishedAt: item.pubDate
+  }));
+  ```
+  HTML entities and CDATA sections are decoded automatically, so descriptions are ready for ingestion.
+
+## Proposed SDK Docs
+
+- `cli.md`: command reference (`dw-plugin run`, `dw-plugin validate`)
+- `sdk-api.md`: TypeScript helper API surface (scraping, DS proxy, output builder)
+- `examples/`: sample plugin projects, unit tests, JSON outputs
+- `ingestion.md`: how the ingestion workflow consumes plugin outputs
+- `local-dev.md`: instructions for running plugins locally, mocking ingestion
+- `bootloader.md`: Temporal registry + bootloader responsibilities
+- `sdk-gateway.md`: Zuplo-powered proxy endpoints and SDK helper contracts
+
+More detailed docs will be added as the SDK solidifies.

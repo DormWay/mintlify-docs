@@ -1,0 +1,470 @@
+---
+title: "LockedIn Navigation Migration Plan"
+description: "status: planning category: plans last_updated: 2025-12-11 created: 2025-12-11 owner: engineering implementation_status: not_started aliases:"
+---
+
+# LockedIn Navigation Migration Plan
+
+---
+status: planning
+category: plans
+last_updated: 2025-12-11
+created: 2025-12-11
+owner: engineering
+implementation_status: not_started
+aliases:
+  - Nav Migration
+  - Sidebar Migration
+  - LockedIn Refactor Plan
+  - Navigation Consolidation Plan
+  - UX Migration
+tags:
+  - '#migration'
+  - '#lockedin'
+  - '#planning'
+  - '#implementation'
+  - '#architecture'
+  - '#frontend'
+  - '#backend'
+  - '#routes'
+  - '#phase-tracking'
+  - '#rollout'
+cssclass: plan-document
+---
+
+## Executive Summary
+
+4-phase migration to consolidate LockedIn navigation from ~12 items to 6.
+
+| Phase | Focus | Key Deliverables |
+|-------|-------|------------------|
+| 1 | Settings Foundation | AI preferences schema, toggle UI |
+| 2 | Sidebar Refactor | Conditional nav, rename Academic→Tasks |
+| 3 | Page Consolidation | New Courses & Settings pages |
+| 4 | Green Mode | Backend model selection, caching |
+
+---
+
+## Phase 1: Settings Foundation
+
+### Objective
+Add AI preferences to settings schema and create toggle UI.
+
+### Tasks
+
+#### 1.1 Database Schema Update
+```sql
+-- Add AI preferences to user_preferences JSONB
+ALTER TABLE user_preferences
+ADD COLUMN IF NOT EXISTS ai_preferences JSONB DEFAULT '{
+  "aiEnabled": true,
+  "greenMode": false,
+  "features": {
+    "aceChat": true,
+    "nextActionWidget": true,
+    "studySuggestions": true,
+    "smartOrganize": true
+  },
+  "greenModeSettings": {
+    "modelTier": "eco",
+    "maxTokens": 500,
+    "cacheAggressive": true,
+    "suggestionsFrequency": "hourly"
+  }
+}'::jsonb;
+```
+
+#### 1.2 API Endpoints
+```typescript
+// GET /api/user/preferences/ai
+// PUT /api/user/preferences/ai
+interface AIPreferencesEndpoint {
+  get(): Promise<AIPreferences>;
+  put(preferences: Partial<AIPreferences>): Promise<AIPreferences>;
+}
+```
+
+#### 1.3 Settings UI Component
+- Create `AIPreferencesTab.tsx`
+- Add to existing preferences page
+- Wire up toggle functionality
+
+#### 1.4 Feature Flag Integration
+```typescript
+// useAIMode hook
+const useAIMode = () => {
+  const { data: preferences } = useAIPreferences();
+
+  return {
+    aiEnabled: preferences?.aiEnabled ?? true,
+    greenMode: preferences?.greenMode ?? false,
+    features: preferences?.features ?? DEFAULT_FEATURES
+  };
+};
+```
+
+### Acceptance Criteria
+- [ ] User can toggle AI on/off in settings
+- [ ] User can toggle Green Mode in settings
+- [ ] Preferences persist across sessions
+- [ ] Feature toggles work independently
+
+---
+
+## Phase 2: Sidebar Refactor
+
+### Objective
+Update sidebar to show conditional items and rename routes.
+
+### Tasks
+
+#### 2.1 Conditional Ace/Help Rendering
+```typescript
+// Sidebar.tsx
+const { aiEnabled, greenMode } = useAIMode();
+
+const bottomNavItem = aiEnabled
+  ? {
+      label: greenMode ? 'Ace (Eco)' : 'Ace',
+      icon: SparklesIcon,
+      href: '/dashboard/ace',
+      badge: greenMode ? '💚' : undefined
+    }
+  : {
+      label: 'Help',
+      icon: HelpCircleIcon,
+      href: '/dashboard/help'
+    };
+```
+
+#### 2.2 Academic → Tasks Rename
+```typescript
+// next.config.js
+async redirects() {
+  return [
+    {
+      source: '/dashboard/academic',
+      destination: '/dashboard/tasks',
+      permanent: true
+    }
+  ];
+}
+```
+
+- Rename route file: `academic/page.tsx` → `tasks/page.tsx`
+- Update all internal links
+- Update telemetry event names
+
+#### 2.3 Remove Items from Sidebar
+- Remove "Notes Hub" nav item
+- Remove "Inbox" nav item
+- Keep routes accessible (for now) via direct URL
+
+#### 2.4 Add Placeholder Items
+- Add "Courses" nav item → `/dashboard/courses` (placeholder)
+- Add "Settings" nav item → `/dashboard/settings` (redirect to preferences)
+
+### Acceptance Criteria
+- [ ] Sidebar shows 6 items (Today, Schedule, Tasks, Courses, Settings, Ace/Help)
+- [ ] Ace shows when AI enabled
+- [ ] Help shows when AI disabled
+- [ ] Green badge shows when Green Mode enabled
+- [ ] `/dashboard/academic` redirects to `/dashboard/tasks`
+- [ ] Notes and Inbox accessible via direct URL only
+
+---
+
+## Phase 3: Page Consolidation
+
+### Objective
+Create consolidated Courses and Settings pages.
+
+### Tasks
+
+#### 3.1 Create Courses Page (`/dashboard/courses`)
+```typescript
+// courses/page.tsx
+const CoursesPage = () => {
+  const { courses, isLoading } = useCourses();
+  const { canvasConnection } = useIntegrations();
+
+  return (
+    <div>
+      <CoursesHeader
+        connected={canvasConnection.isConnected}
+        lastSynced={canvasConnection.lastSync}
+        onSync={handleSync}
+      />
+      <CourseGrid courses={courses} />
+      <CoursesActions />
+    </div>
+  );
+};
+
+// courses/[courseId]/page.tsx - Course detail
+// courses/[courseId]/syllabus/page.tsx - Existing syllabus view
+// courses/[courseId]/documents/page.tsx - New documents view
+// courses/[courseId]/notes/page.tsx - Notes for this course
+```
+
+#### 3.2 Create Settings Page (`/dashboard/settings`)
+```typescript
+// settings/page.tsx
+const SettingsPage = () => {
+  const [activeTab, setActiveTab] = useState('account');
+
+  return (
+    <SettingsLayout>
+      <SettingsSidebar activeTab={activeTab} onTabChange={setActiveTab} />
+      <SettingsContent>
+        {activeTab === 'account' && <AccountSettings />}
+        {activeTab === 'ai' && <AIPreferencesTab />}
+        {activeTab === 'connections' && <ConnectionsTab />}
+        {activeTab === 'preferences' && <PreferencesTab />}
+        {activeTab === 'support' && <SupportTab />}
+      </SettingsContent>
+    </SettingsLayout>
+  );
+};
+```
+
+#### 3.3 Notes Migration
+```typescript
+// Migrate notes to per-course structure
+// Notes without courseId → show in "General Notes" section
+const useNotesForCourse = (courseId: string) => {
+  return useNotes({ filter: { courseId } });
+};
+
+const useGeneralNotes = () => {
+  return useNotes({ filter: { courseId: null } });
+};
+```
+
+#### 3.4 Setup All Redirects
+```typescript
+const redirects = [
+  // Phase 2 (already done)
+  { source: '/dashboard/academic', destination: '/dashboard/tasks', permanent: true },
+
+  // Phase 3
+  { source: '/dashboard/inbox', destination: '/dashboard/home-v2', permanent: true },
+  { source: '/dashboard/notes-hub', destination: '/dashboard/courses', permanent: true },
+  { source: '/dashboard/integrations', destination: '/dashboard/settings?tab=connections', permanent: true },
+  { source: '/dashboard/canvas', destination: '/dashboard/courses', permanent: true },
+  { source: '/dashboard/syllabus', destination: '/dashboard/courses', permanent: true },
+  { source: '/dashboard/documents', destination: '/dashboard/courses', permanent: true },
+  { source: '/dashboard/preferences', destination: '/dashboard/settings', permanent: true },
+  { source: '/dashboard/user-profile', destination: '/dashboard/settings?tab=account', permanent: true },
+];
+```
+
+### Acceptance Criteria
+- [ ] `/dashboard/courses` shows course grid with actions
+- [ ] `/dashboard/courses/[id]` shows course detail with tabs
+- [ ] `/dashboard/settings` consolidates all settings
+- [ ] Notes accessible per-course
+- [ ] All deprecated routes redirect correctly
+- [ ] No broken links in app
+
+---
+
+## Phase 4: Green Mode
+
+### Objective
+Implement Green Mode backend (model selection, caching) and UI indicators.
+
+### Tasks
+
+#### 4.1 AI Service Updates
+```typescript
+// ai-service.ts
+class AIService {
+  async query(request: AIQueryRequest): Promise<AIResponse> {
+    const { greenMode } = request.options;
+
+    // Check cache first (especially aggressive in green mode)
+    if (request.options.allowCache !== false) {
+      const cached = await this.cache.get(request);
+      if (cached) {
+        return { ...cached.response, fromCache: true };
+      }
+    }
+
+    // Select model based on mode
+    const model = this.selectModel(request.options);
+
+    // Execute query
+    const response = await this.executeQuery(request, model);
+
+    // Cache response
+    const ttl = greenMode ? 24 * 60 * 60 : 60 * 60;
+    await this.cache.set(request, response, ttl);
+
+    return response;
+  }
+}
+```
+
+#### 4.2 Caching Layer
+```typescript
+// ai-cache.ts
+class AICache {
+  // Implement Redis-based cache
+  // See [LockedIn-AI-Mode-System](/docs/product/design/lockedin-ai-mode-system) for full spec
+  // See [LockedIn-AI-Cache-Invalidation](/docs/product/design/lockedin-ai-cache-invalidation) for invalidation patterns
+}
+```
+
+#### 4.3 UI Indicators
+```typescript
+// GreenModeBadge.tsx
+const GreenModeBadge = () => (
+  <span className="text-xs bg-emerald-500/20 text-emerald-400 px-2 py-0.5 rounded-full">
+    💚 Eco
+  </span>
+);
+
+// AIResponseFooter.tsx
+const AIResponseFooter = ({ greenMode, fromCache }) => {
+  if (!greenMode) return null;
+
+  return (
+    <div className="flex items-center justify-between mt-2 text-xs">
+      <span className="text-emerald-500">
+        💚 Green response • {fromCache ? 'Cached' : 'Fresh'}
+      </span>
+      <button className="text-amber-500 hover:text-amber-400">
+        ⚡ Boost for detailed answer
+      </button>
+    </div>
+  );
+};
+```
+
+#### 4.4 Boost Functionality
+```typescript
+// useBoost.ts
+const useBoost = () => {
+  const mutation = useMutation(async (promptId: string) => {
+    return aiQuery({
+      promptId,
+      options: {
+        greenMode: false,  // Bypass green mode
+        allowCache: false   // Fresh response
+      }
+    });
+  });
+
+  return {
+    boost: mutation.mutate,
+    isLoading: mutation.isLoading
+  };
+};
+```
+
+#### 4.5 Eco Stats (Optional Enhancement)
+```typescript
+// useEcoStats.ts
+const useEcoStats = () => {
+  // Track and display eco impact
+  return useQuery('eco-stats', async () => {
+    const stats = await getEcoStats();
+    return {
+      aiCallsSaved: stats.cachedResponses,
+      computeReduction: `${stats.reductionPercent}%`
+    };
+  });
+};
+```
+
+### Acceptance Criteria
+- [ ] Green Mode uses smaller models (claude-haiku/gpt-3.5)
+- [ ] Responses cached for 24 hours in Green Mode
+- [ ] Cache hit/miss shown in response footer
+- [ ] Boost button bypasses Green Mode for single request
+- [ ] Green badge visible on widgets when Green Mode enabled
+- [ ] (Optional) Eco stats displayed in settings
+
+---
+
+## Risk Mitigation
+
+### Data Migration Risks
+
+| Risk | Mitigation |
+|------|------------|
+| Notes without course association | Create "General Notes" section, preserve all data |
+| Broken bookmarks/deep links | Set up redirects with toast notification |
+| User confusion with new nav | Keep old routes accessible via direct URL during transition |
+
+### Technical Risks
+
+| Risk | Mitigation |
+|------|------------|
+| Cache invalidation complexity | Start with conservative invalidation (clear all on any change), optimize later |
+| Green Mode model quality | A/B test response quality, gather user feedback |
+| Settings migration bugs | Feature flag new settings page, rollback capability |
+
+---
+
+## Testing Requirements
+
+### Unit Tests
+- [ ] AIPreferences schema validation
+- [ ] Model selection logic
+- [ ] Cache key generation
+- [ ] Redirect configuration
+
+### Integration Tests
+- [ ] Full AI query flow with caching
+- [ ] Settings persistence
+- [ ] Route redirects work correctly
+
+### E2E Tests
+- [ ] Toggle AI mode and verify sidebar changes
+- [ ] Navigate through all new routes
+- [ ] Verify old routes redirect correctly
+- [ ] Green Mode toggle affects AI responses
+
+### Manual Testing
+- [ ] All pages render correctly
+- [ ] No console errors
+- [ ] Mobile responsiveness
+- [ ] Screen reader accessibility
+
+---
+
+## Rollback Plan
+
+### Phase Rollback Steps
+
+1. **Feature flags** - Each phase behind a flag
+2. **Database backward compatible** - Schema changes are additive
+3. **Route redirects reversible** - Can point back to old routes
+4. **Cache clearable** - Redis flush if caching issues
+
+### Emergency Rollback
+```bash
+# Disable all new features
+curl -X POST /api/admin/feature-flags \
+  -d '{"lockedin_new_nav": false, "green_mode": false}'
+
+# Revert route config (if deployed)
+git revert <commit-hash>
+vercel deploy --prod
+```
+
+---
+
+## Related Documents
+
+- [LockedIn-UX-Specification](/docs/product/design/lockedin-ux-specification) - Complete UX specification
+- [LockedIn-AI-Mode-System](/docs/product/design/lockedin-ai-mode-system) - AI mode technical details
+- [LockedIn-AI-Cache-Invalidation](/docs/product/design/lockedin-ai-cache-invalidation) - Cache invalidation patterns (Phase 4)
+- [DormWay-Design-Vision](/docs/product/design/dormway-design-vision) - Design system reference
+
+---
+
+**Document History:**
+- 2025-12-11: Initial migration plan created

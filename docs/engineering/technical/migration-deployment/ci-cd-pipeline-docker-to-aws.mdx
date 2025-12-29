@@ -1,0 +1,490 @@
+---
+title: "CI CD Pipeline Docker to AWS"
+description: "This document outlines the CI/CD pipeline for deploying DormWay services from local Docker development to AWS ECS/Fargate."
+---
+
+# CI/CD Pipeline: Docker to AWS
+
+## Overview
+This document outlines the CI/CD pipeline for deploying DormWay services from local Docker development to AWS ECS/Fargate.
+
+## Pipeline Architecture
+
+```
+┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+│ Local Docker    │────▶│ GitHub Actions  │────▶│ AWS ECS/Fargate │
+│ Development     │     │ CI/CD Pipeline  │     │   Production    │
+└─────────────────┘     └─────────────────┘     └─────────────────┘
+        │                        │                        │
+        ▼                        ▼                        ▼
+   Docker Compose          Build & Test            Container Service
+   Hot Reloading          ECR Push                Auto-scaling
+   Local Testing          Terraform Apply         Load Balanced
+```
+
+## Development to Production Flow
+
+### 1. Local Development Phase
+```yaml
+# Developer works with docker-compose
+Environment: docker-compose.doppler.yml
+Features:
+  - Hot reloading
+  - Local observability
+  - Instant feedback
+  - Full service stack
+```
+
+### 2. Code Commit Phase
+```bash
+# Developer commits code
+git add .
+git commit -m "feat: implement new feature"
+git push origin feature/branch
+
+# Creates PR for review
+```
+
+### 3. CI Pipeline (GitHub Actions)
+
+#### Pull Request Checks
+```yaml
+name: PR Checks
+on:
+  pull_request:
+    branches: [main, development]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Run Docker Compose Tests
+        run: |
+          docker-compose -f docker-compose.test.yml up -d
+          docker-compose -f docker-compose.test.yml run tests
+          
+      - name: Lint Code
+        run: |
+          docker-compose -f docker-compose.test.yml run lint
+          
+      - name: Security Scan
+        run: |
+          docker run --rm -v $PWD:/src \
+            aquasec/trivy fs /src
+```
+
+#### Main Branch Deploy
+```yaml
+name: Deploy to AWS
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+          
+      - name: Login to Amazon ECR
+        run: |
+          aws ecr get-login-password --region us-east-1 | \
+          docker login --username AWS --password-stdin \
+          ${{ secrets.ECR_REGISTRY }}
+          
+      - name: Build and Push Images
+        run: |
+          ./scripts/deployment/build-and-push.sh
+          
+      - name: Deploy with Terraform
+        run: |
+          cd terraform
+          terraform init
+          terraform apply -auto-approve \
+            -var="image_tag=${{ github.sha }}"
+```
+
+### 4. Deployment Phase
+
+#### ECR Image Management
+```bash
+#!/bin/bash
+# scripts/deployment/build-and-push.sh
+
+REGISTRY="${ECR_REGISTRY}"
+TAG="${GITHUB_SHA:-latest}"
+
+# Build all services
+for service in engine api-router ably-relay ics-uploader; do
+  echo "Building $service..."
+  
+  # Use production Dockerfile
+  docker build \
+    -f dormway/$service/Dockerfile \
+    -t $REGISTRY/dormway-$service:$TAG \
+    -t $REGISTRY/dormway-$service:latest \
+    dormway/$service
+    
+  # Push to ECR
+  docker push $REGISTRY/dormway-$service:$TAG
+  docker push $REGISTRY/dormway-$service:latest
+done
+```
+
+#### Terraform Deployment
+```hcl
+# terraform/main.tf
+variable "image_tag" {
+  description = "Docker image tag to deploy"
+  default     = "latest"
+}
+
+module "ecs_services" {
+  source = "./modules/ecs-services"
+  
+  for_each = {
+    engine      = { port = 3000, cpu = 1024, memory = 2048 }
+    api-router  = { port = 4000, cpu = 512,  memory = 1024 }
+    ably-relay  = { port = 3030, cpu = 256,  memory = 512 }
+  }
+  
+  service_name = each.key
+  image_uri    = "${var.ecr_registry}/dormway-${each.key}:${var.image_tag}"
+  port         = each.value.port
+  cpu          = each.value.cpu
+  memory       = each.value.memory
+}
+```
+
+## Environment Management
+
+### Development → Staging → Production
+
+```yaml
+# Environment Configuration
+environments:
+  development:
+    doppler_config: dev_ethan
+    aws_account: "123456789012"
+    domain: dev.dormway.app
+    
+  staging:
+    doppler_config: staging
+    aws_account: "123456789013"
+    domain: staging.dormway.app
+    
+  production:
+    doppler_config: prod
+    aws_account: "123456789014"
+    domain: dormway.app
+```
+
+### Secret Management
+```bash
+# Doppler → AWS Secrets Manager Sync
+doppler secrets download \
+  --config prod \
+  --format json | \
+aws secretsmanager put-secret-value \
+  --secret-id dormway/prod \
+  --secret-string file:///dev/stdin
+```
+
+## Rollback Strategy
+
+### Automated Rollback
+```yaml
+# ECS Service Configuration
+resource "aws_ecs_service" "app" {
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
+  
+  deployment_configuration {
+    maximum_percent         = 200
+    minimum_healthy_percent = 100
+  }
+}
+```
+
+### Manual Rollback
+```bash
+# Quick rollback to previous version
+./scripts/deployment/rollback.sh <service-name>
+
+# Which does:
+# 1. Get previous task definition
+# 2. Update service with previous version
+# 3. Wait for stability
+```
+
+## Monitoring & Alerts
+
+### CloudWatch Integration
+```yaml
+# Each service sends logs to CloudWatch
+log_configuration {
+  log_driver = "awslogs"
+  options = {
+    awslogs-group         = "/ecs/dormway/${var.service_name}"
+    awslogs-region        = "us-east-1"
+    awslogs-stream-prefix = "ecs"
+  }
+}
+```
+
+### Health Checks
+```yaml
+# ALB Health Checks
+health_check {
+  enabled             = true
+  healthy_threshold   = 2
+  unhealthy_threshold = 3
+  timeout             = 5
+  interval            = 30
+  path                = "/health"
+  matcher             = "200"
+}
+```
+
+### Deployment Notifications
+```yaml
+# SNS Topic for Deployments
+resource "aws_sns_topic" "deployments" {
+  name = "dormway-deployments"
+}
+
+# Lambda for Slack notifications
+resource "aws_lambda_function" "notify_deployment" {
+  function_name = "dormway-deployment-notifier"
+  handler       = "index.handler"
+  runtime       = "nodejs18.x"
+  
+  environment {
+    variables = {
+      SLACK_WEBHOOK = var.slack_webhook
+    }
+  }
+}
+```
+
+## Development Workflow Integration
+
+### 1. Feature Development
+```bash
+# Create feature branch
+git checkout -b feature/new-feature
+
+# Develop with Docker
+make obs-full
+
+# Test locally
+docker exec dormway-aws-infrastructure-engine-1 npm test
+
+# Commit changes
+git add .
+git commit -m "feat: add new feature"
+git push origin feature/new-feature
+```
+
+### 2. Pull Request
+- CI runs automatically
+- Tests pass in Docker
+- Security scans complete
+- Code review approved
+
+### 3. Merge to Main
+- Automatically triggers deployment
+- Images built and pushed to ECR
+- Terraform updates ECS services
+- Zero-downtime deployment
+
+### 4. Verification
+```bash
+# Check deployment status
+aws ecs describe-services \
+  --cluster dormway-cluster \
+  --services dormway-engine
+
+# View logs
+aws logs tail /ecs/dormway/engine --follow
+
+# Check metrics
+open https://console.aws.amazon.com/cloudwatch
+```
+
+## Best Practices
+
+### 1. Image Optimization
+```dockerfile
+# Multi-stage builds
+FROM node:20-slim AS builder
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci --only=production
+
+FROM node:20-slim
+WORKDIR /app
+COPY --from=builder /app/node_modules ./node_modules
+COPY . .
+CMD ["node", "index.js"]
+```
+
+### 2. Resource Limits
+```yaml
+# Set appropriate limits
+resources:
+  limits:
+    cpu: "1"
+    memory: "2Gi"
+  requests:
+    cpu: "0.5"
+    memory: "1Gi"
+```
+
+### 3. Health Endpoints
+```javascript
+// Implement proper health checks
+app.get('/health', async (req, res) => {
+  const checks = {
+    database: await checkDatabase(),
+    redis: await checkRedis(),
+    temporal: await checkTemporal()
+  };
+  
+  const healthy = Object.values(checks).every(Boolean);
+  res.status(healthy ? 200 : 503).json(checks);
+});
+```
+
+### 4. Graceful Shutdown
+```javascript
+// Handle SIGTERM for ECS
+process.on('SIGTERM', async () => {
+  console.log('SIGTERM received, shutting down gracefully');
+  await server.close();
+  await database.disconnect();
+  process.exit(0);
+});
+```
+
+## Troubleshooting Deployments
+
+### Failed Deployment
+```bash
+# Check ECS events
+aws ecs describe-services \
+  --cluster dormway-cluster \
+  --services dormway-engine \
+  --query 'services[0].events[0:10]'
+
+# Check task failures
+aws ecs describe-tasks \
+  --cluster dormway-cluster \
+  --tasks <task-arn>
+```
+
+### Image Pull Errors
+```bash
+# Verify ECR permissions
+aws ecr get-login-password --region us-east-1 | \
+  docker login --username AWS --password-stdin $ECR_REGISTRY
+
+# Check image exists
+aws ecr describe-images \
+  --repository-name dormway-engine \
+  --image-ids imageTag=latest
+```
+
+### Service Won't Start
+1. Check CloudWatch logs
+2. Verify environment variables in ECS task definition
+3. Ensure health check endpoint is accessible
+4. Check security group rules
+
+## Cost Optimization
+
+### 1. Use Fargate Spot
+```hcl
+capacity_provider_strategy {
+  capacity_provider = "FARGATE_SPOT"
+  weight            = 80
+}
+
+capacity_provider_strategy {
+  capacity_provider = "FARGATE"
+  weight            = 20
+}
+```
+
+### 2. Auto-scaling
+```hcl
+resource "aws_appautoscaling_target" "ecs" {
+  service_namespace  = "ecs"
+  resource_id        = "service/${var.cluster}/${var.service}"
+  scalable_dimension = "ecs:service:DesiredCount"
+  min_capacity       = 1
+  max_capacity       = 10
+}
+```
+
+### 3. Reserved Capacity
+- Purchase Compute Savings Plans
+- Use Reserved Instances for predictable workloads
+
+## Security Considerations
+
+### 1. Image Scanning
+```yaml
+# ECR scanning on push
+resource "aws_ecr_repository" "app" {
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+}
+```
+
+### 2. IAM Roles
+```hcl
+# Least privilege principle
+resource "aws_iam_role" "task_role" {
+  assume_role_policy = jsonencode({
+    Statement = [{
+      Action = "sts:AssumeRole"
+      Principal = {
+        Service = "ecs-tasks.amazonaws.com"
+      }
+    }]
+  })
+}
+```
+
+### 3. Network Security
+- Use private subnets for ECS tasks
+- ALB in public subnets only
+- Security groups with minimal rules
+- VPC endpoints for AWS services
+
+## Future Enhancements
+
+1. **Blue/Green Deployments**: Implement CodeDeploy for safer deployments
+2. **Canary Releases**: Gradually roll out changes
+3. **Feature Flags**: Deploy code without enabling features
+4. **Multi-region**: Deploy to multiple AWS regions
+5. **GitOps**: Use ArgoCD or Flux for declarative deployments
+
+## Related Documentation
+- [Docker Development Workflow](/docs/engineering/technical/development-guides/docker-development-workflow)
+- [AWS Infrastructure Setup](/docs/engineering/technical/migration-deployment/ci-cd-pipeline-docker-to-aws)
+- Terraform Guide
+- GitHub Actions Configuration

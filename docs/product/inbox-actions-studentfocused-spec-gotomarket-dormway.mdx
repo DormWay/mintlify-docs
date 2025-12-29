@@ -1,0 +1,228 @@
+---
+title: "Inbox Actions — Student‑Focused Spec & Go‑To‑Market (DormWay)"
+description: "Ship **Inbox Actions** as a student‑friendly, fully **opt‑in** feature that turns class emails/announcements into **proposed** plan items students can approv..."
+---
+
+# Inbox Actions — Student‑Focused Spec & Go‑To‑Market (DormWay)
+
+**Owner:** Riley → Ethan
+**Date:** 2025‑09‑26
+**Status:** Final spec for Phase 1 implementation (student‑first)
+
+---
+
+## 0) Purpose
+
+Ship **Inbox Actions** as a student‑friendly, fully **opt‑in** feature that turns class emails/announcements into **proposed** plan items students can approve in **two taps**. It should be transparent (provenance chips), quiet by default (filters, thresholds), and measurable (clarity lift + time‑to‑first‑action).
+
+---
+
+## 1) Student Value (why this matters)
+
+* **Less overwhelm:** stops digging through Canvas + email for what's due.
+* **Fewer misses:** club noise filtered out by default; professor/course emails prioritized.
+* **Faster start:** most students get a usable **Due Soon** item within minutes.
+* **Full control:** read‑only; the student approves every add; disconnect/purge at any time.
+
+**Positioning one‑liner:** *Turn class emails into actions you approve.*
+
+---
+
+## 2) Opt‑In & Trust (non‑negotiables)
+
+* **Read‑only OAuth scopes**; never send emails or post to LMS.
+* **Consent modal (first run):**
+
+  * *We **read** class emails to suggest tasks.*
+  * *We **never send** email or post to your LMS.*
+  * *You **approve** what gets added.*
+  * *Turn off anytime.*
+* **Granular toggles on consent screen:**
+
+  * Professors only (ON) • Clubs & orgs (OFF) • Group projects (OFF)
+  * Quiet hours 11pm–7am (ON)
+  * Due‑soon window 3/5/7/10 days (default 7)
+* **Disconnect & purge** in settings; bodies encrypted at rest; PII minimization.
+
+**Connector microcopy:** *Read‑only. You approve what's added. Disconnect any time.*
+
+---
+
+## 3) Student UX (end‑to‑end)
+
+### 3.1 Flows
+
+1. **Connect** → consent modal with toggles → success state.
+2. **Propose** → Inbox tab shows cards with a right‑side proposal pill (title, due date, course chip, lane badge, **Email** chip).
+3. **Approve** → tap **Add to Plan**; shows lane reason and **Undo** toast.
+4. **Ignore** → card moves to Ignored (restorable).
+5. **Review conflicts** → *Conflict* pill when sources disagree (Syllabus vs Canvas) → **Keep Syllabus / Keep Canvas**.
+
+### 3.2 Lane rules (deterministic)
+
+* **Do Now** = due today/overdue OR in‑session.
+* **Up Next** = rest of today + early tomorrow.
+* **Due Soon** = due within N days (default 7), excluding items already in higher lanes.
+* Tooltip on each lane header explaining the rule.
+
+### 3.3 Dedupe & Noise control
+
+* Collapse Canvas + Email duplicates into a single proposal (Canvas as lead source).
+* Confidence threshold ≥ 0.70 to show proposals.
+* Rate‑limit proposals (max 5/day unless Inbox is open).
+* Default filter: **Professors only**; clubs/orgs opt‑in.
+
+### 3.4 Provenance
+
+* **Source chips** on plan items: Syllabus • Calendar • University • Canvas • Email.
+* Chip tap → mini sheet: *From Email (Oct 2) • Originally from Syllabus (Sep 1)*.
+* "Why this?" link highlights anchors (e.g., *"Quiz Friday 11:59pm"*).
+
+---
+
+## 4) Product Copy (paste‑ready)
+
+* **Connector card:** *Turn announcements into actions (read‑only).*
+* **Consent bullets:** *Reads class emails to suggest tasks • Never sends email • You approve adds • Disconnect anytime*
+* **Proposal CTA:** **Add to Plan** / **Ignore** / **View message**
+* **Toast after add:** *Added to **Due Soon** (Fri 10/4 11:59p) — Undo.*
+* **Empty Inbox state:** *We'll watch for class emails and propose tasks here. You'll approve what gets added.*
+
+---
+
+## 5) Detection → Action Ranking → Plan (tech overview)
+
+### 5.1 Sources & cadence
+
+* Gmail/Outlook (OAuth read‑only): backfill 30 days, then webhook/poll 5 min with backoff.
+* Canvas (beta) announcements feed.
+* University calendar / Syllabus store for cross‑checks.
+
+### 5.2 Detectors (v1)
+
+* **AssignmentDetector** (assignment/quiz/exam/post/lab patterns).
+* **DateTimeDetector** (absolute + relative, campus tz).
+* **CourseLinker** (subject patterns, sender domain, Canvas course ID, syllabus keywords).
+* **MeetingDetector** (Phase 3).
+
+### 5.3 Action Ranking
+
+* Map detector outputs → `ProposedAction[]` (title, dueAt, course, lane, confidence, anchors).
+* Score by: hasDue, title quality, course match, anchor count, recency; penalize collisions.
+* Choose 0..1 default **suggestion**; still requires approval.
+* Thresholds: show ≥ 0.70; (optional future) auto‑add ≥ 0.92 (OFF by default).
+
+### 5.4 Lane computation & reasons
+
+* Compute lane using §3.2 rules; store `laneReason` (e.g., *due in 2d → Due Soon (7d window)*).
+
+---
+
+## 6) Data Model (logical)
+
+* **SourceCredential**(id,userId,provider,scopes,status,tokenRef,createdAt)
+* **InboxMessage**(id,userId,provider,externalId,threadId,from,to,subject,sentAt,bodyRef,hash,courseHint?,processedAt,state)
+* **DetectedItem**(id,messageId,detector,type,payloadJSON,confidence,anchors[])
+* **ProposedAction**(id,messageId,courseId?,actionType,title,dueAt?,startAt?,lane?,confidence,rationale)
+* **ActionDecision**(id,messageId,chosenActionId,decisionType:auto|user,scoreBreakdownJSON)
+* **PlanItem**(id,userId,courseId?,source,email|canvas|syllabus,title,dueAt?,startAt?,lane,sourceRefs[])
+
+---
+
+## 7) BFF Endpoints
+
+* **POST** `/inbox/refresh`
+* **GET** `/inbox/messages` → messages + `proposedActions[]`
+* **POST** `/inbox/{messageId}/ignore`
+* **POST** `/inbox/{messageId}/choose` `{actionId}` → returns `PlanItem`
+* **POST** `/plan` | **GET** `/plan` (lane/course filters)
+* **POST** `/feedback` `{messageId, actionId, outcome: kept|edited|deleted}`
+
+**Events:** `inbox_fetch`, `detect_done`, `action_rank_pick`, `inbox_add_to_plan`, `clarity_before`, `clarity_after`.
+
+---
+
+## 8) Security & Privacy
+
+* Read‑only scopes; token vault; 1‑tap revoke.
+* PII minimization: store normalized fields + anchor offsets; bodies encrypted; purge on disconnect.
+* Logs default to no bodies; QA flag gated.
+* Full delete path proven in tests.
+
+---
+
+## 9) Metrics & Activation
+
+* **Time‑to‑first‑action** after connect.
+* **% accepted proposals** (vs ignored).
+* **Clarity lift**: %(`after` ∈ {yes, way_better}) − %(`before` ∈ {yes}).
+* **9pm–midnight DAU** and **Both‑source activation** (% connected syllabus + calendar).
+
+**Homepage band (when n≥1000):** *After setup, **87%** of students say they know what to do next.*
+**Explainer link:** *How we measure clarity (1‑question pulse).*
+
+---
+
+## 10) Phasing & Acceptance (Phase 1)
+
+**Build:**
+
+* OAuth connect + consent modal + settings toggles
+* Fetch → Detect → Propose → **Action Ranking** → Surface
+* Inbox UI cards with Add/Ignore, anchors preview
+* Dedupe Canvas↔Email
+* Lane compute + reasons, Source chips
+* Clarity quiz events
+
+**Accept when:**
+
+* After connect, at least one valid proposal appears for a seeded test email in ≤60s.
+* Add creates PlanItem with lane + chips; duplicate‑safe; Undo works.
+* Disconnect revokes token and purges inbox data.
+* Clarity quiz stored before & after.
+
+---
+
+## 11) Marketing (student‑first)
+
+* **Homepage tile:** *Turn class emails into actions you approve.*
+* **FAQ near connector:**
+
+  * *Will this send emails or change my LMS?* No—read‑only.
+  * *Can I choose what gets scanned?* Yes—professors only by default.
+  * *Can I turn it off or delete everything?* Yes—one tap in settings.
+* **Push/email:** *"Prof emailed Quiz 2. Add to plan?"*
+* **Social proof:** screenshot of "Way better than last time you asked."
+
+---
+
+## 12) Open Questions
+
+* Auto‑add at very high confidence (reversible) — leave OFF in v1?
+* Per‑course timezone overrides vs campus‑wide.
+* Should "Group projects" toggle auto‑track threads you starred/replied to?
+
+---
+
+## 13) Appendix — Example Payload
+
+```json
+{
+  "messageId": "gmail:1782525c8a",
+  "actionType": "add_deadline",
+  "title": "Quiz 2 — Chapters 5–6",
+  "courseId": "ECON-201-F25",
+  "dueAt": "2025-10-04T23:59:00-04:00",
+  "lane": "due",
+  "confidence": 0.84,
+  "rationale": "Matched 'Quiz' + date 'Oct 4' + course code in subject",
+  "anchors": [
+    {"text":"Quiz 2","ofs":128},
+    {"text":"Due Oct 4, 11:59pm","ofs":201}
+  ]
+}
+```
+
+Requirements from Google to grant the read only Mail scope:
+
+!Pasted image 20250926125732.png

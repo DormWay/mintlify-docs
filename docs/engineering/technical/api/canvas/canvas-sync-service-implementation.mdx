@@ -1,0 +1,486 @@
+---
+title: "Canvas Sync Service Implementation"
+description: "The Canvas Sync Service is a complete, FERPA-compliant integration layer for Canvas LMS. It handles OAuth2 authentication, real-time data synchronization, an..."
+---
+
+# Canvas Sync Service Implementation
+
+**Service**: `dormway-platform/services/canvas-sync/`
+**Status**: ✅ **PRODUCTION READY** (Backend complete, frontend integration in progress)
+**Last Updated**: 2025-10-04  
+
+---
+
+## 🎯 **Service Overview**
+
+The Canvas Sync Service is a complete, FERPA-compliant integration layer for Canvas LMS. It handles OAuth2 authentication, real-time data synchronization, and webhook processing for academic data.
+
+---
+
+## 🏗️ **Architecture**
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     Canvas LMS                               │
+│  (OAuth2 Provider + REST API + Live Events Webhooks)        │
+└─────────────────┬───────────────────────────┬───────────────┘
+                  │                           │
+         OAuth2 Flow                    Live Events
+                  │                           │
+                  ▼                           ▼
+┌─────────────────────────────────────────────────────────────┐
+│                Canvas Sync Service                          │
+│  (Port 3033) - Express + TypeScript + PostgreSQL           │
+└─────────────────┬───────────────────────────┬───────────────┘
+                  │                           │
+            Data Sync                    Real-time Updates
+                  │                           │
+                  ▼                           ▼
+┌─────────────────────────────────────────────────────────────┐
+│              DormWay Platform                               │
+│  (Temporal Workflows + iOS App + Dashboard BFF)            │
+└─────────────────────────────────────────────────────────────┘
+```
+
+---
+
+### **Temporal Orchestration**
+
+- Workflow execution remains in the **engine** service. Canvas-sync acts as the HTTP façade that validates a request and then starts Temporal workflows (`canvasFullSyncWorkflow`, `canvasFullSyncWithSyllabiWorkflow`) on the engine's `student-worker` task queue.
+- Because activities such as Ably notifications, Aurora writes, and Crew triggers depend on shared engine utilities, keeping the orchestration in engine avoids duplicating infrastructure while still allowing canvas-sync to expose FERPA-compliant REST endpoints.
+
+---
+
+## 📁 **Service Structure**
+
+```
+services/canvas-sync/
+├── src/
+│   ├── index.ts                 # Express server (port 3033)
+│   ├── types/canvas.ts          # Canvas API type definitions
+│   ├── oauth/consent.ts         # OAuth2 + FERPA consent
+│   ├── utils/canvasClient.ts    # Canvas API client
+│   ├── middleware/ferpa.ts      # FERPA compliance
+│   └── routes/
+│       ├── oauth.ts             # OAuth endpoints
+│       ├── courses.ts           # Course endpoints
+│       ├── assignments.ts       # Assignment endpoints
+│       ├── webhooks.ts          # Live Events handler
+│       └── sync.ts              # Sync triggers
+├── package.json
+├── tsconfig.json
+└── README.md
+```
+
+---
+
+## 🔐 **OAuth2 Implementation**
+
+### **FERPA-Compliant Consent Flow**
+```typescript
+export const FERPA_CONSENT_NOTICE = `
+By connecting your Canvas account to DormWay, you authorize us to:
+
+✓ View your course list and enrollment information
+✓ Access assignment due dates and descriptions
+✓ View your grades and submission status
+✓ Read your academic calendar events
+
+DormWay respects your privacy under FERPA:
+• We ONLY access YOUR data (never other students')
+• We NEVER modify your Canvas account
+• Data is encrypted and stored securely
+• You can disconnect anytime (data deleted within 24 hours)
+`;
+```
+
+### **Required Scopes**
+```typescript
+const REQUIRED_SCOPES = [
+  'url:GET|/api/v1/courses',
+  'url:GET|/api/v1/users/:user_id/courses',
+  'url:GET|/api/v1/courses/:course_id/assignments',
+  'url:GET|/api/v1/courses/:course_id/students/submissions',
+  'url:GET|/api/v1/calendar_events',
+  'url:GET|/api/v1/users/self/upcoming_events',
+  'url:GET|/api/v1/users/self/todo'
+];
+```
+
+---
+
+## 🗄️ **Database Schema**
+
+### **Core Tables**
+```sql
+-- OAuth account linking
+CREATE TABLE canvas_accounts (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    canvas_instance_id UUID NOT NULL REFERENCES canvas_instances(id),
+    access_token_encrypted TEXT NOT NULL,
+    refresh_token_encrypted TEXT,
+    canvas_user_id VARCHAR(255) NOT NULL,
+    expires_at TIMESTAMPTZ,
+    synced_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Synced courses
+CREATE TABLE canvas_courses (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    context_id UUID REFERENCES contexts(id),
+    canvas_course_id VARCHAR(255) NOT NULL,
+    canvas_instance_id UUID REFERENCES canvas_instances(id),
+    course_code VARCHAR(255),
+    workflow_state VARCHAR(50),
+    start_at TIMESTAMPTZ,
+    end_at TIMESTAMPTZ,
+    synced_at TIMESTAMPTZ
+);
+
+-- Assignments with overrides
+CREATE TABLE canvas_assignments (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    canvas_assignment_id VARCHAR(255) NOT NULL,
+    course_context_id UUID REFERENCES contexts(id),
+    name VARCHAR(500),
+    description TEXT,
+    due_at TIMESTAMPTZ,
+    points_possible NUMERIC(10,2),
+    submission_types JSONB,
+    synced_at TIMESTAMPTZ
+);
+
+-- Submissions and grades
+CREATE TABLE canvas_submissions (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    canvas_submission_id VARCHAR(255) NOT NULL,
+    assignment_id UUID REFERENCES canvas_assignments(id),
+    user_id UUID REFERENCES accounts(id),
+    submitted_at TIMESTAMPTZ,
+    grade VARCHAR(50),
+    score NUMERIC(10,2),
+    workflow_state VARCHAR(50),
+    late BOOLEAN DEFAULT FALSE,
+    synced_at TIMESTAMPTZ
+);
+```
+
+---
+
+## 🔌 **API Endpoints**
+
+### **OAuth Routes**
+- `GET /api/canvas/oauth/authorize` - Initiate OAuth flow
+- `POST /api/canvas/oauth/callback` - Handle OAuth callback
+- `POST /api/canvas/oauth/disconnect` - Disconnect Canvas account
+- `GET /api/canvas/oauth/status` - Check connection status
+
+### **Data Routes**
+- `GET /api/canvas/courses` - Get user courses
+- `GET /api/canvas/courses/:id` - Get specific course
+- `GET /api/canvas/assignments/upcoming` - Get upcoming assignments
+- `GET /api/canvas/assignments/missing` - Get missing assignments
+
+### **Webhook Routes**
+- `POST /api/canvas/webhooks/live-events` - Canvas Live Events handler
+
+### **Sync Routes**
+- `POST /api/canvas/sync/trigger` - Manual sync trigger (starts `canvasFullSyncWorkflow` on the engine `student-worker` queue)
+- `POST /api/canvas/sync/trigger-with-syllabi` - Manual sync trigger that also enqueues syllabus ingestion (`canvasFullSyncWithSyllabiWorkflow` on engine)
+- `GET /api/canvas/sync/status` - Sync status check
+
+---
+
+## 🔄 **Canvas API Client**
+
+### **Automatic Token Refresh**
+```typescript
+export class CanvasAPIClient {
+  async makeRequest<T>(endpoint: string, options?: RequestOptions): Promise<T> {
+    try {
+      return await this.request<T>(endpoint, options);
+    } catch (error) {
+      if (error.status === 401) {
+        await this.refreshAccessToken();
+        return await this.request<T>(endpoint, options);
+      }
+      throw error;
+    }
+  }
+}
+```
+
+### **Pagination Support**
+```typescript
+async getAllPages<T>(endpoint: string): Promise<T[]> {
+  const allData: T[] = [];
+  let nextUrl: string | null = endpoint;
+  
+  while (nextUrl) {
+    const response = await this.makeRequest<CanvasPaginatedResponse<T>>(nextUrl);
+    allData.push(...response.data);
+    nextUrl = response.links?.next?.url || null;
+  }
+  
+  return allData;
+}
+```
+
+---
+
+## 📡 **Real-time Webhook Processing**
+
+### **Canvas Live Events Handler**
+```typescript
+export async function handleCanvasLiveEvent(event: CanvasLiveEvent) {
+  switch (event.event_name) {
+    case 'grade_change':
+      await handleGradePosted(event);
+      break;
+    case 'assignment_created':
+      await handleAssignmentCreated(event);
+      break;
+    case 'submission_created':
+      await handleSubmissionCreated(event);
+      break;
+  }
+}
+```
+
+### **Grade Posted Handler**
+```typescript
+async function handleGradePosted(event: CanvasLiveEvent) {
+  // Update database
+  await db.canvas_submissions.upsert({
+    where: { canvas_submission_id: event.body.submission_id },
+    create: { /* submission data */ },
+    update: { /* updated data */ }
+  });
+
+  // Publish to Ably
+  await ably.channels.get(`user:${userId}:canvas:updates`).publish({
+    type: 'grade_posted',
+    assignment_name: event.body.assignment_name,
+    grade: event.body.grade
+  });
+
+  // Send push notification
+  await sendPush(userId, {
+    title: '📊 New Grade Posted',
+    body: `${event.body.grade} on ${event.body.assignment_name}`
+  });
+}
+```
+
+---
+
+## 🛡️ **FERPA Compliance Features**
+
+### **Student Data Isolation**
+```typescript
+export async function enforceStudentDataIsolation(req, res, next) {
+  const requestedUserId = req.params.user_id;
+  const authenticatedUserId = req.user.id;
+
+  if (requestedUserId !== authenticatedUserId) {
+    const hasPermission = await checkInstructorAccess(
+      authenticatedUserId, 
+      requestedUserId
+    );
+
+    if (!hasPermission) {
+      return res.status(403).json({
+        error: 'FERPA_VIOLATION',
+        message: 'You do not have permission to access another student\'s educational records'
+      });
+    }
+  }
+
+  next();
+}
+```
+
+### **24-Hour Data Deletion**
+```typescript
+export async function canvasDataRetentionWorkflow(userId: string) {
+  const account = await db.canvas_accounts.findOne({ user_id: userId });
+
+  if (!account || account.disconnected_at) {
+    await sleep.for('24 hours');
+
+    await db.transaction(async (tx) => {
+      await tx.canvas_submissions.deleteMany({ user_id: userId });
+      await tx.canvas_assignments.deleteMany({
+        course_context_id: { in: await getUserCourseIds(userId) }
+      });
+      await tx.canvas_courses.deleteMany({
+        context_id: { in: await getUserCourseIds(userId) }
+      });
+      await tx.canvas_accounts.delete({ user_id: userId });
+    });
+  }
+}
+```
+
+---
+
+## 🚀 **Deployment & Configuration**
+
+### **Required Environment Variables**
+```bash
+CANVAS_CLIENT_ID=<from_canvas_developer_keys>
+CANVAS_CLIENT_SECRET=<from_canvas_developer_keys>
+CANVAS_REDIRECT_URI=http://localhost:3033/api/canvas/oauth/callback
+CANVAS_OAUTH_STATE_SECRET=<openssl rand -hex 32>
+CANVAS_WEBHOOK_SECRET=<openssl rand -hex 32>
+TOKEN_ENCRYPTION_KEY=<openssl rand -hex 32>
+```
+
+### **Docker Compose Integration**
+```yaml
+canvas-sync:
+  build:
+    context: ./services/canvas-sync
+    dockerfile: Dockerfile
+  ports:
+    - "3033:3033"
+  environment:
+    - NODE_ENV=development
+  depends_on:
+    - postgres-local
+  networks:
+    - dormway-network
+```
+
+---
+
+## 📊 **Service Status**
+
+| Component | Status | Details |
+|-----------|--------|---------|
+| **OAuth2 Flow** | ✅ Complete | FERPA-compliant authorization |
+| **Database Schema** | ✅ Complete | 8 tables with proper relationships |
+| **API Client** | ✅ Complete | Auto-refresh, pagination, error handling |
+| **Webhook Handler** | ✅ Complete | Live Events processing |
+| **FERPA Compliance** | ✅ Complete | Data isolation, retention policies |
+| **Temporal Integration** | ✅ Complete | 10 activities, 6 workflows registered |
+| **API Router Integration** | ❌ Missing | Canvas routes not added to API Router |
+| **LockedIn Integration** | 🟡 In Progress | Page created, UI components needed |
+| **iOS Integration** | ❌ Missing | Pending - focusing on LockedIn first |
+
+---
+
+## 🔗 **Related Documentation**
+
+- **[Canvas API Documentation - Complete Reference](/docs/engineering/technical/api/canvas/canvas-api-documentation-complete-reference)** - Full API reference
+- **Canvas Full Plan** - High-level integration strategy
+- **[Canvas iOS Integration Guide](/docs/engineering/technical/api/canvas/canvas-ios-integration-guide)** - Mobile implementation
+- **[Canvas FERPA Compliance Guide](/docs/engineering/technical/api/canvas/canvas-ferpa-compliance-guide)** - Privacy and compliance
+
+---
+
+## 🔄 **Temporal Workflows** (NEW - Oct 2025)
+
+### **Canvas Activities** (`services/engine/src/activities/canvas.activities.ts`)
+The Canvas sync process is orchestrated through Temporal activities:
+
+1. **`getCanvasAccount()`** - Retrieve Canvas OAuth account for user
+2. **`fetchCanvasCourses()`** - Fetch Fall 2025 courses from Canvas API
+3. **`syncCanvasCourses()`** - Sync courses to database
+4. **`fetchCanvasAssignments()`** - Fetch course assignments
+5. **`syncCanvasAssignments()`** - Sync assignments and submissions
+6. **`fetchCanvasFiles()`** - Retrieve course files (PDFs, syllabi)
+7. **`fetchCanvasAnnouncements()`** - Get course announcements
+8. **`fetchCanvasStudents()`** - List classmates in courses
+9. **`fetchUpcomingAssignments()`** - Get next 7 days of assignments
+10. **`fullCanvasSync()`** - Complete sync workflow
+
+### **Canvas Workflows** (`services/engine/src/workflows/canvasSync.workflow.ts`)
+
+#### 1. Full Sync Workflow
+```typescript
+export async function canvasFullSyncWorkflow(userId: string): Promise<CanvasSyncResult> {
+  // 1. Get Canvas account
+  const account = await activities.getCanvasAccount(userId);
+
+  // 2. Sync courses
+  const courses = await activities.fetchCanvasCourses(account);
+  await activities.syncCanvasCourses(userId, courses);
+
+  // 3. Sync assignments for each course
+  for (const course of courses) {
+    const assignments = await activities.fetchCanvasAssignments(account, course.id);
+    await activities.syncCanvasAssignments(userId, course.id, assignments);
+  }
+
+  return { success: true, courses: courses.length };
+}
+```
+
+#### 2. Scheduled Sync Workflow (Every 30 Minutes)
+```typescript
+export async function canvasScheduledSyncWorkflow(userId: string): Promise<void> {
+  while (true) {
+    await activities.fullCanvasSync(userId);
+    await sleep('30 minutes');
+  }
+}
+```
+
+#### 3. On-Demand Sync (Pull-to-Refresh)
+```typescript
+export async function canvasOnDemandSyncWorkflow(userId: string): Promise<void> {
+  await activities.fullCanvasSync(userId);
+}
+```
+
+#### 4. Upcoming Assignments Workflow
+```typescript
+export async function canvasUpcomingAssignmentsWorkflow(userId: string): Promise<Assignment[]> {
+  const account = await activities.getCanvasAccount(userId);
+  return await activities.fetchUpcomingAssignments(account, 7); // Next 7 days
+}
+```
+
+### **Workflow Registration**
+All Canvas workflows are registered in the Temporal worker:
+- ✅ Task Queue: `student-worker`
+- ✅ Activities exported in `activities/index.ts`
+- ✅ Workflows exported in `workflows/index.ts`
+- ✅ Workflow bundle built and deployed (Oct 4, 2025)
+
+---
+
+## 🌐 **LockedIn Web App Integration** (NEW - Oct 2025)
+
+### **Canvas Dashboard Page** (`services/dormway-lockedin/src/app/dashboard/canvas/page.tsx`)
+A dedicated Canvas page has been created in the LockedIn web app:
+
+```typescript
+export default function CanvasPage() {
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100">
+      <div className="max-w-5xl mx-auto">
+        <h1 className="text-3xl font-bold">Canvas LMS</h1>
+        <p className="text-gray-600">Connect your Canvas account to sync courses, assignments, and grades</p>
+
+        <CanvasIntegration />
+      </div>
+    </div>
+  );
+}
+```
+
+### **Pending UI Components**
+- ❌ OAuth connection button
+- ❌ Upcoming assignments widget
+- ❌ Grade trends chart
+- ❌ Missing assignments alert
+- ❌ Course list with assignments
+- ❌ Real-time grade notifications (Ably)
+
+---
+
+*This service is production-ready with complete backend infrastructure (OAuth, database, Temporal workflows). Currently integrating with LockedIn web app for end-user features.*

@@ -1,0 +1,941 @@
+---
+title: "AccountsService"
+description: "import { AccountsService } from '@dormway/core'; import { getConnectionPool } from '@dormway/core/database'; import { createStructuredLogger } from '@dormway..."
+---
+
+# AccountsService
+
+## Overview
+
+**AccountsService** manages user accounts with context resolution, login tracking, and hierarchical context queries.
+
+**Purpose**: Centralized account management with support for Clerk/Auth0 integration, context association, and student-campus-city hierarchy resolution.
+
+**Location**: `@dormway/core/domains/accounts`
+
+---
+
+## Installation
+
+```typescript
+import { AccountsService } from '@dormway/core';
+import { getConnectionPool } from '@dormway/core/database';
+import { createStructuredLogger } from '@dormway/core/logger';
+
+const pool = getConnectionPool();
+const logger = createStructuredLogger({ service: 'api-router' });
+
+const accounts = new AccountsService({ pool, logger });
+```
+
+---
+
+## Methods
+
+### createAccount
+
+Create a new user account.
+
+**Signature**:
+```typescript
+createAccount(options: CreateAccountOptions): Promise<ServiceResult<Account>>
+```
+
+**Options**:
+```typescript
+interface CreateAccountOptions {
+  email: string;
+  name: string;
+  given_name?: string;
+  family_name?: string;
+  clerk_id?: string;
+  auth0_id?: string;
+  picture_url?: string;
+  is_personal_account?: boolean;       // Default: true
+  public_data?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+  onboarding_status?: string;          // Default: 'pending'
+}
+```
+
+**Example**:
+```typescript
+const result = await accounts.createAccount({
+  email: 'student@umich.edu',
+  name: 'Alice Johnson',
+  given_name: 'Alice',
+  family_name: 'Johnson',
+  clerk_id: 'user_2abc123',
+  picture_url: 'https://example.com/avatar.jpg',
+  onboarding_status: 'pending',
+  metadata: {
+    source: 'web_signup',
+  },
+});
+
+if (result.success) {
+  console.log('Account created:', result.data.id);
+}
+```
+
+---
+
+### getAccount
+
+Get account by ID or identifier with optional context resolution.
+
+**Signature**:
+```typescript
+getAccount(options: GetAccountOptions): Promise<ServiceResult<Account | AccountWithContexts>>
+```
+
+**Options**:
+```typescript
+interface GetAccountOptions {
+  id?: string;                  // Account ID
+  clerk_id?: string;            // Clerk ID
+  auth0_id?: string;            // Auth0 ID (legacy)
+  email?: string;               // Email
+  includeContexts?: boolean;    // Resolve contexts (default: false)
+  contextTypes?: ContextType[]; // Filter context types
+}
+```
+
+**Examples**:
+
+**Get account by ID**:
+```typescript
+const result = await accounts.getAccount({ id: 'user-123' });
+
+if (result.success) {
+  console.log(result.data.email);
+  console.log(result.data.name);
+}
+```
+
+**Get account by Clerk ID**:
+```typescript
+const result = await accounts.getAccount({ clerk_id: 'user_2abc123' });
+```
+
+**Get account with contexts**:
+```typescript
+const result = await accounts.getAccount({
+  id: 'user-123',
+  includeContexts: true,
+});
+
+if (result.success) {
+  const account = result.data as AccountWithContexts;
+
+  console.log('Student context:', account.studentContext);
+  console.log('Campus context:', account.campusContext);
+  console.log('City context:', account.cityContext);
+  console.log('Course contexts:', account.courseContexts);
+  console.log('All contexts:', account.allContexts);
+}
+```
+
+**Get account with specific context types**:
+```typescript
+const result = await accounts.getAccount({
+  id: 'user-123',
+  includeContexts: true,
+  contextTypes: ['student', 'campus'], // Only fetch these types
+});
+```
+
+---
+
+### updateAccount
+
+Update account fields.
+
+**Signature**:
+```typescript
+updateAccount(options: UpdateAccountOptions): Promise<ServiceResult<Account>>
+```
+
+**Options**:
+```typescript
+interface UpdateAccountOptions {
+  id: string;
+  updates: Partial<Omit<Account, 'id' | 'created_at' | 'updated_at'>>;
+}
+```
+
+**Examples**:
+
+**Update profile**:
+```typescript
+await accounts.updateAccount({
+  id: 'user-123',
+  updates: {
+    name: 'Alice M. Johnson',
+    picture_url: 'https://example.com/new-avatar.jpg',
+  },
+});
+```
+
+**Update onboarding status**:
+```typescript
+await accounts.updateAccount({
+  id: 'user-123',
+  updates: {
+    onboarding_status: 'completed',
+  },
+});
+```
+
+**Update metadata**:
+```typescript
+await accounts.updateAccount({
+  id: 'user-123',
+  updates: {
+    metadata: {
+      theme: 'dark',
+      notifications_enabled: true,
+    },
+  },
+});
+```
+
+---
+
+### deleteAccount
+
+Soft delete account (sets deleted flag in metadata).
+
+**Signature**:
+```typescript
+deleteAccount(accountId: string): Promise<ServiceResult<void>>
+```
+
+**Example**:
+```typescript
+const result = await accounts.deleteAccount('user-123');
+
+if (result.success) {
+  console.log('Account soft deleted');
+}
+```
+
+**Note**: This sets `metadata.deleted = true`. Use filtered queries to exclude deleted accounts.
+
+---
+
+### listAccounts
+
+List accounts with pagination and filters.
+
+**Signature**:
+```typescript
+listAccounts(options: ListAccountsOptions): Promise<ServiceResult<PaginatedResult<Account | AccountWithContexts>>>
+```
+
+**Options**:
+```typescript
+interface ListAccountsOptions {
+  limit?: number;                      // Default: 50
+  offset?: number;                     // Default: 0
+  onboarding_status?: string;
+  is_personal_account?: boolean;
+  email_verified?: boolean;
+  search?: string;                     // Search name or email
+  includeContexts?: boolean;
+  orderBy?: 'created_at' | 'updated_at' | 'last_login_at' | 'name';
+  orderDirection?: 'ASC' | 'DESC';     // Default: 'DESC'
+}
+```
+
+**Examples**:
+
+**List recent accounts**:
+```typescript
+const result = await accounts.listAccounts({
+  limit: 10,
+  orderBy: 'created_at',
+  orderDirection: 'DESC',
+});
+
+if (result.success) {
+  console.log('Total accounts:', result.data.total);
+  console.log('Has more:', result.data.hasMore);
+  result.data.items.forEach((account) => {
+    console.log(account.email, account.created_at);
+  });
+}
+```
+
+**Filter by onboarding status**:
+```typescript
+const result = await accounts.listAccounts({
+  onboarding_status: 'completed',
+  limit: 100,
+});
+```
+
+**Search accounts**:
+```typescript
+const result = await accounts.listAccounts({
+  search: 'umich.edu', // Search name or email
+  limit: 20,
+});
+```
+
+**List with contexts**:
+```typescript
+const result = await accounts.listAccounts({
+  limit: 10,
+  includeContexts: true, // Resolve contexts for each account
+});
+```
+
+---
+
+### trackLogin
+
+Track user login with IP and user agent.
+
+**Signature**:
+```typescript
+trackLogin(options: TrackLoginOptions): Promise<ServiceResult<void>>
+```
+
+**Options**:
+```typescript
+interface TrackLoginOptions {
+  accountId: string;
+  ip?: string;
+  userAgent?: string;
+  timestamp?: Date; // Default: now
+}
+```
+
+**Example**:
+```typescript
+// In authentication middleware
+await accounts.trackLogin({
+  accountId: req.user.id,
+  ip: req.ip,
+  userAgent: req.headers['user-agent'],
+});
+
+// Updates:
+// - last_login_at
+// - last_login_ip
+// - last_login_user_agent
+// - login_count (increments)
+```
+
+---
+
+### getAccountContexts
+
+Get all contexts associated with an account.
+
+**Signature**:
+```typescript
+getAccountContexts(accountId: string, contextTypes?: ContextType[]): Promise<ServiceResult<ContextNode[]>>
+```
+
+**Examples**:
+
+**Get all contexts**:
+```typescript
+const result = await accounts.getAccountContexts('user-123');
+
+if (result.success) {
+  result.data.forEach((ctx) => {
+    console.log(ctx.type, ctx.name);
+  });
+}
+```
+
+**Get specific context types**:
+```typescript
+const result = await accounts.getAccountContexts('user-123', ['student', 'course']);
+
+if (result.success) {
+  const studentContext = result.data.find((c) => c.type === 'student');
+  const courseContexts = result.data.filter((c) => c.type === 'course');
+}
+```
+
+---
+
+### associateContext
+
+Associate account with a context.
+
+**Signature**:
+```typescript
+associateContext(options: AssociateContextOptions): Promise<ServiceResult<ContextNode>>
+```
+
+**Options**:
+```typescript
+interface AssociateContextOptions {
+  accountId: string;
+  contextId: string;
+  contextType: ContextType;
+  metadata?: Record<string, unknown>;
+}
+```
+
+**Example**:
+```typescript
+// Associate account with student context
+const result = await accounts.associateContext({
+  accountId: 'user-123',
+  contextId: 'student-context-id',
+  contextType: 'student',
+  metadata: {
+    enrolled_at: new Date().toISOString(),
+  },
+});
+
+if (result.success) {
+  console.log('Context associated:', result.data.id);
+}
+```
+
+---
+
+### dissociateContext
+
+Remove account from a context.
+
+**Signature**:
+```typescript
+dissociateContext(accountId: string, contextId: string): Promise<ServiceResult<void>>
+```
+
+**Example**:
+```typescript
+await accounts.dissociateContext('user-123', 'course-context-id');
+```
+
+---
+
+### getStudentCampus
+
+Get student's campus context via context hierarchy.
+
+**Signature**:
+```typescript
+getStudentCampus(accountId: string): Promise<ServiceResult<ContextNode | null>>
+```
+
+**Example**:
+```typescript
+const result = await accounts.getStudentCampus('user-123');
+
+if (result.success && result.data) {
+  const campus = result.data;
+  console.log('Campus:', campus.name);
+  console.log('Campus metadata:', campus.metadata);
+}
+```
+
+**How it works**:
+1. Finds student context where `account_id = accountId`
+2. Follows `parent_id` to campus context
+3. Returns campus context or null
+
+---
+
+### getStudentCity
+
+Get student's city context via context hierarchy.
+
+**Signature**:
+```typescript
+getStudentCity(accountId: string): Promise<ServiceResult<ContextNode | null>>
+```
+
+**Example**:
+```typescript
+const result = await accounts.getStudentCity('user-123');
+
+if (result.success && result.data) {
+  const city = result.data;
+  console.log('City:', city.name);
+  console.log('Weather data:', city.metadata.weather);
+}
+```
+
+**How it works**:
+1. Finds student context where `account_id = accountId`
+2. Follows `parent_id` to campus context
+3. Follows campus `parent_id` to city context
+4. Returns city context or null
+
+---
+
+### healthCheck
+
+Check database connectivity.
+
+**Signature**:
+```typescript
+healthCheck(): Promise<boolean>
+```
+
+**Example**:
+```typescript
+const healthy = await accounts.healthCheck();
+console.log('Accounts service healthy:', healthy);
+```
+
+---
+
+## Common Patterns
+
+### Pattern 1: User Registration Flow
+
+```typescript
+import { AccountsService } from '@dormway/core';
+
+async function registerUser(clerkUser: any, campusId: string) {
+  const accounts = new AccountsService({ pool, logger });
+
+  // 1. Create account from Clerk data
+  const accountResult = await accounts.createAccount({
+    email: clerkUser.emailAddresses[0].emailAddress,
+    name: `${clerkUser.firstName} ${clerkUser.lastName}`,
+    given_name: clerkUser.firstName,
+    family_name: clerkUser.lastName,
+    clerk_id: clerkUser.id,
+    picture_url: clerkUser.imageUrl,
+    onboarding_status: 'pending',
+  });
+
+  if (!accountResult.success) {
+    throw new Error('Failed to create account');
+  }
+
+  const accountId = accountResult.data.id;
+
+  // 2. Create student context
+  const studentContextId = await createStudentContext(accountId, campusId);
+
+  // 3. Associate account with student context
+  await accounts.associateContext({
+    accountId,
+    contextId: studentContextId,
+    contextType: 'student',
+  });
+
+  // 4. Update onboarding status
+  await accounts.updateAccount({
+    id: accountId,
+    updates: { onboarding_status: 'context_created' },
+  });
+
+  return accountId;
+}
+```
+
+---
+
+### Pattern 2: Get Student Dashboard Data
+
+```typescript
+async function getStudentDashboardData(accountId: string) {
+  const accounts = new AccountsService({ pool, logger });
+
+  // Fetch account with all contexts in one query
+  const result = await accounts.getAccount({
+    id: accountId,
+    includeContexts: true,
+  });
+
+  if (!result.success) {
+    throw new Error('Account not found');
+  }
+
+  const account = result.data as AccountWithContexts;
+
+  return {
+    user: {
+      id: account.id,
+      name: account.name,
+      email: account.email,
+      picture_url: account.picture_url,
+    },
+    campus: account.campusContext
+      ? {
+          id: account.campusContext.id,
+          name: account.campusContext.name,
+          metadata: account.campusContext.metadata,
+        }
+      : null,
+    city: account.cityContext
+      ? {
+          id: account.cityContext.id,
+          name: account.cityContext.name,
+          weather: account.cityContext.metadata.weather,
+        }
+      : null,
+    courses: account.courseContexts?.map((course) => ({
+      id: course.id,
+      name: course.name,
+      metadata: course.metadata,
+    })),
+  };
+}
+```
+
+---
+
+### Pattern 3: Admin Account Management
+
+```typescript
+async function listRecentUsers(limit: number = 50) {
+  const accounts = new AccountsService({ pool, logger });
+
+  const result = await accounts.listAccounts({
+    limit,
+    orderBy: 'created_at',
+    orderDirection: 'DESC',
+    includeContexts: true,
+  });
+
+  if (!result.success) {
+    return [];
+  }
+
+  return result.data.items.map((account) => {
+    const acc = account as AccountWithContexts;
+    return {
+      id: acc.id,
+      email: acc.email,
+      name: acc.name,
+      created_at: acc.created_at,
+      last_login_at: acc.last_login_at,
+      login_count: acc.login_count,
+      campus: acc.campusContext?.name,
+      onboarding_status: acc.onboarding_status,
+    };
+  });
+}
+```
+
+---
+
+### Pattern 4: Search Users
+
+```typescript
+async function searchUsers(query: string) {
+  const accounts = new AccountsService({ pool, logger });
+
+  const result = await accounts.listAccounts({
+    search: query, // Searches name and email
+    limit: 20,
+    orderBy: 'name',
+    orderDirection: 'ASC',
+  });
+
+  if (!result.success) {
+    return [];
+  }
+
+  return result.data.items.map((account) => ({
+    id: account.id,
+    email: account.email,
+    name: account.name,
+    picture_url: account.picture_url,
+  }));
+}
+```
+
+---
+
+### Pattern 5: Login Tracking Middleware
+
+```typescript
+import { AccountsService } from '@dormway/core';
+
+async function loginTrackingMiddleware(req: Request, res: Response, next: NextFunction) {
+  if (!req.user) {
+    return next();
+  }
+
+  const accounts = new AccountsService({ pool, logger });
+
+  // Track login asynchronously (don't block request)
+  accounts.trackLogin({
+    accountId: req.user.id,
+    ip: req.ip,
+    userAgent: req.headers['user-agent'],
+  }).catch((err) => {
+    logger.error('login.track.error', 'Failed to track login', { error: err });
+  });
+
+  next();
+}
+```
+
+---
+
+### Pattern 6: Get User's Location Hierarchy
+
+```typescript
+async function getUserLocationHierarchy(accountId: string) {
+  const accounts = new AccountsService({ pool, logger });
+
+  // Get campus and city in parallel
+  const [campusResult, cityResult] = await Promise.all([
+    accounts.getStudentCampus(accountId),
+    accounts.getStudentCity(accountId),
+  ]);
+
+  return {
+    campus: campusResult.success ? campusResult.data : null,
+    city: cityResult.success ? cityResult.data : null,
+  };
+}
+```
+
+---
+
+### Pattern 7: Bulk Account Updates
+
+```typescript
+async function bulkUpdateOnboardingStatus(
+  accountIds: string[],
+  status: string
+) {
+  const accounts = new AccountsService({ pool, logger });
+
+  const results = await Promise.allSettled(
+    accountIds.map((id) =>
+      accounts.updateAccount({
+        id,
+        updates: { onboarding_status: status },
+      })
+    )
+  );
+
+  const successful = results.filter((r) => r.status === 'fulfilled').length;
+  const failed = results.filter((r) => r.status === 'rejected').length;
+
+  console.log(`Updated ${successful} accounts, ${failed} failed`);
+}
+```
+
+---
+
+### Pattern 8: Account with Enrollment Check
+
+```typescript
+async function getAccountWithEnrollmentStatus(accountId: string) {
+  const accounts = new AccountsService({ pool, logger });
+
+  const result = await accounts.getAccount({
+    id: accountId,
+    includeContexts: true,
+  });
+
+  if (!result.success) {
+    return null;
+  }
+
+  const account = result.data as AccountWithContexts;
+
+  return {
+    ...account,
+    isEnrolled: Boolean(account.campusContext),
+    courseCount: account.courseContexts?.length ?? 0,
+    hasCompletedOnboarding: account.onboarding_status === 'completed',
+  };
+}
+```
+
+---
+
+## Database Schema
+
+**Table**: `accounts`
+
+```sql
+CREATE TABLE accounts (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  primary_owner_user_id UUID NOT NULL,
+  name TEXT NOT NULL,
+  slug TEXT,
+  email TEXT,
+  is_personal_account BOOLEAN DEFAULT true,
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  created_by TEXT,
+  updated_by TEXT,
+  picture_url TEXT,
+  public_data JSONB DEFAULT '{}',
+  auth0_id TEXT,
+  clerk_id TEXT,
+  given_name TEXT,
+  family_name TEXT,
+  email_verified BOOLEAN DEFAULT false,
+  onboarding_status TEXT DEFAULT 'pending',
+  last_login_at TIMESTAMP WITH TIME ZONE,
+  login_count INTEGER DEFAULT 0,
+  last_login_ip TEXT,
+  last_login_user_agent TEXT,
+  metadata JSONB DEFAULT '{}'
+);
+
+CREATE UNIQUE INDEX ON accounts(email);
+CREATE INDEX ON accounts(clerk_id);
+CREATE INDEX ON accounts(onboarding_status);
+CREATE INDEX ON accounts(created_at);
+```
+
+**⚠️ IMPORTANT**: The accounts table does NOT have a `campus_id` column. Use context hierarchy joins to get student campus:
+
+```sql
+-- Get student's campus
+SELECT campus_ctx.*
+FROM accounts a
+JOIN contexts student_ctx ON student_ctx.account_id = a.id AND student_ctx.type = 'student'
+JOIN contexts campus_ctx ON campus_ctx.id = student_ctx.parent_id AND campus_ctx.type = 'campus'
+WHERE a.id = $1;
+```
+
+---
+
+## Context Resolution
+
+**Context Hierarchy**:
+```
+City (contexts.type = 'city')
+  ↳ Campus (contexts.type = 'campus')
+      ↳ Student (contexts.type = 'student', contexts.account_id = account.id)
+          ↳ Course (contexts.type = 'course', contexts.parent_id = student.id)
+```
+
+**AccountWithContexts Fields**:
+- `studentContext` - Student context (where `account_id = account.id`)
+- `campusContext` - Campus context (via student context `parent_id`)
+- `cityContext` - City context (via campus context `parent_id`)
+- `courseContexts` - Course contexts (where `parent_id = student.id`)
+- `allContexts` - All contexts associated with account
+
+**Query Pattern**:
+```typescript
+// Efficient single-query context resolution
+const account = await accounts.getAccount({
+  id: 'user-123',
+  includeContexts: true, // Resolves all contexts in one query
+});
+
+// Access resolved contexts
+const campus = account.campusContext;
+const courses = account.courseContexts;
+```
+
+---
+
+## Best Practices
+
+### ✅ Do
+
+- **Use `includeContexts`** for dashboard/profile pages to reduce queries
+- **Filter context types** when you only need specific types
+- **Track logins** on authentication for security auditing
+- **Soft delete accounts** using `deleteAccount()` for data retention
+- **Use search** for user lookup by name/email
+- **Paginate large lists** with `limit` and `offset`
+- **Handle null contexts** gracefully (not all accounts have contexts)
+
+### ❌ Don't
+
+- **Don't query campus_id on accounts table** - it doesn't exist (use context joins)
+- **Don't hard delete accounts** - use soft delete for audit trail
+- **Don't fetch contexts** when not needed (extra database queries)
+- **Don't skip login tracking** - important for security monitoring
+- **Don't forget pagination** for large account lists
+- **Don't expose sensitive metadata** in public APIs
+
+---
+
+## Troubleshooting
+
+### Account not found
+
+**Problem**: `getAccount()` returns "Account not found"
+
+**Solution**:
+```typescript
+// 1. Check identifier is correct
+const result = await accounts.getAccount({ id: 'user-123' });
+
+// 2. Try alternative identifiers
+const clerkResult = await accounts.getAccount({ clerk_id: 'user_2abc' });
+const emailResult = await accounts.getAccount({ email: 'user@example.com' });
+
+// 3. Verify account exists in database
+const listResult = await accounts.listAccounts({ search: 'user@example.com' });
+```
+
+---
+
+### Context not resolving
+
+**Problem**: `includeContexts: true` returns empty contexts
+
+**Solution**:
+```typescript
+// 1. Check contexts exist for account
+const contextsResult = await accounts.getAccountContexts('user-123');
+console.log('Contexts:', contextsResult.data);
+
+// 2. Verify account_id is set on contexts
+// Run SQL: SELECT * FROM contexts WHERE account_id = 'user-123';
+
+// 3. Associate context if missing
+await accounts.associateContext({
+  accountId: 'user-123',
+  contextId: 'student-context-id',
+  contextType: 'student',
+});
+```
+
+---
+
+### Campus query returns null
+
+**Problem**: `getStudentCampus()` returns null
+
+**Solution**:
+```typescript
+// 1. Check student context exists
+const studentContext = await pool.query(
+  `SELECT * FROM contexts WHERE account_id = $1 AND type = 'student'`,
+  ['user-123']
+);
+
+// 2. Check student has parent_id set (campus)
+console.log('Parent ID:', studentContext.rows[0]?.parent_id);
+
+// 3. Verify campus context exists and is active
+const campusContext = await pool.query(
+  `SELECT * FROM contexts WHERE id = $1 AND type = 'campus' AND is_active = true`,
+  [studentContext.rows[0]?.parent_id]
+);
+```
+
+---
+
+## Related Documentation
+
+- [DormWay Core Library (@dormway-core)](/docs/engineering/technical/dormway-core-library-dormway-core) - Main overview
+- [ContextsService](/docs/engineering/technical/dormway-core/domain-services/contextsservice) - Context management and graph operations
+- [Structured Logger](/docs/engineering/technical/dormway-core/utilities/structured-logger) - Logging account operations
+- [Error Handling](/docs/engineering/technical/dormway-core/utilities/error-handling) - ServiceResult pattern
+
+---
+
+**Last Updated**: 2025-11-23
+**Maintainer**: Platform Team

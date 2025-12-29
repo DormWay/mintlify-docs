@@ -1,0 +1,485 @@
+---
+title: "Morning Notification Crew   Implementation"
+description: "The Morning Notification Crew is a Sonnet-based AI crew that runs 3x daily (6 AM, 12 PM, 6 PM) to plan and send personalized daily briefings to users."
+---
+
+# Morning Notification Crew - Implementation Plan
+
+## Overview
+The Morning Notification Crew is a Sonnet-based AI crew that runs 3x daily (6 AM, 12 PM, 6 PM) to plan and send personalized daily briefings to users.
+
+## Crew Architecture
+
+### Agents
+
+#### 1. Context Analyst Agent
+**Role**: Gather and analyze user's current context
+**Model**: Claude 3 Haiku (fast, efficient)
+**Responsibilities**:
+- Fetch user's schedule for the day
+- Analyze upcoming deadlines (24-48 hours)
+- Review recent engagement patterns
+- Identify current stress indicators
+- Assess weather and campus events
+
+**Output**: Structured context report
+
+#### 2. Priority Strategist Agent
+**Role**: Determine what's most important for the user today
+**Model**: Claude 3 Sonnet
+**Responsibilities**:
+- Analyze all assignments and deadlines
+- Consider user's grade goals
+- Factor in course difficulty and time requirements
+- Identify potential conflicts or challenges
+- Recommend focus areas
+
+**Output**: Prioritized task list with reasoning
+
+#### 3. Wellness Advisor Agent
+**Role**: Balance academic needs with wellbeing
+**Model**: Claude 3 Haiku
+**Responsibilities**:
+- Analyze user's recent study patterns
+- Check for signs of overwork
+- Suggest break times and activities
+- Consider meal times and social opportunities
+- Monitor streak/progress without pressure
+
+**Output**: Wellness recommendations
+
+#### 4. Message Composer Agent
+**Role**: Create the perfect notification message
+**Model**: Claude 3 Sonnet
+**Responsibilities**:
+- Synthesize insights from other agents
+- Apply user's AI personality preferences
+- Create engaging, actionable message
+- Design appropriate call-to-action
+- Ensure message length is optimal
+
+**Output**: Personalized notification content
+
+### Crew Implementation
+
+```python
+# dormway-crews/src/crews/morning_notification_crew.py
+
+from crewai import Agent, Crew, Task
+from typing import Dict, Any, List
+import json
+from datetime import datetime, timedelta
+
+class MorningNotificationCrew:
+    def __init__(self, llm_config: Dict[str, Any]):
+        self.llm_config = llm_config
+        self._setup_agents()
+    
+    def _setup_agents(self):
+        # Context Analyst - Fast and efficient data gathering
+        self.context_analyst = Agent(
+            role='Student Context Analyst',
+            goal='Gather comprehensive context about the student\'s day ahead',
+            backstory="""You are an expert at analyzing student schedules and contexts. 
+            You excel at identifying important patterns and potential challenges in a 
+            student's day. You're thorough but efficient.""",
+            verbose=True,
+            allow_delegation=False,
+            llm=self.llm_config['haiku']
+        )
+        
+        # Priority Strategist - Smart prioritization
+        self.priority_strategist = Agent(
+            role='Academic Priority Strategist',
+            goal='Identify the most important tasks and focus areas for today',
+            backstory="""You are a master at helping students prioritize their academic 
+            work. You understand how to balance urgency with importance, and you consider 
+            the student's goals and capabilities. You're strategic and insightful.""",
+            verbose=True,
+            allow_delegation=False,
+            llm=self.llm_config['sonnet']
+        )
+        
+        # Wellness Advisor - Balance and wellbeing
+        self.wellness_advisor = Agent(
+            role='Student Wellness Advisor',
+            goal='Ensure the student maintains healthy balance while being productive',
+            backstory="""You are a caring advisor who understands that academic success 
+            requires physical and mental wellbeing. You spot signs of stress and suggest 
+            practical ways to maintain balance. You're supportive without being preachy.""",
+            verbose=True,
+            allow_delegation=False,
+            llm=self.llm_config['haiku']
+        )
+        
+        # Message Composer - Final message creation
+        self.message_composer = Agent(
+            role='Notification Message Composer',
+            goal='Create the perfect morning notification for the student',
+            backstory="""You are a master communicator who crafts messages that are 
+            engaging, helpful, and perfectly matched to each student's communication 
+            style. You know how to motivate without overwhelming.""",
+            verbose=True,
+            allow_delegation=False,
+            llm=self.llm_config['sonnet']
+        )
+    
+    def create_morning_briefing(self, user_context: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Main crew execution for morning briefing
+        """
+        # Task 1: Analyze Context
+        context_task = Task(
+            description=f"""
+            Analyze the following student context for {user_context['user_name']}:
+            
+            Today's Schedule:
+            {json.dumps(user_context['todays_schedule'], indent=2)}
+            
+            Upcoming Deadlines (48 hours):
+            {json.dumps(user_context['upcoming_deadlines'], indent=2)}
+            
+            Recent Activity:
+            - Last study session: {user_context['last_study_session']}
+            - Study streak: {user_context['study_streak']} days
+            - Average daily study time: {user_context['avg_study_time']} hours
+            
+            Current Conditions:
+            - Weather: {user_context['weather']}
+            - Campus events: {json.dumps(user_context['campus_events'])}
+            
+            Provide a comprehensive analysis including:
+            1. Schedule complexity for today
+            2. Deadline pressure level
+            3. Available study windows
+            4. Potential challenges or conflicts
+            5. Opportunities for productivity
+            """,
+            agent=self.context_analyst,
+            expected_output="A detailed context analysis report"
+        )
+        
+        # Task 2: Prioritize Tasks
+        priority_task = Task(
+            description="""
+            Based on the context analysis, create a prioritized action plan:
+            
+            Consider:
+            - Assignment deadlines and weights
+            - Exam preparation needs
+            - Current grades and goals
+            - Time available today
+            - Energy levels throughout the day
+            
+            Provide:
+            1. Top 3 priorities for today with reasoning
+            2. Suggested time blocks for each priority
+            3. Quick wins that can build momentum
+            4. What can be deferred if needed
+            """,
+            agent=self.priority_strategist,
+            context=[context_task],
+            expected_output="A strategic priority plan with clear reasoning"
+        )
+        
+        # Task 3: Add Wellness Perspective
+        wellness_task = Task(
+            description="""
+            Review the priority plan and add wellness considerations:
+            
+            Analyze:
+            - Is the plan realistic and sustainable?
+            - Are there enough breaks scheduled?
+            - When should the student eat meals?
+            - Any social opportunities to maintain?
+            - Signs of overwork to watch for?
+            
+            Suggest:
+            1. Optimal break times and activities
+            2. Energy management strategies
+            3. Stress reduction techniques if needed
+            4. Social connection opportunities
+            5. End-of-day wind-down routine
+            """,
+            agent=self.wellness_advisor,
+            context=[context_task, priority_task],
+            expected_output="Wellness recommendations that complement the priority plan"
+        )
+        
+        # Task 4: Compose Final Message
+        personality = user_context.get('ai_personality', {})
+        message_task = Task(
+            description=f"""
+            Create a morning briefing notification for {user_context['user_name']}.
+            
+            Personality Preferences:
+            - Tone: {personality.get('communicationTone', 'friendly')}
+            - Style: {personality.get('personalityStyle', 'balanced')}
+            - Helpfulness: {personality.get('helpfulnessLevel', 'standard')}
+            
+            Requirements:
+            1. Start with an appropriate greeting for {datetime.now().strftime('%I %p')}
+            2. Highlight the most important 2-3 items for today
+            3. Include one motivational insight
+            4. Suggest a specific first action
+            5. Keep it concise (under 100 words for the main message)
+            
+            Format as:
+            {{
+                "title": "Brief, engaging title",
+                "body": "Main message",
+                "quick_actions": ["Action 1", "Action 2", "Action 3"],
+                "detail_card": "Expandable detail content"
+            }}
+            """,
+            agent=self.message_composer,
+            context=[context_task, priority_task, wellness_task],
+            expected_output="A perfectly crafted notification in JSON format"
+        )
+        
+        # Create and run the crew
+        crew = Crew(
+            agents=[
+                self.context_analyst,
+                self.priority_strategist,
+                self.wellness_advisor,
+                self.message_composer
+            ],
+            tasks=[context_task, priority_task, wellness_task, message_task],
+            verbose=True
+        )
+        
+        result = crew.kickoff()
+        
+        # Parse the composer's output
+        try:
+            notification_content = json.loads(result)
+        except:
+            # Fallback if JSON parsing fails
+            notification_content = {
+                "title": "Your Day Ahead",
+                "body": str(result),
+                "quick_actions": ["View Schedule", "Start First Task"],
+                "detail_card": "Check the app for more details"
+            }
+        
+        return {
+            "notification": notification_content,
+            "crew_execution_id": crew.id,
+            "timestamp": datetime.now().isoformat(),
+            "context_snapshot": user_context
+        }
+```
+
+### Temporal Workflow Integration
+
+```typescript
+// engine/src/workflows/morningNotificationCrew.workflow.ts
+
+import { proxyActivities, sleep } from '@temporalio/workflow';
+import type { MorningNotificationActivities } from '../activities/morningNotification.activities';
+
+const activities = proxyActivities<MorningNotificationActivities>({
+  startToCloseTimeout: '5 minutes', // Crew can take time
+  retry: {
+    initialInterval: '30 seconds',
+    backoffCoefficient: 2,
+    maximumAttempts: 2 // Don't retry too much for time-sensitive notifications
+  }
+});
+
+export async function morningNotificationWorkflow(params: {
+  scheduledTime: 'morning' | 'noon' | 'evening'; // 6 AM, 12 PM, 6 PM
+  userIds?: string[]; // Specific users or all active users
+}): Promise<void> {
+  const { scheduledTime, userIds } = params;
+  
+  // Get list of users to process
+  const targetUsers = userIds || await activities.getActiveUsersForNotifications();
+  
+  // Process in batches to avoid overwhelming the system
+  const BATCH_SIZE = 10;
+  const batches = [];
+  
+  for (let i = 0; i < targetUsers.length; i += BATCH_SIZE) {
+    batches.push(targetUsers.slice(i, i + BATCH_SIZE));
+  }
+  
+  // Process each batch
+  for (const batch of batches) {
+    await Promise.all(
+      batch.map(async (userId) => {
+        try {
+          // Check if user wants notifications at this time
+          const preferences = await activities.getUserNotificationPreferences(userId);
+          if (!preferences.enabledTimes?.includes(scheduledTime)) {
+            return;
+          }
+          
+          // Gather user context
+          const context = await activities.gatherUserContext(userId, scheduledTime);
+          
+          // Run the crew
+          const crewResult = await activities.runMorningNotificationCrew(userId, context);
+          
+          // Send the notification
+          await activities.sendNotification({
+            userId,
+            content: crewResult.notification,
+            channel: preferences.preferredChannel || 'push',
+            metadata: {
+              crewExecutionId: crewResult.crew_execution_id,
+              scheduledTime,
+              generatedAt: crewResult.timestamp
+            }
+          });
+          
+          // Track success
+          await activities.trackNotificationSent(userId, 'morning_briefing', scheduledTime);
+          
+        } catch (error) {
+          // Log error but don't fail the whole batch
+          await activities.logNotificationError(userId, error);
+        }
+      })
+    );
+    
+    // Small delay between batches
+    await sleep(2000);
+  }
+}
+
+// Cron workflow that triggers 3x daily
+export async function morningNotificationCronWorkflow(): Promise<void> {
+  const now = new Date();
+  const hour = now.getHours();
+  
+  let scheduledTime: 'morning' | 'noon' | 'evening';
+  
+  if (hour === 6) {
+    scheduledTime = 'morning';
+  } else if (hour === 12) {
+    scheduledTime = 'noon';
+  } else if (hour === 18) {
+    scheduledTime = 'evening';
+  } else {
+    return; // Not a scheduled time
+  }
+  
+  await activities.startMorningNotificationWorkflow({
+    scheduledTime,
+    userIds: undefined // Process all users
+  });
+}
+```
+
+## Data Requirements
+
+### User Context Data Structure
+```typescript
+interface MorningNotificationContext {
+  user_name: string;
+  user_id: string;
+  ai_personality: {
+    communicationTone: string;
+    personalityStyle: string;
+    helpfulnessLevel: string;
+  };
+  todays_schedule: Array<{
+    time: string;
+    title: string;
+    type: 'class' | 'study' | 'exam' | 'meeting' | 'other';
+    location?: string;
+    duration_minutes: number;
+  }>;
+  upcoming_deadlines: Array<{
+    title: string;
+    course: string;
+    due_date: string;
+    hours_until_due: number;
+    weight: number;
+    completion_estimate_hours: number;
+    current_progress: number;
+  }>;
+  study_patterns: {
+    last_study_session: string;
+    study_streak: number;
+    avg_study_time: number;
+    preferred_study_times: string[];
+    productivity_score: number;
+  };
+  academic_status: {
+    current_gpa: number;
+    course_grades: Record<string, number>;
+    at_risk_courses: string[];
+  };
+  environmental: {
+    weather: {
+      condition: string;
+      temperature: number;
+      feels_like: number;
+    };
+    campus_events: Array<{
+      title: string;
+      time: string;
+      location: string;
+      relevance: 'high' | 'medium' | 'low';
+    }>;
+  };
+}
+```
+
+## Notification Templates
+
+### Morning (6 AM)
+- Focus: Day preparation, energy building
+- Tone: Energizing but not overwhelming
+- Elements: Schedule overview, top priorities, breakfast reminder
+
+### Noon (12 PM)
+- Focus: Progress check, afternoon planning
+- Tone: Encouraging, refocusing
+- Elements: Morning wins, afternoon priorities, energy management
+
+### Evening (6 PM)
+- Focus: Evening productivity, next day prep
+- Tone: Calming but motivating
+- Elements: Evening tasks, tomorrow's prep, wind-down reminder
+
+## Success Metrics
+
+1. **Engagement Rate**: Click-through on notifications
+2. **Action Completion**: How many suggested actions were completed
+3. **Timing Accuracy**: Were notifications sent at optimal times
+4. **Personalization Score**: User feedback on relevance
+5. **Productivity Impact**: Correlation with task completion
+
+## Implementation Steps
+
+1. **Week 1**: 
+   - Set up crew infrastructure
+   - Create agent prompts and roles
+   - Implement basic context gathering
+
+2. **Week 2**:
+   - Build Temporal workflow
+   - Create notification templates
+   - Implement AI personality integration
+
+3. **Week 3**:
+   - Connect to real user data
+   - Test with small user group
+   - Refine agent behaviors
+
+4. **Week 4**:
+   - Scale to larger user base
+   - Add analytics tracking
+   - Optimize performance
+
+## Testing Strategy
+
+1. **Unit Tests**: Individual agent responses
+2. **Integration Tests**: Full crew execution
+3. **User Testing**: Small group beta
+4. **A/B Testing**: Different message styles
+5. **Load Testing**: Batch processing performance

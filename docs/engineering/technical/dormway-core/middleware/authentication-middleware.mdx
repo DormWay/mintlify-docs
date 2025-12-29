@@ -1,0 +1,185 @@
+---
+title: "Authentication Middleware"
+description: "Creates authentication middleware supporting multiple auth methods in priority order. Extracts user information and attaches it to the request object."
+---
+
+# Authentication Middleware
+
+## Overview
+
+Creates authentication middleware supporting multiple auth methods in priority order. Extracts user information and attaches it to the request object.
+
+## Factory Signature
+
+```typescript
+createAuthMiddleware(options: {
+  logger: Logger;
+  clerkClient?: ClerkClient;
+  deviceKeyVerifier?: (key: string) => Promise<DeviceKeyResult>;
+  temporalApiKey?: string;
+  internalApiKey?: string;
+  supabaseJwtSecret?: string;
+}): RequestHandler
+```
+
+## Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `logger` | `Logger` | Yes | Logger instance |
+| `clerkClient` | `ClerkClient` | No | Clerk SDK client for JWT verification |
+| `deviceKeyVerifier` | `function` | No | Custom device key verification function |
+| `temporalApiKey` | `string` | No | API key for Temporal worker auth |
+| `internalApiKey` | `string` | No | API key for internal service auth |
+| `supabaseJwtSecret` | `string` | No | Secret for Supabase JWT verification |
+
+## Usage
+
+```typescript
+import { createAuthMiddleware } from '@dormway/core/middleware';
+import { clerkClient } from '@clerk/clerk-sdk-node';
+import { logger } from './utils/logger';
+import { verifyDeviceKey } from './utils/device-auth';
+
+const authMiddleware = createAuthMiddleware({
+  logger,
+  clerkClient,
+  deviceKeyVerifier: verifyDeviceKey,
+  temporalApiKey: process.env.TEMPORAL_API_KEY,
+  internalApiKey: process.env.API_KEY,
+  supabaseJwtSecret: process.env.SUPABASE_JWT_SECRET
+});
+
+app.use(authMiddleware);
+
+// After auth, req.user is populated
+app.get('/profile', (req, res) => {
+  console.log(req.user);
+  // {
+  //   id: 'user_123',
+  //   role: 'authenticated',
+  //   source: 'clerk',
+  //   email: 'user@example.com',
+  //   name: 'John Doe',
+  //   clerk_id: 'user_123'
+  // }
+});
+```
+
+## Authentication Order
+
+Methods are checked in this order (first match wins):
+
+1. **Internal Service API Key**
+   - Header: `Authorization: Bearer <INTERNAL_API_KEY>`
+   - Use case: Service-to-service calls
+
+2. **Temporal Worker Auth**
+   - Header: `x-temporal-worker-auth: <TEMPORAL_API_KEY>`
+   - Use case: Temporal workflow callbacks
+
+3. **Device API Key**
+   - Header: `x-device-key: <device_key>`
+   - Use case: Mobile app authentication
+
+4. **Clerk JWT Token**
+   - Header: `Authorization: Bearer <clerk_jwt>`
+   - Use case: Web application authentication
+
+5. **API Gateway Headers**
+   - Headers: `x-user-id`, `x-user-role`, etc.
+   - Use case: Requests via Zuplo gateway (pre-authenticated)
+
+6. **Direct JWT Token**
+   - Header: `Authorization: Bearer <jwt>`
+   - Use case: Fallback for custom JWT
+
+## User Object
+
+After successful authentication, `req.user` contains:
+
+```typescript
+interface AuthUser {
+  id: string;              // User identifier
+  role: string;            // 'admin' | 'authenticated' | 'demo' | 'system'
+  source: string;          // Auth method used
+  deviceId?: string;       // For device key auth
+  email?: string;          // User email (if available)
+  name?: string;           // User name (if available)
+  clerk_id?: string;       // Clerk user ID (if Clerk auth)
+}
+```
+
+## Device Key Verifier
+
+Custom function to verify device keys:
+
+```typescript
+interface DeviceKeyResult {
+  valid: boolean;
+  userId?: string;
+  deviceId?: string;
+  error?: string;
+}
+
+async function verifyDeviceKey(key: string): Promise<DeviceKeyResult> {
+  // Lookup device in database
+  const device = await db.devices.findByKey(key);
+
+  if (!device) {
+    return { valid: false, error: 'Invalid device key' };
+  }
+
+  return {
+    valid: true,
+    userId: device.userId,
+    deviceId: device.id
+  };
+}
+```
+
+## Clerk Client Interface
+
+```typescript
+interface ClerkClient {
+  verifyToken(token: string): Promise<{
+    sub: string;              // User ID
+    backend_user_id?: string; // Optional backend user ID
+    role?: string;            // User role
+    [key: string]: unknown;   // Additional claims
+  }>;
+}
+```
+
+## Error Handling
+
+| Scenario | Status | Response |
+|----------|--------|----------|
+| No auth header | 401 | `{ error: "Missing authorization" }` |
+| Invalid token | 401 | `{ error: "Invalid token" }` |
+| Expired token | 401 | `{ error: "Token expired" }` |
+| Invalid device key | 401 | `{ error: "Invalid device key" }` |
+
+## Skipping Authentication
+
+For public endpoints, apply auth middleware selectively:
+
+```typescript
+// Public endpoints - no auth
+app.get('/health', (req, res) => res.json({ status: 'ok' }));
+app.get('/public/*', publicHandler);
+
+// Protected endpoints - auth required
+app.use('/api', authMiddleware);
+app.use('/dashboard', authMiddleware);
+```
+
+## Related
+
+- [Middleware Factory Pattern](/docs/engineering/technical/dormway-core/middleware/middleware-factory-pattern) - Overview of factory pattern
+- [Role Check Middleware](/docs/engineering/technical/dormway-core/middleware/role-check-middleware) - Role-based access control
+- [Gateway Auth Middleware](/docs/engineering/technical/dormway-core/middleware/gateway-auth-middleware) - API gateway validation
+
+---
+
+**Last Updated**: 2025-11-26

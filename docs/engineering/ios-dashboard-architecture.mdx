@@ -1,0 +1,45 @@
+---
+title: "iOS Dashboard Architecture (BFF v1)"
+---
+
+# iOS Dashboard Architecture (BFF v1)
+
+## Current State
+- Store & DI: `DashboardStore` is resolved through the DI container and owns tab snapshots, optimistic ops, ETags, and realtime state (`ios-clean/Core/Services/DashboardStore.swift:154`). It wires the protocol adapters from `DashboardStoreAdapters` (`DashboardServiceAdapter`, `DashboardCacheAdapter`, `RealtimeClientAdapter`, `SimpleLayoutMerger`) when constructed.
+- Fetch Path: `DashboardServiceAdapter` wraps `DWServices.DashboardService.fetchDashboardV1` to return a `DashboardSnapshot` + HTTP ETag while updating feature flags (`ios-clean/Core/Services/DashboardStoreAdapters.swift:13`). 304s are not yet exposed, so every miss triggers a full fetch with `forceRefresh` fallback.
+- Persistence: `DashboardCacheAdapter` reads and writes the unified snapshot through `DashboardPersistenceService`, with legacy layout fallback so home/campus/me layouts survive migrations (`ios-clean/Core/Services/DashboardStoreAdapters.swift:322`).
+- Realtime: `RealtimeClientAdapter` subscribes to Ably channels in the form `user:{userId}:dashboard:{tab}` and surfaces widget-ops into the store; `DashboardRealtimeManager` stitches Ably deltas back into the store via `DashboardDeltaHandler` (`ios-clean/Core/Services/DashboardStoreAdapters.swift:463`, `ios-clean/Core/Services/DashboardRealtimeManager.swift:12`, `ios-clean/Core/Services/DashboardDeltaHandler.swift:8`).
+- Rendering & Editing: `DashboardCoordinator` hydrates per-tab `GridEngine` instances (4×20 grid) and gates edit mode; `FlexibleGridView` with `GridWidgetContainer` renders the placements and enforces chrome/layout rules (`ios-clean/Packages/DWDashboard/Sources/DWDashboard/Coordinators/DashboardCoordinator.swift:31`, `ios-clean/Packages/DWDashboard/Sources/DWDashboard/Grid/GridEngine.swift:27`, `ios-clean/Packages/DWDashboard/Sources/DWDashboard/Views/FlexibleGridView.swift:59`, `ios-clean/Packages/DWWidgets/Sources/DWWidgets/UI/GridWidgetContainer.swift:26`).
+- Mapping: `BackendDataMappers` and `StrictWidgetDecoder` translate `WidgetEnvelope` payloads into strongly typed widget models before the coordinator hands them to views (`ios-clean/Packages/DWWidgets/Sources/DWWidgets/Core/DataMappers/BackendDataMappers.swift:9`, `ios-clean/Packages/DWWidgets/Sources/DWWidgets/Core/DataMappers/StrictWidgetDecoder.swift:8`).
+- Auth & Signing: `AuthService.initialize` injects an app-level HMAC signer into `DWNetworking.APIService`, so every dashboard fetch comes with `X-App-*` headers while Auth0 handles user identity (`ios-clean/Core/Services/AuthService.swift:102`).
+
+## Guardrails (Implemented)
+- ETag & Seq Validation: `DashboardStore.applyDelta` bails out and triggers a forced refresh when `baseEtag` or `seq` drift from the current snapshot (`ios-clean/Core/Services/DashboardStore.swift:469`).
+- Edit Gating: `DashboardStore.isEditingAvailable` only enables edits for authenticated users on non-home tabs once the tab is `.ready`; `DashboardCoordinator.setEditMode` enforces the same restriction UI-side (`ios-clean/Core/Services/DashboardStore.swift:573`, `ios-clean/Packages/DWDashboard/Sources/DWDashboard/Coordinators/DashboardCoordinator.swift:1252`).
+- Tab Handoff: `changeTab` unsubscribes the previous Ably channel before subscribing the new tab and lazily refreshes when the cache is stale (`ios-clean/Core/Services/DashboardStore.swift:310`).
+- Layout Safety: `GridEngine.load` ignores accidental empty loads, clamps oversized widgets to phone limits, and performs DEBUG layout assertions before applying placements (`ios-clean/Packages/DWDashboard/Sources/DWDashboard/Grid/GridEngine.swift:80`).
+- Persistence: `DashboardCacheAdapter.clear` removes cached layouts per-tab without wiping in-memory state, preventing layout loss on logout (`ios-clean/Core/Services/DashboardStoreAdapters.swift:376`).
+
+## References
+- Store & adapters: `ios-clean/Core/Services/DashboardStore.swift:154`, `ios-clean/Core/Services/DashboardStoreAdapters.swift:13`
+- Realtime orchestration: `ios-clean/Core/Services/DashboardRealtimeManager.swift:12`, `ios-clean/Core/Services/DashboardDeltaHandler.swift:8`
+- Network service: `ios-clean/Packages/DWServices/Sources/DWServices/DashboardService.swift:400`
+- Coordinator & grid: `ios-clean/Packages/DWDashboard/Sources/DWDashboard/Coordinators/DashboardCoordinator.swift:31`, `ios-clean/Packages/DWDashboard/Sources/DWDashboard/Grid/GridEngine.swift:27`, `ios-clean/Packages/DWDashboard/Sources/DWDashboard/Views/FlexibleGridView.swift:59`
+- Widget mapping: `ios-clean/Packages/DWWidgets/Sources/DWWidgets/Core/DataMappers/BackendDataMappers.swift:9`, `ios-clean/Packages/DWWidgets/Sources/DWWidgets/Core/DataMappers/StrictWidgetDecoder.swift:8`
+- Signer: `ios-clean/Core/Security/AppHMACSigner.swift:7`
+
+## Near-term Improvements
+- Expose HTTP metadata from `DashboardService.fetchDashboardV1` so `DashboardServiceAdapter` can honour real 304 cache hits.
+- Implement a backend PATCH endpoint and replace the no-op `pushOps` path in `DashboardServiceAdapter` (`ios-clean/Core/Services/DashboardStoreAdapters.swift:142`).
+- Expand telemetry around delta apply/resync to corroborate Ably health (`ios-clean/Core/Services/DashboardStore.swift:388`).
+- Align Realtime formats so `RealtimeClientAdapter` can emit the structured delta payload instead of widget-op fallbacks when the server is ready.
+- Finish rollout of mandatory app-signing headers once backend validation is turned on for write endpoints.
+
+## Realtime Channels & Capability
+- Widget ops: `user:{userId}:dashboard:{tab}` (home/campus/me) via `RealtimeClientAdapter`.
+- Delta stream: `user:{userId}:dashboard` consumed by `DashboardRealtimeManager` when the delta pipeline is enabled.
+- Telemetry publishes remain limited to `telemetry`/`dev-telemetry` via backend services; mobile stays subscribe-only.
+
+## Reference (Signers)
+- iOS signer: `ios-clean/Core/Security/AppHMACSigner.swift:7`
+- Injection: `ios-clean/Core/Services/AuthService.swift:102` wires the signer into `DWNetworking.APIService` via a request decorator during `initialize()`.

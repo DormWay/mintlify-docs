@@ -1,0 +1,718 @@
+---
+title: "Dashboard BFF Widget System   Complete Guide"
+description: "This guide explains **how the home page gets populated with real data** from the backend using the **Widget Envelope Strategy** and `service_data` table. Thi..."
+---
+
+# Dashboard BFF Widget System - Complete Data Integration Guide
+
+## Overview
+
+This guide explains **how the home page gets populated with real data** from the backend using the **Widget Envelope Strategy** and `service_data` table. This is your definitive guide to understanding the full data flow from database → API → Frontend.
+
+---
+
+## 🎯 The Widget Envelope Strategy (Core Concept)
+
+### What Is A Widget Envelope?
+
+A **Widget Envelope** is a standardized container that wraps different types of dashboard data (weather, schedule, assignments, etc.) in a consistent structure:
+
+```typescript
+interface WidgetEnvelope {
+  id: string;                    // Stable, deterministic ID (e.g., "widget:weather")
+  type: string;                  // Widget type (e.g., "weather", "schedule", "academic")
+  title?: string;                // Display title
+  priority?: number;             // Rendering priority
+  content: {
+    displayType?: string;        // How to render (e.g., "timeline", "urgent_deadlines")
+    data: any;                   // The actual widget data
+  };
+  grid?: {                       // Optional grid layout hints
+    w?: number; h?: number;
+    minW?: number; minH?: number;
+  };
+}
+```
+
+### Why Widget Envelopes?
+
+1. **Consistent API Contract** - Frontend always expects `widgets[]` array
+2. **Type Safety** - Each widget type has known data schema
+3. **Easy Extension** - Add new widget types without breaking existing code
+4. **Real-time Updates** - Ably deltas use widget IDs for surgical updates
+5. **Caching** - ETag based on widget array for efficient 304 responses
+
+---
+
+## 📊 Data Flow Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│ 1. DATA SOURCES (Multiple Origins)                                     │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌───────────┐ │
+│  │ Temporal     │  │ External     │  │ User Input   │  │ AI Crews  │ │
+│  │ Workflows    │  │ APIs         │  │ (Manual)     │  │ (BrainGa  │ │
+│  │              │  │              │  │              │  │ ins)      │ │
+│  └───────┬──────┘  └───────┬──────┘  └───────┬──────┘  └─────┬─────┘ │
+│          │                 │                 │                │       │
+│          └─────────────────┴─────────────────┴────────────────┘       │
+│                                    │                                   │
+└────────────────────────────────────┼───────────────────────────────────┘
+                                     │
+                                     ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│ 2. STORAGE (service_data table - Partitioned by Month)                 │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  Table: service_data (partitioned by fetched_at)                       │
+│  ┌──────────────┬──────────────┬──────────────┬────────────────────┐   │
+│  │ user_id      │ method       │ data (JSONB) │ fetched_at         │   │
+│  │ (UUID)       │ (TEXT)       │              │ (TIMESTAMP)        │   │
+│  ├──────────────┼──────────────┼──────────────┼────────────────────┤   │
+│  │ user-123     │ weather      │ {...}        │ 2025-10-09 04:00   │   │
+│  │ user-123     │ schedule     │ {...}        │ 2025-10-09 04:00   │   │
+│  │ user-123     │ dayplan      │ {blocks:[]}  │ 2025-10-09 03:30   │   │
+│  │ user-123     │ assignments  │ {...}        │ 2025-10-09 03:00   │   │
+│  └──────────────┴──────────────┴──────────────┴────────────────────┘   │
+│                                                                         │
+│  Common `method` values:                                                │
+│  - weather                  - Weather data from external API           │
+│  - schedule                 - Calendar events                          │
+│  - dayplan                  - AI-generated daily plan                  │
+│  - assignments              - Canvas assignments                       │
+│  - parking                  - Campus parking availability              │
+│  - dining                   - Dining hall hours/menus                  │
+│  - braingains_*             - BrainGains processed syllabus insights   │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+                                     │
+                                     ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│ 3. BFF TRANSFORMATION (Dashboard Composite Transformer)                │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  File: services/api-router/src/services/                               │
+│        dashboard-composite-transformer.ts                               │
+│                                                                         │
+│  Function: transformToDashboardCompositeV1()                            │
+│                                                                         │
+│  Process:                                                               │
+│  1. Fetch all service_data for user                                    │
+│  2. Group by method (weather, schedule, etc.)                          │
+│  3. Transform each into WidgetEnvelope                                 │
+│  4. Apply runtime guards (validate data shape)                         │
+│  5. Compute canonical ETag (SHA-256 of widget array)                   │
+│  6. Cache in Redis with context-aware TTL                              │
+│                                                                         │
+│  Example Transformation:                                                │
+│  ┌────────────────────────────────────────────────────────────────┐    │
+│  │ service_data.method = "weather"                                │    │
+│  │ service_data.data = {                                          │    │
+│  │   "temp": 72, "condition": "sunny", "humidity": 45           │    │
+│  │ }                                                              │    │
+│  └────────────────────────────────────────────────────────────────┘    │
+│                          │                                              │
+│                          ▼ Transform                                    │
+│  ┌────────────────────────────────────────────────────────────────┐    │
+│  │ WidgetEnvelope {                                               │    │
+│  │   id: "widget:weather",                                        │    │
+│  │   type: "weather",                                             │    │
+│  │   content: {                                                   │    │
+│  │     displayType: "current",                                    │    │
+│  │     data: {                                                    │    │
+│  │       status: "available",                                     │    │
+│  │       current: {                                               │    │
+│  │         temperature: 72,                                       │    │
+│  │         condition: "sunny",                                    │    │
+│  │         humidity: 45                                           │    │
+│  │       }                                                        │    │
+│  │     }                                                          │    │
+│  │   }                                                            │    │
+│  │ }                                                              │    │
+│  └────────────────────────────────────────────────────────────────┘    │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+                                     │
+                                     ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│ 4. API RESPONSE (BFF v1 Endpoint)                                      │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  Endpoint: GET /dashboard/v1/composite?tab=home&context=campus         │
+│                                                                         │
+│  Response Structure:                                                    │
+│  {                                                                      │
+│    "version": "1.0",                                                    │
+│    "server_time": "2025-10-09T08:30:00.000Z",                          │
+│    "request": {                                                         │
+│      "tab": "home",                                                     │
+│      "context": "campus",                                               │
+│      "generatedAt": "2025-10-09T08:30:00.000Z"                          │
+│    },                                                                   │
+│    "widgets": [                                                         │
+│      { id: "widget:weather", type: "weather", ... },                   │
+│      { id: "widget:schedule", type: "schedule", ... },                 │
+│      { id: "widget:academic", type: "academic", ... },                 │
+│      { id: "widget:dayplan", type: "dayplan", ... }                    │
+│    ],                                                                   │
+│    "status": {                                                          │
+│      "calendar_connected": true,                                        │
+│      "syllabus_count": 5,                                               │
+│      "last_ingest_at": "2025-10-08T10:00:00.000Z"                       │
+│    },                                                                   │
+│    "metadata": {                                                        │
+│      "requestId": "req-123",                                            │
+│      "processingTimeMs": 45,                                            │
+│      "cache": { "hit": true, "ttl": 300 }                               │
+│    }                                                                    │
+│  }                                                                      │
+│                                                                         │
+│  Headers:                                                               │
+│  - ETag: W/"dcv1-abc123..."                                             │
+│  - Cache-Control: private, no-cache                                     │
+│  - Vary: Authorization                                                  │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+                                     │
+                                     ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│ 5. FRONTEND CONSUMPTION (React Query + Hooks)                          │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  Hook: useDashboardComposite()                                          │
+│  File: src/hooks/home/useDashboardComposite.ts                          │
+│                                                                         │
+│  Features:                                                              │
+│  - ETag caching (98% bandwidth savings on cache hits)                  │
+│  - 304 Not Modified support                                             │
+│  - Automatic retry on failure                                           │
+│  - Widget envelope transformation                                       │
+│                                                                         │
+│  Usage in Components:                                                   │
+│  ```typescript                                                          │
+│  const { data, isLoading } = useDashboardComposite({                   │
+│    tab: 'home',                                                         │
+│    context: 'campus'                                                    │
+│  });                                                                    │
+│                                                                         │
+│  // Access transformed data                                             │
+│  const events = data?.timeline.events;      // TimeBlock[]             │
+│  const tasks = data?.unscheduledTasks;      // UnscheduledTask[]       │
+│  const assignments = data?.dueSoon;         // DueItem[]               │
+│  const notes = data?.recentNotes;           // RecentNote[]            │
+│  const rawWidgets = data?.widgets;          // WidgetEnvelope[]        │
+│  ```                                                                    │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 🔧 How Each Component Gets Data
+
+### 1. Timeline / DayStrip
+
+**Data Source:** `widgets[]` with `type: "schedule"`
+
+**Backend Transformation:**
+```typescript
+// service_data.method = "schedule"
+// service_data.data = { events: [...] }
+
+// Transformed to:
+{
+  id: "widget:schedule",
+  type: "schedule",
+  content: {
+    displayType: "timeline",
+    data: {
+      items: [
+        {
+          id: "event-123",
+          title: "EECS 281 Lecture",
+          startTime: "2025-10-09T10:00:00Z",
+          endTime: "2025-10-09T11:30:00Z",
+          location: "2505 GGBL",
+          courseCode: "EECS 281"
+        }
+      ]
+    }
+  }
+}
+```
+
+**Frontend Extraction** (from `useDashboardComposite.ts:272-304`):
+```typescript
+const timelineWidget = widgets.find(w =>
+  w.type === 'schedule' && w.content?.displayType === 'timeline'
+);
+const timelineItems = timelineWidget?.content?.data?.items || [];
+
+const events: TimeBlock[] = timelineItems.map(item => ({
+  id: item.id,
+  title: item.title,
+  start: item.startTime,
+  end: item.endTime,
+  type: 'class',
+  courseCode: item.courseCode,
+  location: item.location
+}));
+```
+
+### 2. Task Bank
+
+**Data Source:** `widgets[]` with `type: "dayplan"` + persistent `tasks` table
+
+**Backend Transformation:**
+```typescript
+// service_data.method = "dayplan"
+// service_data.data = { blocks: [...] }
+
+// Transformed to:
+{
+  id: "widget:dayplan",
+  type: "dayplan",
+  content: {
+    data: {
+      blocks: [
+        {
+          id: "task-456",
+          title: "Study for midterm",
+          minutes: 90,
+          priority: "high",
+          courseCode: "EECS 281"
+        }
+      ]
+    }
+  }
+}
+```
+
+**Frontend Extraction** (from `useDashboardComposite.ts:349-393`):
+```typescript
+const dayplanWidget = widgets.find(w => w.type === 'dayplan');
+const blocks = dayplanWidget?.content?.data?.blocks || [];
+
+const unscheduledTasks: UnscheduledTask[] = blocks
+  .filter(block => !block.startTime) // Only unscheduled
+  .map(block => ({
+    id: block.id,
+    title: block.title,
+    estimatedDuration: block.minutes || 30,
+    priority: block.priority || 'medium',
+    courseCode: block.courseCode
+  }));
+```
+
+### 3. What's Due
+
+**Data Source:** `widgets[]` with `type: "academic"`
+
+**Backend Transformation:**
+```typescript
+// service_data.method = "assignments"
+// service_data.data = { assignments: [...] }
+
+// Transformed to:
+{
+  id: "widget:academic",
+  type: "academic",
+  content: {
+    displayType: "urgent_deadlines",
+    data: {
+      urgentAssignments: [
+        {
+          id: "assign-789",
+          title: "Problem Set 3",
+          dueAt: "2025-10-11T23:59:00Z",
+          courseCode: "MATH 216",
+          weight: 10,
+          progress: 0
+        }
+      ]
+    }
+  }
+}
+```
+
+**Frontend Extraction** (from `useDashboardComposite.ts:307-346`):
+```typescript
+const academicWidgets = widgets.filter(w => w.type === 'academic');
+
+const dueSoon: DueItem[] = [];
+for (const widget of academicWidgets) {
+  if (widget.content?.displayType === 'urgent_deadlines') {
+    const assignments = widget.content.data.urgentAssignments || [];
+    for (const assignment of assignments) {
+      dueSoon.push({
+        id: assignment.id,
+        title: assignment.title,
+        dueDate: assignment.dueAt,
+        courseCode: assignment.courseCode,
+        priority: determinePriority(assignment.dueAt),
+        status: 'pending',
+        type: 'assignment'
+      });
+    }
+  }
+}
+```
+
+### 4. Notes Widget
+
+**Data Source:** `widgets[]` with `type: "notes"` (future)
+
+**Current Status:** ⚠️ Not yet implemented in transformer
+
+**Proposed Implementation:**
+```typescript
+// service_data.method = "notes"
+// service_data.data = { recentNotes: [...] }
+
+// Should transform to:
+{
+  id: "widget:notes",
+  type: "notes",
+  content: {
+    data: {
+      notes: [
+        {
+          id: "note-101",
+          title: "EECS 281 Lecture Notes",
+          courseCode: "EECS 281",
+          lastModified: "2025-10-09T10:00:00Z",
+          preview: "Binary search trees..."
+        }
+      ]
+    }
+  }
+}
+```
+
+### 5. Course Information
+
+**Data Source:** Context hierarchy + enrollment data
+
+**Current Status:** ⚠️ Not in widget envelope yet
+
+**Proposed Implementation:**
+```typescript
+// FROM contexts table (type='course') joined with enrollments
+// Transformed to:
+{
+  id: "widget:courses",
+  type: "courses",
+  content: {
+    data: {
+      enrolled: [
+        {
+          id: "course-001",
+          code: "EECS 281",
+          name: "Data Structures and Algorithms",
+          credits: 4,
+          assignments: 12,
+          color: "blue"
+        }
+      ]
+    }
+  }
+}
+```
+
+### 6. Calendar Widget
+
+**Data Source:** Same as Timeline (schedule events)
+
+**Current Status:** ✅ Available via `widgets[]` with `type: "schedule"`
+
+**Frontend Usage:**
+```typescript
+const scheduleWidget = widgets.find(w => w.type === 'schedule');
+const allEvents = scheduleWidget?.content?.data?.items || [];
+
+// Group by date for calendar view
+const eventsByDate = groupEventsByDate(allEvents);
+```
+
+---
+
+## 🚀 How to Populate Missing Data
+
+### Step 1: Add Data to `service_data` Table
+
+**Option A: Via Temporal Workflow** (Recommended)
+```typescript
+// In a Temporal activity
+import { auroraClient } from '../services/auroraDb';
+
+await auroraClient.query(`
+  INSERT INTO service_data (user_id, method, fetched_at, data, context_id)
+  VALUES ($1, $2, NOW(), $3, $4)
+  ON CONFLICT (user_id, method, fetched_at)
+  DO UPDATE SET data = EXCLUDED.data
+`, [userId, 'courses', coursesData, contextId]);
+```
+
+**Option B: Via API Endpoint**
+```typescript
+// In api-router
+router.post('/mobile/sync/courses', async (req, res) => {
+  const { courses } = req.body;
+  const userId = req.user.id;
+
+  await auroraClient.query(`
+    INSERT INTO service_data (user_id, method, data, fetched_at)
+    VALUES ($1, 'courses', $2, NOW())
+  `, [userId, JSON.stringify({ enrolled: courses })]);
+
+  // Invalidate dashboard cache
+  await redisClient.del(`dashboard:v1:${userId}:home:campus`);
+
+  res.json({ success: true });
+});
+```
+
+### Step 2: Add Transformer Logic
+
+**File:** `services/api-router/src/services/dashboard-composite-transformer.ts`
+
+**Add to `createMvpV1Widgets()` function:**
+```typescript
+function createMvpV1Widgets(complete: any, context: string): WidgetEnvelope[] {
+  const widgets: WidgetEnvelope[] = [];
+
+  // ... existing widgets (weather, schedule, etc.)
+
+  // Add courses widget
+  if (complete.courses) {
+    widgets.push({
+      id: 'widget:courses',
+      type: 'courses',
+      content: {
+        data: {
+          enrolled: complete.courses.enrolled || []
+        }
+      }
+    });
+  }
+
+  return widgets;
+}
+```
+
+### Step 3: Update Frontend Hook
+
+**File:** `src/hooks/home/useDashboardComposite.ts`
+
+**Add extraction logic:**
+```typescript
+function transformCompositeResponse(apiData: any): DashboardCompositeResponse {
+  const widgets = apiData.widgets || [];
+
+  // ... existing extractions
+
+  // Extract courses
+  const coursesWidget = widgets.find((w: any) => w.type === 'courses');
+  const courses = coursesWidget?.content?.data?.enrolled || [];
+
+  return {
+    // ... existing fields
+    courses, // Add to response type
+  };
+}
+```
+
+### Step 4: Update TypeScript Types
+
+**Add to `DashboardCompositeResponse` interface:**
+```typescript
+export interface DashboardCompositeResponse {
+  // ... existing fields
+  courses: Course[];
+}
+
+export interface Course {
+  id: string;
+  code: string;
+  name: string;
+  credits: number;
+  assignments: number;
+  color?: string;
+}
+```
+
+### Step 5: Use in Component
+
+**In your React component:**
+```typescript
+import { useDashboardComposite } from '@/hooks/home/useDashboardComposite';
+
+export function CourseInformation() {
+  const { data, isLoading } = useDashboardComposite({
+    tab: 'home',
+    context: 'campus'
+  });
+
+  const courses = data?.courses || [];
+
+  if (isLoading) return <Skeleton />;
+
+  if (courses.length === 0) {
+    return <EmptyState />;
+  }
+
+  return (
+    <div className="grid grid-cols-2 gap-3">
+      {courses.map(course => (
+        <CourseCard key={course.id} course={course} />
+      ))}
+    </div>
+  );
+}
+```
+
+---
+
+## 📝 Available Widget Types (Current)
+
+| Widget Type | Data Source (`service_data.method`) | Status | Used By |
+|-------------|-------------------------------------|--------|---------|
+| `weather` | `weather` | ✅ Active | Header, Weather widget |
+| `schedule` | `schedule` | ✅ Active | Timeline, Calendar |
+| `academic` | `assignments` | ✅ Active | What's Due |
+| `dayplan` | `dayplan` | ✅ Active | Task Bank |
+| `context_status` | N/A (computed) | ✅ Active | Connection warnings |
+| `notes` | `notes` | ❌ Not implemented | Notes widget |
+| `courses` | `enrollments` + `contexts` | ❌ Not implemented | Course Information |
+| `announcements` | `announcements` | ⚠️ Partial | Admin announcements |
+| `dining` | `dining` | ❌ Not implemented | Dining widget |
+| `parking` | `parking` | ✅ Active (in BFF) | ⚠️ Not in frontend yet |
+
+---
+
+## 🔄 Real-time Updates (Ably Deltas)
+
+**How It Works:**
+
+1. **Server publishes delta** when `service_data` changes:
+```typescript
+// After inserting new assignment
+await ablyService.publishDashboardDelta(userId, {
+  type: 'dashboard.delta',
+  baseEtag: currentEtag,
+  seq: nextSeq,
+  ops: [
+    {
+      op: 'upsert',
+      id: 'widget:academic',
+      value: updatedAcademicWidget
+    }
+  ]
+});
+```
+
+2. **Frontend receives delta** and applies surgical update:
+```typescript
+// In Ably subscription handler
+ablyChannel.subscribe('dashboard.delta', (message) => {
+  const delta = message.data;
+
+  // Apply ops to cached widget array
+  for (const op of delta.ops) {
+    if (op.op === 'upsert') {
+      updateWidget(op.id, op.value);
+    } else if (op.op === 'remove') {
+      removeWidget(op.id);
+    }
+  }
+
+  // Recompute derived data
+  const updatedResponse = transformCompositeResponse(updatedData);
+  queryClient.setQueryData(['dashboard-composite', ...], updatedResponse);
+});
+```
+
+---
+
+## 🐛 Debugging Tips
+
+### Check if data exists in `service_data`:
+```sql
+SELECT method, data, fetched_at
+FROM service_data
+WHERE user_id = '06ea6226-c327-483b-9bc6-e554af6a22a1'
+ORDER BY fetched_at DESC
+LIMIT 20;
+```
+
+### Check BFF response structure:
+```bash
+curl -H "x-user-id: USER_ID" \
+  "http://localhost:3001/dashboard/v1/composite?tab=home&context=campus" \
+  | jq '.widgets | map({type, id})'
+```
+
+### Check frontend transformation:
+```typescript
+// Add in useDashboardComposite.ts
+console.log('[Dashboard] Raw API response:', data);
+console.log('[Dashboard] Transformed response:', transformedData);
+```
+
+### Check Redis cache:
+```bash
+redis-cli GET "dashboard:v1:USER_ID:home:campus"
+```
+
+---
+
+## 📚 Related Documentation
+
+- **Backend:** `services/api-router/docs/bff-dashboard-v1.md`
+- **Real-time:** `services/api-router/docs/realtime-dashboard-deltas.md`
+- **Schema:** `infrastructure/database/migrations/*_service_data.sql`
+- **Frontend Hook:** `services/dormway-lockedin/src/hooks/home/useDashboardComposite.ts`
+- **Transformer:** `services/api-router/src/services/dashboard-composite-transformer.ts`
+
+---
+
+## ✅ Next Steps to Populate Home Page
+
+1. **Audit Current Data:**
+   ```sql
+   SELECT DISTINCT method FROM service_data WHERE user_id = 'YOUR_USER_ID';
+   ```
+
+2. **Identify Missing Widgets:**
+   - Notes (recent notes preview)
+   - Courses (enrollment data)
+   - Announcements (campus-wide or course-specific)
+
+3. **Add Data Sources:**
+   - Create Temporal workflows to populate `service_data`
+   - OR add manual sync endpoints
+
+4. **Add Transformer Logic:**
+   - Update `createMvpV1Widgets()` to handle new types
+   - Add runtime guards (`ensureCourses()`, etc.)
+
+5. **Update Frontend:**
+   - Add extraction logic in `transformCompositeResponse()`
+   - Update TypeScript types
+   - Use in components
+
+6. **Test End-to-End:**
+   - Insert test data in `service_data`
+   - Verify BFF transformation
+   - Check frontend rendering
+
+---
+
+**Current Status:** The infrastructure is FULLY BUILT and WORKING. You just need to:
+1. Populate `service_data` with the data you want
+2. Add extraction logic in the transformer
+3. Use it in your React components
+
+The widget envelope system handles all the caching, real-time updates, and type safety automatically! 🎉

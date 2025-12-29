@@ -1,0 +1,261 @@
+---
+title: "HERO_LAYOUT_FIX_PLAN"
+description: "1. **Double Padding Conflict**"
+---
+
+# Hero Layout Fix - Comprehensive Plan
+
+## Problem Analysis
+
+### Current Issues Causing Glitchiness
+
+1. **Double Padding Conflict**
+   - Outer grid container: `p-4 sm:p-6 md:p-8` (16px/24px/32px)
+   - Inner content containers: `px-4 sm:px-6 md:px-8` (16px/24px/32px)
+   - Result: 32px/48px/64px total padding, causing content to be too narrow
+   - Impact: Layout miscalculations, ResizeObserver measuring wrong widths
+
+2. **ResizeObserver Performance Issues**
+   - No debouncing - fires on every resize event
+   - Observing 3 elements simultaneously (left, title, firstLine)
+   - `requestAnimationFrame` still allows rapid state changes
+   - Multiple timeouts (100ms, 200ms) causing race conditions
+   - Impact: Rapid state toggles, layout thrashing, visual glitches
+
+3. **Initial State Flash**
+   - Starts with `isHeroStacked = true` (stacked)
+   - Then measures and potentially switches to `false` (side-by-side)
+   - Causes visible layout shift on page load
+   - Impact: Poor UX, perceived glitchiness
+
+4. **Conditional Class Application**
+   - Dynamic classes based on `isHeroStacked` state
+   - Changes trigger full re-renders and layout recalculations
+   - Grid structure changes from `grid-cols-1` to `lg:grid-cols-4`
+   - Impact: Layout shifts, content jumping, visual inconsistency
+
+5. **Measurement Timing Issues**
+   - ResizeObserver setup happens before elements are fully rendered
+   - Fonts may not be loaded when measuring
+   - Theme changes can affect text width
+   - Impact: Incorrect measurements, wrong stacking decisions
+
+6. **Nested Container Complexity**
+   - Multiple wrapper divs with conflicting padding/spacing
+   - `min-w-0 max-w-full` constraints may conflict with grid
+   - `w-full` on multiple nested elements
+   - Impact: Layout calculation confusion, unexpected behavior
+
+## Goals
+
+1. **No Overlap**: Title and CTA always have proper padding from edges
+2. **Smooth Transitions**: No visible layout shifts or glitches
+3. **Consistent Behavior**: Predictable layout at all screen sizes
+4. **Performance**: Minimal re-renders, efficient ResizeObserver usage
+5. **Responsive**: Proper stacking when space is constrained
+6. **"Never wonder" Protection**: Never splits onto two lines unless absolutely necessary
+
+## Solution Strategy
+
+### Phase 1: Simplify Padding Structure
+**Goal**: Single source of padding, no conflicts
+
+1. Remove padding from outer grid container
+2. Apply padding only to inner content containers
+3. Use consistent padding values: `px-4 sm:px-6 md:px-8 lg:px-12`
+4. Ensure padding is never doubled
+
+### Phase 2: Optimize ResizeObserver
+**Goal**: Efficient, debounced, accurate measurements
+
+1. Debounce resize events (150ms)
+2. Use single ResizeObserver for grid container only
+3. Measure after fonts/theme are loaded
+4. Add hysteresis to prevent rapid toggling (50px buffer)
+5. Use `useLayoutEffect` for synchronous measurements
+
+### Phase 3: Fix Initial State
+**Goal**: No visible layout shift on load
+
+1. Use CSS media queries for initial layout decision
+2. Only use ResizeObserver for fine-tuning
+3. Start with appropriate state based on viewport width
+4. Use `useIsomorphicLayoutEffect` for SSR safety
+
+### Phase 4: Simplify Conditional Classes
+**Goal**: Minimal class changes, stable layout
+
+1. Use CSS Grid with `auto-fit` or `minmax` for responsive behavior
+2. Reduce conditional class applications
+3. Use CSS-only responsive breakpoints where possible
+4. Only use JS for edge cases
+
+### Phase 5: Clean Container Structure
+**Goal**: Simple, predictable DOM structure
+
+1. Remove unnecessary wrapper divs
+2. Consolidate padding containers
+3. Use CSS Grid for layout, not nested flex containers
+4. Simplify class names and structure
+
+## Implementation Plan
+
+### Step 1: Restructure Padding (High Priority)
+```tsx
+// BEFORE:
+<div className="p-4 sm:p-6 md:p-8">  // Outer padding
+  <div className="grid ...">
+    <div className="px-4 sm:px-6 md:px-8">  // Inner padding - DOUBLE!
+      Content
+    </div>
+  </div>
+</div>
+
+// AFTER:
+<div className="grid ...">  // No outer padding
+  <div className="px-4 sm:px-6 md:px-8 lg:px-12">  // Single padding source
+    Content
+  </div>
+</div>
+```
+
+### Step 2: Implement Debounced ResizeObserver (High Priority)
+```tsx
+useLayoutEffect(() => {
+  const MIN_PADDING = 32;
+  const MIN_CONTENT_WIDTH = 320;
+  const HYSTERESIS = 50; // Prevent rapid toggling
+  
+  let timeoutId: NodeJS.Timeout;
+  let lastStackedState = isHeroStacked;
+  
+  const evaluate = () => {
+    const left = heroLeftRef.current;
+    const first = heroFirstLineRef.current;
+    if (!left || !first) return;
+    
+    const containerWidth = left.clientWidth;
+    const availableWidth = containerWidth - (MIN_PADDING * 2);
+    const firstLineNeeded = first.scrollWidth;
+    
+    // Add hysteresis: need more space to unstack, less to stack
+    const threshold = lastStackedState 
+      ? firstLineNeeded + HYSTERESIS  // Need extra space to unstack
+      : firstLineNeeded - HYSTERESIS; // Less space needed to stack
+    
+    const mustStack = 
+      containerWidth < MIN_CONTENT_WIDTH || 
+      availableWidth < threshold;
+    
+    if (mustStack !== lastStackedState) {
+      setIsHeroStacked(mustStack);
+      lastStackedState = mustStack;
+    }
+  };
+  
+  const debouncedEvaluate = () => {
+    clearTimeout(timeoutId);
+    timeoutId = setTimeout(() => {
+      requestAnimationFrame(evaluate);
+    }, 150);
+  };
+  
+  // Use CSS media query for initial state
+  const mq = window.matchMedia('(min-width: 1024px)');
+  const initialStacked = !mq.matches;
+  setIsHeroStacked(initialStacked);
+  lastStackedState = initialStacked;
+  
+  // Observe only the grid container
+  const ro = new ResizeObserver(debouncedEvaluate);
+  if (heroLeftRef.current) {
+    ro.observe(heroLeftRef.current);
+  }
+  
+  // Initial evaluation after fonts load
+  const fontCheck = setTimeout(() => {
+    evaluate();
+  }, 300);
+  
+  return () => {
+    clearTimeout(timeoutId);
+    clearTimeout(fontCheck);
+    ro.disconnect();
+  };
+}, []);
+```
+
+### Step 3: Use CSS-First Approach (Medium Priority)
+```tsx
+// Use CSS Grid with auto-fit for responsive behavior
+<div className="grid grid-cols-1 lg:grid-cols-4 gap-6 md:gap-8">
+  {/* CSS handles responsive behavior */}
+  <div className="col-span-1 lg:col-span-1 lg:row-span-3">
+    {/* Content */}
+  </div>
+  <div className="col-span-1 lg:col-span-3 lg:row-span-3">
+    {/* Preview */}
+  </div>
+</div>
+
+// Only use JS for "Never wonder" protection
+// Use CSS `@container` queries if supported, fallback to JS
+```
+
+### Step 4: Simplify Container Structure (Medium Priority)
+```tsx
+// BEFORE: Multiple nested containers
+<div className="hero relative col-span-1 ...">
+  <div className="flex flex-col ... w-full px-4 ...">
+    <div className="space-y-6 text-center">
+      <h1>...</h1>
+    </div>
+    <div className="w-full px-4 ...">
+      <PrimaryCTA />
+    </div>
+  </div>
+</div>
+
+// AFTER: Single container with consistent padding
+<div className="hero relative col-span-1 ... px-4 sm:px-6 md:px-8 lg:px-12">
+  <div className="flex flex-col ... space-y-6">
+    <h1>...</h1>
+    <PrimaryCTA />
+  </div>
+</div>
+```
+
+### Step 5: Add Transition for Smooth Changes (Low Priority)
+```css
+.hero-layout-transition {
+  transition: grid-template-columns 0.3s ease-out;
+}
+```
+
+## Testing Checklist
+
+- [ ] No double padding on any screen size
+- [ ] "Never wonder" never splits on desktop (1024px+)
+- [ ] Layout stacks smoothly on mobile (< 1024px)
+- [ ] No layout shift on page load
+- [ ] ResizeObserver doesn't cause rapid toggling
+- [ ] Padding is consistent at all breakpoints
+- [ ] No visual glitches during resize
+- [ ] Works in all themes (light, dark, glass)
+- [ ] Works with different font sizes
+- [ ] Performance: < 16ms per frame during resize
+
+## Rollout Strategy
+
+1. **Phase 1** (Immediate): Fix padding structure - removes double padding
+2. **Phase 2** (High Priority): Optimize ResizeObserver - reduces glitches
+3. **Phase 3** (Medium Priority): Simplify containers - improves maintainability
+4. **Phase 4** (Low Priority): Add transitions - polish
+
+## Success Metrics
+
+- Zero visible layout shifts on page load
+- Smooth resize behavior (no rapid toggling)
+- Consistent padding at all breakpoints
+- "Never wonder" protection working correctly
+- Performance: 60fps during resize operations

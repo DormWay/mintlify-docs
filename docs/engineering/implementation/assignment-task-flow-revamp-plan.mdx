@@ -1,0 +1,182 @@
+---
+title: "Assignment Task Flow Revamp Plan"
+description: "status: draft owner: product_engineering last_updated: 2025-10-20 related_docs:"
+---
+
+# Assignment & Planner UX Revamp – Implementation Plan
+
+---
+status: draft
+owner: product_engineering
+last_updated: 2025-10-20
+related_docs:
+  - [Tasks vs Assignments - Two-Table Architecture Decision](/docs/engineering/architecture/tasks-vs-assignments-two-table-architecture-decision)
+  - [Task-Assignment Bidirectional Sync Implementation](/docs/engineering/implementation/task-assignment-bidirectional-sync-implementation)
+  - dormway-platform/services/api-router/src/routes/task-routes.ts
+  - dormway-platform/services/api-router/src/routes/assignment-completion-routes.ts
+  - dormway-platform/services/dormway-lockedin/src/app/dashboard/academic/page.tsx
+---
+
+## 1. Context
+
+Students currently encounter inconsistent assignment states across the home dashboard, Academic Intelligence view, and task planner. Backend architecture distinguishes `tasks` (work sessions) from `assignment_completion` (deliverables), but the bidirectional sync described in [Task-Assignment Bidirectional Sync Implementation](/docs/engineering/implementation/task-assignment-bidirectional-sync-implementation) has not shipped. Frontend flows only surface information—they do not guide students through planning, working, and closing the loop when an assignment is finished.
+
+This plan orchestrates the UX and backend changes required to deliver a cohesive “plan → act → finish” experience.
+
+## 2. Goals & Success Metrics
+
+### Goals
+- Present actionable assignments on every relevant surface (home widgets, academic dashboard, planner).
+- Keep `tasks` and `assignment_completion` synchronized automatically.
+- Allow scheduling and completion actions without leaving the surface the student is on.
+- Ensure home and academic dashboards display the same canonical assignment state.
+
+### Success Metrics
+- **Assignment closure rate**: % of assignments auto-marked complete within 6 hours of Canvas submission or all linked tasks finishing.
+- **Planning adoption**: % of assignments with at least one scheduled block within 24 hours of appearing as “due soon”.
+- **State consistency**: 0 known mismatches between home “What’s Due” and academic deliverables (monitored via automated check).
+
+## 3. Scope Overview
+
+| Track | Summary | Key Owners |
+|-------|---------|------------|
+| Backend Sync | Implement bidirectional task↔assignment sync, cache invalidation, analytics. | API Router + Engine |
+| Planner API | Persist time blocks when students plan work from web UI. | API Router |
+| Frontend UX | Make assignment lists actionable, expose completion prompts, unify data sources. | Lockedin Web |
+| Data/Telemetry | Measure assignment states, planner usage, sync health. | Data Eng / Analytics |
+
+Out of scope: large design system refactors, mobile clients (follow-up once web foundation is stable).
+
+## 4. Dependencies & Risks
+
+### Dependencies
+- Stable `tasks` / `assignment_completion` schemas (already validated in architecture decision).
+- Access to `/dashboard/v1/composite` BFF response.
+- Ably channels for real-time updates (already available per proxy route).
+
+### Risks / Mitigations
+- **Race conditions** when Canvas webhook, manual completion, and task completion fire simultaneously.  
+  Mitigation: wrap auto-complete logic in idempotent transactions and rely on `updated_at` to detect stale writes.
+- **Planner scheduling conflicts** if time blocks overlap.  
+  Mitigation: reuse existing validation logic from mobile planner APIs (`student_time_blocks` guard rails).
+- **UI regression** due to additional actions in tight card layouts.  
+  Mitigation: prototype with design; use feature flag to roll out iteratively.
+
+## 5. Detailed Work Breakdown
+
+### 5.1 Backend – Task/Assignment Sync
+
+1. **Implement task completion prompt** (`task-routes.ts`):
+   - Extend `POST /api/mobile/tasks/:taskId/complete` to fetch linked tasks and assignment status (see checklist in [Task-Assignment Bidirectional Sync Implementation](/docs/engineering/implementation/task-assignment-bidirectional-sync-implementation)).
+   - Return `prompt` payload when assignment should be marked complete (type, message, suggested actions).
+   - Include analytics event `task_completion_prompt_shown`.
+
+2. **Implement assignment auto-complete** (`assignment-completion-routes.ts` and Canvas activities):
+   - Add shared helper `autoCompleteRelatedTasks(userId, assignmentId)` to update pending/scheduled tasks, set `metadata.auto_completed_from_assignment = true`, and emit count.
+   - Invoke helper in manual completion endpoint and Canvas submission activity (`canvas.activities.ts`).
+   - Ensure Redis dashboard cache invalidation runs after each mutation.
+
+3. **Bidirectional cache & analytics**:
+   - Publish Ably event when tasks auto-complete to keep dashboards current.
+   - Track events `assignment_auto_completed_tasks` and `assignment_prompted_completion`.
+
+4. **Database safety**:
+   - Add constraint migration (if not already applied) to enforce `tasks.assignment_id` / `source` rule.
+   - Optional: add FK or nightly cleanup job (per architecture doc).
+
+### 5.2 Backend – Planner Persistence
+
+1. **Planner API upgrade**:
+   - Create `POST /api/mobile/tasks/:taskId/schedule` variant for multi-block creation or add new `/api/mobile/planner/blocks` endpoint.
+   - Accept payload from web planner drawer (day/start/end/hours), validate overlaps, insert into `student_time_blocks`, update task status.
+   - Return enriched response containing block metadata for UI (start/end ISO, course context, etc.).
+
+2. **Unschedule / modify** use existing endpoint; expose from web once base flow is working.
+
+3. **ETag/Cache coherence**:
+   - When planner actions run, invalidate relevant cache keys (dashboard composite, academic data).
+
+### 5.3 Frontend – Data Unification
+
+1. **Migrate academic dashboard to BFF composite**:
+   - Extend `useDashboardComposite` to expose all data needed by Academic page (deliverables, completion map, timeline).
+   - Remove redundant `getDeliverables`/`getCourses` fetch logic in `lib/academic/data.ts`; rely on composite response for canonical state and fall back gracefully if BFF unavailable.
+   - Subscribe to Ably events for live updates (via existing proxy `realtime/ably-auth` endpoint).
+
+2. **Shared utilities**:
+   - Standardize `DueItem` / `Deliverable` types to avoid duplication.
+   - Provide selectors that map composite payload to view-specific needs (today’s priorities, next 7 days, etc.).
+
+### 5.4 Frontend – Interaction Improvements
+
+1. **Assignments List (home)**:
+   - Add inline actions (Complete, Plan, Break into Tasks) and connect to new APIs.
+   - Replace global modal in `AssignmentDetailPopover` with anchored popover positioned near the clicked item (leverage `ModalRoot` only for large detail views).
+   - Show real-time feedback (spinners, state badges). Integrate with completion prompt: if backend returns prompt, render toast with CTA to mark assignment complete.
+
+2. **Academic Dashboard**:
+   - Wire `handleStartClick` and `handleConfirmTimeBlock` to planner API; update UI state after success.
+   - Show planned blocks within cards (chip summarizing next scheduled session, direct “Open calendar” link).
+   - When marking assignment complete, update local state optimistically and rely on Ably/BFF to reconcile.
+   - Remove TODO logging and ensure error handling surfaces user-friendly messages.
+
+3. **Completion Prompt UX**:
+   - Create reusable component (toast/modal) that reads prompt payload from task completion response.
+   - If user confirms “Mark assignment complete”, call `markAssignmentComplete`; else dismiss gracefully.
+   - Track acceptance/decline events for analytics.
+
+4. **Planner Drawer polish**:
+   - Pre-populate suggestions based on data (due date proximity, course schedule).
+   - Show conflict warnings if scheduling overlaps existing blocks (requires fetching user schedule or using composite timeline section).
+
+### 5.5 Data & Monitoring
+
+1. **Quality dashboards**:
+   - Create metric for tasks referencing assignments with mismatched completion state (BI query stored as view).
+   - Monitor scheduler success/failure rate.
+
+2. **Logging & Alerting**:
+   - Structured logs for sync operations (counts, durations, auto-completed tasks).
+   - Alert if prompt adoption rate is <20% or auto-completion fails repeatedly for a user.
+
+## 6. Timeline & Milestones
+
+| Week | Milestone | Notes |
+|------|-----------|-------|
+| W1 | Backend sync foundation (prompt + auto-complete) | Guard behind feature flag `TASK_ASSIGNMENT_SYNC_V1`. |
+| W2 | Planner API persistence complete, composite data hooked into Academic page. | Ensure regression tests for scheduler. |
+| W3 | Frontend actions on home + academic dashboards, completion prompt UX. | Conduct usability review with design. |
+| W4 | Rollout + telemetry validation, QA, polish. | Remove legacy data fetches, enable feature flag. |
+
+## 7. Testing Strategy
+
+- **Unit**: Sync helpers (`autoCompleteRelatedTasks`), planner input validation, completion prompt logic.
+- **Integration**: API Router endpoint tests covering manual completion, unscheduling, Canvas webhook integration.
+- **End-to-End**: Cypress or Playwright scenarios:
+  1. Student completes tasks → receives assignment prompt → marks complete → sees consistent state on both dashboards.
+  2. Student schedules time via planner drawer → block appears on timeline and task status updates.
+  3. Canvas webhook marks assignment submitted → related tasks auto-complete within 1 minute.
+- **Load/Regression**: Ensure materialized views / BFF caching handle new traffic patterns (repeat composite fetch after planning, completion).
+
+## 8. Rollout & Communication
+
+1. Deploy behind feature flags (`TASK_ASSIGNMENT_SYNC_V1`, `PLANNER_WEB_SCHEDULING`, `HOME_ASSIGNMENT_ACTIONS`).
+2. Pilot with internal QA + limited beta cohort (students who connected Canvas).
+3. Share enablement doc with Support covering new behavior (auto-complete, prompts, planner scheduling).
+4. Collect feedback via in-app survey after first week of use.
+
+## 9. Open Questions
+
+- Should we surface “planned time” progress in the assignment card (e.g., progress ring)? Requires additional aggregation from `student_time_blocks`.
+- Do we need manual override for auto-completed tasks (student wants to keep them pending)? Consider adding “undo” option in toast.
+- How to handle assignments sourced from syllabus only (no Canvas ID)? Decide on identifier strategy for auto-completion prompts—likely keep manual path only.
+
+## 10. Next Steps Checklist
+
+- [ ] Confirm backend owners and timelines for sync + planner APIs.
+- [ ] Align with design on action layouts and prompt visuals.
+- [ ] Draft analytics specs for new events/metrics.
+- [ ] Create QA test plan covering regression and new flows.
+- [ ] Schedule beta rollout + communications.
+
+Once these items are staffed and the feature flags are wired, implementation can begin iterating track by track. This document should be updated with decisions and learnings during execution.

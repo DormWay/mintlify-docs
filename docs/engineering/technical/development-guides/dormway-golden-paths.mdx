@@ -1,0 +1,350 @@
+---
+title: "DormWay Golden Paths"
+description: "// workflows/myFeature.workflow.ts import { proxyActivities, defineSignal, setHandler } from '@temporalio/workflow'; import type * as activities from '../act..."
+---
+
+# DormWay Golden Paths
+
+> **Purpose**: Copy-paste templates and patterns for common development tasks.
+> This file is used by `/load-context` to provide AI assistants with implementation patterns.
+
+---
+
+## 1. Temporal Workflow Pattern
+
+### Template: Basic Workflow
+
+```typescript
+// workflows/myFeature.workflow.ts
+import { proxyActivities, defineSignal, setHandler } from '@temporalio/workflow';
+import type * as activities from '../activities/myFeature.activities';
+
+// Type-safe activity imports
+const { myActivity } = proxyActivities<typeof activities>({
+  startToCloseTimeout: '10 minutes',
+  retry: {
+    maximumAttempts: 3,
+    initialInterval: '1 second',
+    backoffCoefficient: 2,
+  },
+});
+
+// Signals for external input
+export const updateSignal = defineSignal<[{ data: string }]>('update');
+
+// Workflow interface
+export interface MyWorkflowInput {
+  userId: string;
+  // ... other inputs
+}
+
+export interface MyWorkflowOutput {
+  success: boolean;
+  // ... other outputs
+}
+
+// Main workflow function
+export async function myFeatureWorkflow(input: MyWorkflowInput): Promise<MyWorkflowOutput> {
+  // Set up signal handlers
+  let pendingUpdate: { data: string } | null = null;
+  setHandler(updateSignal, (update) => {
+    pendingUpdate = update;
+  });
+
+  // Execute activities (never do I/O directly in workflow!)
+  const result = await myActivity(input);
+
+  return { success: result.ok };
+}
+```
+
+### Registration Checklist
+- [ ] Export in `src/workflows/index.ts`
+- [ ] Register activities in `src/index.ts` worker
+- [ ] Run `npm run build && npm run build:workflow`
+- [ ] Restart engine: `./scripts/dev/dev-with-doppler.sh restart engine`
+
+---
+
+## 2. API Route Pattern (Express)
+
+### Template: New Route File
+
+```typescript
+// routes/myFeature-routes.ts
+import { Router, Request, Response, NextFunction } from 'express';
+import { validateRequest } from '../middleware/validation';
+import { z } from 'zod';
+import { MyService } from '../services/myFeature-service';
+
+const router = Router();
+
+// Input validation schema
+const CreateInputSchema = z.object({
+  name: z.string().min(1).max(100),
+  userId: z.string().uuid(),
+});
+
+// POST endpoint with validation
+router.post(
+  '/api/my-feature',
+  validateRequest(CreateInputSchema),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const service = new MyService();
+      const result = await service.create(req.body);
+
+      res.status(201).json({
+        success: true,
+        data: result,
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+// GET endpoint with params
+router.get(
+  '/api/my-feature/:id',
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { id } = req.params;
+      const service = new MyService();
+      const result = await service.getById(id);
+
+      if (!result) {
+        return res.status(404).json({ error: 'Not found' });
+      }
+
+      res.json({ data: result });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+export default router;
+```
+
+### Route Registration
+```typescript
+// In app.ts or routes/index.ts
+import myFeatureRoutes from './routes/myFeature-routes';
+app.use(myFeatureRoutes);
+```
+
+---
+
+## 3. Database Query Pattern
+
+### Template: Parameterized Query
+
+```typescript
+// ALWAYS use parameterized queries - NEVER string concatenation
+async function getUserCourses(userId: string, semesterId?: string): Promise<Course[]> {
+  const pool = await getAuroraPool();
+
+  // Dynamic query building
+  const params: any[] = [userId];
+  let paramIndex = 2;
+  const conditions = ['c.user_id = $1'];
+
+  if (semesterId) {
+    conditions.push(`c.semester_id = $${paramIndex}`);
+    params.push(semesterId);
+    paramIndex++;
+  }
+
+  const query = `
+    SELECT c.id, c.name, c.course_code
+    FROM contexts c
+    WHERE c.type = 'course'
+      AND ${conditions.join(' AND ')}
+    ORDER BY c.name
+  `;
+
+  const result = await pool.query(query, params);
+  return result.rows;
+}
+```
+
+### Critical Rules
+- **NEVER** use `campus_id` on accounts table (use contexts join)
+- **ALWAYS** verify schema with `mcp__neon-server__describe_table_schema` first
+- **ALWAYS** include `fetched_at` filter when querying `service_data` (partitioned table)
+
+---
+
+## 4. SwiftUI Component Pattern
+
+### Template: DWDesign-Compliant View
+
+```swift
+import SwiftUI
+import DWDesign
+
+struct MyFeatureView: View {
+    // Use dependency injection, not singletons
+    let viewModel: MyFeatureViewModel
+
+    var body: some View {
+        VStack(spacing: DWSpacing.md) {
+            // Use design system tokens
+            Text(viewModel.title)
+                .font(.dwHeadline)
+                .foregroundStyle(Color.dwTextPrimary)
+
+            // Interactive elements
+            DWButton(
+                title: "Action",
+                style: .primary,
+                action: viewModel.performAction
+            )
+        }
+        .padding(DWSpacing.lg)
+        .background(Color.dwBackground)
+    }
+}
+
+// MARK: - ViewModel
+@MainActor
+final class MyFeatureViewModel: ObservableObject {
+    @Published var title: String = ""
+
+    private let apiClient: APIClient
+
+    // Dependency injection
+    init(apiClient: APIClient) {
+        self.apiClient = apiClient
+    }
+
+    func performAction() {
+        Task {
+            // Use structured concurrency
+            await apiClient.doSomething()
+        }
+    }
+}
+```
+
+### SwiftUI Rules
+- **NO singletons** - use dependency injection
+- **Use DWDesign tokens** - `DWSpacing`, `Color.dw*`, `.font(.dw*)`
+- **MainActor for ViewModels** - ensures UI updates on main thread
+
+---
+
+## 5. Real-Time Update Pattern (Ably)
+
+### Template: Publishing Updates
+
+```typescript
+// Publishing from backend
+import { AblyService } from '../services/ably-service';
+
+async function publishScheduleUpdate(userId: string, data: ScheduleData) {
+  const ably = AblyService.getInstance();
+
+  // User-specific channel pattern
+  const channel = `user:${userId}:schedule`;
+
+  await ably.publish(channel, 'schedule.updated', {
+    type: 'schedule.updated',
+    data,
+    timestamp: new Date().toISOString(),
+  });
+}
+```
+
+### Template: Subscribing (Client)
+
+```typescript
+// In React/Next.js component
+import { useAbly } from '@/hooks/useAbly';
+
+function ScheduleWidget() {
+  const { subscribe, unsubscribe } = useAbly();
+
+  useEffect(() => {
+    const channel = `user:${userId}:schedule`;
+
+    const callback = (message) => {
+      if (message.name === 'schedule.updated') {
+        // Handle update
+        setSchedule(message.data);
+      }
+    };
+
+    subscribe(channel, callback);
+
+    return () => unsubscribe(channel, callback);
+  }, [userId]);
+}
+```
+
+---
+
+## 6. LLM Prompt Pattern
+
+### Template: Portkey Integration
+
+```typescript
+import { callLLMDirect } from '../utils/portkey';
+
+async function analyzeContent(content: string): Promise<Analysis> {
+  const systemPrompt = `You are a content analyzer.
+Return STRICT JSON with this structure:
+{
+  "summary": string,
+  "keywords": string[],
+  "sentiment": "positive" | "negative" | "neutral"
+}
+Do NOT include markdown code fences. Return raw JSON only.`;
+
+  const result = await callLLMDirect(
+    [{ role: 'user', content: `Analyze: ${content}` }],
+    {
+      system: systemPrompt,
+      model: 'claude-sonnet-4-20250514',
+      temperature: 0.2,
+      maxTokens: 1000,
+    },
+    {
+      purpose: 'content-analysis',
+      pattern: 'extraction',
+    }
+  );
+
+  // Parse JSON from response
+  const match = result.match(/\{[\s\S]*\}/);
+  if (!match) throw new Error('Invalid LLM response');
+  return JSON.parse(match[0]);
+}
+```
+
+### LLM Rules
+- **Use Portkey** for all LLM calls (provides observability)
+- **Request JSON only** - no markdown, no explanations
+- **Set low temperature** for extraction tasks (0.1-0.3)
+- **NEVER include PII** in prompts - use `scan-risks.sh` to verify
+
+---
+
+## Quick Reference Commands
+
+| Task | Command |
+|------|---------|
+| Start services | `make dev` |
+| Restart service | `make rs s=api` |
+| Run tests | `cd .repos/dormway-platform && make test-service s=engine` |
+| Check schema | Use `mcp__neon-server__describe_table_schema` |
+| Search docs | `npm run obsidian:search -- "query"` |
+| Run evals | `./scripts/run-evals.sh` |
+| Scan risks | `./scripts/scan-risks.sh` |
+| Install hooks | `./scripts/install-hooks.sh all` |
+
+---
+
+## Tags
+#patterns #golden-paths #development #templates #best-practices

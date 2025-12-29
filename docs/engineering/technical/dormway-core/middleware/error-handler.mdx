@@ -1,0 +1,123 @@
+---
+title: "Error Handler"
+description: "Creates an error handler middleware with consistent error formatting and logging."
+---
+
+# Error Handler Middleware
+
+## Overview
+
+Creates an error handler middleware with consistent error formatting and logging.
+
+## Factory Signature
+
+```typescript
+createErrorHandler(options: {
+  logger: Logger;
+  environment?: string;
+  includeSentryEventId?: boolean;
+}): ErrorRequestHandler
+```
+
+## Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `logger` | `Logger` | Yes | Logger instance for error logging |
+| `environment` | `string` | No | Current environment (affects error detail exposure) |
+| `includeSentryEventId` | `boolean` | No | Include Sentry event ID in response |
+
+## Usage
+
+```typescript
+import { createErrorHandler, AppError } from '@dormway/core/middleware';
+import { logger } from './utils/logger';
+
+// Must be the LAST middleware!
+app.use(createErrorHandler({
+  logger,
+  environment: process.env.NODE_ENV,
+  includeSentryEventId: true
+}));
+
+// Throw operational errors in routes
+app.get('/user/:id', async (req, res, next) => {
+  const user = await findUser(req.params.id);
+  if (!user) {
+    throw new AppError('User not found', 404);
+  }
+  res.json(user);
+});
+```
+
+## AppError Class
+
+```typescript
+class AppError extends Error {
+  constructor(
+    message: string,
+    statusCode: number,
+    details?: unknown,
+    isOperational?: boolean
+  )
+}
+```
+
+### Properties
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `message` | `string` | Error message |
+| `statusCode` | `number` | HTTP status code |
+| `details` | `unknown` | Additional error details |
+| `isOperational` | `boolean` | Whether error is expected (default: true) |
+
+### Examples
+
+```typescript
+// 404 Not Found
+throw new AppError('User not found', 404);
+
+// 400 Bad Request with details
+throw new AppError('Invalid input', 400, { field: 'email', reason: 'Invalid format' });
+
+// 500 Internal Error (non-operational)
+throw new AppError('Database connection failed', 500, null, false);
+```
+
+## Error Response Format
+
+### Production
+
+```json
+{
+  "error": "User not found",
+  "statusCode": 404
+}
+```
+
+### Development
+
+```json
+{
+  "error": "User not found",
+  "statusCode": 404,
+  "details": { "userId": "123" },
+  "stack": "Error: User not found\n    at ..."
+}
+```
+
+## Behavior
+
+1. **Operational errors** (isOperational = true): Logged as warnings, safe to expose message
+2. **Non-operational errors**: Logged as errors, generic message returned to client
+3. **Unknown errors**: Treated as 500 Internal Server Error
+
+## Related
+
+- [Middleware Factory Pattern](/docs/engineering/technical/dormway-core/middleware/middleware-factory-pattern) - Overview of factory pattern
+- [Error Handling](/docs/engineering/technical/dormway-core/utilities/error-handling) - Error classes and utilities
+
+---
+
+**Last Updated**: 2025-11-26

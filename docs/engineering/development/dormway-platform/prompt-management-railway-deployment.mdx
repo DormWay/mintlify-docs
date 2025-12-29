@@ -1,0 +1,373 @@
+---
+title: "Prompt Management   Railway Deployment"
+description: "Railway does **NOT support shared volumes** across services. Each service gets its own isolated volume."
+---
+
+# Prompt Management - Railway Deployment
+
+**Related**: [Prompt Management System](/docs/engineering/development/dormway-platform/prompt-management-system), [Prompt Management - Phase 1 Complete](/docs/engineering/development/dormway-platform/prompt-management-phase-1-complete)
+**Date**: 2025-01-14
+**Status**: ✅ Correct Solution
+**Context**: Railway deployment for prompts directory
+
+---
+
+## Overview
+
+Railway does **NOT support shared volumes** across services. Each service gets its own isolated volume.
+
+The correct solution for our monorepo is to use **root directory configuration** so Dockerfiles can access both service code AND the prompts directory at build time.
+
+---
+
+## ❌ Why Railway Volumes Won't Work
+
+Railway volumes have critical limitations:
+- ❌ **Not shared**: Each service gets its own volume (cannot share)
+- ❌ **Single volume per service**: Can't mount multiple volumes
+- ❌ **No replicas**: Volumes prevent horizontal scaling
+- ❌ **Per-service only**: Designed for service-specific persistent data
+
+**Source**: [Railway Docs - Volumes](https://docs.railway.com/reference/volumes)
+
+---
+
+## ✅ Correct Approach: Root Directory + Dockerfile COPY
+
+Railway supports **monorepo builds** with root directory configuration.
+
+---
+
+## Implementation Steps
+
+### 1. Configure Root Directory in railway.toml
+
+Tell Railway to build from repo root instead of service directory:
+
+#### `services/engine/railway.toml`
+```toml
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "services/engine/Dockerfile"  # Relative to repo root
+rootDirectory = "/"  # Build from repo root, not services/engine/
+watchPaths = [
+  "services/engine/**",
+  "prompts/**"  # Rebuild when prompts change
+]
+
+[deploy]
+startCommand = "node lib/index.js"
+healthcheckPath = "/health"
+healthcheckTimeout = 100
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
+
+[deploy.envs]
+NODE_ENV = "production"
+```
+
+#### `services/dormway-crews/railway.toml`
+```toml
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "services/dormway-crews/Dockerfile"
+rootDirectory = "/"  # Build from repo root
+watchPaths = [
+  "services/dormway-crews/**",
+  "prompts/**"
+]
+
+[deploy]
+startCommand = "./start_with_health.sh"
+healthcheckPath = "/"
+healthcheckTimeout = 100
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3
+```
+
+#### `services/api-router/railway.json`
+```json
+{
+  "$schema": "https://railway.app/railway.schema.json",
+  "build": {
+    "builder": "DOCKERFILE",
+    "dockerfilePath": "services/api-router/Dockerfile",
+    "rootDirectory": "/",
+    "watchPaths": [
+      "services/api-router/**",
+      "prompts/**"
+    ]
+  },
+  "deploy": {
+    "startCommand": "node dist/index.js",
+    "restartPolicyType": "ON_FAILURE",
+    "restartPolicyMaxRetries": 10
+  }
+}
+```
+
+### 2. Update Dockerfiles to Copy from Repo Root
+
+With `rootDirectory = "/"`, Docker build context is repo root. Update paths:
+
+#### `services/engine/Dockerfile`
+```dockerfile
+FROM node:20-slim
+
+WORKDIR /app
+
+# Install certificates
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+
+# Copy service files from services/engine/
+COPY services/engine/package*.json ./
+COPY services/engine/ .
+
+# Copy prompts from repo root
+COPY prompts /prompts
+
+# Build
+RUN chmod +x build.sh && ./build.sh
+
+ENV NODE_ENV=production
+ENV PORT=3030
+
+EXPOSE 3030
+
+CMD ["node", "lib/index.js"]
+```
+
+#### `services/dormway-crews/Dockerfile`
+```dockerfile
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Copy service files from services/dormway-crews/
+COPY services/dormway-crews/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY services/dormway-crews/ .
+
+# Copy prompts from repo root
+COPY prompts /prompts
+
+# Ensure scripts executable
+RUN chmod +x start_with_health.sh
+
+CMD ["./start_with_health.sh"]
+```
+
+#### `services/api-router/Dockerfile`
+```dockerfile
+FROM node:20-slim
+
+WORKDIR /app
+
+# Copy service files from services/api-router/
+COPY services/api-router/package*.json ./
+RUN npm ci --production
+
+COPY services/api-router/ .
+
+# Copy prompts from repo root
+COPY prompts /prompts
+
+ENV NODE_ENV=production
+
+CMD ["node", "dist/index.js"]
+```
+
+### 3. Benefits of This Approach
+
+✅ **Prompts baked into image** - No runtime dependencies
+✅ **Version consistency** - Prompts match code version
+✅ **No shared volume needed** - Each service gets its own copy
+✅ **Standard Docker pattern** - Works anywhere (Railway, AWS, local)
+✅ **Watch paths prevent unnecessary rebuilds** - Only rebuild when prompts OR service code changes
+
+---
+
+## Testing Locally
+
+Test Dockerfile changes **before** deploying to Railway:
+
+```bash
+# Build from repo root (simulates Railway rootDirectory = "/")
+cd /path/to/dormway-platform
+
+# Engine
+docker build -f services/engine/Dockerfile -t engine-test .
+
+# Dormway Crews
+docker build -f services/dormway-crews/Dockerfile -t crews-test .
+
+# API Router
+docker build -f services/api-router/Dockerfile -t api-router-test .
+
+# Verify prompts exist in each image
+docker run --rm engine-test ls -la /prompts
+docker run --rm engine-test cat /prompts/registry.json
+
+docker run --rm crews-test ls -la /prompts
+docker run --rm crews-test cat /prompts/registry.json
+
+docker run --rm api-router-test ls -la /prompts
+```
+
+### Test Prompt Loaders
+
+```bash
+# Engine (TypeScript)
+docker run --rm engine-test node -e "
+const { loadPrompt } = require('./lib/shared/utils/prompt-loader');
+loadPrompt('syllabus-extraction', { SYLLABUS_CONTENT: 'test' })
+  .then(p => console.log('✅ Loaded:', p.substring(0, 100)))
+  .catch(e => console.error('❌ Error:', e.message));
+"
+
+# Dormway Crews (Python)
+docker run --rm crews-test python3 -c "
+from shared.utils.prompt_loader import load_prompt
+prompt = load_prompt('student-priority-analyzer', {
+    'current_datetime': '2025-01-14T12:00:00Z',
+    'student_profile': '{}',
+    'dayplan_data': '{}'
+})
+print('✅ Loaded:', len(prompt), 'characters')
+"
+```
+
+---
+
+## Deploying to Railway
+
+### Update Sequence
+
+1. **Update railway.toml files** (3 services)
+2. **Update Dockerfiles** (3 services)
+3. **Test locally** with commands above
+4. **Deploy to Railway staging** environment
+5. **Verify in Railway logs**:
+   ```
+   railway logs --service engine | grep prompts
+   ```
+6. **Test in Railway shell**:
+   ```bash
+   railway shell engine
+   ls -la /prompts/
+   ```
+7. **Deploy to production**
+
+### Railway Dashboard Verification
+
+After deploy, check Railway dashboard:
+- Build logs should show: `COPY prompts /prompts`
+- Container should have `/prompts/registry.json`
+- No errors about missing files
+
+---
+
+## Troubleshooting
+
+### Build fails: "COPY prompts: no such file or directory"
+**Cause**: `rootDirectory` not set or incorrect
+**Fix**: Ensure `rootDirectory = "/"` in railway.toml
+
+### Build context error
+**Cause**: `dockerfilePath` relative to wrong directory
+**Fix**: Use `dockerfilePath = "services/<name>/Dockerfile"` (relative to repo root)
+
+### Prompts directory empty in container
+**Cause**: COPY command after build didn't run
+**Fix**: Check Dockerfile has `COPY prompts /prompts` and it runs successfully
+
+### Loader can't find prompts
+**Cause**: Loader looking in wrong path
+**Fix**: Verify loaders read from `/prompts/` (absolute path)
+
+---
+
+## Migration Checklist
+
+Before Phase 2 (when code starts using loaders):
+
+- [ ] Update `services/engine/railway.toml` with rootDirectory config
+- [ ] Update `services/dormway-crews/railway.toml` with rootDirectory config
+- [ ] Update `services/api-router/railway.json` with rootDirectory config
+- [ ] Update `services/engine/Dockerfile` to copy from services/ and prompts/
+- [ ] Update `services/dormway-crews/Dockerfile` to copy from services/ and prompts/
+- [ ] Update `services/api-router/Dockerfile` to copy from services/ and prompts/
+- [ ] Test all 3 builds locally from repo root
+- [ ] Verify prompts exist in each built image
+- [ ] Deploy to Railway staging environment
+- [ ] Test loaders in Railway shell
+- [ ] Verify no build errors in Railway logs
+- [ ] Deploy to production
+
+---
+
+## Production Considerations
+
+### Image Size Impact
+
+Prompts are small text files:
+- **Current**: ~50 KB (5 prompts)
+- **Full migration**: ~500 KB (80 prompts)
+- **Impact**: Negligible (<1 MB per image)
+
+### Build Performance
+
+With `watchPaths`:
+- Only rebuilds when service code OR prompts change
+- Changes to other services don't trigger rebuilds
+- Efficient CI/CD pipeline
+
+### Version Consistency
+
+Prompts baked into Docker images ensure:
+- ✅ Code and prompts always match (atomic deploy)
+- ✅ Rollbacks include prompt versions
+- ✅ No drift between services
+- ✅ Git is single source of truth
+
+### Security
+
+- Prompts embedded in private Docker images
+- No external volume or storage needed
+- Standard Docker security model applies
+
+---
+
+## Summary
+
+**For Railway deployment (correct approach):**
+
+1. ✅ Set `rootDirectory = "/"` in all railway.toml/json configs
+2. ✅ Update `dockerfilePath` to be relative to repo root
+3. ✅ Configure `watchPaths` to rebuild on service OR prompts changes
+4. ✅ Update Dockerfiles to COPY from `services/<name>/` and `prompts/`
+5. ✅ Test locally with `docker build -f services/<name>/Dockerfile .`
+6. ✅ Deploy to Railway
+
+**Why this works:**
+- Railway builds from repo root (monorepo pattern)
+- Dockerfiles can access both service code and shared prompts
+- Prompts baked into images (no runtime dependencies)
+- Standard Docker pattern (works anywhere)
+
+**Timeline**:
+- Not blocking Phase 1 (loaders not called yet)
+- Required before Phase 2 (when code uses loaders)
+- Can be tested in staging first
+
+**Status**: ✅ Correct solution documented
+
+---
+
+## Key Takeaway
+
+**Railway does NOT support shared volumes.** The correct monorepo pattern is:
+- Build from root with `rootDirectory = "/"`
+- COPY both service files and shared resources at build time
+- Use `watchPaths` to optimize rebuild triggers

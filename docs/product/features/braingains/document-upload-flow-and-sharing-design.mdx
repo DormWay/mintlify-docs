@@ -1,0 +1,305 @@
+---
+title: "Document Upload Flow and Sharing Design"
+description: "This document outlines the proposed flow for uploading different document types (schedule screenshots, syllabi, and notes) with considerations for:"
+---
+
+# Document Upload Flow and Sharing Design
+
+> **Created**: 2025-07-15  
+> **Status**: Design Proposal  
+> **Author**: Design Team
+
+## Overview
+
+This document outlines the proposed flow for uploading different document types (schedule screenshots, syllabi, and notes) with considerations for:
+- When to require user authentication
+- How to handle documents without full course context
+- Community sharing options ("Share with class/school")
+
+## Core Principles
+
+1. **Progressive Disclosure**: Don't require full context upfront, allow gradual association
+2. **Community Value**: Enable sharing to benefit other students
+3. **Privacy First**: User controls what gets shared
+4. **Smart Defaults**: Use AI to infer context when possible
+
+## Document Types and Requirements
+
+### 1. Schedule Screenshot
+**Required Context**: Minimal
+- Can process without user account (anonymous preview)
+- Only needs campus/timezone for accuracy
+- Full account required to save to calendar
+
+**Flow**:
+```
+Upload → OCR → Preview → [Login/Signup] → Save
+                ↓
+        [Share Anonymized]
+```
+
+### 2. Syllabus (PDF/Word)
+**Required Context**: Medium
+- Needs user account for personalized insights
+- Course association helpful but not required
+- Can extract course info from document
+
+**Flow**:
+```
+Upload → Extract → Review → Associate Course → Save
+                              ↓
+                    [Auto-detect from content]
+                              ↓
+                      [Share with Class]
+```
+
+### 3. Lecture Notes
+**Required Context**: High
+- Requires course association for proper categorization
+- Benefits from syllabus context for better AI responses
+- Most valuable when shared with classmates
+
+**Flow**:
+```
+Upload → Check Context → [Missing Syllabus Warning] → Process
+            ↓                      ↓
+    [Has Syllabus]         [Continue Anyway]
+            ↓                      ↓
+        Full RAG            Limited RAG
+            ↓
+    [Share with Class]
+```
+
+## Sharing Framework
+
+### Share Levels
+
+1. **Private** (Default)
+   - Only accessible to uploading user
+   - Full document content in personal RAG
+
+2. **Share with Class**
+   - Available to students in same course section
+   - Requires verified enrollment
+   - Shows contributor attribution
+   - Moderation queue for quality
+
+3. **Share with School**
+   - Available to all students at university
+   - Useful for general resources
+   - Higher moderation threshold
+   - Anonymous option available
+
+### What Gets Shared
+
+**Syllabi**:
+- Extracted dates and deadlines
+- Course policies (anonymized)
+- NOT: Professor contact info, zoom links
+
+**Notes**:
+- Concept explanations
+- Study guides
+- Practice problems
+- NOT: Personal annotations, grades
+
+**Schedules**:
+- Course meeting patterns
+- Common time blocks
+- NOT: Personal events
+
+## Implementation Approach
+
+### Phase 1: Foundation (Launch)
+- Private uploads only
+- Full authentication required
+- Course association via manual selection or AI detection
+
+### Phase 2: Sharing Beta (Post-Launch)
+- "Share with Class" for syllabi
+- Contribution tracking
+- Basic moderation
+
+### Phase 3: Community (Future)
+- Full sharing tiers
+- Reputation system
+- Anonymous contributions
+- Crowdsourced corrections
+
+## Technical Considerations
+
+### Document Association Rules
+
+```typescript
+interface DocumentContext {
+  userId: string;          // Required for save
+  courseId?: string;       // Optional, can be inferred
+  schoolId: string;        // Required, from user profile
+  documentType: DocType;   // Required
+  sharingLevel: ShareLevel; // Default: 'private'
+}
+
+// Association strategies
+async function associateDocument(doc: Document): Promise<DocumentContext> {
+  // 1. Try to extract course from content
+  const extractedCourse = await extractCourseInfo(doc);
+  
+  // 2. Match against user's enrolled courses
+  const matchedCourse = await matchUserCourse(extractedCourse, user.courses);
+  
+  // 3. Prompt user if no match
+  if (!matchedCourse) {
+    return await promptCourseSelection(user);
+  }
+  
+  return {
+    courseId: matchedCourse.id,
+    ...defaultContext
+  };
+}
+```
+
+### Missing Context Handling
+
+```typescript
+// When notes uploaded without syllabus
+async function handleOrphanNotes(notes: Document, user: User) {
+  const warning = {
+    title: "No Syllabus Found",
+    message: "Upload a syllabus for this course to get better insights",
+    actions: [
+      { label: "Upload Syllabus", action: "upload_syllabus" },
+      { label: "Continue Anyway", action: "process_limited" },
+      { label: "Select Course", action: "manual_associate" }
+    ]
+  };
+  
+  const choice = await showWarning(warning);
+  
+  switch(choice) {
+    case 'process_limited':
+      // Process with limited context
+      return processWithGenericContext(notes);
+    case 'manual_associate':
+      // Let user pick from their courses
+      return await selectCourseManual(user);
+    // etc...
+  }
+}
+```
+
+### Sharing Permissions
+
+```typescript
+interface SharingRules {
+  canShare(doc: Document, user: User): boolean {
+    // Must own document
+    if (doc.userId !== user.id) return false;
+    
+    // Must have verified enrollment for class sharing
+    if (doc.shareLevel === 'class') {
+      return user.enrollments.some(e => 
+        e.courseId === doc.courseId && 
+        e.verified === true
+      );
+    }
+    
+    // School sharing requires email verification
+    if (doc.shareLevel === 'school') {
+      return user.emailVerified && user.schoolId === doc.schoolId;
+    }
+    
+    return true;
+  }
+}
+```
+
+## UI/UX Patterns
+
+### Upload Flow Screens
+
+1. **Document Type Selection**
+   ```
+   What are you uploading?
+   [📅 Schedule] [📄 Syllabus] [📝 Notes]
+   ```
+
+2. **Context Check** (for Notes)
+   ```
+   Which course is this for?
+   
+   🔍 Auto-detected: EECS 280
+   [✓ Correct] [Select Different]
+   
+   ⚠️ No syllabus on file for this course
+   [Upload Syllabus] [Continue]
+   ```
+
+3. **Sharing Option**
+   ```
+   Help your classmates?
+   
+   [🔒 Keep Private]
+   [👥 Share with EECS 280 Students]
+   [🏫 Share with U-M Students]
+   
+   ℹ️ What gets shared: [Learn more]
+   ```
+
+### Progressive Enhancement
+
+- **Anonymous Preview**: Show what we can extract before requiring signup
+- **Gradual Context**: Start with minimal info, add more as needed
+- **Smart Suggestions**: "Based on this content, is this for EECS 280?"
+- **Batch Operations**: "Upload all syllabi at once"
+
+## Privacy & Moderation
+
+### Auto-Moderation Rules
+- Remove personal information (emails, phone numbers)
+- Flag potential exam/quiz content
+- Detect copyrighted material
+- Check for inappropriate content
+
+### User Controls
+- View all shared documents
+- Revoke sharing anytime
+- See who accessed (aggregate stats)
+- Report inappropriate content
+
+## Success Metrics
+
+1. **Upload Completion Rate**: % who finish upload flow
+2. **Context Association Rate**: % with proper course linkage  
+3. **Sharing Adoption**: % who share at least one document
+4. **Community Value**: # students helped by shared content
+5. **Quality Score**: Upvotes/downvotes on shared content
+
+## Open Questions
+
+1. **Incentives**: How do we encourage quality sharing?
+   - Reputation points?
+   - Early access features?
+   - Study group formation?
+
+2. **Moderation Scale**: How to handle at 10k+ documents?
+   - Auto-moderation thresholds?
+   - Community moderation?
+   - Trusted contributor program?
+
+3. **Cross-Semester**: How to handle document relevance over time?
+   - Archive old syllabi?
+   - Version tracking?
+   - "Updated for Fall 2025" tags?
+
+## Next Steps
+
+1. User research on sharing willingness
+2. Legal review of content sharing
+3. Design mockups for sharing flows
+4. Technical spike on moderation systems
+5. Define MVP scope for Phase 1
+
+---
+
+*This is a living document. Feedback and iterations welcome.*

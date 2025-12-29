@@ -1,0 +1,842 @@
+---
+title: "Entity System Guide"
+description: "This guide explains how to integrate the `@dormway/core` entity system into DormWay services."
+---
+
+# Entity System Guide
+
+This guide explains how to integrate the `@dormway/core` entity system into DormWay services.
+
+## Overview
+
+The entity system provides:
+- **Domain Entities**: Campus, City, Course, Syllabus, Student, Term
+- **Singleton Factories**: CRUD operations with caching
+- **Lazy Loading**: Relationships fetched on-demand
+- **Type Safety**: Full TypeScript support with `ServiceResult<T>`
+
+**Related Documentation:**
+- [API v2 Design - Resource-Oriented REST](/docs/engineering/architecture/api-v2-design-resource-oriented-rest) - API endpoints using entity system
+- [DormWay Core Library (@dormway-core)](/docs/engineering/technical/dormway-core-library-dormway-core) - Core library overview
+
+## Quick Start
+
+### 1. Install the Package
+
+```bash
+npm install @dormway/core
+```
+
+### 2. Initialize Factories at Startup
+
+Factories must be initialized once at application startup, before any routes or handlers execute.
+
+```typescript
+// src/index.ts or src/server.ts
+import { Pool } from 'pg';
+import {
+  initializeCampusFactory,
+  initializeCityFactory,
+  initializeCourseFactory,
+  initializeSyllabusFactory,
+  initializeStudentFactory,
+  initializeTermFactory,
+} from '@dormway/core';
+
+async function initializeFactories(pool: Pool) {
+  // All factories share the same pool
+  // cacheAdapter is optional (for Redis caching)
+  const config = { pool };
+
+  await initializeCampusFactory(config);
+  await initializeCityFactory(config);
+  await initializeCourseFactory(config);
+  await initializeSyllabusFactory(config);
+  await initializeStudentFactory(config);
+  await initializeTermFactory(config);
+
+  console.log('Entity factories initialized');
+}
+
+// Call during app startup
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+await initializeFactories(pool);
+```
+
+### 3. Use Factories in Your Code
+
+```typescript
+import { getCampusFactory } from '@dormway/core';
+
+async function getCampusDetails(campusId: string) {
+  const factory = getCampusFactory();
+  const result = await factory.getById(campusId);
+
+  if (!result.success) {
+    throw new Error(result.error);
+  }
+
+  return result.data;
+}
+```
+
+## Service Integration Patterns
+
+### API Router (Express)
+
+```typescript
+// routes/campuses.ts
+import { Router } from 'express';
+import { getCampusFactory } from '@dormway/core';
+
+const router = Router();
+
+router.get('/:id', async (req, res) => {
+  const factory = getCampusFactory();
+  const result = await factory.getById(req.params.id);
+
+  if (!result.success) {
+    return res.status(500).json({ error: result.error });
+  }
+
+  if (!result.data) {
+    return res.status(404).json({ error: 'Campus not found' });
+  }
+
+  res.json({ data: result.data });
+});
+
+export default router;
+```
+
+### Engine (Temporal Activities)
+
+```typescript
+// activities/campus.activities.ts
+import { getCampusFactory, getCityFactory } from '@dormway/core';
+
+export async function getCampusWithCity(campusId: string) {
+  const campusFactory = getCampusFactory();
+  const result = await campusFactory.getById(campusId);
+
+  if (!result.success || !result.data) {
+    return null;
+  }
+
+  const campus = result.data;
+
+  // Lazy-load the city relationship
+  const city = await campus.getCity();
+
+  return {
+    campus: {
+      id: campus.id,
+      name: campus.name,
+      emailDomain: campus.emailDomain,
+    },
+    city: city ? {
+      id: city.id,
+      name: city.name,
+      state: city.state,
+      timezone: city.timezone,
+    } : null,
+  };
+}
+
+export async function getStudentCourses(userId: string) {
+  const { getStudentFactory } = await import('@dormway/core');
+  const factory = getStudentFactory();
+
+  const result = await factory.getByUserId(userId);
+  if (!result.success || !result.data) {
+    return [];
+  }
+
+  const student = result.data;
+  const courses = await student.getCourses();
+
+  return courses.map(course => ({
+    id: course.id,
+    name: course.name,
+    code: course.code,
+    canvasCourseId: course.canvasCourseId,
+  }));
+}
+```
+
+### Background Jobs / Scripts
+
+```typescript
+// scripts/sync-campuses.ts
+import { Pool } from 'pg';
+import {
+  initializeCampusFactory,
+  getCampusFactory,
+  resetCampusFactory,
+} from '@dormway/core';
+
+async function main() {
+  const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+
+  try {
+    // Initialize factory for this script
+    await initializeCampusFactory({ pool });
+
+    const factory = getCampusFactory();
+    const result = await factory.list({ limit: 100 });
+
+    if (result.success) {
+      console.log(`Found ${result.data.total} campuses`);
+      for (const campus of result.data.items) {
+        console.log(`- ${campus.name} (${campus.emailDomain})`);
+      }
+    }
+  } finally {
+    // Cleanup
+    resetCampusFactory();
+    await pool.end();
+  }
+}
+
+main().catch(console.error);
+```
+
+## ServiceResult Pattern
+
+All factory methods return `ServiceResult<T>`:
+
+```typescript
+type ServiceResult<T> =
+  | { success: true; data: T }
+  | { success: false; error: string };
+```
+
+### Handling Results
+
+```typescript
+// Pattern 1: Guard clause
+const result = await factory.getById(id);
+if (!result.success) {
+  throw new Error(result.error);
+}
+const entity = result.data; // T | null
+
+// Pattern 2: Early return
+const result = await factory.getById(id);
+if (!result.success) {
+  return { error: result.error };
+}
+if (!result.data) {
+  return { error: 'Not found' };
+}
+return { data: result.data };
+
+// Pattern 3: Optional chaining
+const result = await factory.getById(id);
+const name = result.success ? result.data?.name : null;
+```
+
+### Paginated Results
+
+List operations return `PaginatedResult<T>`:
+
+```typescript
+interface PaginatedResult<T> {
+  items: T[];
+  total: number;
+  hasMore: boolean;
+}
+
+const result = await factory.list({ limit: 20, offset: 40 });
+if (result.success) {
+  console.log(`Page 3 of ${Math.ceil(result.data.total / 20)}`);
+  console.log(`Items: ${result.data.items.length}`);
+  console.log(`Has more: ${result.data.hasMore}`);
+}
+```
+
+## Entity Reference
+
+### Campus
+
+```typescript
+interface Campus {
+  id: string;
+  name: string;
+  emailDomain: string | null;
+  metadata: Record<string, unknown>;
+  createdAt: Date;
+  updatedAt: Date;
+
+  // Lazy-loaded relationships
+  getCity(): Promise<City | null>;
+  getCourses(): Promise<Course[]>;
+  getStudents(): Promise<Student[]>;
+}
+```
+
+**Factory Methods:**
+- `getById(id)` - Get by ID
+- `list({ limit, offset })` - Paginated list
+- `searchByName(query, limit)` - Search by name
+- `getByEmailDomain(email)` - Find by email domain
+
+### City
+
+```typescript
+interface City {
+  id: string;
+  name: string;
+  state: string | null;
+  timezone: string | null;
+  metadata: Record<string, unknown>;
+  createdAt: Date;
+  updatedAt: Date;
+
+  // Lazy-loaded relationships
+  getCampuses(): Promise<Campus[]>;
+
+  // Lazy-loaded service_data
+  getWeather(): Promise<WeatherData | null>;
+  getTransit(): Promise<TransitData | null>;
+}
+```
+
+**Factory Methods:**
+- `getById(id)` - Get by ID
+- `list({ limit, offset })` - Paginated list
+- `searchByName(query, limit)` - Search by name
+
+### Course
+
+```typescript
+interface Course {
+  id: string;
+  name: string;
+  code: string | null;
+  canvasCourseId: string | null;
+  campusContextId: string;
+  metadata: Record<string, unknown>;
+  createdAt: Date;
+  updatedAt: Date;
+
+  // Lazy-loaded relationships
+  getSyllabus(): Promise<Syllabus | null>;
+  getCalendarEvents(): Promise<CalendarEvent[]>;
+}
+```
+
+**Factory Methods:**
+- `getById(id)` - Get by ID
+- `list({ limit, offset })` - Paginated list
+- `getByCanvasCourseId(canvasId)` - Find by Canvas ID
+- `getByCampus(campusId, options)` - Courses in campus
+
+### Syllabus
+
+```typescript
+interface Syllabus {
+  id: string;
+  courseContextId: string;
+  documentUrl: string | null;
+
+  // Parsed content (nullable)
+  assignments: Assignment[] | null;
+  meetings: Meeting[] | null;
+  policies: Policy[] | null;
+
+  metadata: Record<string, unknown>;
+  createdAt: Date;
+  updatedAt: Date;
+}
+```
+
+**Factory Methods:**
+- `getById(id)` - Get by ID
+- `list({ limit, offset, courseContextId? })` - Paginated list
+- `getForCourse(courseContextId)` - Get syllabus for course
+
+### Student
+
+```typescript
+interface Student {
+  id: string;
+  userId: string;
+  name: string | null;
+  email: string | null;
+  campusContextId: string;
+  metadata: Record<string, unknown>;
+  createdAt: Date;
+  updatedAt: Date;
+
+  // Lazy-loaded relationships
+  getCampus(): Promise<Campus | null>;
+  getCourses(): Promise<Course[]>;
+  getTerms(): Promise<Term[]>;
+  getCurrentTerm(): Promise<Term | null>;
+}
+```
+
+**Factory Methods:**
+- `getById(id)` - Get by ID
+- `getByUserId(userId)` - Find by user ID
+- `list({ limit, offset })` - Paginated list (admin)
+- `searchByName(query, limit)` - Search by name (admin)
+
+### Term
+
+```typescript
+interface Term {
+  id: string;
+  studentContextId: string;
+  term: string;  // 'Fall', 'Winter', 'Spring', 'Summer'
+  year: number;
+  startDate: Date | null;
+  endDate: Date | null;
+  isCurrent: boolean;
+  metadata: Record<string, unknown>;
+  createdAt: Date;
+  updatedAt: Date;
+}
+```
+
+**Factory Methods:**
+- `getById(id)` - Get by ID
+- `getByStudentAndTerm(studentId, term, year)` - Specific term
+- `getStudentTerms(studentId)` - All terms for student
+- `getCurrentTerm(studentId)` - Current active term
+
+## Service Data Lazy Loaders (DORM-754)
+
+Each entity provides typed lazy loaders for accessing processed `service_data` from the database. These methods use the `lazyLoadServiceData<T>(cacheKey, method)` helper from `BaseEntity`, which includes in-memory caching via `EntityCache`.
+
+### Course Entity - Syllabus Data
+
+| Method | service_data.method | Return Type |
+|--------|---------------------|-------------|
+| `getProcessedSyllabus()` | `processed_syllabus_crew` | `ProcessedSyllabus \| null` |
+| `getWebExperience()` | (via syllabus) | `WebExperience \| null` |
+| `getAssignments()` | (via syllabus) | `SyllabusAssignment[]` |
+| `getGrading()` | (via syllabus) | `GradingStructure \| null` |
+| `getCriticalDates()` | (via syllabus) | `CriticalDate[]` |
+| `getWeeklyWorkload()` | (via syllabus) | `WeeklyWorkload[]` |
+| `getGeneratedInsights()` | (via syllabus) | `GeneratedInsights \| null` |
+| `getCalendarEvents()` | `fetch_ics_calendar` | `CalendarEvent[]` |
+
+**Example:**
+```typescript
+const course = await courseFactory.getById(courseId);
+if (course.success && course.data) {
+  // Get all syllabus-derived data
+  const syllabus = await course.data.getProcessedSyllabus();
+  const assignments = await course.data.getAssignments();
+  const grading = await course.data.getGrading();
+
+  // Critical dates for exam prep
+  const criticalDates = await course.data.getCriticalDates();
+}
+```
+
+### Term Entity - BrainGains & Predictions
+
+| Method | service_data.method | Return Type |
+|--------|---------------------|-------------|
+| `getBrainGainsWorkloadAnalysis()` | `braingains_semester_workload_analysis` | `BrainGainsWorkloadAnalysis \| null` |
+| `getBrainGainsConflictAnalysis()` | `braingains_schedule_conflict_detection` | `BrainGainsConflictAnalysis \| null` |
+| `getCrossCourseInsights()` | `braingains_cross_course_insights` | `BrainGainsCrossCourseInsights \| null` |
+| `getEarlyWarnings()` | `braingains_early_warnings` | `EarlyWarning[]` |
+| `getSemesterPlan()` | `braingains_semester_planning` | `SemesterPlan \| null` |
+| `getWorkloadPrediction()` | `term_workload_prediction` | `TermWorkloadPrediction \| null` |
+| `getTrendAnalysis()` | `term_trend_analysis` | `TermTrendAnalysis \| null` |
+| `getPredictedRisks()` | `predicted_risk_events` | `PredictedRiskEvent[]` |
+| `getScheduleContinuity()` | `schedule_continuity` | `ScheduleContinuity[]` |
+| `getPredictions()` | (aggregate) | `TermPredictions \| null` |
+
+**Example:**
+```typescript
+const term = await termFactory.getByStudentAndTerm(studentId, 'Fall', 2025);
+if (term.success && term.data) {
+  // BrainGains analysis
+  const workload = await term.data.getBrainGainsWorkloadAnalysis();
+  const conflicts = await term.data.getBrainGainsConflictAnalysis();
+  const warnings = await term.data.getEarlyWarnings();
+
+  // Aggregated predictions (combines multiple methods)
+  const predictions = await term.data.getPredictions();
+}
+```
+
+### Student Entity - Daily Intelligence
+
+| Method | service_data.method | Return Type |
+|--------|---------------------|-------------|
+| `getDayPlan()` | `dayplan` | `DayPlan \| null` |
+| `getContextUpdate()` | `dayplan_context_update` | `ContextUpdate \| null` |
+| `getContextPrediction()` | `context_prediction_response` | `ContextPrediction \| null` |
+| `getOnboardingData()` | `onboarding_data` | `OnboardingData \| null` |
+| `getIntelligence()` | `processed_student_daily_intelligence` | `DailyIntelligence \| null` |
+| `getHealthData()` | `mobile_user_health_data` | `HealthData \| null` |
+
+**Example:**
+```typescript
+const student = await studentFactory.getByUserId(userId);
+if (student.success && student.data) {
+  // Today's plan
+  const dayplan = await student.data.getDayPlan();
+
+  // Widget data
+  const intelligence = await student.data.getIntelligence();
+
+  // Health metrics from mobile
+  const health = await student.data.getHealthData();
+}
+```
+
+### Campus Entity - Context Widgets
+
+| Method | service_data.method | Return Type |
+|--------|---------------------|-------------|
+| `getPerplexityData()` | `processed_perplexity_campus_data` | `PerplexityCampusData \| null` |
+| `getEventsWidget()` | `processed_campus_events_crew` | `CampusWidget \| null` |
+| `getLogisticsWidget()` | `processed_campus_logistics_crew` | `CampusWidget \| null` |
+| `getNewsWidget()` | `processed_campus_news_crew` | `CampusWidget \| null` |
+| `getParkingContext()` | `processed_parking_context` | `ParkingContext \| null` |
+| `getBulletin()` | `processed_campus_bulletin` | `CampusBulletin \| null` |
+
+**Example:**
+```typescript
+const campus = await campusFactory.getById(campusId);
+if (campus.success && campus.data) {
+  // Campus widgets for dashboard
+  const events = await campus.data.getEventsWidget();
+  const news = await campus.data.getNewsWidget();
+  const parking = await campus.data.getParkingContext();
+
+  // Announcements and alerts
+  const bulletin = await campus.data.getBulletin();
+}
+```
+
+### City Entity - Location Services
+
+| Method | service_data.method | Return Type |
+|--------|---------------------|-------------|
+| `getWeather()` | `fetch_weather` | `WeatherData \| null` |
+| `getForecast()` | `fetch_forecast` | `ForecastData \| null` |
+| `getNews()` | `fetch_news` | `CityNews \| null` |
+| `getTransit()` | `fetch_transit` | `TransitData \| null` |
+| `getProcessedContext()` | `processed_city_context` | `CityContextWidget \| null` |
+
+**Example:**
+```typescript
+const city = await cityFactory.getById(cityId);
+if (city.success && city.data) {
+  // Weather for dashboard
+  const weather = await city.data.getWeather();
+  const forecast = await city.data.getForecast();
+
+  // Traffic and transit
+  const transit = await city.data.getTransit();
+}
+```
+
+### Caching Behavior
+
+All lazy loaders use the `EntityCache` with configurable TTL:
+
+```typescript
+// Default TTL: 5 minutes
+async getWeather(): Promise<WeatherData | null> {
+  return this.lazyLoadServiceData<WeatherData>('weather', 'fetch_weather');
+}
+
+// Custom TTL: 30 minutes
+async getPerplexityData(): Promise<PerplexityCampusData | null> {
+  return this.lazyLoadServiceData<PerplexityCampusData>(
+    'perplexityData',
+    'processed_perplexity_campus_data',
+    1800000  // 30 min TTL
+  );
+}
+```
+
+Cache is cleared when:
+- Entity is garbage collected
+- `resetFactory()` is called
+- TTL expires
+
+## Testing
+
+### Mocking Factories
+
+```typescript
+// __tests__/campus.test.ts
+import { getCampusFactory, resetCampusFactory } from '@dormway/core';
+
+// Mock the module
+jest.mock('@dormway/core', () => ({
+  getCampusFactory: jest.fn(),
+  resetCampusFactory: jest.fn(),
+}));
+
+describe('Campus Service', () => {
+  const mockFactory = {
+    getById: jest.fn(),
+    list: jest.fn(),
+    searchByName: jest.fn(),
+  };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    (getCampusFactory as jest.Mock).mockReturnValue(mockFactory);
+  });
+
+  it('should get campus by ID', async () => {
+    mockFactory.getById.mockResolvedValue({
+      success: true,
+      data: { id: 'campus-1', name: 'Test University' },
+    });
+
+    const factory = getCampusFactory();
+    const result = await factory.getById('campus-1');
+
+    expect(result.success).toBe(true);
+    expect(result.data?.name).toBe('Test University');
+  });
+
+  it('should handle not found', async () => {
+    mockFactory.getById.mockResolvedValue({
+      success: true,
+      data: null,
+    });
+
+    const factory = getCampusFactory();
+    const result = await factory.getById('non-existent');
+
+    expect(result.success).toBe(true);
+    expect(result.data).toBeNull();
+  });
+
+  it('should handle errors', async () => {
+    mockFactory.getById.mockResolvedValue({
+      success: false,
+      error: 'Database error',
+    });
+
+    const factory = getCampusFactory();
+    const result = await factory.getById('campus-1');
+
+    expect(result.success).toBe(false);
+    expect(result.error).toBe('Database error');
+  });
+});
+```
+
+### Integration Tests
+
+For integration tests against a real database:
+
+```typescript
+import { Pool } from 'pg';
+import {
+  initializeCampusFactory,
+  getCampusFactory,
+  resetCampusFactory,
+} from '@dormway/core';
+
+describe('Campus Factory Integration', () => {
+  let pool: Pool;
+
+  beforeAll(async () => {
+    pool = new Pool({ connectionString: process.env.TEST_DATABASE_URL });
+    await initializeCampusFactory({ pool });
+  });
+
+  afterAll(async () => {
+    resetCampusFactory();
+    await pool.end();
+  });
+
+  it('should list campuses', async () => {
+    const factory = getCampusFactory();
+    const result = await factory.list({ limit: 10 });
+
+    expect(result.success).toBe(true);
+    expect(Array.isArray(result.data?.items)).toBe(true);
+  });
+});
+```
+
+## Migration from Direct Queries
+
+### Before (Direct SQL)
+
+```typescript
+// Old pattern - direct SQL queries
+async function getStudentCampus(userId: string) {
+  const pool = await getAuroraPool();
+  const result = await pool.query(`
+    SELECT c.id, c.name, c.metadata
+    FROM accounts a
+    JOIN contexts student_ctx ON student_ctx.user_id = a.id AND student_ctx.type = 'student'
+    JOIN contexts c ON c.id = student_ctx.parent_id AND c.type = 'campus'
+    WHERE a.id = $1
+  `, [userId]);
+
+  return result.rows[0] || null;
+}
+```
+
+### After (Entity System)
+
+```typescript
+// New pattern - entity system
+import { getStudentFactory } from '@dormway/core';
+
+async function getStudentCampus(userId: string) {
+  const factory = getStudentFactory();
+  const result = await factory.getByUserId(userId);
+
+  if (!result.success || !result.data) {
+    return null;
+  }
+
+  return result.data.getCampus();
+}
+```
+
+### Benefits
+
+1. **Type Safety**: Full TypeScript support, no `any` types
+2. **Consistency**: Same patterns across all services
+3. **Caching**: Built-in caching (when configured)
+4. **Testability**: Easy to mock in unit tests
+5. **Maintainability**: Schema changes handled in one place
+
+## Best Practices
+
+### 1. Initialize Once, Use Everywhere
+
+```typescript
+// DO: Initialize at startup
+await initializeCampusFactory({ pool });
+
+// DON'T: Initialize in each handler
+router.get('/:id', async (req, res) => {
+  await initializeCampusFactory({ pool }); // BAD!
+  // ...
+});
+```
+
+### 2. Handle Both Success and Error Cases
+
+```typescript
+// DO: Check success before using data
+if (!result.success) {
+  return handleError(result.error);
+}
+
+// DON'T: Assume success
+const campus = result.data; // May be undefined!
+```
+
+### 3. Use Lazy Loading Judiciously
+
+```typescript
+// DO: Load relationships only when needed
+const campus = result.data;
+if (includeCity) {
+  campus.city = await campus.getCity();
+}
+
+// DON'T: Always load everything
+const campus = result.data;
+const city = await campus.getCity();        // May not be needed
+const courses = await campus.getCourses();  // May not be needed
+```
+
+### 4. Prefer Factory Methods Over Direct Entity Access
+
+```typescript
+// DO: Use factory for lookups
+const result = await syllabusFactory.getForCourse(courseId);
+
+// DON'T: Navigate through entities unnecessarily
+const courseResult = await courseFactory.getById(courseId);
+const syllabus = await courseResult.data?.getSyllabus();
+```
+
+### 5. Reset Factories in Tests
+
+```typescript
+afterEach(() => {
+  resetCampusFactory();
+  resetCityFactory();
+  // etc.
+});
+```
+
+## Troubleshooting
+
+### "Factory not initialized"
+
+```
+Error: CampusFactory not initialized. Call initializeCampusFactory() first.
+```
+
+**Solution**: Ensure `initializeCampusFactory()` is called before using `getCampusFactory()`.
+
+### Null Data After Success
+
+```typescript
+const result = await factory.getById(id);
+// result.success is true, but result.data is null
+```
+
+**This is expected** - it means the entity wasn't found. Handle with:
+
+```typescript
+if (!result.data) {
+  return { error: 'Not found' };
+}
+```
+
+### Lazy Loading Returns Empty
+
+If lazy-loaded relationships return `null` or `[]` unexpectedly:
+
+1. Check if the relationship exists in the database
+2. Verify foreign keys are correct
+3. Check for `is_active = false` on related contexts
+
+## API v2 Routes Reference
+
+The entity system backs API v2 at `/api/v2/`:
+
+| Route | Factory | Method |
+|-------|---------|--------|
+| `GET /campuses` | CampusFactory | `list()` |
+| `GET /campuses/:id` | CampusFactory | `getById()` |
+| `GET /campuses/search` | CampusFactory | `searchByName()` |
+| `GET /campuses/by-email/:email` | CampusFactory | `getByEmailDomain()` |
+| `GET /cities` | CityFactory | `list()` |
+| `GET /cities/:id` | CityFactory | `getById()` |
+| `GET /courses` | CourseFactory | `list()` |
+| `GET /courses/:id` | CourseFactory | `getById()` |
+| `GET /courses/by-canvas/:id` | CourseFactory | `getByCanvasCourseId()` |
+| `GET /syllabi` | SyllabusFactory | `list()` |
+| `GET /syllabi/:id` | SyllabusFactory | `getById()` |
+| `GET /students/me` | StudentFactory | `getByUserId()` |
+| `GET /terms/:studentId/:term/:year` | TermFactory | `getByStudentAndTerm()` |
+
+See `services/api-router/src/routes/v2/` for full implementation.
+
+## Related Documentation
+
+- [API v2 Design - Resource-Oriented REST](/docs/engineering/architecture/api-v2-design-resource-oriented-rest) - Full API v2 implementation details
+- [DormWay Core Library (@dormway-core)](/docs/engineering/technical/dormway-core-library-dormway-core) - Core library overview
+- [Migration Guide](/docs/engineering/technical/dormway-core/migration-guide) - Migrating services to use @dormway/core
+
+---
+
+*Last Updated: 2025-12-13 (DORM-754 - Service Data Lazy Loaders)*

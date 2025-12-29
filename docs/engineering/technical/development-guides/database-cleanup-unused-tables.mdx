@@ -1,0 +1,81 @@
+---
+title: "Database Cleanup   Unused Tables"
+description: "Created: 2025-07-18 Tags: #database #cleanup #technical-debt"
+---
+
+# Database Cleanup - Unused Tables
+
+Created: 2025-07-18
+Tags: #database #cleanup #technical-debt
+
+## Overview
+
+During the real-time notification implementation, we discovered several database tables that are no longer in use and should be cleaned up.
+
+## Tables to Remove
+
+### 1. `engine_user_notification_preferences`
+- **Status**: NOT USED
+- **Replaced by**: `user_preferences` table with key='preferences'
+- **Issue**: Code was looking for this table but actual preferences are stored in the generic key-value `user_preferences` table
+- **Action**: Drop this table after confirming no other services use it
+
+### 2. Potential Other Unused Tables
+Need to audit:
+- Any other `engine_*` prefixed tables that might be duplicates
+- Tables related to old notification system before Customer.io migration
+
+## Current Notification Data Structure
+
+### Active Tables
+1. **`user_preferences`** - Stores all user preferences including notifications
+   ```sql
+   -- Notification preferences are nested in the JSON value
+   SELECT value->'notifications' FROM user_preferences 
+   WHERE user_id = ? AND key = 'preferences';
+   ```
+
+2. **`engine_notification_history`** - Stores sent notifications
+   ```sql
+   -- Tracks all notifications sent to users
+   SELECT * FROM engine_notification_history 
+   WHERE user_id = ? ORDER BY sent_at DESC;
+   ```
+
+## Migration Steps
+
+1. **Audit Usage**
+   ```sql
+   -- Check if engine_user_notification_preferences has any recent data
+   SELECT COUNT(*), MAX(created_at) 
+   FROM engine_user_notification_preferences;
+   ```
+
+2. **Verify No Active Reads**
+   - Search codebase for references to `engine_user_notification_preferences`
+   - Check logs for any queries to this table
+
+3. **Backup Data** (if needed)
+   ```sql
+   -- Create backup before dropping
+   CREATE TABLE engine_user_notification_preferences_backup AS 
+   SELECT * FROM engine_user_notification_preferences;
+   ```
+
+4. **Drop Table**
+   ```sql
+   DROP TABLE engine_user_notification_preferences;
+   ```
+
+## Code References to Fix
+
+1. **Supabase Service** (`/engine/src/utils/supabase.ts`)
+   - `getUserNotificationPreferences()` method - FIXED ✅
+   - Now correctly queries `user_preferences` table
+
+2. **Other Services**
+   - Need to audit all services for any references to the old table
+
+## Related Issues
+- [Real-Time Notifications Extension Guide](/docs/engineering/technical/mobile/real-time-notifications-extension-guide)
+- User Preferences Architecture

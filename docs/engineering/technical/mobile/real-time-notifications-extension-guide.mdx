@@ -1,0 +1,186 @@
+---
+title: "Real Time Notifications Extension Guide"
+description: "Created: 2025-07-18 Tags: #mobile #notifications #realtime #technical-guide"
+---
+
+# Real-Time Notifications Extension Guide
+
+Created: 2025-07-18
+Tags: #mobile #notifications #realtime #technical-guide
+
+## Overview
+
+This guide documents how to extend DormWay's real-time notification system to support new event types and notification scenarios.
+
+## Architecture Overview
+
+The real-time notification system follows this flow:
+1. iOS app → API Router → Ably → Engine (via ably-relay)
+2. Student Watcher workflow receives signals
+3. Contextual Notification workflow evaluates and sends notifications
+4. Customer.io delivers push notifications
+
+## Adding New Real-Time Event Types
+
+### 1. Define the Event Type
+
+Add your new event type to the `realTimeEventTypes` array in `/engine/src/workflows/studentWatcher.workflow.ts`:
+
+```typescript
+const realTimeEventTypes = [
+  'location.building_entry',
+  'location.building_exit', 
+  'location.campus_entry',
+  'location.campus_exit',
+  'your.new_event_type', // Add here
+  // ...
+];
+```
+
+### 2. Map Event to Contextual Category
+
+In the student watcher, map your specific event to a contextual category:
+
+```typescript
+if (data.type.startsWith('location.')) {
+  contextualEventType = 'location_change';
+  // Transform data...
+} else if (data.type === 'your.new_event_type') {
+  contextualEventType = 'your_category'; // Must be one of the ContextualEvent types
+  // Transform your data to match the expected interface
+}
+```
+
+### 3. Add Evaluation Logic
+
+In `/engine/src/activities/contextEvaluation.activities.ts`, add evaluation logic for your event:
+
+```typescript
+case 'your_category':
+  return evaluateYourCategory(userId, event.data as YourDataType, userPrefs.data);
+```
+
+Then implement the evaluation function:
+
+```typescript
+async function evaluateYourCategory(
+  userId: string,
+  data: YourDataType,
+  preferences: any
+): Promise<NotificationDecision> {
+  // Your logic to decide if notification should be sent
+  // Return decision with suggested message
+}
+```
+
+### 4. Configure Customer.io Template
+
+Add your notification type to the template mapping in `/engine/src/activities/notification.activities.ts`:
+
+```typescript
+const typeMapping: Record<string, string> = {
+  'your_notification_type': 'your_customerio_template_id',
+  // ...
+};
+```
+
+## Testing Real-Time Notifications
+
+### Test Mode
+
+All events with `testRun: true` will bypass evaluation and always send a notification using the `realtime_generic_push` template:
+
+```typescript
+const testPayload = {
+  type: 'your.new_event_type',
+  data: {
+    testRun: true, // This triggers test mode
+    // your test data
+  },
+  immediateProcessing: true,
+  requiresPush: true
+};
+```
+
+### Direct Temporal Testing
+
+Use the test script at `/engine/src/scripts/test-realtime-temporal-signal.ts`:
+
+```bash
+doppler run -- npx ts-node src/scripts/test-realtime-temporal-signal.ts
+```
+
+## Database Considerations
+
+### Current State
+- User preferences are stored in `user_preferences` table (key-value structure)
+- The `engine_user_notification_preferences` table is **NOT USED** and should be cleaned up
+- Notification history is stored in `engine_notification_history`
+
+### Preference Structure
+```sql
+-- User preferences are stored as JSON in the value column
+SELECT value->'notifications' FROM user_preferences 
+WHERE user_id = ? AND key = 'preferences';
+```
+
+## Rate Limiting
+
+Real-time notifications respect these limits:
+- **Hourly**: Maximum 3 notifications per hour
+- **Daily**: Configurable per user (default 10)
+
+The `checkNotificationRateLimit` activity enforces these limits automatically.
+
+## Common Issues and Solutions
+
+### Issue: "User has notifications disabled"
+**Solution**: Check that user has preferences in `user_preferences` table, not the unused `engine_user_notification_preferences` table.
+
+### Issue: "Unknown event type"
+**Solution**: Ensure your event type is mapped to a valid `ContextualEvent` category (location_change, context_change, etc.)
+
+### Issue: Template not found
+**Solution**: Use `realtime_generic_push` for testing or ensure your Customer.io template ID exists.
+
+## Event Data Requirements
+
+### Location Events
+```typescript
+{
+  type: 'location.building_entry',
+  data: {
+    coordinates: { lat: number, lng: number },
+    buildingId: string,
+    buildingName?: string,
+    floor?: number,
+    accuracy: number,
+    source: 'gps' | 'wifi' | 'beacon'
+  }
+}
+```
+
+### Context Change Events
+```typescript
+{
+  type: 'context.study_mode_start',
+  data: {
+    context: string,
+    location?: string,
+    confidence: number
+  }
+}
+```
+
+## Future Enhancements
+
+1. **On-device evaluation**: iOS 26+ will evaluate context locally
+2. **Template personalization**: AI-generated messages based on user personality
+3. **Rich media**: Support for images and action buttons
+4. **Batch notifications**: Group related events into single notification
+
+## Related Documentation
+- Push Notification Architecture
+- Customer.io Integration
+- Temporal Workflows
+- API Event Endpoints

@@ -1,0 +1,1490 @@
+---
+title: "API v2 Design   Resource Oriented REST"
+description: "1. **Consistency**: Standard REST patterns are well-understood by the team 2. **Less Fragility**: Simpler architecture with fewer moving parts than GraphQL 3..."
+---
+
+# API v2 Design - Resource-Oriented REST
+
+## Decision Summary
+
+**Status**: ✅ Implemented (DORM-739)
+**Date**: October 30, 2025 (design), December 12, 2025 (implementation)
+**Decision**: Build API v2 using **resource-oriented REST** over GraphQL
+
+### Key Rationale
+
+1. **Consistency**: Standard REST patterns are well-understood by the team
+2. **Less Fragility**: Simpler architecture with fewer moving parts than GraphQL
+3. **Leverage HTTP**: Use standard HTTP caching (ETags), status codes, and conventions
+4. **Incremental Migration**: Can coexist with current BFF endpoints during transition
+5. **Reuse Core Library**: Route all cross-cutting concerns (cache, realtime, analytics, Ragie, Customer.io, Temporal) through `@dormway/core` adapters to avoid reimplementing clients per endpoint
+
+---
+
+## ✅ Implementation Status (DORM-739)
+
+### What Was Built
+
+API v2 is now implemented in `services/api-router/src/routes/v2/` using the `@dormway/core` entity system.
+
+**Route Files Created:**
+- `campuses.routes.ts` - Campus CRUD + search + email detection
+- `cities.routes.ts` - City CRUD + search + weather/transit
+- `courses.routes.ts` - Course CRUD + Canvas ID lookup
+- `syllabi.routes.ts` - Syllabus CRUD + assignments/schedule/policies
+- `students.routes.ts` - Student profile + `/me` endpoints
+- `terms.routes.ts` - Term data by student/term/year
+
+**Supporting Files:**
+- `utils/entity-response.ts` - Standardized response helpers
+- `index.ts` - Route mounting
+
+### Implemented Routes
+
+```
+/api/v2/
+├── /campuses
+│   │   # PUBLIC endpoints (no auth required - DORM-755)
+│   ├── GET /typeahead?q=        # Campus search for onboarding
+│   ├── GET /spotlight           # Featured campuses for onboarding
+│   │
+│   │   # Authenticated endpoints
+│   ├── GET /                    # List campuses (paginated)
+│   ├── GET /search?q=name       # Search by name
+│   ├── GET /by-email/:email     # Find by email domain
+│   ├── GET /by-domain?domain=   # Find by domain directly (DORM-755)
+│   ├── GET /nearby?lat=&lon=    # PostGIS nearby search (DORM-755)
+│   ├── GET /:id                 # Get campus by ID
+│   ├── GET /:id/city            # Get campus's city
+│   ├── GET /:id/courses         # Get campus's courses
+│   ├── GET /:id/students        # Get campus's students
+│   ├── GET /:id/events          # Campus events widget
+│   ├── GET /:id/news            # Campus news widget
+│   ├── GET /:id/logistics       # Campus logistics widget
+│   ├── GET /:id/parking         # Campus parking info
+│   ├── GET /:id/bulletin        # Campus bulletin/announcements
+│   ├── GET /:id/info            # Campus info (Perplexity)
+│   ├── GET /:id/config          # Campus configuration data (DORM-755)
+│   └── GET /:id/current-term    # Campus current academic term (DORM-755)
+│
+├── /cities
+│   ├── GET /                    # List cities (paginated)
+│   ├── GET /search?q=name       # Search by name
+│   ├── GET /:id                 # Get city by ID
+│   ├── GET /:id/campuses        # Get city's campuses
+│   ├── GET /:id/weather         # Get city weather (lazy-loaded)
+│   └── GET /:id/transit         # Get city transit (lazy-loaded)
+│
+├── /courses
+│   ├── GET /                    # List courses (paginated)
+│   ├── GET /by-canvas/:canvasId # Find by Canvas ID
+│   ├── GET /:id                 # Get course by ID
+│   ├── GET /:id/syllabus        # Get course syllabus
+│   └── GET /:id/calendar-events # Get course events
+│
+├── /syllabi
+│   ├── GET /                    # List syllabi (paginated)
+│   ├── GET /:id                 # Get syllabus by ID (see query params below)
+│   ├── GET /:id/assignments     # Get syllabus assignments
+│   ├── GET /:id/schedule        # Get syllabus meetings
+│   ├── GET /:id/policies        # Get syllabus policies
+│   │
+│   │   Query params for GET /:id:
+│   │   - (none)        → Summary data (default toJSON)
+│   │   - ?full=true    → Curated full data including assignments, weekly analysis, policies, hidden insights
+│   │   - ?full=raw     → ALL raw data fields from service_data (55+ fields)
+│   │
+│   │   # Mutations (DORM-755)
+│   ├── POST /upload             # Upload syllabus file (multipart/form-data)
+│   ├── POST /:id/archive        # Archive course enrollment (changes dependency_type to has_taken)
+│   ├── POST /:id/unarchive      # Restore course enrollment (changes dependency_type to enrolled_in)
+│   └── PATCH /:id/status        # Update course status (active/completed/dropped)
+│
+├── /students
+│   ├── GET /                    # List all students (admin only)
+│   ├── GET /search?q=query      # Search students (admin only)
+│   ├── GET /me                  # Current user's profile
+│   ├── GET /me/courses          # Current user's courses
+│   ├── GET /me/terms            # Current user's terms
+│   ├── GET /me/current-term     # Current user's active term
+│   ├── GET /me/campus           # Current user's campus
+│   ├── GET /me/dayplan          # Current user's day plan
+│   ├── GET /me/intelligence     # Current user's daily intelligence
+│   ├── GET /me/health           # Current user's health data
+│   ├── GET /me/context          # Current user's context update
+│   ├── GET /me/context/prediction # Current user's context prediction
+│   ├── GET /me/onboarding       # Current user's onboarding data
+│   ├── GET /me/current-term/analysis   # Full term predictions (Phase 4)
+│   ├── GET /me/current-term/workload   # BrainGains workload analysis
+│   ├── GET /me/current-term/conflicts  # Schedule conflicts
+│   ├── GET /me/current-term/warnings   # Early warning alerts
+│   ├── GET /me/current-term/insights   # Cross-course insights
+│   ├── GET /me/current-term/summary    # Semester summary
+│   ├── GET /me/current-term/plan       # Semester plan
+│   ├── GET /me/current-term/trends     # Trend analysis with projections
+│   └── GET /:id                 # Get student by ID (admin only)
+│
+└── /terms (uses studentId = account ID, NOT studentContextId)
+    ├── GET /:studentId                         # Get student's terms
+    ├── GET /:studentId/current/analysis        # Full term predictions
+    ├── GET /:studentId/current/workload        # BrainGains workload
+    ├── GET /:studentId/current/conflicts       # Schedule conflicts
+    ├── GET /:studentId/current/warnings        # Early warnings
+    ├── GET /:studentId/current/insights        # Cross-course insights
+    ├── GET /:studentId/current/summary         # Semester summary
+    ├── GET /:studentId/current/plan            # Semester plan
+    ├── GET /:studentId/current/trends          # Trend analysis
+    ├── GET /:studentId/:term/:year             # Get specific term
+    ├── GET /:studentId/:term/:year/courses     # Get term courses
+    │
+    │   # Mutations (DORM-755)
+    ├── POST /process                           # Trigger semester processing for current user
+    └── POST /:studentId/process                # Trigger semester processing for student (admin)
+```
+
+### Response Format
+
+All v2 endpoints use a standardized response format:
+
+```typescript
+// Success - single entity
+{ success: true, data: { id, name, ... } }
+
+// Success - paginated list
+{ success: true, data: { items: [...], total: 100, hasMore: true } }
+
+// Not found
+{ success: false, error: "Not found" }
+
+// Error
+{ success: false, error: "Error message" }
+```
+
+### Entity System (`@dormway/core`)
+
+Routes are backed by the singleton factory pattern from `@dormway/core`:
+
+```typescript
+import { getCampusFactory, getCityFactory, ... } from '@dormway/core';
+
+// Factories provide CRUD operations
+const factory = getCampusFactory();
+const result = await factory.getById(id);
+
+// Result is ServiceResult<T>
+if (result.success) {
+  return result.data; // Campus entity
+} else {
+  return result.error; // Error message
+}
+```
+
+**Available Factories:**
+- `getCampusFactory()` - Campus operations
+- `getCityFactory()` - City operations
+- `getCourseFactory()` - Course operations
+- `getSyllabusFactory()` - Syllabus operations
+- `getStudentFactory()` - Student operations
+- `getTermFactory()` - Term operations
+
+### Integration Tests
+
+100 tests across 6 test suites in `services/api-router/src/__tests__/v2/`:
+- `campuses.test.ts` (18 tests)
+- `cities.test.ts` (17 tests)
+- `courses.test.ts` (17 tests)
+- `syllabi.test.ts` (16 tests)
+- `students.test.ts` (17 tests)
+- `terms.test.ts` (13 tests)
+
+Run tests: `cd services/api-router && npm test`
+
+### Usage Example
+
+```typescript
+// Get campus with city
+const campus = await fetch('/api/v2/campuses/campus-123');
+const city = await fetch('/api/v2/campuses/campus-123/city');
+
+// Get current user's courses
+const courses = await fetch('/api/v2/students/me/courses', {
+  headers: { Authorization: `Bearer ${token}` }
+});
+
+// Search campuses by name
+const results = await fetch('/api/v2/campuses/search?q=michigan&limit=10');
+
+// Find campus by email domain
+const campus = await fetch('/api/v2/campuses/by-email/umich.edu');
+```
+
+### Documentation Links
+
+- [Entity System Guide](/docs/engineering/technical/dormway-core/entity-system-guide) - Full guide for integrating entities in engine, crews, and other services
+  - Service integration patterns (API Router, Engine, scripts)
+  - Migration patterns from direct SQL to entity system
+  - Testing and mocking patterns
+- [DormWay Core Library (@dormway-core)](/docs/engineering/technical/dormway-core-library-dormway-core) - Core library overview
+- **Route Implementation**: `services/api-router/src/routes/v2/`
+  - Reference implementation for all endpoints
+
+---
+
+## Background
+
+### Previous GraphQL Evaluation (Q2 2025)
+
+DormWay previously evaluated **Hasura GraphQL** as a replacement for the BFF pattern. The team discovered that **90% of dashboard business logic was already computed and stored as processed data**, making GraphQL's flexibility less valuable than initially thought.
+
+**GraphQL was deprecated** in favor of:
+- Dashboard BFF v1 (`/dashboard/v1/composite`)
+- Direct Neon PostgreSQL queries
+- ETag-based HTTP caching
+- Ably for real-time updates
+
+### Current State (November 2025)
+
+The current API has **89 route files** with various patterns:
+- Mobile endpoints: `/api/mobile/*`
+- Admin endpoints: `/api/admin/*`
+- Dashboard BFF: `/dashboard/v1/composite`
+- Canvas integration: `/api/canvas/*`
+- Various service-specific routes
+
+**Pain Points**:
+- Tight coupling between frontend and specific endpoint shapes
+- Endpoints designed around use cases rather than resources
+- Difficult to evolve without breaking clients
+- Limited reusability across different client types
+- Core library now exists: api-router and engine are largely migrated to `@dormway/core` adapters (Redis, Ragie, Amplitude, Customer.io, Temporal) and domain services (contexts, service-data, preferences). Temporal adapter is used for workflow/schedule operations; legacy clients are being removed.
+
+### Post dormway-core Update (Nov 2025)
+
+- **Adapters**: api-router now uses core adapters for cache/realtime/analytics/Ragie/Customer.io/Temporal; keep using `@temporalio/worker` only for engine worker bootstrap.
+- **Ragie metadata**: Reserved keys (e.g., `document_type`) must be stripped before upload; centralize metadata sanitization for uploads.
+- **Scheduling**: Admin schedule CRUD now uses the core Temporal adapter; deprecate direct schedule handles in v2.
+- **Health/telemetry**: Prefer adapter health surfaces and structured logging; propagate `x-request-id` through adapters.
+- **BFF**: `/dashboard/v1/composite` remains canonical; v2 should coexist and gradually replace bespoke routes with resource-oriented endpoints backed by the same processed data.
+
+## Design Principles
+
+### 1. Resource-Oriented Design
+
+APIs should model **domain resources**, not UI screens or use cases.
+
+**Resources in DormWay**:
+- **Students** - user accounts with student context
+- **Courses** - academic courses with enrollments
+- **Campuses** - educational institutions
+- **Contexts** - hierarchical entities (general purpose)
+- **Assignments** - course work items
+- **Schedules** - time blocks and events
+- **DayPlans** - daily intelligent schedules
+- **Intelligence** - processed AI insights
+
+### 2. REST Design Patterns
+
+#### Standard URL Structure
+```
+GET    /api/v2/students/:id
+POST   /api/v2/students
+PATCH  /api/v2/students/:id
+DELETE /api/v2/students/:id
+
+GET    /api/v2/students/:id/courses
+GET    /api/v2/students/:id/dayplan
+GET    /api/v2/students/:id/intelligence
+```
+
+#### Use HTTP Methods Correctly
+- `GET` - Fetch resource(s) (idempotent, cacheable)
+- `POST` - Create new resource
+- `PUT` - Replace entire resource
+- `PATCH` - Partial update
+- `DELETE` - Remove resource
+
+#### Use HTTP Status Codes
+- `200 OK` - Success
+- `201 Created` - Resource created
+- `204 No Content` - Success with no body
+- `304 Not Modified` - ETag cache hit
+- `400 Bad Request` - Client error
+- `404 Not Found` - Resource doesn't exist
+- `409 Conflict` - Business logic conflict
+- `422 Unprocessable Entity` - Validation error
+- `500 Internal Server Error` - Server error
+
+### 3. Sparse Fieldsets & Inclusion
+
+Allow clients to request exactly the data they need:
+
+```
+GET /api/v2/students/:id?fields=id,name,email,campus
+
+GET /api/v2/students/:id?include=courses,dayplan,campus
+
+GET /api/v2/students/:id/courses?include=assignments,schedule&fields=id,name,code
+```
+
+**Benefits**:
+- Mobile apps can request minimal data (bandwidth savings)
+- Web apps can request richer data
+- Single endpoint serves multiple use cases
+- Reduces over-fetching
+
+### 4. Filtering & Pagination
+
+```
+GET /api/v2/courses?campus_id={id}&active=true&page=1&limit=50
+
+GET /api/v2/students?search=john&campus_id={id}&sort=name&order=asc
+```
+
+### 5. Versioning Strategy
+
+- **URL versioning**: `/api/v2/*` (explicit, easy to route)
+- Keep v1 running during migration
+- Document deprecation timeline
+- Use `Sunset` HTTP header for deprecated endpoints
+
+## API v2 Resource Design
+
+### Students
+
+```http
+# Get student profile
+GET /api/v2/students/:id
+Query Params:
+  - include: courses,campus,city,dayplan,intelligence
+  - fields: id,name,email,phone,created_at
+
+Response:
+{
+  "id": "uuid",
+  "name": "John Doe",
+  "email": "john@umich.edu",
+  "phone": "+1234567890",
+  "created_at": "2025-01-15T10:00:00Z",
+  "campus": {
+    "id": "uuid",
+    "name": "University of Michigan",
+    "city": "Ann Arbor",
+    "state": "MI"
+  },
+  "courses": [
+    {
+      "id": "uuid",
+      "code": "EECS 281",
+      "name": "Data Structures and Algorithms",
+      "semester": "Fall 2025"
+    }
+  ]
+}
+
+# Get student's courses
+GET /api/v2/students/:id/courses
+Query Params:
+  - active: true|false
+  - semester: "Fall 2025"
+  - include: assignments,schedule,syllabus
+
+# Get student's daily plan
+GET /api/v2/students/:id/dayplan
+Query Params:
+  - date: YYYY-MM-DD (default: today)
+  - include: weather,events,actions,intelligence
+
+# Get student's intelligence/insights
+GET /api/v2/students/:id/intelligence
+Query Params:
+  - type: academic,wellness,social
+  - since: ISO8601 timestamp
+```
+
+### Courses
+
+```http
+# Get course details
+GET /api/v2/courses/:id
+Query Params:
+  - include: students,assignments,schedule,syllabus,campus
+
+Response:
+{
+  "id": "uuid",
+  "code": "EECS 281",
+  "name": "Data Structures and Algorithms",
+  "semester": "Fall 2025",
+  "credits": 4,
+  "campus": {
+    "id": "uuid",
+    "name": "University of Michigan"
+  },
+  "assignments": [
+    {
+      "id": "uuid",
+      "title": "Project 1: Euchre",
+      "due_date": "2025-09-15T23:59:00Z",
+      "points": 100
+    }
+  ]
+}
+
+# List courses
+GET /api/v2/courses
+Query Params:
+  - campus_id: uuid
+  - semester: "Fall 2025"
+  - student_id: uuid (enrolled courses)
+  - active: true|false
+  - search: "data structures"
+
+# Get course assignments
+GET /api/v2/courses/:id/assignments
+Query Params:
+  - status: upcoming,overdue,completed
+  - due_after: ISO8601 timestamp
+  - due_before: ISO8601 timestamp
+
+# Get course schedule
+GET /api/v2/courses/:id/schedule
+Query Params:
+  - start_date: YYYY-MM-DD
+  - end_date: YYYY-MM-DD
+```
+
+### Campuses
+
+```http
+# Get campus details
+GET /api/v2/campuses/:id
+Query Params:
+  - include: city,courses,students,weather
+
+Response:
+{
+  "id": "uuid",
+  "name": "University of Michigan",
+  "domain": "umich.edu",
+  "city": {
+    "id": "uuid",
+    "name": "Ann Arbor",
+    "state": "MI",
+    "timezone": "America/Detroit"
+  },
+  "location": {
+    "latitude": 42.2808,
+    "longitude": -83.7430
+  },
+  "metadata": {
+    "enrollment": 47000,
+    "founded": 1817
+  }
+}
+
+# List campuses
+GET /api/v2/campuses
+Query Params:
+  - city_id: uuid
+  - state: "MI"
+  - search: "michigan"
+  - near: lat,lon (spatial query)
+  - radius: meters
+
+# Detect campus from location
+POST /api/v2/campuses/detect
+Body:
+{
+  "latitude": 42.2808,
+  "longitude": -83.7430,
+  "accuracy": 10.0
+}
+```
+
+### Contexts (General Hierarchy)
+
+```http
+# Get context
+GET /api/v2/contexts/:id
+Query Params:
+  - include: parent,children,dependencies
+
+Response:
+{
+  "id": "uuid",
+  "type": "course",
+  "name": "EECS 281",
+  "parent_id": "uuid",
+  "metadata": { ... },
+  "parent": {
+    "id": "uuid",
+    "type": "student",
+    "name": "John Doe"
+  },
+  "children": [],
+  "dependencies": [
+    {
+      "type": "prerequisite",
+      "context": {
+        "id": "uuid",
+        "type": "course",
+        "name": "EECS 280"
+      }
+    }
+  ]
+}
+
+# Query contexts
+GET /api/v2/contexts
+Query Params:
+  - type: city,campus,course,student,building
+  - parent_id: uuid
+  - user_id: uuid
+  - active: true|false
+```
+
+### DayPlans
+
+```http
+# Get student's dayplan for a date
+GET /api/v2/students/:id/dayplan
+Query Params:
+  - date: YYYY-MM-DD (default: today)
+  - include: weather,events,actions,intelligence
+
+Response:
+{
+  "date": "2025-10-30",
+  "student_id": "uuid",
+  "events": [
+    {
+      "id": "uuid",
+      "type": "class",
+      "title": "EECS 281 Lecture",
+      "start_time": "10:00:00",
+      "end_time": "11:30:00",
+      "location": "1500 EECS",
+      "course_id": "uuid"
+    }
+  ],
+  "actions": [
+    {
+      "id": "uuid",
+      "type": "study",
+      "title": "Review data structures notes",
+      "priority": "high",
+      "estimated_minutes": 60
+    }
+  ],
+  "weather": {
+    "temperature": 58,
+    "condition": "Partly cloudy",
+    "feels_like": 55
+  },
+  "intelligence": {
+    "focus_hours": ["9:00-11:00", "14:00-16:00"],
+    "wellness_score": 8.5,
+    "recommendations": [
+      "Consider studying in the library during your focus hours"
+    ]
+  }
+}
+
+# Get dayplan range
+GET /api/v2/students/:id/dayplan/range
+Query Params:
+  - start_date: YYYY-MM-DD
+  - end_date: YYYY-MM-DD
+```
+
+### Intelligence/Insights
+
+```http
+# Get student intelligence
+GET /api/v2/students/:id/intelligence
+Query Params:
+  - type: academic,wellness,social,all
+  - since: ISO8601 timestamp
+  - include: context,recommendations
+
+Response:
+{
+  "student_id": "uuid",
+  "intelligence": [
+    {
+      "id": "uuid",
+      "type": "academic",
+      "category": "workload",
+      "title": "Heavy assignment week ahead",
+      "description": "You have 3 major assignments due next week",
+      "severity": "medium",
+      "recommendations": [
+        "Start EECS 281 project early",
+        "Block study time on Saturday"
+      ],
+      "created_at": "2025-10-30T08:00:00Z",
+      "context": {
+        "courses": ["uuid1", "uuid2"],
+        "assignments": ["uuid3", "uuid4"]
+      }
+    }
+  ]
+}
+
+# Get intelligence for a specific context
+GET /api/v2/contexts/:id/intelligence
+```
+
+## Implementation Strategy
+
+### Phase 1: Foundation (2-4 hours)
+
+1. **Create API v2 router structure**
+   ```typescript
+   // services/api-router/src/routes/v2/index.ts
+   export const v2Router = Router();
+
+   v2Router.use('/students', studentsRouter);
+   v2Router.use('/courses', coursesRouter);
+   v2Router.use('/campuses', campusesRouter);
+   v2Router.use('/contexts', contextsRouter);
+   ```
+
+2. **Implement base middleware**
+   - Authentication (Clerk JWT validation)
+   - Authorization (role checks)
+   - Query parameter parsing (fields, include, pagination)
+   - Response formatting (consistent structure)
+   - Error handling (standardized error responses)
+
+3. **Create shared utilities**
+   ```typescript
+   // services/api-router/src/utils/v2/
+   - query-parser.ts      // Parse ?fields= and ?include=
+   - response-builder.ts  // Build consistent responses
+   - validators.ts        // Input validation
+   - pagination.ts        // Offset/limit helpers
+   ```
+
+### Phase 2: Core Resources (8-12 hours)
+
+Implement resources in priority order:
+
+1. **Students** (highest priority)
+   - `GET /api/v2/students/:id`
+   - `GET /api/v2/students/:id/courses`
+   - `GET /api/v2/students/:id/dayplan`
+
+2. **Courses**
+   - `GET /api/v2/courses/:id`
+   - `GET /api/v2/courses?campus_id=...`
+   - `GET /api/v2/courses/:id/assignments`
+
+3. **Campuses**
+   - `GET /api/v2/campuses/:id`
+   - `POST /api/v2/campuses/detect`
+
+4. **Contexts** (general purpose)
+   - `GET /api/v2/contexts/:id`
+   - `GET /api/v2/contexts?type=...&parent_id=...`
+
+### Phase 3: Advanced Features (6-10 hours)
+
+1. **Filtering & Search**
+   - Text search across resources
+   - Complex filters (date ranges, status, etc.)
+   - Spatial queries (campuses near location)
+
+2. **Caching Strategy**
+   - ETags for individual resources
+   - Cache-Control headers
+   - Redis caching layer
+   - Stale-while-revalidate pattern
+
+3. **Real-time Updates**
+   - Integrate with Ably for resource changes
+   - Webhook support for external systems
+   - Server-Sent Events for streaming updates
+
+### Phase 4: Migration (4-6 hours)
+
+1. **Update dormway-lockedin** to use v2 endpoints
+2. **Update iOS app** to use v2 endpoints
+3. **Deprecate v1 endpoints** (keep running for 3 months)
+4. **Documentation** - OpenAPI/Swagger spec
+
+### Total Estimated Time: 20-32 hours
+
+## Database Query Patterns
+
+### Leveraging Existing Processed Data
+
+The current system already computes most data via Temporal workflows and stores it in `service_data` table. API v2 should **fetch this processed data** rather than recomputing:
+
+```typescript
+// Example: Get student's dayplan (already processed)
+async function getStudentDayPlan(studentId: string, date: string) {
+  const { data } = await auroraClient.query(`
+    SELECT data
+    FROM service_data
+    WHERE user_id = $1
+      AND method = 'dayplan_generated'
+      AND (data->>'date')::date = $2::date
+    ORDER BY fetched_at DESC
+    LIMIT 1
+  `, [studentId, date]);
+
+  return data?.[0]?.data || null;
+}
+
+// Example: Get student intelligence
+async function getStudentIntelligence(studentId: string, options: { type?, since? }) {
+  const { data } = await auroraClient.query(`
+    SELECT data
+    FROM processed_student_daily_intelligence
+    WHERE user_id = $1
+      AND ($2::text IS NULL OR intelligence_type = $2)
+      AND ($3::timestamptz IS NULL OR created_at >= $3)
+    ORDER BY created_at DESC
+    LIMIT 50
+  `, [studentId, options.type, options.since]);
+
+  return data;
+}
+```
+
+### Context Hierarchy Queries
+
+```typescript
+// Get student with campus (via contexts hierarchy)
+async function getStudentWithCampus(studentId: string) {
+  const { data } = await auroraClient.query(`
+    SELECT
+      a.id,
+      a.email,
+      a.name,
+      campus_ctx.id as campus_id,
+      campus_ctx.name as campus_name,
+      campus_ctx.metadata as campus_metadata,
+      city_ctx.id as city_id,
+      city_ctx.name as city_name
+    FROM accounts a
+    INNER JOIN contexts student_ctx
+      ON student_ctx.user_id = a.id AND student_ctx.type = 'student'
+    INNER JOIN contexts campus_ctx
+      ON campus_ctx.id = student_ctx.parent_id AND campus_ctx.type = 'campus'
+    LEFT JOIN contexts city_ctx
+      ON city_ctx.id = campus_ctx.parent_id AND city_ctx.type = 'city'
+    WHERE a.id = $1
+  `, [studentId]);
+
+  return data?.[0];
+}
+```
+
+### Sparse Fieldsets Implementation
+
+```typescript
+function buildSelectClause(allowedFields: string[], requestedFields?: string): string {
+  if (!requestedFields) {
+    return allowedFields.join(', ');
+  }
+
+  const requested = requestedFields.split(',').map(f => f.trim());
+  const valid = requested.filter(f => allowedFields.includes(f));
+
+  return valid.length > 0 ? valid.join(', ') : allowedFields.join(', ');
+}
+
+// Usage:
+const fields = buildSelectClause(
+  ['id', 'name', 'email', 'created_at'],
+  req.query.fields as string
+);
+const query = `SELECT ${fields} FROM accounts WHERE id = $1`;
+```
+
+## API Client Usage Examples
+
+### JavaScript/TypeScript (dormway-lockedin)
+
+```typescript
+// API client with automatic token injection
+import { apiClient } from '@/lib/api-client';
+
+// Get student profile with courses
+const student = await apiClient.get(`/v2/students/${userId}`, {
+  params: {
+    include: 'courses,campus,dayplan',
+    fields: 'id,name,email'
+  }
+});
+
+// Get today's dayplan
+const dayplan = await apiClient.get(`/v2/students/${userId}/dayplan`, {
+  params: {
+    date: '2025-10-30',
+    include: 'weather,intelligence'
+  }
+});
+
+// Search courses
+const courses = await apiClient.get('/v2/courses', {
+  params: {
+    campus_id: campusId,
+    active: true,
+    search: 'data structures',
+    page: 1,
+    limit: 20
+  }
+});
+```
+
+### Swift (iOS App)
+
+```swift
+// API client with Clerk token
+class APIClient {
+    func getStudent(id: String, include: [String] = []) async throws -> Student {
+        var components = URLComponents(string: "\(baseURL)/v2/students/\(id)")!
+
+        if !include.isEmpty {
+            components.queryItems = [
+                URLQueryItem(name: "include", value: include.joined(separator: ","))
+            ]
+        }
+
+        let (data, response) = try await URLSession.shared.data(from: components.url!)
+
+        // Handle 304 Not Modified
+        if (response as? HTTPURLResponse)?.statusCode == 304 {
+            return cachedStudent!
+        }
+
+        return try JSONDecoder().decode(Student.self, from: data)
+    }
+
+    func getDayPlan(studentId: String, date: Date) async throws -> DayPlan {
+        let dateString = ISO8601DateFormatter().string(from: date)
+        let url = URL(string: "\(baseURL)/v2/students/\(studentId)/dayplan?date=\(dateString)")!
+
+        let (data, _) = try await URLSession.shared.data(from: url)
+        return try JSONDecoder().decode(DayPlan.self, from: data)
+    }
+}
+```
+
+## Testing Strategy
+
+### Unit Tests
+
+```typescript
+describe('GET /api/v2/students/:id', () => {
+  it('should return student with basic fields', async () => {
+    const res = await request(app)
+      .get(`/api/v2/students/${testStudentId}`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveProperty('id', testStudentId);
+    expect(res.body).toHaveProperty('email');
+  });
+
+  it('should support sparse fieldsets', async () => {
+    const res = await request(app)
+      .get(`/api/v2/students/${testStudentId}?fields=id,name`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.body).toHaveProperty('id');
+    expect(res.body).toHaveProperty('name');
+    expect(res.body).not.toHaveProperty('email');
+  });
+
+  it('should include related resources', async () => {
+    const res = await request(app)
+      .get(`/api/v2/students/${testStudentId}?include=courses,campus`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.body).toHaveProperty('courses');
+    expect(res.body).toHaveProperty('campus');
+  });
+
+  it('should return 304 for matching ETag', async () => {
+    const first = await request(app)
+      .get(`/api/v2/students/${testStudentId}`)
+      .set('Authorization', `Bearer ${token}`);
+
+    const etag = first.headers['etag'];
+
+    const second = await request(app)
+      .get(`/api/v2/students/${testStudentId}`)
+      .set('Authorization', `Bearer ${token}`)
+      .set('If-None-Match', etag);
+
+    expect(second.status).toBe(304);
+  });
+});
+```
+
+### Integration Tests
+
+```bash
+# Test student flow
+curl -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:3001/api/v2/students/$STUDENT_ID?include=courses,dayplan"
+
+# Test campus detection
+curl -X POST \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"latitude": 42.2808, "longitude": -83.7430}' \
+  "http://localhost:3001/api/v2/campuses/detect"
+
+# Test filtering
+curl -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:3001/api/v2/courses?campus_id=$CAMPUS_ID&active=true&search=eecs"
+```
+
+## Documentation
+
+### OpenAPI/Swagger Spec
+
+Generate OpenAPI 3.0 spec from route definitions:
+
+```yaml
+openapi: 3.0.0
+info:
+  title: DormWay API v2
+  version: 2.0.0
+  description: Resource-oriented REST API for DormWay platform
+
+paths:
+  /v2/students/{id}:
+    get:
+      summary: Get student by ID
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: include
+          in: query
+          schema:
+            type: string
+            enum: [courses, campus, city, dayplan, intelligence]
+        - name: fields
+          in: query
+          schema:
+            type: string
+      responses:
+        200:
+          description: Student found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Student'
+        404:
+          description: Student not found
+```
+
+Host Swagger UI at `/api/v2/docs` for interactive testing.
+
+## Performance Considerations
+
+### Caching Strategy
+
+1. **ETag for all GET endpoints**
+   ```typescript
+   const etag = computeETag(data);
+   res.setHeader('ETag', etag);
+   res.setHeader('Cache-Control', 'private, max-age=60');
+
+   if (req.headers['if-none-match'] === etag) {
+     return res.status(304).end();
+   }
+   ```
+
+2. **Redis caching for expensive queries**
+   ```typescript
+   const cacheKey = `student:${id}:${include}:${fields}`;
+   const cached = await redisCache.get(cacheKey);
+
+   if (cached) {
+     return res.json(cached);
+   }
+
+   const data = await fetchStudentData(id, include, fields);
+   await redisCache.set(cacheKey, data, 300); // 5 min TTL
+   ```
+
+3. **Database query optimization**
+   - Use indexes on frequently queried columns
+   - Limit included resources to prevent N+1 queries
+   - Use database query batching (DataLoader pattern)
+
+### Rate Limiting
+
+```typescript
+import rateLimit from 'express-rate-limit';
+
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 1000, // Limit each IP to 1000 requests per window
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+v2Router.use(apiLimiter);
+```
+
+### Monitoring
+
+Add metrics for:
+- Request latency per endpoint
+- Cache hit/miss rates
+- Error rates by status code
+- Most requested resources
+- Query parameter usage (fields, include patterns)
+
+## Security Considerations
+
+### Authentication
+
+All v2 endpoints require Clerk JWT authentication:
+
+```typescript
+v2Router.use(clerkAuthMiddleware);
+```
+
+### Authorization
+
+Resource-level permissions:
+
+```typescript
+async function canAccessStudent(requestingUserId: string, targetStudentId: string) {
+  // Users can access their own data
+  if (requestingUserId === targetStudentId) return true;
+
+  // Admins can access any student
+  const user = await getUser(requestingUserId);
+  if (user.role === 'admin') return true;
+
+  // TODO: Add campus admin, instructor permissions
+  return false;
+}
+```
+
+### Input Validation
+
+```typescript
+import { z } from 'zod';
+
+const studentQuerySchema = z.object({
+  include: z.string().regex(/^(courses|campus|city|dayplan|intelligence)(,(courses|campus|city|dayplan|intelligence))*$/).optional(),
+  fields: z.string().optional(),
+});
+
+// In route handler:
+const params = studentQuerySchema.parse(req.query);
+```
+
+### SQL Injection Prevention
+
+Always use parameterized queries:
+
+```typescript
+// ✅ SAFE
+const { data } = await auroraClient.query(
+  'SELECT * FROM accounts WHERE id = $1',
+  [userId]
+);
+
+// ❌ NEVER DO THIS
+const { data } = await auroraClient.query(
+  `SELECT * FROM accounts WHERE id = '${userId}'`
+);
+```
+
+## Migration from v1 to v2
+
+### Coexistence Strategy
+
+Both v1 and v2 will run simultaneously:
+
+```
+v1: /api/mobile/*, /dashboard/v1/*, /api/admin/*
+v2: /api/v2/*
+```
+
+### Deprecation Timeline
+
+1. **Month 1-2**: Launch v2, encourage adoption
+2. **Month 3**: Mark v1 endpoints as deprecated (Sunset header)
+3. **Month 4-5**: Migrate all clients to v2
+4. **Month 6**: Remove v1 endpoints
+
+### Client Migration Guide
+
+**dormway-lockedin** (Next.js web app):
+```diff
+// Before (v1 BFF)
+- const response = await fetch('/dashboard/v1/composite?tab=home&context=campus');
+- const dashboard = await response.json();
+
+// After (v2 resource-oriented)
++ const student = await apiClient.get(`/v2/students/${userId}`, {
++   params: { include: 'courses,campus,dayplan,intelligence' }
++ });
+```
+
+**iOS app**:
+```diff
+// Before
+- let dashboard = try await networkService.request("dashboard/v1/composite", ...)
+
+// After
++ let student = try await apiClient.getStudent(id: userId, include: ["courses", "dayplan"])
++ let dayplan = try await apiClient.getDayPlan(studentId: userId, date: Date())
+```
+
+## Open Questions
+
+1. **Pagination style**: Offset-based or cursor-based?
+   - Offset: Simple, familiar (`?page=1&limit=50`)
+   - Cursor: Better for large datasets, prevents missed records
+
+2. **Versioning in URL vs header**: Currently using `/api/v2/*`
+   - Alternative: `Accept: application/vnd.dormway.v2+json`
+
+3. **Batch requests**: Should we support batching multiple requests?
+   ```json
+   POST /api/v2/batch
+   {
+     "requests": [
+       { "method": "GET", "url": "/v2/students/123" },
+       { "method": "GET", "url": "/v2/courses/456" }
+     ]
+   }
+   ```
+
+4. **GraphQL for complex queries**: Keep option open for future?
+   - Could add GraphQL at `/api/graphql` for specific advanced use cases
+   - Most use cases well-served by REST with include/fields
+
+---
+
+## Widget Endpoints: BFF → V2 Migration
+
+**Status**: 📋 Scoping Complete (DORM-760)
+**Target**: Migrate from monolithic BFF (`/dashboard/v1/composite`) to composable v2 widget endpoints aligned with dormway-lockedin
+
+### Canonical Widget Types (from dormway-lockedin)
+
+**Source**: `dormway-lockedin/src/app/dashboard/home-v2/widgets/registry.ts`
+
+| Widget Type | Category | Data Source | Description |
+|-------------|----------|-------------|-------------|
+| `dayplan` | core | api | Daily schedule with AI-optimized timeline |
+| `schedule` | core | api | Upcoming classes and events |
+| `tasks` | core | api | "Unified Up Next" - Canvas + personal tasks |
+| `academic` | academic | api | Workload metrics + assignment previews |
+| `courses` | academic | api | Enrolled courses from Canvas |
+| `deadlines` | academic | api | Aggregated deadlines across all courses |
+| `workload` | academic | api | Weekly intensity forecast from syllabi |
+| `syllabus` | academic | api | Course info and syllabus uploads |
+| `attendance` | academic | computed | "Can I Skip?" - Track remaining absences |
+| `policy_highlights` | academic | api | Critical course policies |
+| `context_status` | context | local | Current location context |
+| `action_cta` | ai | api | AI-suggested next action |
+| `study` | productivity | api | Track study hours this week |
+| `quick_links` | productivity | local | Campus resource shortcuts |
+
+**Type Aliases**: `canvas` → `courses`
+
+### V2 Widget Endpoints (Thin Orchestrators)
+
+Widget endpoints internally call existing v2 resource endpoints rather than duplicating query logic:
+
+```
+/api/v2/widgets/
+├── /dayplan          → /v2/students/me/dayplan
+├── /schedule         → /v2/students/me/dayplan + events formatting
+├── /tasks            → Canvas assignments + personal tasks
+├── /academic         → /v2/students/me/courses + workload metrics
+├── /courses          → /v2/students/me/courses
+├── /deadlines        → Extract from courses/assignments
+├── /workload         → Syllabus workload analysis
+├── /syllabus         → /v2/syllabi/:id
+├── /attendance       → Computed from syllabus policies
+├── /policy-highlights → Extract from syllabi
+├── /action-cta       → /v2/students/me/intelligence
+└── /study            → Study tracking data
+```
+
+**12 backend endpoints** (context_status and quick_links are local-only)
+
+### Composition Pattern
+
+Each widget endpoint adds:
+1. **Widget envelope wrapping** - `WidgetEnvelope` with id, type, grid hints
+2. **Widget-specific transformations** - e.g., filtering "due soon" items
+3. **Cross-endpoint aggregation** - e.g., academic widget combines courses + term info
+
+Example internal composition:
+```typescript
+// /v2/widgets/academic internally composes:
+async function getAcademicWidget(userId: string) {
+  const [courses, currentTerm] = await Promise.all([
+    fetch(`/v2/students/me/courses`),      // Existing v2 endpoint
+    fetch(`/v2/students/me/current-term`)  // Existing v2 endpoint
+  ]);
+
+  return {
+    type: 'academic',
+    content: { courses, term: currentTerm },
+    gridHints: { minWidth: 2, minHeight: 1 }
+  };
+}
+```
+
+### Migration Strategy
+
+#### Phase 1: Create V2 Widget Endpoints (Backend)
+**File**: `services/api-router/src/routes/v2/widgets.routes.ts`
+
+Priority order:
+1. **Core**: `dayplan`, `schedule`, `tasks`
+2. **Academic**: `academic`, `courses`, `deadlines`, `workload`
+3. **AI/Productivity**: `action_cta`, `study`
+4. **Syllabus**: `syllabus`, `attendance`, `policy_highlights`
+
+#### Phase 2: iOS Widget Data Sources
+- Update `WidgetDefinition.dataSource` to support both modes:
+  - **BFF mode**: Extract from composite response (current)
+  - **V2 mode**: Direct fetch from widget endpoint
+- Use same widget type names as lockedin registry
+
+#### Phase 3: Feature Flag Rollout
+- Add `use_v2_widgets` preference flag
+- Migrate widget-by-widget with flag control
+- Start with `dayplan` and `schedule` (most stable)
+
+#### Phase 4: Deprecate BFF
+- Remove BFF aggregation logic once all widgets migrated
+- Keep BFF as thin proxy if needed for legacy clients
+
+### Architecture Decisions
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| **Caching** | Per-widget ETags | Independent invalidation, granular cache control |
+| **Real-time** | Keep Ably deltas | Existing infrastructure, proven reliability |
+| **Offline** | Per-widget cache | Granular persistence, selective refresh |
+
+### Benefits
+
+| Benefit | Description |
+|---------|-------------|
+| **DRY Logic** | Query logic stays in v2 resource endpoints |
+| **Independent Caching** | Per-widget ETags and TTLs |
+| **Parallel Loading** | Widgets load independently |
+| **Granular Refresh** | Refresh only stale widgets |
+| **Smaller Payloads** | Load only needed widgets |
+| **Easier Testing** | Test widgets in isolation |
+| **Platform Alignment** | iOS and lockedin use same widget types |
+
+---
+
+## Related Documentation
+
+- [BFF Dashboard v1](/docs/engineering/architecture/bff-dashboard-v1) - Current implementation being replaced
+- Current System Architecture - August 2025 - Overall platform architecture
+- [DormWay Platform – System Architecture](/docs/engineering/architecture/dormway-platform-system-architecture) - System design overview
+- Ably Real-Time Updates Implementation Strategy - Real-time layer that works with API v2
+
+## References
+
+- [REST API Design Best Practices](https://stackoverflow.blog/2020/03/02/best-practices-for-rest-api-design/)
+- [JSON:API Specification](https://jsonapi.org/) - Sparse fieldsets pattern
+- [Google API Design Guide](https://cloud.google.com/apis/design)
+- [Stripe API](https://stripe.com/docs/api) - Excellent example of resource-oriented design
+
+## Term Predictions API (DORM-450 Phase 4)
+
+The Term Predictions API provides intelligent workload analysis, trend predictions, and risk alerts computed from BrainGains semester data.
+
+### Endpoint: `/v2/students/me/current-term/analysis`
+
+Returns aggregated predictions combining BrainGains data with computed predictions.
+
+**Response Structure:**
+```json
+{
+  "success": true,
+  "data": {
+    "generatedAt": "2025-12-13T20:06:53.548Z",
+    "termYear": 2025,
+
+    // Phase 4 Computed Predictions
+    "workloadPrediction": {
+      "termYear": 2025,
+      "predictedCredits": 15,
+      "predictedAssignments": 45,
+      "peakWeeks": ["Week 13", "Week 15", "Week 16"],
+      "workloadScore": 65,
+      "recommendations": [
+        "Plan ahead for 3 high-workload week(s): Week 13, Week 15, Week 16",
+        "Consider starting assignments early to manage the heavy workload"
+      ]
+    },
+
+    "trendAnalysis": {
+      "termId": "Fall Term 2025",
+      "trends": [
+        {
+          "metric": "workload",
+          "direction": "up",
+          "percentChange": 45,
+          "description": "Workload increases in the second half of the term"
+        },
+        {
+          "metric": "assignment_density",
+          "direction": "up",
+          "percentChange": 30,
+          "description": "More assignments due in the second half"
+        }
+      ],
+      "historicalComparison": {
+        "currentTerm": "Fall 2025",
+        "workloadChange": 45
+      },
+      "projections": [
+        { "week": 14, "predictedWorkload": 75, "confidence": 0.7 },
+        { "week": 15, "predictedWorkload": 85, "confidence": 0.6 }
+      ]
+    },
+
+    "predictedRisks": [
+      {
+        "id": "stress-2025-12-01",
+        "weekStart": "2025-12-01",
+        "riskType": "workload_spike",
+        "severity": "high",
+        "confidence": 0.85,
+        "description": "Intense week with COMM 404 production deadlines",
+        "mitigationSuggestion": "Start early and use campus support centers",
+        "affectedCourses": ["COMM 404", "DIGITAL 202"]
+      }
+    ],
+
+    "yearLongCourses": [
+      {
+        "courseContextId": "uuid",
+        "courseCode": "PHYS 201A",
+        "courseName": "Physics I",
+        "currentTermId": "Fall Term 2025",
+        "predictedNextTermId": "Spring Term 2026",
+        "confidence": 0.75,
+        "reason": "Course pattern suggests year-long sequence"
+      }
+    ],
+
+    // BrainGains Production Data
+    "brainGainsWorkload": {
+      "term": "Fall",
+      "year": 2025,
+      "weekly_analysis": [...],
+      "stress_alerts": [...]
+    },
+    "brainGainsConflicts": {...},
+    "brainGainsInsights": {...},
+    "brainGainsWarnings": [...],
+
+    "recommendedActions": [
+      "Plan ahead for 3 high-workload week(s)",
+      "Consider starting assignments early"
+    ]
+  }
+}
+```
+
+### Prediction Types
+
+| Type | Description | Source |
+|------|-------------|--------|
+| `workloadPrediction` | Peak weeks, overall score, recommendations | Computed from BrainGains weekly data |
+| `trendAnalysis` | Workload direction, projections | First-half vs second-half comparison |
+| `predictedRisks` | Risk events with severity | Derived from stress alerts & conflicts |
+| `yearLongCourses` | Year-long course continuity | Course code pattern analysis |
+| `brainGainsWorkload` | Raw weekly workload analysis | BrainGains `braingains_semester_workload_analysis` |
+| `brainGainsConflicts` | Schedule conflict detection | BrainGains `braingains_schedule_conflict_detection` |
+| `brainGainsInsights` | Cross-course synergies | BrainGains `braingains_cross_course_insights` |
+| `brainGainsWarnings` | Early warning alerts | BrainGains `braingains_early_warnings` |
+
+### Individual Prediction Endpoints
+
+| Endpoint | Returns | Entity Method |
+|----------|---------|---------------|
+| `/current-term/analysis` | All predictions combined | `getPredictions()` |
+| `/current-term/workload` | BrainGains workload only | `getBrainGainsWorkloadAnalysis()` |
+| `/current-term/conflicts` | Schedule conflicts | `getBrainGainsConflictAnalysis()` |
+| `/current-term/warnings` | Early warning alerts | `getEarlyWarnings()` |
+| `/current-term/insights` | Cross-course insights | `getCrossCourseInsights()` |
+| `/current-term/summary` | Semester summary | `getSemesterSummary()` |
+| `/current-term/plan` | Semester plan | `getSemesterPlan()` |
+| `/current-term/trends` | Trend analysis | `getTrendAnalysis()` |
+
+### Implementation Notes
+
+1. **Computed on-the-fly**: Phase 4 predictions are computed from existing BrainGains data when no stored prediction exists
+2. **Lazy loading**: All prediction methods use `lazyLoad` for efficient caching within a request
+3. **Fallback strategy**: Methods first check `service_data` for stored predictions, then compute if not found
+4. **Course extraction**: Risk events extract affected courses from text using regex pattern `/\b[A-Z]{2,10}\s*\d{2,4}\b/g`
+
+### Risk Types
+
+| Risk Type | Description | Derived From |
+|-----------|-------------|--------------|
+| `workload_spike` | High workload period | BrainGains stress alerts |
+| `deadline_cluster` | Multiple deadlines close together | BrainGains conflicts (type=deadline) |
+| `exam_conflict` | Overlapping exam schedules | BrainGains conflicts (type=exam) |
+
+---
+
+## Changelog
+
+- **2025-12-13**: Mutations & Extended Endpoints (DORM-755)
+  - **Syllabus Mutations:**
+    - `POST /v2/syllabi/upload` - Multipart file upload to S3, triggers `processSyllabusFromWebhook` workflow
+    - `POST /v2/syllabi/:id/archive` - Archive course (changes `dependency_type` to `has_taken`)
+    - `POST /v2/syllabi/:id/unarchive` - Restore course (changes `dependency_type` to `enrolled_in`)
+    - `PATCH /v2/syllabi/:id/status` - Update course status (active/completed/dropped)
+  - **Term/Semester Mutations:**
+    - `POST /v2/terms/process` - Trigger `processSemester` workflow for authenticated user
+    - `POST /v2/terms/:studentId/process` - Admin endpoint to process specific student
+  - **Campus Authenticated Endpoints:**
+    - `GET /v2/campuses/by-domain?domain=` - Find campus by domain directly
+    - `GET /v2/campuses/nearby?lat=&lon=&radius=` - PostGIS nearby campus search
+    - `GET /v2/campuses/:id/config` - Campus configuration data (feature flags, calendar, metadata)
+    - `GET /v2/campuses/:id/current-term` - Campus current academic term with session status
+  - **Campus Public Endpoints** (no auth):
+    - `GET /v2/campuses/typeahead?q=` - Campus search for onboarding
+    - `GET /v2/campuses/spotlight` - Featured campuses for onboarding
+  - Updated admin API tester (RequestBuilder.tsx) with all new endpoints
+- **2025-12-13**: Term Predictions API (DORM-450 Phase 4)
+  - Added 19 new Term endpoints (`/current/*` routes)
+  - Implemented computed predictions from BrainGains data
+  - `getWorkloadPrediction()` - peak weeks, workload score
+  - `getTrendAnalysis()` - first/second half comparison, projections
+  - `getPredictedRisks()` - derived from stress alerts
+  - `getScheduleContinuity()` - year-long course detection
+  - Updated `getPredictions()` to combine all sources
+  - Fixed URL params: uses `studentId` (account ID), NOT `studentContextId`
+- **2025-12-12**: Implementation complete (DORM-739)
+  - Created API v2 routes in `services/api-router/src/routes/v2/`
+  - Built on `@dormway/core` entity system with singleton factories
+  - Added 100 integration tests across 6 test suites
+  - Documentation updated with implementation details
+- **2025-10-30**: Initial design document created based on architecture discussion

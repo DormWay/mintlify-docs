@@ -1,0 +1,971 @@
+---
+title: "Feature Parity Analysis"
+description: "This document compares the feature implementations between the dormway-lockedin Next.js web app and the ios-clean native iOS app to identify gaps, difference..."
+---
+
+# DormWay Platform Feature Parity Analysis
+## Web (dormway-lockedin) vs iOS (ios-clean)
+
+**Generated:** 2025-11-09
+**iOS Branch:** `feat/liquid-glass-modernization`
+
+---
+
+## Executive Summary
+
+This document compares the feature implementations between the dormway-lockedin Next.js web app and the ios-clean native iOS app to identify gaps, differences, and areas requiring investigation.
+
+### Key Findings Overview
+
+| Category | Web-Only Features | iOS-Only Features | Implementation Differences |
+|----------|------------------|-------------------|---------------------------|
+| **AI Assistant (Ace)** | Write mode, Documents Q&A, Personality settings | Voice input, Document camera upload | Chat interface similar |
+| **Academic** | Timeline tab, Policies tab, Gradebook detailed view | - | Similar assignment tracking |
+| **Dashboard** | Sidebar navigation, 5 theme modes | Tab bar navigation, Widget grid system (4×7) | Completely different UX paradigm |
+| **Settings** | Centralized preferences page | Multi-tab settings with permissions | iOS more granular |
+| **Integrations** | Syllabus Manager as integration, Gmail (planned) | ICS upload, Screenshot schedule extraction | Canvas & Google Calendar in both |
+| **Real-time** | SSE fallback option | Native push notifications, WidgetKit | Both use Ably |
+| **Data Collection** | - | HealthKit, Screen Time, Motion tracking | iOS-specific |
+
+---
+
+## 1. ACE AI ASSISTANT - Detailed Comparison
+
+### ✅ Features Present in BOTH
+
+| Feature | Web Implementation | iOS Implementation | Notes |
+|---------|-------------------|-------------------|-------|
+| **Chat Interface** | `/dashboard/ace/chat` | `BrainGainsChatView.swift` | ✅ Parity |
+| **Message History** | Conversation persistence | Chat history view | ✅ Parity |
+| **Streaming Responses** | Ably real-time streaming | Via Ably service | ✅ Parity |
+| **Document Upload** | Document upload for Q&A | `DocumentPickerView.swift` | ✅ Parity |
+| **Source Citations** | Citations in responses | Expandable source references | ✅ Parity |
+| **Scopes** | User, Course, Org, Multi | User context awareness | ⚠️ Scope system less visible in iOS |
+
+### ❌ Web-Only Features
+
+| Feature | Location (Web) | Gap in iOS | Priority | Investigation Required |
+|---------|---------------|------------|----------|------------------------|
+| **Write Mode** | `/dashboard/ace/write/page.tsx` | Not found | HIGH | Check if planned, API endpoints available? |
+| **Documents Tab** | `/dashboard/ace/documents/page.tsx` | Not found | MEDIUM | Separate document Q&A interface |
+| **Ace Personality Settings** | `AcePersonality` component | Not found | MEDIUM | Check if preferences API supports this |
+| **FAB (Floating Action Button)** | `AceFAB.tsx` | Not found | LOW | UI pattern difference (iOS has tab) |
+| **Top Mode Switcher** | `AceTopSwitcher.tsx` (Chat/Documents/Write) | Not found | MEDIUM | Related to missing modes |
+
+### ❌ iOS-Only Features
+
+| Feature | Location (iOS) | Gap in Web | Priority | Investigation Required |
+|---------|---------------|------------|----------|------------------------|
+| **Voice Input** | `SpeechRecognizer` in BrainGains | Not found | MEDIUM | Check if web supports speech-to-text |
+| **Suggested Questions** | `BrainGainsSearchView.swift` | Not found | LOW | Could be useful for web |
+| **Document Camera** | Native iOS camera for doc scanning | Web file upload only | LOW | Platform limitation |
+
+### 🔍 Deep Investigation: Ace Assistant
+
+**Questions to Answer:**
+
+1. **Write Mode API:**
+   - Does the backend support write mode?
+   - Endpoint: `/api/ace/write` or similar?
+   - What prompts/templates are used for writing assistance?
+
+2. **Document Q&A Scope:**
+   - Is document Q&A in iOS limited to uploaded documents only?
+   - Can web query documents without uploading them (by URL)?
+   - API endpoint: `/api/ace/documents/search` or similar?
+
+3. **Personality Settings:**
+   - Are personality settings stored in user preferences table?
+   - iOS uses default personality - is this configurable via API?
+   - Check: `/api/proxy/mobile/preferences` endpoint
+
+4. **Scope System:**
+   - Does iOS support multi-scope queries?
+   - Check `BrainGainsService.swift` for scope parameters
+   - Verify API parity: `/api/search/chat` parameters
+
+**Investigation Tasks:**
+- [ ] Check database schema for `ace_personality_settings` or similar
+- [ ] Review API Router endpoints: `grep -r "ace" dormway-platform/services/api-router/src/routes/`
+- [ ] Test iOS chat API calls to see if scope parameter is sent
+- [ ] Check if write mode API exists: `curl -X POST localhost:3001/api/ace/write`
+- [ ] Review Obsidian vault for Ace feature specifications
+
+---
+
+## 2. ACADEMIC INTELLIGENCE - Detailed Comparison
+
+### ✅ Features Present in BOTH
+
+| Feature | Web Implementation | iOS Implementation | Notes |
+|---------|-------------------|-------------------|-------|
+| **Assignment List** | Academic Hub > Assignments tab | Academic Widget | ✅ Parity |
+| **Course List** | Academic Hub > Courses tab | Widgets (context-based) | ⚠️ Different UX |
+| **Assignment Grouping** | Overdue, Today, This Week, Next Week | Similar grouping in widget | ✅ Parity |
+| **Filtering** | By time, type, source, course | Mobile bottom sheet filters | ✅ Parity |
+| **Assignment Actions** | Start, Plan, Mark Complete, Inspect | Similar actions | ✅ Parity |
+| **Canvas Integration** | Real-time sync | Real-time sync | ✅ Parity |
+| **Time Blocks** | Planner drawer | Time block widgets | ✅ Parity |
+
+### ❌ Web-Only Features
+
+| Feature | Location (Web) | Gap in iOS | Priority | Investigation Required |
+|---------|---------------|------------|----------|------------------------|
+| **Timeline Tab** | `/dashboard/academic` > Timeline | Not found | HIGH | Weekly grid with 3-week lookahead |
+| **Policies Tab** | `/dashboard/academic` > Policies | Not found | HIGH | Course policies, slack days, late policies |
+| **Gradebook Tab** | `/dashboard/academic` > Gradebook | Not found | HIGH | Detailed grade table with weighting |
+| **Capacity Bar** | Shows needed/scheduled/gap hours | Not found | MEDIUM | Workload visualization |
+| **Inspector Panel** | Docked right panel (desktop) | Not found | LOW | Mobile has modals instead |
+| **Weekly Grid** | Timeline visualization | Not found | MEDIUM | Visual weekly assignment layout |
+| **Policy Guardrails** | Assignment-specific rules | Not found | MEDIUM | AI-extracted syllabus policies |
+| **Awaiting Grading** | Separate section in gradebook | Not found | LOW | Submitted but not graded |
+
+### ❌ iOS-Only Features
+
+| Feature | Location (iOS) | Gap in Web | Priority |
+|---------|---------------|------------|----------|
+| **Widget-based Academic View** | Multiple widget types (Academic, Schedule, Priority, Timeline) | Not in widget form | LOW (design difference) |
+| **Priority Widget** | Urgent tasks widget | No equivalent focused view | MEDIUM |
+
+### 🔍 Deep Investigation: Academic Intelligence
+
+**Questions to Answer:**
+
+1. **Timeline Tab:**
+   - API endpoint: `/api/academic/timeline` or similar?
+   - How is the 3-week lookahead calculated?
+   - Does iOS fetch this data but not display it?
+
+2. **Policies Tab:**
+   - Where are policies stored? `course_policies` table?
+   - API: `/api/syllabus/policies` or `/api/courses/:id/policies`?
+   - Does iOS have policy data in `SyllabusWidget` but not exposed in UI?
+
+3. **Gradebook:**
+   - API: `/api/grades` or `/api/canvas/grades`?
+   - Does iOS fetch grade data but only show in Academic Widget?
+   - Check if weighted average calculation exists in iOS codebase
+
+4. **Capacity Bar:**
+   - Algorithm for calculating needed/scheduled/gap hours
+   - API: `/api/capacity` or calculated client-side?
+   - Does iOS have this data but not visualized?
+
+**Investigation Tasks:**
+- [ ] Check API Router for academic endpoints: `grep -r "academic\|timeline\|policies\|gradebook" dormway-platform/services/api-router/src/routes/`
+- [ ] Review database schema: `docker exec dormway-postgres-local psql -U dormway_admin -d dormway -c "\d course_policies"`
+- [ ] Check iOS `AcademicWidget.swift` for hidden data fields
+- [ ] Test academic API: `curl localhost:3001/api/academic/timeline -H "x-user-id: test-user"`
+- [ ] Search Obsidian vault for "academic intelligence" design docs
+
+---
+
+## 3. PREFERENCES & SETTINGS - Detailed Comparison
+
+### ✅ Features Present in BOTH
+
+| Feature | Web Implementation | iOS Implementation | Notes |
+|---------|-------------------|-------------------|-------|
+| **Theme Selection** | 5 modes (light, dark, glass, paper, calm) | Light/dark/system | ⚠️ iOS has fewer themes |
+| **Notification Prefs** | Notification preferences | `NotificationPreferencesView.swift` | ✅ Parity |
+| **Profile Management** | User profile editing | Account settings tab | ✅ Parity |
+| **Sign Out** | Safe sign out | Sign out functionality | ✅ Parity |
+
+### ❌ Web-Only Features
+
+| Feature | Location (Web) | Gap in iOS | Priority | Investigation Required |
+|---------|---------------|------------|----------|------------------------|
+| **Centralized Preferences Page** | `/dashboard/preferences/page.tsx` | Settings split across tabs | LOW | Design difference |
+| **5 Theme Modes** | glass, paper, calm themes | Only light/dark | MEDIUM | Are these themes designed for web only? |
+| **Time Zone Settings** | `TimezoneContext` | Not found | HIGH | Critical for multi-timezone users |
+| **Campus Selection UI** | Campus picker modal | Only in onboarding | MEDIUM | Can users change campus post-onboarding? |
+| **AI Personality Config** | Ace personality settings | Not found | MEDIUM | See Ace section |
+| **Privacy Settings** | Privacy preferences | `PrivacyPreferencesView.swift` | ✅ Exists in iOS |
+
+### ❌ iOS-Only Features
+
+| Feature | Location (iOS) | Gap in Web | Priority | Investigation Required |
+|---------|---------------|------------|----------|------------------------|
+| **Multi-Tab Settings** | Account, Permissions, Integrations, Preferences, Support | Single page in web | LOW | iOS-native pattern |
+| **Permissions Management** | Detailed permission status & deep links | Not applicable to web | N/A | Platform-specific |
+| **AI Communication Prefs** | `AICommunicationPreferencesView.swift` | Not found | MEDIUM | Related to Ace personality? |
+| **App Behavior Prefs** | `AppBehaviorPreferencesView.swift` | Not found | LOW | iOS-specific behaviors |
+| **Content Prefs** | `ContentPreferencesView.swift` | Not found | MEDIUM | What content filters exist? |
+| **Wellness Prefs** | `WellnessPreferencesView.swift` | Not found | MEDIUM | Wellness feature set |
+| **Social Prefs** | `SocialPreferencesView.swift` | Not found | LOW | Social features planned? |
+
+### 🔍 Deep Investigation: Preferences & Settings
+
+**Questions to Answer:**
+
+1. **Time Zone Settings:**
+   - Does iOS handle timezone automatically via device settings?
+   - Is timezone stored in user profile API?
+   - Endpoint: `/api/user/profile` - check if timezone field exists
+
+2. **Theme System:**
+   - Are glass/paper/calm themes web-only designs?
+   - Can iOS support these with SwiftUI design tokens?
+   - Check design system: `DWDesign` package capabilities
+
+3. **AI Communication Preferences:**
+   - What settings does this include?
+   - Is this the iOS equivalent of Ace personality settings?
+   - API: `/api/preferences/ai_communication`?
+
+4. **Content Preferences:**
+   - What content is being filtered?
+   - Feed content, widget content, notification content?
+   - Check if web has implicit content filtering
+
+5. **Wellness Preferences:**
+   - Related to `WellnessWidget.swift` (deprecated)?
+   - Does web have wellness features not exposed?
+   - Check for wellness-related API endpoints
+
+**Investigation Tasks:**
+- [ ] Review user preferences schema: `docker exec dormway-postgres-local psql -U dormway_admin -d dormway -c "\d user_preferences"`
+- [ ] Check preference API: `grep -r "preferences" dormway-platform/services/api-router/src/routes/`
+- [ ] Test preferences endpoint: `curl localhost:3001/api/proxy/mobile/preferences -H "x-user-id: test-user"`
+- [ ] Review iOS `AppPreferencesView.swift` for all preference keys
+- [ ] Cross-reference preference keys with web `src/lib/preferences.ts`
+
+---
+
+## 4. DASHBOARD & NAVIGATION - Detailed Comparison
+
+### 🔄 Completely Different Paradigms
+
+#### **Web Paradigm: Sidebar + Pages**
+- **Sidebar navigation** (collapsible)
+- **Full-page views** for each section
+- **Tab-based sub-navigation** (Academic, Syllabus)
+- **Theme-based gradients** (time-aware)
+- **Desktop-optimized** layouts
+
+#### **iOS Paradigm: Tab Bar + Widget Grids**
+- **Tab bar navigation** (Home, Campus, Me, Settings)
+- **Widget grid system** (4×7 cells, drag & drop)
+- **Home = AI-curated** (non-customizable, read-only)
+- **Campus & Me = User-customizable** grids
+- **Mobile-optimized** layouts
+
+### Key Differences
+
+| Aspect | Web | iOS | Notes |
+|--------|-----|-----|-------|
+| **Navigation** | Sidebar with nested routes | 4-tab bar | Standard web vs mobile pattern |
+| **Home View** | Today dashboard with widgets | AI-curated contextual content | iOS Home is server-curated |
+| **Customization** | Limited (theme, some widgets) | Extensive (drag & drop widgets) | iOS has more UX flexibility |
+| **Layout** | Responsive grid/flexbox | Fixed 4×7 grid engine | Different layout constraints |
+| **Theme System** | 5 themes with gradients | Light/dark/system | Web has richer theming |
+| **Data Display** | Page-based deep views | Widget-based glanceable views | Fundamental UX philosophy difference |
+
+### ❌ Web-Only Navigation Features
+
+| Feature | Location (Web) | Gap in iOS | Priority |
+|---------|---------------|------------|----------|
+| **Today Page** | `/dashboard/home` | Partially (Home tab) | LOW |
+| **Schedule Page** | `/dashboard/schedule` | Widget-based | LOW |
+| **Notes Hub Page** | `/dashboard/notes-hub` | Not found | MEDIUM |
+| **Inbox Page** | `/dashboard/inbox` | Not found | MEDIUM |
+| **Documents/Locker Page** | `/dashboard/documents` | Partial (uploads only) | MEDIUM |
+| **Debug Page** | `/dashboard/debug` | Debug views exist | LOW |
+
+### ❌ iOS-Only Navigation Features
+
+| Feature | Location (iOS) | Gap in Web | Priority |
+|---------|---------------|------------|----------|
+| **Campus Tab** | User-customizable campus grid | No equivalent | LOW (design difference) |
+| **Me Tab** | User-customizable personal grid | No equivalent | LOW (design difference) |
+| **Widget Browser** | Edit mode + widget library | Not applicable | N/A |
+
+### 🔍 Deep Investigation: Dashboard Paradigm
+
+**Questions to Answer:**
+
+1. **Dashboard BFF API:**
+   - Does `/dashboard/v1/composite` serve both web and iOS?
+   - Are there separate endpoints for web pages vs iOS widgets?
+   - Check response format differences
+
+2. **Notes Hub:**
+   - Does iOS have note-taking functionality hidden?
+   - Check `QuickCapture` in iOS codebase
+   - API: `/api/notes` endpoints?
+
+3. **Inbox:**
+   - Is inbox functionality planned for iOS?
+   - Does the API support inbox/messages?
+   - Check for notification center in iOS
+
+4. **Document Management:**
+   - iOS has document upload but no management UI
+   - Does web have full document library?
+   - API: `/api/documents` vs iOS upload endpoints
+
+**Investigation Tasks:**
+- [ ] Compare dashboard API responses: Web vs iOS
+- [ ] Check for notes API: `grep -r "notes" dormway-platform/services/api-router/src/routes/`
+- [ ] Check for inbox API: `grep -r "inbox\|messages" dormway-platform/services/api-router/src/routes/`
+- [ ] Review widget envelope system in iOS vs web widget system
+- [ ] Test if iOS can display web-style "pages" in modal views
+
+---
+
+## 5. INTEGRATIONS - Detailed Comparison
+
+### ✅ Features Present in BOTH
+
+| Integration | Web | iOS | Notes |
+|-------------|-----|-----|-------|
+| **Canvas LMS** | ✅ OAuth, sync | ✅ OAuth, sync | ✅ Parity |
+| **Google Calendar** | ✅ OAuth, bi-directional sync | ✅ OAuth, event import | ✅ Parity |
+
+### ❌ Web-Only Integrations
+
+| Integration | Location (Web) | Gap in iOS | Priority | Investigation Required |
+|-------------|---------------|------------|----------|------------------------|
+| **Gmail** | Coming soon | Not mentioned | LOW | Planned but not implemented |
+| **Schedule Upload** | `ScheduleUploadIntegration` (one-time) | In onboarding only | MEDIUM | Different placement |
+| **Syllabus Manager** | Full syllabus processing UI | Upload only (in Ace) | HIGH | Web has dedicated interface |
+| **Locker Section** | Document storage UI | Not found | MEDIUM | Document management interface |
+
+### ❌ iOS-Only Integrations
+
+| Integration | Location (iOS) | Gap in Web | Priority | Investigation Required |
+|-------------|---------------|------------|----------|------------------------|
+| **ICS Calendar Upload** | `ICSUploadView.swift` | Not found | MEDIUM | .ics file import feature |
+| **Schedule Screenshot** | `ScheduleImportViewLLM.swift` | Not found | HIGH | LLM-powered schedule extraction from images |
+| **Share Extension** | `ScheduleShare` extension | Not applicable | N/A | iOS-specific |
+| **HealthKit** | Data collection | Not applicable | N/A | Platform-specific |
+| **Screen Time** | FamilyControls framework | Not applicable | N/A | Platform-specific |
+
+### 🔍 Deep Investigation: Integrations
+
+**Questions to Answer:**
+
+1. **Syllabus Manager:**
+   - Web has `/dashboard/syllabus` with term/course views
+   - iOS uploads via Ace chat interface
+   - Does iOS use the same backend processing?
+   - API: `/api/syllabus/process` or similar?
+   - Check iOS: Does `BrainGainsService` handle syllabus uploads differently?
+
+2. **Schedule Screenshot Extraction:**
+   - iOS has LLM-powered image parsing
+   - Does web support image upload for schedule extraction?
+   - API: `/api/schedule/extract` or similar?
+   - Could web benefit from this feature?
+
+3. **ICS Upload:**
+   - iOS supports .ics file import
+   - Does web have calendar import?
+   - API: `/api/calendar/import` endpoints?
+
+4. **Locker/Document Management:**
+   - Web has document storage UI at `/dashboard/documents`
+   - iOS uploads documents to Ace but no management UI
+   - Are documents stored in same backend location?
+   - API: `/api/documents` CRUD endpoints?
+
+**Investigation Tasks:**
+- [ ] Compare syllabus processing APIs between web and iOS
+- [ ] Check if schedule extraction API exists: `grep -r "schedule.*extract\|ocr\|image.*parse" dormway-platform/services/api-router/src/routes/`
+- [ ] Review iOS schedule extraction: `ios-clean/App/Views/Integrations/ScheduleImportViewLLM.swift`
+- [ ] Test ICS upload API: `curl -X POST localhost:3001/api/calendar/import -F "file=@schedule.ics"`
+- [ ] Check document management API: `curl localhost:3001/api/documents -H "x-user-id: test-user"`
+
+---
+
+## 6. REAL-TIME FEATURES - Detailed Comparison
+
+### ✅ Features Present in BOTH
+
+| Feature | Web Implementation | iOS Implementation | Notes |
+|---------|-------------------|-------------------|-------|
+| **Ably Client** | `AblyContext.tsx` | `AblyService.swift` | ✅ Parity |
+| **User-Specific Channel** | `user:{userId}:updates` | Same | ✅ Parity |
+| **Canvas Updates** | `useCanvasRealtime` | Real-time handlers | ✅ Parity |
+| **Dashboard Updates** | ETag + Ably delta | ETag + staged delta | ✅ Parity |
+| **Chat Streaming** | Ace chat via Ably | Ace chat via Ably | ✅ Parity |
+
+### ❌ Web-Only Features
+
+| Feature | Location (Web) | Gap in iOS | Priority |
+|---------|---------------|------------|----------|
+| **SSE Fallback** | `/api/sse` for non-Ably environments | Not found | LOW |
+
+### ❌ iOS-Only Features
+
+| Feature | Location (iOS) | Gap in Web | Priority | Investigation Required |
+|---------|---------------|------------|----------|------------------------|
+| **Native Push Notifications** | APNS integration | Web push (limited) | MEDIUM | Web could use PWA push |
+| **WidgetKit Updates** | Background widget refresh | Not applicable | N/A | Platform-specific |
+| **Telemetry Uplink** | `telemetry` channel TO server | Not found | LOW | Does web send telemetry via Ably? |
+
+### 🔍 Deep Investigation: Real-Time
+
+**Questions to Answer:**
+
+1. **Telemetry Channel:**
+   - iOS sends telemetry via Ably `telemetry` channel
+   - Does web send telemetry via Amplitude only?
+   - Should web also use Ably for real-time telemetry?
+
+2. **Push Notifications:**
+   - iOS has native APNS
+   - Does web support PWA push notifications?
+   - Check for service worker in web app
+
+3. **Dashboard Delta Updates:**
+   - Web uses ETag caching
+   - iOS uses "staged delta" updates
+   - Are these the same mechanism?
+   - Check API response format differences
+
+**Investigation Tasks:**
+- [ ] Check if web sends Ably telemetry: `grep -r "telemetry" dormway-platform/services/dormway-lockedin/src/`
+- [ ] Review web service worker: `dormway-lockedin/public/service-worker.js` or similar
+- [ ] Compare dashboard delta formats: iOS vs web
+- [ ] Test Ably channel subscriptions for web vs iOS
+
+---
+
+## 7. MISSING FEATURE CATEGORIES
+
+### ❌ Features in Web, Completely Absent in iOS
+
+| Feature | Location (Web) | Priority | Notes |
+|---------|---------------|----------|-------|
+| **Notes Hub** | `/dashboard/notes-hub` | HIGH | Full note-taking system with MDX, linking, search |
+| **Inbox** | `/dashboard/inbox` | MEDIUM | Email integration, message bundles, filtering |
+| **Syllabus Term View** | `/dashboard/syllabus` (term tab) | HIGH | Batch syllabus processing, semester workload analysis |
+| **Academic Timeline** | Academic hub > Timeline tab | HIGH | 3-week visual timeline |
+| **Academic Policies** | Academic hub > Policies tab | HIGH | Course policies, late rules, slack days |
+| **Gradebook** | Academic hub > Gradebook tab | HIGH | Detailed grade table with weighted averages |
+| **Capacity Planning** | Capacity bar in academic hub | MEDIUM | Workload visualization (needed/scheduled/gap) |
+| **Ace Write Mode** | `/dashboard/ace/write` | MEDIUM | AI writing assistant |
+| **Ace Documents Mode** | `/dashboard/ace/documents` | MEDIUM | Separate document Q&A interface |
+| **Document Locker** | `/dashboard/documents` | MEDIUM | Document storage and management UI |
+| **Smart Scheduling** | Backend feature | MEDIUM | AI-powered time block suggestions |
+| **Focus Session** | `useFocusSession` hook | LOW | Pomodoro timer |
+| **Briefings** | `briefings.ts` | LOW | Daily AI-powered summaries |
+
+### ❌ Features in iOS, Completely Absent in Web
+
+| Feature | Location (iOS) | Priority | Notes |
+|---------|---------------|----------|-------|
+| **Widget Grid System** | Campus & Me tabs | LOW | Design paradigm difference |
+| **Voice Input for Ace** | `SpeechRecognizer` | MEDIUM | Could be useful for web |
+| **Schedule Screenshot Extraction** | `ScheduleImportViewLLM.swift` | HIGH | LLM-powered image parsing |
+| **ICS Calendar Upload** | `ICSUploadView.swift` | MEDIUM | .ics file import |
+| **HealthKit Integration** | Data collection | N/A | Platform-specific |
+| **Screen Time Tracking** | Data collection | N/A | Platform-specific |
+| **Motion Tracking** | Data collection | N/A | Platform-specific |
+| **WidgetKit Home Screen Widgets** | Extension | N/A | Platform-specific |
+| **Share Extension** | ScheduleShare | N/A | Platform-specific |
+| **Native Permissions UI** | Permissions tab | N/A | Platform-specific |
+
+---
+
+## 8. DEEP INVESTIGATION ROADMAP
+
+### Phase 1: Critical API Mapping (Week 1-2)
+
+**Objective:** Understand which features are blocked by missing APIs vs missing UI
+
+#### Tasks:
+1. **Map All API Endpoints**
+   - [ ] Document all endpoints used by web app
+   - [ ] Document all endpoints used by iOS app
+   - [ ] Create Venn diagram of shared vs unique endpoints
+   - [ ] Identify endpoints that exist but aren't used by iOS
+
+2. **Test Key Missing Features' APIs**
+   - [ ] Notes API: `curl localhost:3001/api/notes`
+   - [ ] Inbox API: `curl localhost:3001/api/inbox`
+   - [ ] Academic timeline API: `curl localhost:3001/api/academic/timeline`
+   - [ ] Policies API: `curl localhost:3001/api/courses/:id/policies`
+   - [ ] Gradebook API: `curl localhost:3001/api/grades`
+   - [ ] Ace write mode API: `curl localhost:3001/api/ace/write`
+   - [ ] Document locker API: `curl localhost:3001/api/documents`
+   - [ ] Capacity API: `curl localhost:3001/api/capacity`
+   - [ ] Smart scheduling API: `curl localhost:3001/api/schedule/suggest`
+
+3. **Database Schema Analysis**
+   - [ ] Check for notes tables: `\d notes`, `\d note_links`
+   - [ ] Check for inbox tables: `\d messages`, `\d message_bundles`
+   - [ ] Check for policies tables: `\d course_policies`
+   - [ ] Check for preferences tables: `\d user_preferences`
+   - [ ] Check for document tables: `\d documents`, `\d document_knowledge`
+   - [ ] Check for capacity tracking: `\d time_blocks`, `\d capacity_metrics`
+
+#### Deliverable:
+- **API Coverage Matrix** (Spreadsheet)
+  - Columns: Feature, Web Endpoint, iOS Endpoint, Exists in API Router?, DB Table, Status (Ready/Needs Work/Missing)
+
+---
+
+### Phase 2: Feature-by-Feature Deep Dive (Week 3-6)
+
+For each high-priority gap, perform:
+
+#### 2.1 Notes Hub Investigation
+
+**Questions:**
+- Does the notes API exist?
+- Is there a notes table in the database?
+- Does iOS have any note-taking code (even hidden)?
+- Can iOS integrate with native Notes app instead?
+
+**Tasks:**
+- [ ] Search API Router for notes endpoints
+- [ ] Check database for notes schema
+- [ ] Search iOS codebase for "notes" or "quick capture"
+- [ ] Review web implementation: `src/app/dashboard/notes-hub/`
+- [ ] Check if `useQuickCapture` in web has iOS equivalent
+- [ ] Decision: Build native iOS notes UI or integrate with Apple Notes?
+
+**Deliverable:** Notes Hub Feature Spec for iOS
+
+---
+
+#### 2.2 Academic Intelligence Gaps
+
+**Timeline Tab:**
+- [ ] Find timeline API endpoint
+- [ ] Understand 3-week lookahead algorithm
+- [ ] Design iOS timeline widget or modal view
+- [ ] Check if timeline data is already fetched but not displayed
+
+**Policies Tab:**
+- [ ] Find policies API endpoint
+- [ ] Understand how policies are extracted from syllabi (AI processing)
+- [ ] Check if `SyllabusWidget` in iOS has policy data
+- [ ] Design iOS policies view (possibly in course detail)
+
+**Gradebook Tab:**
+- [ ] Find gradebook API endpoint
+- [ ] Understand weighted average calculation
+- [ ] Check if iOS `AcademicWidget` has grade data
+- [ ] Design iOS gradebook view (expand from widget?)
+
+**Capacity Bar:**
+- [ ] Find capacity calculation logic (client-side or API?)
+- [ ] Understand needed/scheduled/gap hours algorithm
+- [ ] Design iOS capacity indicator (could be in PlannerDrawer equivalent)
+
+**Deliverable:** Academic Intelligence Parity Plan
+
+---
+
+#### 2.3 Syllabus Processing Investigation
+
+**Questions:**
+- Does iOS syllabus upload use the same backend as web?
+- Is the web `/dashboard/syllabus` page using unique APIs?
+- Can iOS display syllabus term view?
+
+**Tasks:**
+- [ ] Compare syllabus upload flow: iOS (via Ace) vs web (via Syllabus Manager)
+- [ ] Check API: `/api/syllabus/process`, `/api/syllabus/courses`, `/api/syllabus/term`
+- [ ] Review web implementation: `src/app/dashboard/syllabus/`
+- [ ] Check iOS: `BrainGainsService` syllabus upload parameters
+- [ ] Test if iOS can receive syllabus processing results
+- [ ] Determine if iOS needs dedicated syllabus UI or if Ace chat is sufficient
+
+**Deliverable:** Syllabus Processing Parity Decision Document
+
+---
+
+#### 2.4 Preferences & Settings Investigation
+
+**Questions:**
+- What preference keys exist in the backend?
+- Are iOS-specific preferences (AI Communication, Content, Wellness) stored but not used by web?
+- Are web-specific preferences (Ace Personality, Timezone) stored but not used by iOS?
+
+**Tasks:**
+- [ ] Get all preference keys from database: `SELECT DISTINCT key FROM user_preferences;`
+- [ ] Map web preferences: `src/lib/preferences.ts`
+- [ ] Map iOS preferences: All `*PreferencesView.swift` files
+- [ ] Create unified preference schema
+- [ ] Identify preferences that should be shared across platforms
+- [ ] Test preference sync: Change on web, check iOS (and vice versa)
+
+**Deliverable:** Unified Preferences Schema Document
+
+---
+
+#### 2.5 Schedule Screenshot Extraction (iOS → Web)
+
+**Investigation:**
+- iOS has `ScheduleImportViewLLM.swift` with image-based schedule extraction
+- Does web support image upload for schedule import?
+- What LLM backend does this use?
+
+**Tasks:**
+- [ ] Review iOS implementation: `ScheduleImportViewLLM.swift`
+- [ ] Find API endpoint: `/api/schedule/extract` or similar?
+- [ ] Check if DormWay Crews (AI service) handles image processing
+- [ ] Test API with sample schedule screenshot
+- [ ] Determine if web should add this feature (mobile-first use case)
+
+**Deliverable:** Schedule Extraction API Documentation
+
+---
+
+### Phase 3: UI/UX Parity Design (Week 7-8)
+
+For each missing feature, design iOS/Web UI:
+
+#### 3.1 iOS UI Designs Needed
+
+| Feature | Design Approach | Components Needed |
+|---------|----------------|-------------------|
+| **Timeline Tab** | Modal or new tab? Weekly grid widget? | WeeklyTimelineView, TimelineWidget |
+| **Policies View** | Course detail expansion? Dedicated tab? | CoursePoliciesView, PolicyCard |
+| **Gradebook View** | Expanded Academic Widget? Modal? | GradebookView, GradeTableRow |
+| **Capacity Indicator** | Top bar? Widget? Inside planner? | CapacityIndicator, WorkloadBar |
+| **Notes Hub** | New tab? Widget? Modal? | NotesListView, NoteEditor, QuickCaptureSheet |
+| **Inbox** | Notification center style? Tab? | InboxView, MessageBundleCard |
+| **Ace Write Mode** | Tab in BrainGains? Separate modal? | AceWriteView, WritingPromptPicker |
+| **Ace Documents Mode** | Tab in BrainGains? | AceDocumentsView, DocumentSearchResults |
+| **Document Locker** | File browser? Grid view? | DocumentLibraryView, DocumentCard |
+
+#### 3.2 Web UI Enhancements from iOS
+
+| Feature | Design Approach |
+|---------|----------------|
+| **Voice Input for Ace** | Microphone button in chat input |
+| **ICS Upload** | Add to Integrations page |
+| **Schedule Screenshot** | Add to schedule import flow |
+
+**Deliverable:** Figma mockups or SwiftUI prototypes
+
+---
+
+### Phase 4: Implementation Prioritization (Week 9)
+
+#### High Priority (P0) - Critical Feature Gaps
+
+1. **Academic Timeline** (Web → iOS)
+   - Visual timeline is core to academic planning
+   - API likely exists (web uses it)
+   - iOS impact: Medium complexity
+
+2. **Academic Policies** (Web → iOS)
+   - Course policies are critical for students
+   - Likely extracted from syllabi already
+   - iOS impact: Low complexity (display only)
+
+3. **Gradebook** (Web → iOS)
+   - Students need detailed grade tracking
+   - API exists (Canvas integration)
+   - iOS impact: Medium complexity
+
+4. **Syllabus Term View** (Web → iOS)
+   - Semester workload planning is valuable
+   - Backend processing exists
+   - iOS impact: Medium complexity
+
+5. **Schedule Screenshot Extraction** (iOS → Web)
+   - Onboarding friction reducer
+   - API exists (iOS uses it)
+   - Web impact: Low complexity (add upload UI)
+
+#### Medium Priority (P1) - Important but Not Blocking
+
+6. **Notes Hub** (Web → iOS)
+   - Could integrate with Apple Notes instead
+   - Requires investigation of backend API
+
+7. **Capacity Planning** (Web → iOS)
+   - Workload visualization is helpful
+   - May be algorithmic (client-side)
+
+8. **Ace Write Mode** (Web → iOS)
+   - AI writing is useful but not core
+   - API investigation needed
+
+9. **Ace Documents Mode** (Web → iOS)
+   - Separate from chat interface
+   - UX decision: Is chat sufficient?
+
+10. **ICS Upload** (iOS → Web)
+    - Convenience feature for calendar import
+
+#### Low Priority (P2) - Nice to Have
+
+11. **Inbox** (Web → iOS)
+    - Email integration unclear status
+    - May be "coming soon" for both platforms
+
+12. **Document Locker** (Web → iOS)
+    - iOS has upload, just needs management UI
+
+13. **Voice Input for Ace** (iOS → Web)
+    - Web has `SpeechRecognition` API available
+
+**Deliverable:** Prioritized Implementation Roadmap
+
+---
+
+### Phase 5: Implementation Sprint Planning (Week 10+)
+
+For each P0 feature:
+
+#### Sprint Template
+
+**Feature:** [Name]
+**Platform:** iOS or Web
+**Sprint Duration:** 1-2 weeks
+**Team:** 1 iOS dev + 1 backend dev OR 1 web dev + 1 backend dev
+
+**Tasks:**
+1. [ ] API verification/creation
+2. [ ] Database schema (if needed)
+3. [ ] Backend logic
+4. [ ] Frontend UI
+5. [ ] Integration testing
+6. [ ] QA pass
+7. [ ] Documentation
+
+**Example: Academic Timeline for iOS**
+
+**Sprint 1: Academic Timeline (iOS)**
+- [ ] Verify timeline API endpoint exists
+- [ ] Test API response with sample data
+- [ ] Design `TimelineView.swift` in SwiftUI
+- [ ] Implement weekly grid component
+- [ ] Integrate with `DashboardStore`
+- [ ] Add timeline tab to Academic section (or modal)
+- [ ] Real-time updates via Ably
+- [ ] Testing and polish
+
+---
+
+## 9. INVESTIGATION COMMANDS CHEAT SHEET
+
+### API Endpoint Discovery
+
+```bash
+# Find all routes in API Router
+cd ~/Development/GitHub/dormway-platform/services/api-router
+grep -r "router\." src/routes/ | grep -E "(get|post|put|delete)" > ../../api-routes.txt
+
+# Search for specific feature endpoints
+grep -r "academic\|timeline\|policies" src/routes/
+grep -r "notes\|notebook" src/routes/
+grep -r "inbox\|messages" src/routes/
+grep -r "syllabus" src/routes/
+grep -r "preferences" src/routes/
+grep -r "ace\|chat\|write" src/routes/
+
+# Check iOS API calls
+cd ~/Development/GitHub/ios-clean
+grep -r "api/\|/v1/\|/dashboard/" Packages/ App/ | grep -E "\.swift"
+```
+
+### Database Schema Inspection
+
+```bash
+# List all tables
+docker exec dormway-postgres-local psql -U dormway_admin -d dormway -c "\dt"
+
+# Inspect specific tables
+docker exec dormway-postgres-local psql -U dormway_admin -d dormway -c "\d notes"
+docker exec dormway-postgres-local psql -U dormway_admin -d dormway -c "\d user_preferences"
+docker exec dormway-postgres-local psql -U dormway_admin -d dormway -c "\d course_policies"
+docker exec dormway-postgres-local psql -U dormway_admin -d dormway -c "\d documents"
+docker exec dormway-postgres-local psql -U dormway_admin -d dormway -c "\d time_blocks"
+
+# Check all columns in a table
+docker exec dormway-postgres-local psql -U dormway_admin -d dormway -c "\d+ accounts"
+
+# Search for specific column names
+docker exec dormway-postgres-local psql -U dormway_admin -d dormway -c "SELECT table_name, column_name FROM information_schema.columns WHERE column_name LIKE '%policy%';"
+```
+
+### API Testing
+
+```bash
+# Make sure services are running
+cd ~/Development/GitHub/dormway-platform
+make status
+
+# Test endpoints (replace x-user-id with actual test user)
+curl -v "http://localhost:3001/api/academic/timeline" -H "x-user-id: test-user-id"
+curl -v "http://localhost:3001/api/notes" -H "x-user-id: test-user-id"
+curl -v "http://localhost:3001/api/inbox" -H "x-user-id: test-user-id"
+curl -v "http://localhost:3001/api/preferences" -H "x-user-id: test-user-id"
+curl -v "http://localhost:3001/dashboard/v1/composite?tab=home" -H "x-user-id: test-user-id"
+
+# Test with JWT (get token from web app)
+TOKEN="your-jwt-token"
+curl -v "http://localhost:3001/api/protected-endpoint" -H "Authorization: Bearer $TOKEN"
+```
+
+### Obsidian Vault Search
+
+```bash
+cd ~/Development/GitHub/dormway-platform
+
+# Search for feature documentation
+npm run obsidian:search -- "academic timeline"
+npm run obsidian:search -- "notes system"
+npm run obsidian:search -- "ace personality"
+npm run obsidian:search -- "syllabus processing"
+npm run obsidian:search -- "capacity planning"
+npm run obsidian:search -- "inbox"
+npm run obsidian:search -- "preferences"
+```
+
+### Code Search
+
+```bash
+# Search web codebase
+cd ~/Development/GitHub/dormway-platform/services/dormway-lockedin
+grep -r "useAcademicData\|useTodayV2\|useNotes" src/hooks/
+grep -r "TimelineTab\|PoliciesTab\|GradebookTab" src/components/
+grep -r "CapacityBar\|PlannerDrawer" src/components/
+
+# Search iOS codebase
+cd ~/Development/GitHub/ios-clean
+grep -r "BrainGains\|AcademicWidget\|DashboardStore" Packages/ App/
+grep -r "class.*View:\|struct.*View:" App/Views/ | grep -E "Timeline|Policy|Gradebook"
+```
+
+---
+
+## 10. EXPECTED OUTCOMES
+
+### After Phase 1 (API Mapping):
+- **Deliverable:** Comprehensive API coverage matrix
+- **Insight:** Which features are backend-ready vs. need API work
+- **Decision:** Can iOS reuse web APIs or need mobile-specific endpoints?
+
+### After Phase 2 (Feature Deep Dives):
+- **Deliverable:** Feature specs for each high-priority gap
+- **Insight:** Complexity estimates for each feature
+- **Decision:** Build, buy, or integrate with native platform features?
+
+### After Phase 3 (UI/UX Design):
+- **Deliverable:** Mockups and design system components
+- **Insight:** How features adapt to mobile vs. web paradigms
+- **Decision:** Direct port vs. mobile-optimized redesign?
+
+### After Phase 4 (Prioritization):
+- **Deliverable:** Sequenced implementation roadmap
+- **Insight:** Quick wins vs. long-term investments
+- **Decision:** What ships in next release?
+
+### After Phase 5 (Implementation):
+- **Deliverable:** Feature parity across platforms
+- **Outcome:** Unified DormWay experience for all users
+
+---
+
+## 11. RISK FACTORS & MITIGATION
+
+### Risk: APIs Don't Exist
+
+**If a feature in web has no backend API:**
+- **Mitigation:** Check if it's client-side logic that can be ported
+- **Example:** Capacity bar calculation might be pure frontend math
+
+### Risk: Mobile UX Doesn't Translate
+
+**If a feature is too desktop-centric:**
+- **Mitigation:** Redesign for mobile-first interaction
+- **Example:** Academic Timeline → swipeable week view instead of grid
+
+### Risk: Duplicate Backend Work
+
+**If iOS and web call different endpoints for same data:**
+- **Mitigation:** Consolidate to single BFF endpoint
+- **Example:** Dashboard composite endpoint should serve both
+
+### Risk: Feature Bloat
+
+**If porting all features makes app too complex:**
+- **Mitigation:** User research to validate which features are essential
+- **Example:** Do mobile users need full Notes Hub or is quick capture enough?
+
+---
+
+## 12. SUCCESS METRICS
+
+### Feature Parity Score
+
+**Formula:** (Shared Features / Total Features) × 100
+
+**Current Estimate:**
+- **Shared Features:** ~40% (Ace chat, Academic basics, Canvas, Calendar, Settings basics)
+- **Web-only Features:** ~35% (Notes Hub, Inbox, Timeline, Policies, Gradebook, etc.)
+- **iOS-only Features:** ~25% (Widget system, data collection, native integrations)
+
+**Target:** 70% shared features by Q2 2026
+
+### User Satisfaction
+
+**Metrics:**
+- Mobile NPS score
+- Feature request volume for missing features
+- Cross-platform usage (users who use both web and iOS)
+
+### Development Velocity
+
+**Metrics:**
+- Time to implement parity feature (baseline vs. optimized)
+- API reuse rate (shared endpoints vs. platform-specific)
+- Bug rate for ported features
+
+---
+
+## NEXT STEPS
+
+1. **Review this document** with product and engineering teams
+2. **Select Phase 1 owner** (backend engineer to map APIs)
+3. **Schedule investigation sprint** (2 weeks for Phase 1)
+4. **Set up tracking board** (Linear/Jira) for parity tasks
+5. **Begin API mapping** using commands in Section 9
+
+---
+
+## APPENDIX: Quick Reference Tables
+
+### A. Feature Status Legend
+
+| Symbol | Meaning |
+|--------|---------|
+| ✅ | Feature has parity across platforms |
+| ⚠️ | Feature exists but with differences |
+| ❌ | Feature missing on one platform |
+| 🔄 | Feature exists but fundamentally different paradigm |
+| N/A | Feature is platform-specific (not applicable) |
+
+### B. Priority Levels
+
+| Level | Label | Criteria |
+|-------|-------|----------|
+| P0 | Critical | Core user workflow, high usage, blocks other features |
+| P1 | Important | Valuable but not blocking, medium usage |
+| P2 | Nice to Have | Low usage, convenience feature |
+| P3 | Future | Long-term vision, experimental |
+
+### C. Implementation Complexity
+
+| Complexity | Criteria | Estimated Time |
+|-----------|----------|----------------|
+| Low | UI only, API exists, no new backend logic | 1-3 days |
+| Medium | Some backend changes, new UI components | 1-2 weeks |
+| High | New APIs, database migrations, complex logic | 3-4 weeks |
+| Very High | Multi-service changes, architectural changes | 1-3 months |
+
+---
+
+**Document Owner:** Engineering Team
+**Last Updated:** 2025-11-09
+**Next Review:** After Phase 1 completion

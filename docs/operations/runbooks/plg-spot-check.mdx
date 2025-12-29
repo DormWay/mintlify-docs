@@ -1,0 +1,64 @@
+---
+title: "PLG Spot Check"
+description: "Purpose: Quickly reconcile provisional PLG users and ensure consistent campus links. All actions are idempotent and safe to re‑run."
+---
+
+# PLG Spot Check (Admin)
+
+Purpose: Quickly reconcile provisional PLG users and ensure consistent campus links. All actions are idempotent and safe to re‑run.
+
+## Verification Needed
+- Confirm admin UI path and tab labels in current admin build.
+- Confirm endpoints and request shapes in API Router.
+- Confirm guardrails for domain filter in production.
+
+## Where To Find
+- Admin → Syllabus → Tabs → PLG Spot Check
+- Removed standalone menu to avoid confusion; lives under Syllabus tools.
+
+## Top Controls
+- Status: `provisional` or `all`.
+- Domain: optional filter; required with `all` in prod to prevent broad scopes.
+- Limit: result cap (server also bounds).
+- Actions:
+  - Refresh: fetch rows.
+  - Normalize Provisional (idempotent): normalizes legacy provisional links (confirmation).
+  - Fix Filtered Users (idempotent):
+    - Confirms count, runs per-user cleanup (student context consolidation + campus assignment from syllabi/deps).
+    - Use “Preview Fix (dry run)” first to see affected users and outcomes.
+
+## Peek Syllabi Panel
+- Peek Syllabi: loads up to 20 syllabi for the user.
+- Per-row actions:
+  - Preview JSON: structured view via JsonPreview.
+  - Open PDF: opens original document.
+- Campus Reassignment:
+  - Search campus-configs →
+    - Dry run toggle: simulates reassign.
+    - Reassign ALL syllabi here: batch move (respects Dry run).
+    - Apply to selected syllabus: single move (respects Dry run).
+  - “Move to this campus” on the row is disabled if it’s already linked (no‑op guard).
+
+## Idempotency Guarantees
+- Batch cleanup fixes final state; double-run yields same outcome.
+- Ensure User + Optional Campus creates or reconciles without duplicates.
+- Reassign endpoints reuse existing course contexts; insert conflicts are handled.
+
+## Backend Endpoints
+- GET `/api/admin/plg/spotcheck` – rows for UI.
+- POST `/api/admin/plg/cleanup-batch` – accepts `{ status, domain, limit, preferredCampusId, dryRun }`.
+  - `dryRun=true` computes outcomes without writes; returns per-user details.
+- POST `/api/admin/plg/reassign-one` – `{ serviceDataId, campusId, dryRun }`.
+  - `dryRun=true` returns `{ inferred: { code,name,externalId }, wouldCreateCourse, existingCourseId }`.
+- POST `/api/admin/plg/reassign-syllabi` – `{ userId|email|serviceDataIds, campusId, dryRun }`.
+
+## Dedupe Rules
+- Courses: matched by `external_id=course:CODE` under campus; conflict-safe insert.
+- Campuses (from registry): reuse existing `contexts` row where `metadata->>'registry_id'` matches.
+
+## Ops Notes
+- Prefer domain filters in production; guardrails disable very broad runs.
+- Dry run available for batch and single reassign.
+- See also: [Syllabus Campus Linker](/docs/operations/runbooks/syllabus-campus-linker) and [Admin PLG Endpoints](/docs/engineering/technical/admin-plg-endpoints).
+
+*Last updated: 2025-12-21*

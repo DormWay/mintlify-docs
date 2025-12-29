@@ -1,0 +1,599 @@
+---
+title: "ServiceDataService"
+description: "CREATE TABLE service_data ( id UUID DEFAULT gen_random_uuid(), context_id UUID NOT NULL,        -- Links to contexts table user_id UUID,                    -..."
+---
+
+# ServiceDataService
+
+## Overview
+
+**ServiceDataService** manages CRUD operations on the `service_data` table, which stores time-series data from external services (Canvas, Google Calendar, weather APIs, etc.).
+
+**Purpose**: Provide efficient access to the partitioned `service_data` table with automatic partition routing.
+
+**Location**: `@dormway/core/domains/service-data`
+
+**Critical**: `service_data` is **partitioned by month** (`fetched_at` column). Always include date filters for partition pruning!
+
+---
+
+## Table Structure
+
+```sql
+CREATE TABLE service_data (
+  id UUID DEFAULT gen_random_uuid(),
+  context_id UUID NOT NULL,        -- Links to contexts table
+  user_id UUID,                    -- Owner of the data
+  method TEXT NOT NULL,            -- Service method (e.g., 'fetch_calendar', 'fetch_weather')
+  data JSONB NOT NULL,             -- Actual service data
+  fetched_at TIMESTAMP NOT NULL,   -- Partition key!
+  created_at TIMESTAMP DEFAULT NOW(),
+  PRIMARY KEY (id, fetched_at)    -- Composite key includes partition column
+) PARTITION BY RANGE (fetched_at);
+
+-- Partitions by month
+CREATE TABLE service_data_2025_11 PARTITION OF service_data
+  FOR VALUES FROM ('2025-11-01') TO ('2025-12-01');
+
+CREATE TABLE service_data_2025_12 PARTITION OF service_data
+  FOR VALUES FROM ('2025-12-01') TO ('2026-01-01');
+
+-- etc...
+```
+
+---
+
+## Installation
+
+```typescript
+import { ServiceDataService } from '@dormway/core';
+import { getConnectionPool } from '@dormway/core/database';
+import { createStructuredLogger } from '@dormway/core/logger';
+
+const pool = getConnectionPool();
+const logger = createStructuredLogger({ service: 'engine' });
+
+const service = new ServiceDataService({ pool, logger });
+```
+
+---
+
+## Methods
+
+### queryServiceData
+
+Query service data with filtering and pagination.
+
+**Signature**:
+```typescript
+queryServiceData(
+  contextId: string,
+  method: string,
+  options?: QueryServiceDataOptions
+): Promise<ServiceResult<ServiceDataRecord[]>>
+```
+
+**Options**:
+```typescript
+interface QueryServiceDataOptions {
+  startDate?: string;    // ISO date (CRITICAL for partition pruning!)
+  endDate?: string;      // ISO date
+  limit?: number;        // Max results (default: 100)
+  offset?: number;       // Pagination offset
+  orderBy?: 'asc' | 'desc';  // Sort by fetched_at (default: 'desc')
+}
+```
+
+**Returns**:
+```typescript
+interface ServiceDataRecord {
+  id: string;
+  context_id: string;
+  user_id: string | null;
+  method: string;
+  data: Record<string, unknown>;
+  fetched_at: Date;
+  created_at: Date;
+}
+```
+
+**Examples**:
+
+**Query calendar events (with date filter)**:
+```typescript
+const result = await service.queryServiceData(
+  studentContextId,
+  'fetch_calendar',
+  {
+    startDate: '2025-11-01',
+    endDate: '2025-11-30',
+    limit: 50,
+  }
+);
+
+if (result.success) {
+  const events = result.data!;
+  events.forEach(record => {
+    const event = record.data;
+    console.log(`Event: ${event.summary} at ${event.start}`);
+  });
+}
+```
+
+**Query weather data**:
+```typescript
+const result = await service.queryServiceData(
+  cityContextId,
+  'fetch_weather',
+  {
+    startDate: '2025-11-23',
+    endDate: '2025-11-23',
+    limit: 1,
+    orderBy: 'desc',  // Get most recent
+  }
+);
+
+const weather = result.data![0]?.data;
+```
+
+**⚠️ CRITICAL**: Always use date filters!
+
+```typescript
+// ❌ BAD - scans ALL partitions (slow!)
+const result = await service.queryServiceData(contextId, 'fetch_calendar');
+
+// ✅ GOOD - only scans November partition
+const result = await service.queryServiceData(
+  contextId,
+  'fetch_calendar',
+  { startDate: '2025-11-01', endDate: '2025-11-30' }
+);
+```
+
+---
+
+### getLatestServiceData
+
+Get the most recent service data record.
+
+**Signature**:
+```typescript
+getLatestServiceData(
+  contextId: string,
+  method: string
+): Promise<ServiceResult<ServiceDataRecord | null>>
+```
+
+**Example**:
+```typescript
+const result = await service.getLatestServiceData(
+  campusContextId,
+  'fetch_weather'
+);
+
+if (result.success && result.data) {
+  const weather = result.data.data;
+  console.log(`Temperature: ${weather.temperature}°F`);
+  console.log(`Fetched at: ${result.data.fetched_at}`);
+}
+```
+
+---
+
+### insertServiceData
+
+Insert a new service data record.
+
+**Signature**:
+```typescript
+insertServiceData(
+  record: InsertServiceDataOptions
+): Promise<ServiceResult<ServiceDataRecord>>
+```
+
+**Options**:
+```typescript
+interface InsertServiceDataOptions {
+  contextId: string;
+  userId?: string;
+  method: string;
+  data: Record<string, unknown>;
+  fetchedAt?: Date;  // Default: now
+}
+```
+
+**Example**:
+```typescript
+const result = await service.insertServiceData({
+  contextId: studentContextId,
+  userId: studentUserId,
+  method: 'fetch_calendar',
+  data: {
+    events: [
+      {
+        id: 'event-1',
+        summary: 'CS 101 Lecture',
+        start: '2025-11-23T10:00:00Z',
+        end: '2025-11-23T11:00:00Z',
+      },
+    ],
+  },
+  fetchedAt: new Date(),
+});
+
+if (result.success) {
+  console.log(`Inserted record: ${result.data!.id}`);
+}
+```
+
+---
+
+### bulkInsertServiceData
+
+Insert multiple records efficiently.
+
+**Signature**:
+```typescript
+bulkInsertServiceData(
+  records: InsertServiceDataOptions[]
+): Promise<ServiceResult<ServiceDataRecord[]>>
+```
+
+**Example**:
+```typescript
+const records = calendarEvents.map(event => ({
+  contextId: studentContextId,
+  userId: studentUserId,
+  method: 'fetch_calendar',
+  data: event,
+  fetchedAt: new Date(),
+}));
+
+const result = await service.bulkInsertServiceData(records);
+
+if (result.success) {
+  console.log(`Inserted ${result.data!.length} records`);
+}
+```
+
+---
+
+### deleteOldServiceData
+
+Clean up old data before a specific date.
+
+**Signature**:
+```typescript
+deleteOldServiceData(
+  contextId: string,
+  method: string,
+  beforeDate: string
+): Promise<ServiceResult<number>>
+```
+
+**Example**:
+```typescript
+// Delete weather data older than 30 days
+const thirtyDaysAgo = new Date();
+thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+const result = await service.deleteOldServiceData(
+  cityContextId,
+  'fetch_weather',
+  thirtyDaysAgo.toISOString()
+);
+
+if (result.success) {
+  console.log(`Deleted ${result.data!} old weather records`);
+}
+```
+
+---
+
+## Common Methods & Data Types
+
+### Method Names
+
+Use consistent method naming:
+
+**Calendar/Events**:
+- `fetch_calendar` - Google Calendar events
+- `fetch_canvas_calendar` - Canvas calendar events
+- `processed_calendar` - Processed/merged calendar
+
+**Weather**:
+- `fetch_weather` - Current weather
+- `fetch_forecast` - Weather forecast
+- `processed_city_weather_context` - Processed city weather (prioritized)
+
+**Canvas LMS**:
+- `fetch_canvas_courses` - Course list
+- `fetch_canvas_assignments` - Assignment list
+- `fetch_canvas_grades` - Grade data
+- `fetch_canvas_modules` - Course modules
+
+**Assignments**:
+- `fetch_assignments` - Assignment data
+- `processed_assignments` - Processed assignments
+
+---
+
+## Common Patterns
+
+### Pattern 1: Get Recent Calendar Events
+
+```typescript
+const today = new Date().toISOString().split('T')[0];
+const nextWeek = new Date();
+nextWeek.setDate(nextWeek.getDate() + 7);
+const nextWeekStr = nextWeek.toISOString().split('T')[0];
+
+const result = await service.queryServiceData(
+  studentContextId,
+  'fetch_calendar',
+  {
+    startDate: today,
+    endDate: nextWeekStr,
+    limit: 100,
+  }
+);
+
+if (result.success) {
+  const events = result.data!.flatMap(record => record.data.events || []);
+  console.log(`Found ${events.length} events`);
+}
+```
+
+### Pattern 2: Get Latest Weather with Fallback
+
+```typescript
+const methods = [
+  'processed_city_weather_context',  // Most processed (try first)
+  'fetch_weather',                   // Raw weather data
+  'fetch_forecast',                  // Forecast data
+];
+
+let weather = null;
+
+for (const method of methods) {
+  const result = await service.getLatestServiceData(cityContextId, method);
+
+  if (result.success && result.data) {
+    weather = result.data.data;
+    break;
+  }
+}
+
+if (weather) {
+  console.log(`Weather: ${weather.temperature}°F`);
+} else {
+  console.log('No weather data available');
+}
+```
+
+### Pattern 3: Periodic Cleanup Job
+
+```typescript
+async function cleanupOldServiceData() {
+  const thirtyDaysAgo = new Date();
+  thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+  const cutoffDate = thirtyDaysAgo.toISOString();
+
+  const methods = [
+    'fetch_calendar',
+    'fetch_weather',
+    'fetch_forecast',
+    'fetch_canvas_assignments',
+  ];
+
+  for (const method of methods) {
+    const result = await service.deleteOldServiceData(
+      contextId,
+      method,
+      cutoffDate
+    );
+
+    if (result.success) {
+      logger.info('cleanup.complete', `Deleted ${result.data!} ${method} records`, {
+        metadata: { method, recordsDeleted: result.data! },
+      });
+    }
+  }
+}
+```
+
+### Pattern 4: Batch Insert with Error Handling
+
+```typescript
+const records = dataItems.map(item => ({
+  contextId: studentContextId,
+  userId: studentUserId,
+  method: 'fetch_assignments',
+  data: item,
+}));
+
+// Split into chunks of 100
+const chunkSize = 100;
+for (let i = 0; i < records.length; i += chunkSize) {
+  const chunk = records.slice(i, i + chunkSize);
+
+  try {
+    await service.bulkInsertServiceData(chunk);
+    logger.info('insert.success', `Inserted ${chunk.length} records`);
+  } catch (error) {
+    logger.error('insert.error', 'Failed to insert chunk', {
+      error,
+      metadata: { chunkIndex: i / chunkSize, chunkSize: chunk.length },
+    });
+  }
+}
+```
+
+---
+
+## Partition Management
+
+### Understanding Partitions
+
+```typescript
+// When you query with date filter:
+const result = await service.queryServiceData(
+  contextId,
+  'fetch_calendar',
+  { startDate: '2025-11-15', endDate: '2025-11-20' }
+);
+
+// PostgreSQL only scans partition: service_data_2025_11
+// Much faster than scanning all partitions!
+```
+
+### Partition Pruning (Good vs Bad)
+
+```typescript
+// ❌ BAD - scans ALL partitions (slow!)
+SELECT * FROM service_data
+WHERE context_id = $1 AND method = 'fetch_calendar';
+
+// ✅ GOOD - only scans November partition (fast!)
+SELECT * FROM service_data
+WHERE context_id = $1
+  AND method = 'fetch_calendar'
+  AND fetched_at >= '2025-11-01'
+  AND fetched_at < '2025-12-01';
+```
+
+### Performance Impact
+
+| Query Type | Partitions Scanned | Performance |
+|------------|-------------------|-------------|
+| No date filter | ALL (24+) | ❌ Slow (seconds) |
+| Single month | 1 | ✅ Fast (milliseconds) |
+| 3 months | 3 | ✅ Good (< 1 second) |
+| 1 year | 12 | ⚠️ Medium (1-2 seconds) |
+
+---
+
+## Best Practices
+
+### ✅ Do
+
+- **Always use date filters** for queries
+- **Use consistent method names** across services
+- **Clean up old data** periodically (30-90 days)
+- **Batch insert** multiple records at once
+- **Index by context_id + method** for fast lookups
+- **Use fetchedAt for versioning** (multiple fetches for same data)
+
+### ❌ Don't
+
+- **Don't query without date filters** (scans all partitions!)
+- **Don't use dynamic method names** (inconsistent querying)
+- **Don't store huge JSON** (> 1MB per record)
+- **Don't keep data forever** (disk space fills up)
+- **Don't insert one record at a time** in loops (use bulk insert)
+
+---
+
+## Data Retention Policies
+
+### Recommended TTLs by Method Type
+
+| Method Type | Retention | Reason |
+|-------------|-----------|--------|
+| `fetch_calendar` | 90 days | Old events not needed |
+| `fetch_weather` | 7 days | Weather changes quickly |
+| `fetch_forecast` | 3 days | Forecasts update frequently |
+| `fetch_canvas_assignments` | 180 days | Keep for semester |
+| `fetch_canvas_grades` | 1 year | Historical grades useful |
+| `processed_*` | 30 days | Reprocessed regularly |
+
+**Implementation**:
+```typescript
+const retentionPolicies = {
+  fetch_calendar: 90,
+  fetch_weather: 7,
+  fetch_forecast: 3,
+  fetch_canvas_assignments: 180,
+  fetch_canvas_grades: 365,
+};
+
+async function enforceRetention(contextId: string) {
+  for (const [method, days] of Object.entries(retentionPolicies)) {
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - days);
+
+    await service.deleteOldServiceData(
+      contextId,
+      method,
+      cutoff.toISOString()
+    );
+  }
+}
+```
+
+---
+
+## Troubleshooting
+
+### Problem: Slow queries
+
+**Cause**: Missing date filters, scanning all partitions.
+
+**Solution**: Always include date range:
+```typescript
+// ✅ Add date filters
+const result = await service.queryServiceData(
+  contextId,
+  method,
+  {
+    startDate: thirtyDaysAgo,
+    endDate: today,
+  }
+);
+```
+
+### Problem: No results found
+
+**Cause**: Data might be in different partition or method name mismatch.
+
+**Solution**: Check what data exists:
+```sql
+-- Check available methods
+SELECT DISTINCT method, COUNT(*)
+FROM service_data
+WHERE context_id = 'context-uuid'
+  AND fetched_at >= '2025-11-01'
+GROUP BY method;
+
+-- Check date range
+SELECT MIN(fetched_at), MAX(fetched_at)
+FROM service_data
+WHERE context_id = 'context-uuid'
+  AND method = 'fetch_calendar';
+```
+
+### Problem: Partition doesn't exist
+
+**Error**: `no partition of relation "service_data" found for row`
+
+**Cause**: Trying to insert data for a month without a partition.
+
+**Solution**: Create partition for that month:
+```sql
+-- Create partition for December 2025
+CREATE TABLE service_data_2025_12 PARTITION OF service_data
+  FOR VALUES FROM ('2025-12-01') TO ('2026-01-01');
+```
+
+---
+
+## Related Documentation
+
+- [DormWay Core Library (@dormway-core)](/docs/engineering/technical/dormway-core-library-dormway-core) - Main overview
+- [DayPlanDataService](/docs/engineering/technical/dormway-core/domain-services/dayplandataservice) - Uses ServiceDataService for calendar/weather
+- [CampusService](/docs/engineering/technical/dormway-core/domain-services/campusservice) - Uses ServiceDataService for weather/housing
+
+---
+
+**Last Updated**: 2025-11-23
+**Maintainer**: Platform Team

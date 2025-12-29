@@ -1,0 +1,474 @@
+---
+title: "Customer.io Event Implementation Guide"
+description: "Technical implementation details for Customer.io event tracking across the 5 user journeys."
+---
+
+# Customer.io Event Implementation Guide
+
+Technical implementation details for Customer.io event tracking across the 5 user journeys.
+
+## Event Naming Convention
+
+All events follow the pattern: `{noun}_{verb}` or `{feature}_{action}_{status}`
+
+Examples:
+- `user_created`
+- `syllabus_upload_started`
+- `calendar_sync_completed`
+
+## Required User Attributes
+
+```swift
+// User attributes to sync with Customer.io
+struct CustomerIOUserAttributes {
+    // Basic Profile
+    let userId: String
+    let email: String
+    let firstName: String
+    let lastName: String?
+    let createdAt: Date
+    
+    // Academic Profile
+    let campus: String
+    let campusId: String
+    let major: String
+    let graduationYear: Int?
+    let enrolledCourses: [String]
+    
+    // Preferences
+    let timezone: String
+    let notificationPreferences: NotificationPreferences
+    let quietHoursStart: String? // "22:00"
+    let quietHoursEnd: String? // "08:00"
+    
+    // Feature Adoption
+    let hasSyllabus: Bool
+    let syllabusCount: Int
+    let hasCalendarConnected: Bool
+    let hasPushEnabled: Bool
+    let hasUsedBrainGains: Bool
+    
+    // Engagement Metrics
+    let lastActiveAt: Date
+    let daysSinceLastActive: Int
+    let totalSessions: Int
+    let averageSessionLength: Int // seconds
+    
+    // Notification Settings
+    let morningBriefingEnabled: Bool
+    let morningBriefingTime: String? // "08:00"
+    let middayCheckinEnabled: Bool
+    let eveningReviewEnabled: Bool
+    let eveningReviewTime: String? // "21:00"
+}
+```
+
+## Event Specifications
+
+### Journey 1: Onboarding Events
+
+```swift
+// 1. User Created
+CustomerIO.shared.track(
+    name: "user_created",
+    data: [
+        "source": "ios_app",
+        "app_version": Bundle.main.appVersion,
+        "ios_version": UIDevice.current.systemVersion,
+        "referral_source": referralSource ?? "organic"
+    ]
+)
+
+// 2. Onboarding Started
+CustomerIO.shared.track(
+    name: "onboarding_started",
+    data: [
+        "timestamp": Date().iso8601String
+    ]
+)
+
+// 3. Campus Selected
+CustomerIO.shared.track(
+    name: "campus_selected",
+    data: [
+        "campus_name": campus.name,
+        "campus_id": campus.id,
+        "state": campus.state
+    ]
+)
+
+// 4. Major Selected
+CustomerIO.shared.track(
+    name: "major_selected",
+    data: [
+        "major": selectedMajor,
+        "school": schoolName
+    ]
+)
+
+// 5. Permissions Granted
+CustomerIO.shared.track(
+    name: "permissions_granted",
+    data: [
+        "notification": hasNotificationPermission,
+        "calendar": hasCalendarPermission,
+        "location": hasLocationPermission
+    ]
+)
+
+// 6. Onboarding Completed
+CustomerIO.shared.track(
+    name: "onboarding_completed",
+    data: [
+        "duration_seconds": onboardingDuration,
+        "steps_completed": stepsCompleted,
+        "skipped_steps": skippedSteps
+    ]
+)
+```
+
+### Journey 2: Syllabus Upload Events
+
+```swift
+// 1. Upload Started
+CustomerIO.shared.track(
+    name: "syllabus_upload_started",
+    data: [
+        "upload_method": "file_picker", // or "camera", "share_extension"
+        "file_type": "pdf" // or "docx", "doc"
+    ]
+)
+
+// 2. Processing Started
+CustomerIO.shared.track(
+    name: "syllabus_processing_started",
+    data: [
+        "course_name": courseName,
+        "file_size_kb": fileSizeKB,
+        "page_count": pageCount
+    ]
+)
+
+// 3. Processing Success
+CustomerIO.shared.track(
+    name: "syllabus_processed_success",
+    data: [
+        "course_name": courseName,
+        "course_code": courseCode,
+        "deadlines_found": deadlineCount,
+        "exams_found": examCount,
+        "assignments_found": assignmentCount,
+        "processing_time_ms": processingTime
+    ]
+)
+
+// 4. Processing Failed
+CustomerIO.shared.track(
+    name: "syllabus_processing_failed",
+    data: [
+        "error_type": errorType,
+        "error_message": errorMessage,
+        "file_type": fileType,
+        "retry_available": canRetry
+    ]
+)
+
+// 5. First Syllabus Milestone
+CustomerIO.shared.track(
+    name: "first_syllabus_uploaded",
+    data: [
+        "course_name": courseName,
+        "total_items_extracted": totalItems
+    ]
+)
+
+// 6. All Syllabi Uploaded
+CustomerIO.shared.track(
+    name: "all_syllabi_uploaded",
+    data: [
+        "total_courses": courseCount,
+        "total_deadlines": totalDeadlines,
+        "total_exams": totalExams
+    ]
+)
+```
+
+### Journey 3: Calendar Events
+
+```swift
+// 1. Permission Requested
+CustomerIO.shared.track(
+    name: "calendar_permission_requested",
+    data: [
+        "source_screen": sourceScreen
+    ]
+)
+
+// 2. Calendar Connected
+CustomerIO.shared.track(
+    name: "calendar_connected",
+    data: [
+        "calendar_count": calendarCount,
+        "selected_calendars": selectedCalendarNames
+    ]
+)
+
+// 3. Sync Completed
+CustomerIO.shared.track(
+    name: "calendar_sync_completed",
+    data: [
+        "events_synced": eventCount,
+        "date_range_days": dateRangeDays,
+        "sync_duration_ms": syncDuration
+    ]
+)
+
+// 4. Calendar Disconnected
+CustomerIO.shared.track(
+    name: "calendar_disconnected",
+    data: [
+        "reason": reason, // "user_initiated", "permission_revoked", "error"
+        "was_active_days": daysActive
+    ]
+)
+
+// 5. Time Conflict Detected
+CustomerIO.shared.track(
+    name: "time_conflict_detected",
+    data: [
+        "event1_title": event1.title,
+        "event1_type": event1.type,
+        "event2_title": event2.title,
+        "event2_type": event2.type,
+        "overlap_minutes": overlapMinutes
+    ]
+)
+```
+
+### Journey 4: BrainGains Events
+
+```swift
+// 1. Feature Opened
+CustomerIO.shared.track(
+    name: "braingains_opened",
+    data: [
+        "source": source, // "home", "deep_link", "notification"
+        "has_syllabus": hasSyllabus
+    ]
+)
+
+// 2. Question Asked
+CustomerIO.shared.track(
+    name: "braingains_question_asked",
+    data: [
+        "question_length": questionLength,
+        "course_context": courseCode,
+        "question_type": questionType // "factual", "conceptual", "procedural"
+    ]
+)
+
+// 3. Answer Received
+CustomerIO.shared.track(
+    name: "braingains_answer_received",
+    data: [
+        "response_time_ms": responseTime,
+        "sources_count": sourcesCount,
+        "answer_length": answerLength
+    ]
+)
+
+// 4. Answer Rated
+CustomerIO.shared.track(
+    name: "braingains_answer_rated",
+    data: [
+        "rating": rating, // "helpful", "not_helpful"
+        "course_context": courseCode
+    ]
+)
+
+// 5. Study Streak
+CustomerIO.shared.track(
+    name: "braingains_streak_achieved",
+    data: [
+        "streak_days": streakDays,
+        "total_questions": totalQuestions
+    ]
+)
+```
+
+### Journey 5: Daily Return User Events
+
+```swift
+// 1. App Opened
+CustomerIO.shared.track(
+    name: "app_opened",
+    data: [
+        "source": source, // "direct", "notification", "widget"
+        "time_since_last_open_hours": hoursSinceLastOpen,
+        "notification_id": notificationId // if from notification
+    ]
+)
+
+// 2. Morning Context Loaded
+CustomerIO.shared.track(
+    name: "morning_context_loaded",
+    data: [
+        "has_classes_today": hasClassesToday,
+        "deadlines_today": deadlinesToday,
+        "weather_condition": weatherCondition,
+        "load_time_ms": loadTime
+    ]
+)
+
+// 3. Notification Clicked
+CustomerIO.shared.track(
+    name: "notification_clicked",
+    data: [
+        "notification_type": type, // "morning_briefing", "deadline_reminder", etc
+        "campaign_id": campaignId,
+        "time_to_click_seconds": timeToClick
+    ]
+)
+
+// 4. Notification Preferences Changed
+CustomerIO.shared.track(
+    name: "notification_preferences_updated",
+    data: [
+        "morning_enabled": morningEnabled,
+        "morning_time": morningTime,
+        "midday_enabled": middayEnabled,
+        "evening_enabled": eveningEnabled,
+        "evening_time": eveningTime,
+        "enabled_days": enabledDays
+    ]
+)
+
+// 5. Study Session Completed
+CustomerIO.shared.track(
+    name: "study_session_completed",
+    data: [
+        "duration_minutes": durationMinutes,
+        "course": courseCode,
+        "questions_asked": questionsAsked,
+        "resources_accessed": resourcesAccessed
+    ]
+)
+```
+
+## Transactional API Events
+
+Some events should be triggered from the backend via Customer.io's Track API:
+
+```typescript
+// Backend events (via Customer.io Track API)
+
+// 1. Deadline Approaching
+await customerIO.track({
+  userId: userId,
+  name: 'deadline_approaching',
+  data: {
+    assignment_title: assignment.title,
+    course_name: course.name,
+    hours_until_due: hoursUntilDue,
+    completion_status: completionPercentage
+  }
+});
+
+// 2. Weekly Digest Generated
+await customerIO.track({
+  userId: userId,
+  name: 'weekly_digest_ready',
+  data: {
+    week_number: weekNumber,
+    upcoming_deadlines: upcomingDeadlines.length,
+    completed_assignments: completedCount,
+    study_hours: totalStudyHours,
+    achievement_unlocked: achievementName
+  }
+});
+
+// 3. Sync Error
+await customerIO.track({
+  userId: userId,
+  name: 'sync_error_occurred',
+  data: {
+    error_type: 'calendar_sync_failed',
+    error_message: error.message,
+    retry_count: retryCount,
+    last_successful_sync: lastSyncDate
+  }
+});
+```
+
+## Implementation Checklist
+
+### iOS App Setup
+- [ ] Install Customer.io iOS SDK
+- [ ] Configure workspace credentials
+- [ ] Implement user identification on login
+- [ ] Set up push notification handling
+- [ ] Implement deep link routing
+- [ ] Add event tracking to all user actions
+- [ ] Sync user attributes on profile changes
+
+### Backend Setup
+- [ ] Install Customer.io Node.js SDK
+- [ ] Configure API credentials
+- [ ] Implement transactional event triggers
+- [ ] Set up webhook handlers
+- [ ] Implement user attribute sync
+- [ ] Add error handling and retries
+
+### Customer.io Configuration
+- [ ] Create all event definitions
+- [ ] Set up user segments
+- [ ] Build email templates
+- [ ] Configure push notification templates
+- [ ] Set up campaigns for each journey
+- [ ] Configure triggered workflows
+- [ ] Set up A/B tests
+- [ ] Configure reporting dashboards
+
+### Testing Requirements
+- [ ] Test all events fire correctly
+- [ ] Verify user attributes sync
+- [ ] Test email delivery
+- [ ] Test push notification delivery
+- [ ] Verify deep links work
+- [ ] Test campaign triggers
+- [ ] Verify timezone handling
+- [ ] Test unsubscribe flows
+
+## Analytics & Monitoring
+
+Track these metrics in Customer.io:
+- Event delivery rates
+- Campaign engagement rates
+- Push notification CTR
+- Email open rates
+- User segment sizes
+- Feature adoption funnels
+- Re-engagement campaign success
+
+## Security Considerations
+
+1. **PII Handling**
+   - Never send passwords or tokens
+   - Hash any sensitive identifiers
+   - Use userId instead of email where possible
+
+2. **Data Minimization**
+   - Only send necessary event data
+   - Don't duplicate data already in attributes
+   - Clean up old events per retention policy
+
+3. **Error Handling**
+   - Don't expose internal errors in events
+   - Use error codes instead of stack traces
+   - Log failures for debugging
+
+---
+
+*Created: 2025-07-18*
+*Status: 🟡 Ready for implementation*
+*Related: [Customer.io Campaign Map](/docs/product/features/customerio-campaign-map-5-journeys), Push Notifications, Analytics Implementation*

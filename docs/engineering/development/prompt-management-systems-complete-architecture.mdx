@@ -1,0 +1,479 @@
+---
+title: "Prompt Management Systems   Complete Architecture"
+description: "DormWay has **THREE DISTINCT** prompt management systems serving different needs:"
+---
+
+# Prompt Management Systems - Complete Architecture
+
+**Date:** 2025-11-15
+**Status:** Current
+**Related Issues:** DORM-468 (Phase 1), DORM-469 (Phase 2)
+
+---
+
+## Executive Summary
+
+DormWay has **THREE DISTINCT** prompt management systems serving different needs:
+
+1. **Database-backed Templates** (`PromptTemplatesService`) - DayPlan personalization
+2. **Git Registry + Portkey Sync** (`callHelicone()`) - 23 prompts with observability
+3. **Git Registry Direct** (`loadPrompt()`) - 11 prompts with simple rendering
+
+All three systems are **production-ready and actively used**.
+
+---
+
+## System 1: Database-backed Templates (PromptTemplatesService)
+
+### Purpose
+User-personalizable prompt templates with hierarchical scoping for DayPlan generation.
+
+### Storage
+- **Location:** PostgreSQL `engine_prompt_templates` table
+- **Scopes:** user > campus > global (precedence order)
+- **Versioning:** Supports multiple versions, `is_active` flag
+
+### Template Syntax
+```
+{{path.to.value|defaultValue}}
+```
+
+Simple dot-notation with optional defaults.
+
+### Usage Example
+```typescript
+import { PromptTemplatesService } from '../services/promptTemplates.service';
+
+// Fetch with scope precedence
+const template = await PromptTemplatesService.getActiveTemplate(
+  'dayplan.user.baseline',
+  { userId, campusId }
+);
+
+// Render with context
+const rendered = PromptTemplatesService.render(template.content, {
+  studentInfo,
+  aiPersonality,
+  date: input.date
+});
+```
+
+### Template Keys (Known)
+- `dayplan.system` - System prompt for DayPlan generation
+- `dayplan.user.baseline` - User prompt for baseline profile
+
+### Used By
+- `dayplan.activities.ts` (11 references)
+- DayPlan email personalization
+- AI personality customization
+
+### Editing Location
+**Database**: Admin UI or direct SQL inserts to `engine_prompt_templates`
+
+### Advantages
+- ✅ User/campus-level customization
+- ✅ Runtime updates (no deployment)
+- ✅ Personalization via AI personality settings
+- ✅ Version control per scope
+
+### Limitations
+- ❌ No Git version control
+- ❌ No code review process
+- ❌ Database-dependent (not portable)
+
+---
+
+## System 2: Git Registry + Portkey Sync (callHelicone)
+
+### Purpose
+Source-controlled prompts with Portkey observability, A/B testing, and playground access.
+
+### Storage
+- **Source of Truth:** Git (`prompts/registry.json`, `prompts/engine/*.md`)
+- **Execution Layer:** Portkey dashboard (synced via API)
+- **Sync Mechanism:** GitHub Actions on merge to main
+
+### Prompt Count
+**23 prompts** (have `portkeyId` field in registry)
+
+### Template Syntax
+```
+{{variableName}}
+```
+
+Handlebars syntax in `.md` files with YAML frontmatter.
+
+### Usage Example
+```typescript
+import { callHelicone } from '../utils/portkey';
+
+// Git registry → Portkey API → LLM response
+const result = await callHelicone<ExtractedData>(
+  "syllabus-extraction",
+  { SYLLABUS_CONTENT: text },
+  { userId, workflowId }
+);
+```
+
+### Sync Workflow
+```
+1. Edit prompt in Git (prompts/engine/my-prompt.md)
+2. Update registry.json with metadata
+3. Create PR → GitHub Actions runs dry-run
+4. Merge to main → GitHub Actions syncs to Portkey
+5. Portkey returns promptId → stored in registry.json
+6. callHelicone() uses promptId for execution
+```
+
+### GitHub Actions Workflow
+- **File:** `.github/workflows/sync-prompts.yml`
+- **Triggers:** Push to `main` on `prompts/**` changes
+- **Script:** `scripts/sync-prompts-to-portkey.js`
+- **PR Preview:** Dry-run comment on PRs
+- **Production:** Auto-sync on merge with status summary
+
+### Example Prompts
+- `syllabus-extraction` - BrainGains syllabus processing
+- `city-weather-context-processor` - Weather insights
+- `campus-bulletin-context-processor` - Campus bulletin generation
+- `student-priority-analyzer` - Student priority analysis
+
+### Used By
+- `braingains.activities.ts`
+- `student.activities.ts`
+- `semester.activities.ts`
+- `building.activities.ts`
+- `portkey.activities.ts`
+- Some functions in `campus.activities.ts`
+
+### Editing Location
+**Git first, Portkey second:**
+1. Edit `.md` file in Git
+2. Update `prompts/registry.json`
+3. Commit → PR → Merge
+4. GitHub Actions auto-syncs to Portkey
+5. Optional: Use Portkey playground for A/B testing
+
+### Advantages
+- ✅ Git version control with PR review
+- ✅ Portkey observability (cost, latency, errors)
+- ✅ A/B testing in Portkey playground
+- ✅ Automated CI/CD sync
+- ✅ Metadata tracking (provider, model, variables)
+
+### Limitations
+- ⚠️ Requires Portkey API key (PORTKEY_SERVICE_KEY)
+- ⚠️ Two-step process (Git → Portkey sync)
+- ⚠️ Portkey API dependency for execution
+
+---
+
+## System 3: Git Registry Direct (loadPrompt)
+
+### Purpose
+Simple, Git-native prompts with no external dependencies or observability overhead.
+
+### Storage
+- **Source of Truth:** Git (`prompts/registry.json`, `prompts/engine/*.md`)
+- **Execution:** Direct file reads at runtime (no Portkey)
+
+### Prompt Count
+**11 prompts** (NO `portkeyId` field in registry)
+
+### Template Syntax
+```
+{{variableName}}
+```
+
+Handlebars syntax (same as System 2).
+
+### Usage Example
+```typescript
+import { loadPrompt } from '../utils/portkey';
+
+// Direct Git load → manual LLM call
+const userPrompt = await loadPrompt('city-news-perplexity', {
+  cityName,
+  state,
+  currentDate
+});
+
+const portkey = new Portkey({ apiKey: process.env.PORTKEY_API_KEY! });
+const response = await portkey.chat.completions.create({
+  model: 'sonar-pro',
+  messages: [{ role: 'user', content: userPrompt }]
+});
+```
+
+### Example Prompts (Migrated in Phase 2)
+- `campus-metadata-comprehensive` - Campus metadata extraction
+- `campus-term-dates` - Academic calendar dates
+- `campus-housing` - Housing information
+- `campus-academic-calendar` - Academic events
+- `campus-events-perplexity` - Campus events discovery
+- `campus-logistics-widgets` - Logistics dashboard widgets
+- `campus-events-widgets` - Events dashboard widgets
+- `campus-news-widgets` - News & safety widgets
+- `city-news-perplexity` - City news aggregation
+- `city-transit-perplexity` - Transit alerts
+- `student-priority-analyzer` - Student priority analysis (1 existing)
+
+### Used By
+- `campusEnrichment.activities.ts` (4 functions)
+- `campus.activities.ts` (4 functions)
+- `city.activities.ts` (2 functions)
+
+### Editing Location
+**Git only:**
+1. Edit `.md` file in `prompts/engine/`
+2. Update `prompts/registry.json` (version, variables)
+3. Commit → PR → Merge
+4. Engine reads updated file at runtime (no sync needed)
+
+### Advantages
+- ✅ Git version control with PR review
+- ✅ Simple, no external dependencies
+- ✅ Fast (direct file reads, cached registry)
+- ✅ No Portkey API calls (cost savings)
+- ✅ Full control over LLM routing
+
+### Limitations
+- ❌ No Portkey observability (cost, latency)
+- ❌ No A/B testing playground
+- ❌ Manual LLM integration in code
+
+---
+
+## Decision Matrix: Which System to Use?
+
+| Criteria | Database Templates | Git + Portkey | Git Direct |
+|----------|-------------------|---------------|------------|
+| **User personalization** | ✅ Best | ❌ No | ❌ No |
+| **Git version control** | ❌ No | ✅ Yes | ✅ Yes |
+| **Code review process** | ❌ No | ✅ PR required | ✅ PR required |
+| **Portkey observability** | ❌ No | ✅ Yes | ❌ No |
+| **A/B testing** | ❌ No | ✅ Portkey playground | ❌ No |
+| **Runtime updates** | ✅ Instant | ⚠️ Requires sync | ✅ Next file read |
+| **Campus-level prompts** | ✅ Yes | ❌ No | ❌ No |
+| **Deployment needed** | ❌ No | ⚠️ GitHub Actions | ❌ No |
+| **External dependencies** | Database | Portkey API | None |
+
+### Recommendation by Use Case
+
+**Use Database Templates when:**
+- DayPlan personalization (user/campus-specific)
+- AI personality customization
+- Runtime prompt updates needed
+- No Git review required
+
+**Use Git + Portkey when:**
+- Need observability (cost tracking, latency)
+- A/B testing in Portkey playground
+- Want LLM provider flexibility
+- Complex prompt engineering workflow
+
+**Use Git Direct when:**
+- Simple prompts with no observability needs
+- Fast iteration during development
+- Cost optimization (avoid Portkey API calls)
+- Full control over LLM integration
+
+---
+
+## Where to Edit Prompts
+
+### System 1: Database Templates
+**Primary:** Admin UI (if available) or SQL
+```sql
+INSERT INTO engine_prompt_templates (
+  template_key, scope_type, scope_id, content, version, is_active
+) VALUES (
+  'dayplan.system',
+  'global',
+  NULL,
+  'You are a helpful assistant...',
+  1,
+  true
+);
+```
+
+### System 2: Git + Portkey
+**Primary:** Git (source of truth)
+1. Edit `prompts/engine/my-prompt.md`
+2. Update `prompts/registry.json`
+3. Commit → PR → Merge → GitHub Actions syncs to Portkey
+
+**Secondary:** Portkey playground (for A/B testing)
+- Changes in Portkey are NOT synced back to Git
+- Use Portkey for experimentation, then backport to Git
+
+### System 3: Git Direct
+**Only:** Git
+1. Edit `prompts/engine/my-prompt.md`
+2. Update `prompts/registry.json` (increment version)
+3. Commit → PR → Merge
+4. Engine picks up changes at runtime
+
+---
+
+## Testing Status: Git → Portkey Sync
+
+### ⚠️ CRITICAL: Sync Not Yet Tested in Production
+
+**What's Implemented:**
+- ✅ Sync script (`scripts/sync-prompts-to-portkey.js`)
+- ✅ GitHub Actions workflow (`.github/workflows/sync-prompts.yml`)
+- ✅ Dry-run tested locally
+- ✅ 23 prompts have `portkeyId` (from Phase 1 manual sync?)
+
+**What's NOT Tested:**
+- ❌ GitHub Actions workflow on actual PR
+- ❌ GitHub Actions workflow on merge to main
+- ❌ Auto-sync for 11 new prompts added today
+- ❌ Portkey API key validity in GitHub Secrets
+
+### Testing Checklist
+
+**Before merging PR #514:**
+1. [ ] Verify `PORTKEY_SERVICE_KEY` exists in GitHub Secrets
+2. [ ] Create test PR modifying a prompt file
+3. [ ] Verify dry-run comment appears on PR
+4. [ ] Merge test PR to main
+5. [ ] Verify production sync runs successfully
+6. [ ] Check Portkey dashboard for synced prompts
+7. [ ] Verify new `portkeyId` fields added to registry.json
+
+**Manual sync command:**
+```bash
+npm run prompts:sync:dry-run  # Preview
+npm run prompts:sync          # Execute
+```
+
+---
+
+## Should We Keep Portkey Hosting for 23 Prompts?
+
+### Arguments FOR Keeping Portkey (Git + Portkey System)
+
+**1. Observability**
+- Cost tracking per prompt
+- Latency monitoring
+- Error rate analysis
+- Provider comparison (OpenAI vs Anthropic)
+
+**2. A/B Testing**
+- Portkey playground for experimentation
+- Test variations without deployment
+- Side-by-side comparison
+
+**3. Provider Flexibility**
+- Easy provider switching (OpenAI → Anthropic)
+- Fallback routing on provider failures
+- Load balancing across providers
+
+**4. Prompt Versioning**
+- Historical version tracking in Portkey
+- Rollback to previous versions
+- Version comparison
+
+### Arguments AGAINST (Migrate to Git Direct)
+
+**1. Complexity**
+- Two systems to maintain (Git + Portkey)
+- Sync failures require monitoring
+- API key management
+
+**2. Cost**
+- Portkey API overhead (minimal but non-zero)
+- Additional API hop latency
+
+**3. Dependency**
+- External service dependency
+- Portkey API outages affect execution
+
+### Recommendation
+
+**Hybrid Approach (Status Quo):**
+- Keep System 2 (Git + Portkey) for prompts needing observability
+- Use System 3 (Git Direct) for simple, stable prompts
+- Migrate prompts between systems based on maturity:
+  - New prompts → Git Direct (fast iteration)
+  - Stable prompts needing analytics → Git + Portkey
+  - Campus/user-specific → Database Templates
+
+**Decision Criteria:**
+- If prompt cost > $10/month → Use Git + Portkey (track cost)
+- If prompt changes weekly → Use Git Direct (fast iteration)
+- If prompt needs personalization → Use Database Templates
+
+---
+
+## Migration Status
+
+### Phase 1 (DORM-468) - COMPLETED ✅
+- Built Git registry infrastructure
+- Built sync script + GitHub Actions
+- Migrated `callHelicone()` to load from Git metadata
+- Synced 23 prompts to Portkey (manual sync?)
+
+### Phase 2 (DORM-469) - IN PROGRESS ⚠️
+- ✅ Migrated 10 prompts to Git Direct (`loadPrompt()`)
+- ✅ Created 10 new prompt files
+- ✅ Production validation (campus + city workflows)
+- ⏳ **NOT TESTED:** GitHub Actions auto-sync
+- ⏳ Remove `PROMPT_ID_MAPPING` hardcoded fallback
+- ⏳ Sync 11 new prompts to Portkey (if desired)
+- ⏳ Migrate remaining Engine prompts (target: 46 total)
+
+### Remaining Work
+1. **Test sync workflow** (PR + merge to main)
+2. **Decide on 11 new prompts**: Keep Git Direct or sync to Portkey?
+3. **Remove hardcoded fallbacks** in `portkey.ts`
+4. **Audit remaining prompts** (student, semester, building, braingains)
+5. **Document decision criteria** for which system to use
+
+---
+
+## Files Reference
+
+### Git Registry
+- `prompts/registry.json` - Central metadata
+- `prompts/engine/*.md` - Prompt files
+- `prompts/schemas/registry-schema.json` - Validation schema
+
+### Code
+- `services/engine/src/utils/portkey.ts` - loadPrompt() + callHelicone()
+- `services/engine/src/services/promptTemplates.service.ts` - Database templates
+- `scripts/sync-prompts-to-portkey.js` - Sync script
+- `scripts/validate-prompt-registry.js` - Validation
+
+### CI/CD
+- `.github/workflows/sync-prompts.yml` - Auto-sync workflow
+
+### Database
+- `engine_prompt_templates` table - Database-backed templates
+
+---
+
+## Next Steps
+
+1. **Immediate (Today):**
+   - [ ] Test GitHub Actions sync workflow
+   - [ ] Verify Portkey API key in GitHub Secrets
+   - [ ] Update Linear DORM-469 with 3-system architecture
+
+2. **Short-term (This Week):**
+   - [ ] Decide: Sync 11 new prompts to Portkey or keep Git Direct?
+   - [ ] Remove `PROMPT_ID_MAPPING` hardcoded fallback
+   - [ ] Document where to edit each prompt type
+
+3. **Long-term (Next Sprint):**
+   - [ ] Build admin UI for database template management
+   - [ ] Audit remaining Engine prompts for migration
+   - [ ] Create cost tracking dashboard (Portkey analytics)
+
+---
+
+**Last Updated:** 2025-11-15
+**Author:** Ethan Kaplan (via Claude Code)
+**Related PRs:** #511 (Phase 1), #514 (Phase 2)

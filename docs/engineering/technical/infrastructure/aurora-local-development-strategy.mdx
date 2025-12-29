@@ -1,0 +1,262 @@
+---
+title: "Aurora Local Development Strategy"
+description: "This guide provides a comprehensive strategy for local development with the Aurora PostgreSQL database that sits behind a VPC in AWS."
+---
+
+# Aurora Local Development Strategy
+
+## Overview
+This guide provides a comprehensive strategy for local development with the Aurora PostgreSQL database that sits behind a VPC in AWS.
+
+## Current Infrastructure Analysis
+- **Aurora Setup**: PostgreSQL 15.4 with Serverless v2 (0.5-1.0 ACU)
+- **Security**: Database in private subnets, accessed via bastion host
+- **Connection Methods**: Direct cluster endpoint or RDS Proxy
+- **Authentication**: AWS Secrets Manager for password management
+
+## Strategy Options
+
+### Option 1: SSH Tunnel via Bastion (Recommended for Development)
+**Pros**: Secure, uses production-like connection, no data sync needed
+**Cons**: Requires bastion host running, slight latency
+
+```bash
+# One-time setup
+cd dormway-aws-infrastructure
+./scripts/setup-bastion.sh
+
+# Create tunnel (in one terminal)
+./scripts/tunnel-aurora.sh
+
+# Connect locally (in another terminal)
+psql -h localhost -p 5432 -U dormway_admin -d dormway
+# Or use DATABASE_URL
+export DATABASE_URL="postgresql://dormway_admin:PASSWORD@localhost:5432/dormway"
+```
+
+### Option 2: Local PostgreSQL with Periodic Sync
+**Pros**: No latency, works offline, full control
+**Cons**: Data sync complexity, potential drift from production
+
+```bash
+# Install PostgreSQL 15 locally
+brew install postgresql@15
+brew services start postgresql@15
+
+# Create local database
+createdb dormway
+
+# Sync from Aurora (via bastion)
+./scripts/tunnel-aurora.sh
+pg_dump -h localhost -p 5432 -U dormway_admin -d dormway > dormway_backup.sql
+psql -h localhost -d dormway < dormway_backup.sql
+```
+
+### Option 3: Docker Compose with Local PostgreSQL
+**Pros**: Reproducible environment, easy cleanup, version control
+**Cons**: Still needs data sync strategy
+
+```yaml
+# docker-compose.local-db.yml
+version: '3.8'
+services:
+  postgres:
+    image: postgres:15.4
+    environment:
+      POSTGRES_DB: dormway
+      POSTGRES_USER: dormway_admin
+      POSTGRES_PASSWORD: local_dev_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - dormway_db:/var/lib/postgresql/data
+      - ./migration/schema:/docker-entrypoint-initdb.d
+volumes:
+  dormway_db:
+```
+
+### Option 4: AWS Cloud9 IDE
+**Pros**: Direct VPC access, no tunneling needed
+**Cons**: Browser-based IDE, costs money, requires internet
+
+```bash
+# Create Cloud9 environment in same VPC
+aws cloud9 create-environment-ec2 \
+  --name "dormway-dev" \
+  --instance-type "t3.small" \
+  --subnet-id "subnet-xxx" # Use private subnet ID
+```
+
+## Recommended Approach: Hybrid Strategy
+
+### 1. Development Workflow
+```bash
+# For schema changes and migrations
+cd dormway-aws-infrastructure
+./scripts/tunnel-aurora.sh  # Keep tunnel open
+
+# For application development  
+docker-compose -f docker-compose.local-db.yml up -d
+
+# Environment setup for services
+export DATABASE_URL="postgresql://dormway_admin:local_dev_password@localhost:5432/dormway"
+export USE_LOCAL_DB=true  # Flag to bypass some AWS-specific features
+```
+
+### 2. Data Management Script
+Create `scripts/sync-dev-database.sh`:
+```bash
+#!/bin/bash
+# Sync production data to local development
+
+echo "🔄 Syncing Aurora data to local..."
+
+# Start tunnel in background
+./scripts/tunnel-aurora.sh &
+TUNNEL_PID=$!
+sleep 5
+
+# Dump schema and sample data
+pg_dump -h localhost -p 5432 -U dormway_admin -d dormway \
+  --schema-only > ./migration/schema.sql
+
+# Dump sample data (limited rows)
+pg_dump -h localhost -p 5432 -U dormway_admin -d dormway \
+  --data-only \
+  --table=users --table=campuses --table=courses \
+  --where="users.created_at > NOW() - INTERVAL '7 days'" \
+  > ./migration/sample-data.sql
+
+# Kill tunnel
+kill $TUNNEL_PID
+
+# Import to local
+docker exec -i dormway_postgres psql -U dormway_admin -d dormway < ./migration/schema.sql
+docker exec -i dormway_postgres psql -U dormway_admin -d dormway < ./migration/sample-data.sql
+
+echo "✅ Local database synced!"
+```
+
+### 3. Service Configuration
+Update each service to handle both local and Aurora connections:
+
+```javascript
+// Example for Node.js services
+const isLocalDev = process.env.USE_LOCAL_DB === 'true';
+
+const dbConfig = isLocalDev ? {
+  connectionString: process.env.LOCAL_DATABASE_URL || 'postgresql://dormway_admin:local_dev_password@localhost:5432/dormway',
+  ssl: false
+} : {
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+};
+```
+
+### 4. Doppler Integration
+```bash
+# Create local development config in Doppler
+doppler configs create local_dev
+doppler secrets set DATABASE_URL="postgresql://dormway_admin:local_dev_password@localhost:5432/dormway" --config local_dev
+
+# Use for local development
+doppler run --config local_dev -- npm run dev
+```
+
+## Implementation Checklist
+
+1. **Initial Setup**
+   - [ ] Run bastion setup script
+   - [ ] Deploy bastion host to AWS
+   - [ ] Test SSH tunnel connection
+   - [ ] Create docker-compose.local-db.yml
+
+2. **Database Initialization**
+   - [ ] Create sync script
+   - [ ] Set up initial schema
+   - [ ] Import sample data
+   - [ ] Verify connections
+
+3. **Service Updates**
+   - [ ] Update engine service for local DB
+   - [ ] Update API router for local DB
+   - [ ] Configure Doppler local_dev environment
+   - [ ] Update README with local setup instructions
+
+4. **Developer Tools**
+   - [ ] Create Makefile targets for common tasks
+   - [ ] Add database GUI connection instructions
+   - [ ] Document troubleshooting steps
+
+## Quick Start Commands
+
+```bash
+# Start local development environment
+make local-db-up
+
+# Sync data from Aurora
+make sync-aurora-data
+
+# Connect to local database
+make db-console
+
+# Run services with local database
+make run-local-services
+
+# Clean up
+make local-db-down
+```
+
+## Troubleshooting
+
+### Connection Refused
+- Check if tunnel is active: `ps aux | grep ssh`
+- Verify bastion host is running: `aws ec2 describe-instances`
+- Check security groups allow connection
+
+### Authentication Failed
+- Get password from Secrets Manager
+- Verify DATABASE_URL is correct
+- Check if using correct connection method (tunnel vs direct)
+
+### Data Out of Sync
+- Run sync script more frequently
+- Consider using database triggers for critical data
+- Implement versioning for schema changes
+
+## Security Considerations
+
+1. **Never commit credentials** - Use Doppler or environment variables
+2. **Limit bastion access** - Update allowed_ssh_ips regularly
+3. **Use read replicas** - For data analysis, use reader endpoint
+4. **Rotate credentials** - Update local passwords periodically
+5. **Audit access** - Monitor bastion host usage
+
+## Migration Workflow
+
+When making database changes:
+
+1. Develop and test locally
+2. Create migration script
+3. Test via SSH tunnel to Aurora
+4. Apply to production via CI/CD
+
+```bash
+# Example migration workflow
+# 1. Create migration
+echo "ALTER TABLE users ADD COLUMN feature_flags JSONB;" > migrations/001_add_feature_flags.sql
+
+# 2. Test locally
+docker exec -i dormway_postgres psql -U dormway_admin -d dormway < migrations/001_add_feature_flags.sql
+
+# 3. Test on Aurora via tunnel
+./scripts/tunnel-aurora.sh
+psql -h localhost -p 5432 -U dormway_admin -d dormway < migrations/001_add_feature_flags.sql
+
+# 4. Commit and deploy
+git add migrations/
+git commit -m "Add feature_flags column to users table"
+git push
+```
+
+This strategy provides flexibility for different development scenarios while maintaining security and data integrity.

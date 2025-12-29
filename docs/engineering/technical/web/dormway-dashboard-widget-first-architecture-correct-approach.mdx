@@ -1,0 +1,869 @@
+---
+title: "DormWay Dashboard   Widget First Architecture (CORRECT APPROACH)"
+description: "I initially proposed creating a **Dashboard BFF v2** with a flattened data structure and feature flags for gradual migration. **This was completely wrong.**"
+---
+
+# DormWay Dashboard - Widget-First Architecture (CORRECT APPROACH)
+
+**Date**: October 11, 2025
+**Critical Decision**: DO NOT CREATE V2 API - Fix frontend to embrace existing widget system
+**Status**: Supersedes previous "Dashboard Integration Plan"
+
+---
+
+## Executive Summary: What I Got Wrong
+
+I initially proposed creating a **Dashboard BFF v2** with a flattened data structure and feature flags for gradual migration. **This was completely wrong.**
+
+After reviewing Ethan's implementation and the obsidian vault documentation:
+
+### The Widget Envelope System is Already Perfect ✅
+
+1. **98% Complete** - Production-ready since September 2025
+2. **Modular by design** - Widget envelopes with stable IDs
+3. **Extensible** - New widget types don't break clients
+4. **iOS already uses it correctly** - They have normalizers that consume widgets
+5. **Real-time deltas work** - Ably integration operational
+6. **ETag caching works** - 98% bandwidth savings
+
+### The Real Problem ❌
+
+**The web frontend is fighting against a well-designed system.**
+
+The 518-line `transformCompositeResponse()` function exists because the web app is trying to:
+- Flatten widget envelopes into custom shapes
+- Extract `schedule` from 3+ different sources
+- Generate tasks from assignments (backend's job)
+- Map course contexts across inconsistent field names
+
+**This is the WRONG approach.**
+
+### The Correct Solution ✅
+
+**Make the web app consume widgets like iOS does:**
+
+1. **No v2 API** - Keep the current BFF v1
+2. **No feature flags** - Refactor incrementally without changing the API
+3. **Widget-first components** - Each React component consumes specific widget types
+4. **Embrace envelopes** - Stop trying to flatten everything
+5. **Delete the 518-line transformer** - Replace with simple widget routing
+
+---
+
+## Why the Widget System is Already Modular
+
+### Current Architecture (Good ✅)
+
+```typescript
+// Backend returns widget envelopes
+{
+  version: '1.0',
+  server_time: '2025-10-11T...',
+  widgets: [
+    {
+      id: 'urgent-deadlines',
+      type: 'academic',
+      content: {
+        displayType: 'urgent_deadlines',
+        data: { urgentAssignments: [...] }
+      }
+    },
+    {
+      id: 'next-class',
+      type: 'schedule',
+      content: {
+        displayType: 'upcoming_class',
+        data: { nextClass: {...}, items: [...] }
+      }
+    },
+    // ... more widgets
+  ]
+}
+```
+
+**Why this is good:**
+- ✅ **Stable IDs** - `urgent-deadlines`, `next-class` (deterministic)
+- ✅ **Type discrimination** - `type` + `displayType` make widgets self-describing
+- ✅ **Extensible** - New widget types added without breaking clients
+- ✅ **Modular** - Each widget is independent, can be rendered or ignored
+- ✅ **Versioned** - Top-level `version` field for contract changes
+- ✅ **Real-time friendly** - Delta ops: `{ op: 'upsert', id, value }`
+
+### How iOS Does It (Correct ✅)
+
+**File**: `ios-clean/Core/Services/Dashboard/DashboardCompositeV1Normalizer.swift`
+
+```swift
+func normalize(_ response: DashboardCompositeV1Response) -> DashboardState {
+  var state = DashboardState()
+
+  for widget in response.widgets {
+    switch widget.type {
+    case "academic":
+      state.academicWidget = parseAcademicWidget(widget)
+    case "schedule":
+      if widget.content.displayType == "upcoming_class" {
+        state.upcomingClass = parseUpcomingClass(widget)
+      } else if widget.content.displayType == "timeline" {
+        state.timeline = parseTimeline(widget)
+      }
+    case "weather":
+      state.weather = parseWeather(widget)
+    case "dayplan":
+      state.dayplan = parseDayplan(widget)
+    // Unknown widgets are silently ignored (forward compatibility)
+    default:
+      break
+    }
+  }
+
+  return state
+}
+```
+
+**Why this works:**
+- ✅ Simple switch statement on `widget.type`
+- ✅ Type-specific parsers extract data
+- ✅ Unknown widgets ignored (forward compatibility)
+- ✅ ~50 lines vs 518 lines
+
+### How Web Currently Does It (Wrong ❌)
+
+**File**: `src/hooks/home/useDashboardComposite.ts:286-467`
+
+```typescript
+function transformCompositeResponse(apiData: any): DashboardCompositeResponse {
+  const widgets = apiData.widgets || [];
+
+  // Extract timeline from MULTIPLE SOURCES (bad!)
+  const scheduleArray = apiData.schedule || [];
+  const timelineWidget = widgets.find(w => w.type === 'schedule' && w.content?.displayType === 'timeline');
+  const timelineItems = timelineWidget?.content?.data?.items || [];
+  const upcomingClassWidget = widgets.find(w => w.type === 'schedule' && w.content?.displayType === 'upcoming_class');
+  const upcomingClassItems = upcomingClassWidget?.content?.data?.items || [];
+
+  // Combine all sources (duplicates, inconsistency)
+  const allScheduleItems = [...scheduleArray, ...timelineItems, ...upcomingClassItems];
+
+  // Transform to custom shape (why?)
+  const events: TimeBlock[] = allScheduleItems.map((item: any) => ({
+    id: item.id || `event-${Date.now()}-${Math.random()}`,
+    title: item.title || 'Untitled',
+    // ... 20 more lines of mapping
+  }));
+
+  // Extract assignments from widgets (complex)
+  const academicWidgets = widgets.filter((w: any) => w.type === 'academic');
+  const widgetDueSoon: DueItem[] = [];
+  for (const widget of academicWidgets) {
+    if (widget.content?.displayType === 'urgent_deadlines') {
+      // ... extract assignments
+    }
+    // ... more extraction logic
+  }
+
+  // Generate tasks from assignments (backend's job!)
+  for (const assignment of dueSoon) {
+    if (!hasTaskBlock(assignment)) {
+      unscheduledTasks.push({
+        id: `task-from-assignment-${assignment.id}`,
+        // ... hardcoded logic
+      });
+    }
+  }
+
+  // ... 400 more lines of this
+}
+```
+
+**Why this is bad:**
+- ❌ Extracting from multiple sources (duplicates, inconsistency)
+- ❌ Creating custom intermediate shapes (unnecessary complexity)
+- ❌ Business logic in frontend (task generation)
+- ❌ Field name mappings (`courseCode` vs `course_code`)
+- ❌ 518 lines of fragile code
+
+---
+
+## The Correct Refactoring Plan
+
+### Phase 1: Create Widget Consumer Components (Week 1)
+
+#### Step 1.1: Create Widget Parser Hook
+
+**File**: `src/hooks/home/useWidgetParser.ts` (NEW)
+
+```typescript
+import type { WidgetEnvelope } from './useDashboardComposite';
+
+export function useWidgetParser(widgets: WidgetEnvelope[] | undefined) {
+  if (!widgets) return {};
+
+  // Simple routing to type-specific parsers
+  const parsed: Record<string, any> = {};
+
+  for (const widget of widgets) {
+    switch (widget.type) {
+      case 'schedule':
+        if (!parsed.schedule) parsed.schedule = [];
+        if (widget.content.displayType === 'timeline') {
+          parsed.schedule.push(...parseTimelineWidget(widget));
+        } else if (widget.content.displayType === 'upcoming_class') {
+          parsed.upcomingClass = parseUpcomingClassWidget(widget);
+        }
+        break;
+
+      case 'academic':
+        if (widget.content.displayType === 'urgent_deadlines') {
+          parsed.assignments = parseUrgentDeadlinesWidget(widget);
+        } else if (widget.content.displayType === 'workload_summary') {
+          parsed.workload = parseWorkloadWidget(widget);
+        }
+        break;
+
+      case 'dayplan':
+        parsed.tasks = parseDayplanWidget(widget);
+        break;
+
+      case 'weather':
+        parsed.weather = parseWeatherWidget(widget);
+        break;
+
+      case 'course_detail':
+        if (!parsed.courses) parsed.courses = [];
+        parsed.courses.push(parseCourseWidget(widget));
+        break;
+
+      // Unknown widgets silently ignored (forward compatibility)
+      default:
+        if (process.env.NODE_ENV === 'development') {
+          console.log('[Widgets] Unknown widget type:', widget.type, widget.id);
+        }
+        break;
+    }
+  }
+
+  return parsed;
+}
+
+// Type-specific parsers (simple, focused)
+function parseTimelineWidget(widget: WidgetEnvelope): TimeBlock[] {
+  const items = widget.content.data?.items || [];
+  return items.map(item => ({
+    id: item.id,
+    title: item.title,
+    start: item.startTime,
+    end: item.endTime,
+    type: 'class',
+    courseCode: item.courseCode,
+    location: item.location
+  }));
+}
+
+function parseUrgentDeadlinesWidget(widget: WidgetEnvelope): DueItem[] {
+  const assignments = widget.content.data?.urgentAssignments || [];
+  return assignments.map(a => ({
+    id: a.id,
+    title: a.title,
+    dueDate: a.dueAt,
+    courseCode: a.courseCode,
+    priority: determinePriority(a.dueAt),
+    status: 'pending',
+    type: 'assignment'
+  }));
+}
+
+function parseDayplanWidget(widget: WidgetEnvelope): UnscheduledTask[] {
+  const blocks = widget.content.data?.blocks || [];
+  return blocks.filter(b => !b.startTime).map(b => ({
+    id: b.id,
+    title: b.title,
+    estimatedDuration: b.minutes || 30,
+    priority: b.priority || 'medium',
+    courseCode: b.courseCode
+  }));
+}
+
+// ... more parsers (each ~10 lines)
+```
+
+**Why this is better:**
+- ✅ ~150 lines total (vs 518)
+- ✅ Type-specific parsers (focused, testable)
+- ✅ Unknown widgets silently ignored
+- ✅ Easy to add new widget types
+- ✅ No business logic, just data mapping
+
+#### Step 1.2: Update Dashboard Hook
+
+**File**: `src/hooks/home/useDashboardComposite.ts` (SIMPLIFIED)
+
+```typescript
+export function useDashboardComposite(options: UseDashboardCompositeOptions = {}) {
+  const { tab = 'home', context = 'campus', date, enabled = true } = options;
+
+  const query = useQuery({
+    queryKey: ['dashboard-composite', tab, context, date],
+    queryFn: async () => {
+      const params = new URLSearchParams({ tab, context });
+      if (date) params.append('date', date);
+
+      const url = proxyPath(`/dashboard/v1/composite?${params}`);
+      const response = await authorizedFetch(url, { cache: 'no-store' });
+
+      if (!response.ok) {
+        throw new Error(`Dashboard API error: ${response.status}`);
+      }
+
+      return await response.json();
+    },
+    staleTime: 60_000,
+    enabled
+  });
+
+  // Parse widgets using new hook
+  const parsed = useWidgetParser(query.data?.widgets);
+
+  return {
+    ...query,
+    // Expose parsed data in convenient shapes
+    timeline: parsed.schedule || [],
+    upcomingClass: parsed.upcomingClass,
+    assignments: parsed.assignments || [],
+    tasks: parsed.tasks || [],
+    courses: parsed.courses || [],
+    weather: parsed.weather,
+    // Also expose raw response for debugging
+    raw: query.data
+  };
+}
+```
+
+**Reduced from 518 lines to ~50 lines.**
+
+#### Step 1.3: Update Column Components (No Changes!)
+
+**File**: `src/components/home/columns/Column1Timeline.tsx`
+
+```typescript
+export function Column1Timeline() {
+  const { timeline, isLoading, error } = useDashboardComposite();
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Timeline</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <DayStripTimeline events={timeline} isLoading={isLoading} />
+      </CardContent>
+    </Card>
+  );
+}
+```
+
+**No changes needed** - Column components already expect the right shapes!
+
+---
+
+### Phase 2: Backend Data Quality (Week 2)
+
+These improvements don't require API changes, just data quality fixes:
+
+#### 2.1: Consistent Course Context IDs ✅
+
+**File**: `services/api-router/src/services/dashboard-composite-transformer.ts`
+
+Ensure all course-related data includes `courseContextId`:
+
+```typescript
+// When building schedule widget
+function buildScheduleWidget(complete: any): WidgetEnvelope {
+  const items = complete.schedule.map(event => ({
+    id: event.id,
+    title: event.title,
+    startTime: event.start,
+    endTime: event.end,
+    location: event.location,
+    // ALWAYS include courseContextId
+    courseContextId: event.courseContextId || event.course_context_id || null,
+    courseCode: event.courseCode || event.course_code || null
+  }));
+
+  return {
+    id: 'timeline',
+    type: 'schedule',
+    content: {
+      displayType: 'timeline',
+      data: { items }
+    }
+  };
+}
+```
+
+#### 2.2: Backend-Generated Tasks ✅
+
+**File**: `services/api-router/src/services/dashboard-aurora-service.ts`
+
+Add function to generate unscheduled tasks:
+
+```typescript
+export async function getUnscheduledTasks(userId: string): Promise<UnscheduledTask[]> {
+  const tasks = [];
+
+  // 1. Manual tasks from planner_blocks
+  const manualTasks = await pool.query(`
+    SELECT id, title, estimated_duration_minutes, priority, course_context_id
+    FROM planner_blocks
+    WHERE user_id = $1 AND start_time IS NULL AND status = 'pending'
+  `, [userId]);
+
+  tasks.push(...manualTasks.rows.map(t => ({
+    id: t.id,
+    title: t.title,
+    estimatedDuration: t.estimated_duration_minutes,
+    priority: t.priority,
+    courseContextId: t.course_context_id
+  })));
+
+  // 2. Auto-generate tasks from assignments without time blocks
+  const assignments = await pool.query(`
+    SELECT a.id, a.title, a.due_at, a.course_context_id, a.course_code
+    FROM canvas_assignments a
+    WHERE a.user_id = $1
+      AND a.workflow_state = 'published'
+      AND a.due_at > NOW()
+      AND NOT EXISTS (
+        SELECT 1 FROM planner_blocks pb
+        WHERE pb.metadata->>'assignmentId' = a.id::text
+      )
+  `, [userId]);
+
+  for (const assignment of assignments.rows) {
+    // TODO: Use AI to estimate work time (for now, default to 60 min)
+    tasks.push({
+      id: `task-auto-${assignment.id}`,
+      title: `Work on: ${assignment.title}`,
+      estimatedDuration: 60,
+      priority: determinePriorityFromDueDate(assignment.due_at),
+      courseContextId: assignment.course_context_id,
+      courseCode: assignment.course_code,
+      dueDate: assignment.due_at,
+      metadata: {
+        source: 'assignment',
+        assignmentId: assignment.id,
+        autoGenerated: true
+      }
+    });
+  }
+
+  return tasks;
+}
+```
+
+Then emit in dayplan widget:
+
+```typescript
+function buildDayPlanWidget(complete: any): WidgetEnvelope {
+  // Backend provides unscheduled tasks (no frontend generation!)
+  return {
+    id: 'widget:dayplan',
+    type: 'dayplan',
+    content: {
+      displayType: 'full_day',
+      data: {
+        blocks: complete.unscheduledTasks || []
+      }
+    }
+  };
+}
+```
+
+#### 2.3: Course Unification Widget ✅
+
+**New widget type**: `course_detail` (unifies Canvas + Schedule + Syllabus)
+
+```typescript
+async function buildCourseWidgets(userId: string): Promise<WidgetEnvelope[]> {
+  // Get all courses student is enrolled in
+  const courses = await pool.query(`
+    SELECT c.id, c.name, c.metadata->>'courseCode' as course_code
+    FROM contexts c
+    INNER JOIN context_dependencies cd ON cd.child_context_id = c.id
+    INNER JOIN contexts student_ctx ON student_ctx.id = cd.parent_context_id
+    WHERE student_ctx.user_id = $1
+      AND student_ctx.type = 'student'
+      AND c.type = 'course'
+  `, [userId]);
+
+  return Promise.all(courses.rows.map(async (course) => {
+    // Fetch all data sources in parallel
+    const [canvasData, scheduleData, syllabusData, assignments] = await Promise.all([
+      getCanvasCourseData(course.id),
+      getScheduleForCourse(course.id, userId),
+      getSyllabusForCourse(course.id),
+      getAssignmentsForCourse(course.id, userId, { limit: 3 })
+    ]);
+
+    return {
+      id: `course:${course.id}`,
+      type: 'course_detail',
+      content: {
+        data: {
+          courseContextId: course.id,
+          courseCode: course.course_code,
+          courseName: course.name,
+          sources: determineSources({ canvasData, scheduleData, syllabusData }),
+          canvas: canvasData ? {
+            currentGrade: canvasData.current_grade,
+            totalStudents: canvasData.total_students,
+            unreadAnnouncements: canvasData.unread_count
+          } : null,
+          nextClass: scheduleData?.nextEvent,
+          upcomingAssignments: assignments,
+          syllabus: syllabusData ? {
+            professor: syllabusData.professor,
+            officeHours: syllabusData.office_hours
+          } : null
+        }
+      }
+    };
+  }));
+}
+```
+
+Add to composite response:
+
+```typescript
+const widgets = [
+  ...createMvpV1Widgets(complete, context),
+  ...await buildCourseWidgets(userId)  // New!
+];
+```
+
+---
+
+### Phase 3: Add Course Column (Week 3)
+
+**File**: `src/components/home/columns/Column5Courses.tsx` (NEW)
+
+```typescript
+export function Column5Courses() {
+  const { courses, isLoading } = useDashboardComposite();
+
+  return (
+    <Card className="h-full overflow-hidden flex flex-col">
+      <CardHeader>
+        <CardTitle>My Courses</CardTitle>
+      </CardHeader>
+
+      <CardContent className="flex-1 overflow-y-auto space-y-3">
+        {isLoading && <LoadingSpinner />}
+
+        {courses?.map(course => (
+          <CourseCard key={course.courseContextId} course={course} />
+        ))}
+      </CardContent>
+    </Card>
+  );
+}
+
+function CourseCard({ course }) {
+  return (
+    <div className="p-4 bg-neutral-800/50 rounded-lg border border-neutral-700">
+      <div className="flex items-center justify-between mb-3">
+        <div>
+          <div className="font-semibold text-white">{course.courseCode}</div>
+          <div className="text-sm text-neutral-400">{course.courseName}</div>
+        </div>
+        {course.canvas?.currentGrade && (
+          <div className="text-2xl font-bold text-green-400">
+            {course.canvas.currentGrade}%
+          </div>
+        )}
+      </div>
+
+      {course.nextClass && (
+        <div className="text-sm text-neutral-300 mb-2">
+          Next: {formatTime(course.nextClass.start)} • {course.nextClass.location}
+        </div>
+      )}
+
+      {course.upcomingAssignments?.map(a => (
+        <div key={a.id} className="text-xs text-neutral-400">
+          • {a.title} (Due {formatDueDate(a.dueDate)})
+        </div>
+      ))}
+
+      <div className="flex gap-2 mt-3">
+        {course.sources.map(source => (
+          <Badge key={source} variant="outline" className="text-xs">
+            {source}
+          </Badge>
+        ))}
+      </div>
+    </div>
+  );
+}
+```
+
+Update home page layout:
+
+```typescript
+// src/app/dashboard/home/page.tsx
+<div className="grid grid-cols-1 2xl:grid-cols-5 xl:grid-cols-3 lg:grid-cols-2 gap-4">
+  <Column1Timeline />
+  <Column2TaskBank />
+  <Column3Assignments />
+  <Column4Notes />
+  <Column5Courses />  {/* NEW */}
+</div>
+```
+
+---
+
+## Why This Approach is Better
+
+### 1. Respects Existing Architecture ✅
+
+**Ethan built a modular, extensible widget system.** We should use it, not fight it.
+
+- Widget envelopes are production-ready
+- iOS already uses them correctly
+- Real-time deltas work
+- ETag caching works
+
+### 2. No API Versioning ✅
+
+**V2 would create:**
+- ❌ Two code paths to maintain
+- ❌ Feature flag complexity
+- ❌ Migration overhead
+- ❌ Technical debt
+
+**This approach:**
+- ✅ Single API version
+- ✅ Backend improvements are additive (new widget types)
+- ✅ Frontend improvements are incremental
+- ✅ No breaking changes
+
+### 3. More Modular ✅
+
+**Widget-first components:**
+- ✅ Each widget type has a focused parser (~10 lines)
+- ✅ Unknown widgets silently ignored (forward compatibility)
+- ✅ Easy to add new widget types (just add a parser)
+- ✅ Type-specific rendering logic colocated with parser
+
+**Flattened API would be:**
+- ❌ Rigid structure (hard to extend)
+- ❌ Breaking changes when adding fields
+- ❌ All clients must understand all fields
+
+### 4. Testable ✅
+
+**Type-specific parsers:**
+```typescript
+describe('parseTimelineWidget', () => {
+  it('should extract schedule items', () => {
+    const widget = {
+      type: 'schedule',
+      content: {
+        displayType: 'timeline',
+        data: { items: [{ id: '1', title: 'CS101' }] }
+      }
+    };
+
+    const result = parseTimelineWidget(widget);
+
+    expect(result).toEqual([{
+      id: '1',
+      title: 'CS101',
+      // ...
+    }]);
+  });
+});
+```
+
+**518-line transformer:**
+- ❌ Hard to test (too many responsibilities)
+- ❌ Mocking all data sources is complex
+- ❌ Fragile (breaks when backend changes)
+
+### 5. Future-Proof ✅
+
+**When adding new widget types:**
+
+**Current approach:**
+1. Backend adds new widget type
+2. Frontend parser: add `case 'new_type':` (5 lines)
+3. Frontend component: render new data
+4. Deploy independently
+
+**V2 approach would require:**
+1. Backend adds new field to v2 response
+2. Update v2 TypeScript types
+3. Update all consuming components
+4. Deploy backend + frontend together
+
+---
+
+## Migration Strategy (No Downtime)
+
+### Week 1: Create Widget Parsers
+- ✅ Create `useWidgetParser` hook
+- ✅ Add type-specific parser functions
+- ✅ Write unit tests for parsers
+- ✅ Deploy (no user-facing changes)
+
+### Week 2: Switch Dashboard Hook
+- ✅ Update `useDashboardComposite` to use new parser
+- ✅ Delete old 518-line transformer
+- ✅ Test on staging
+- ✅ Deploy to production (no API changes)
+
+### Week 3: Backend Data Quality
+- ✅ Add backend task generation
+- ✅ Add course widgets
+- ✅ Consistent `courseContextId` everywhere
+- ✅ Deploy backend (additive changes, backward compatible)
+
+### Week 4: Add Course Column
+- ✅ Create `Column5Courses` component
+- ✅ Update home page layout
+- ✅ Test rendering
+- ✅ Deploy
+
+**No feature flags. No API versioning. Just incremental improvements.**
+
+---
+
+## Open Questions
+
+### 1. Should we keep the flattened helpers?
+
+Some columns expect `timeline: TimeBlock[]` instead of `widgets: WidgetEnvelope[]`.
+
+**Answer**: Yes, keep them. The parser hook provides convenient shapes for common use cases, but also exposes raw widgets for advanced use.
+
+### 2. What about the Canvas courses array?
+
+Current response has `canvasCourses: CanvasCourse[]` at root level.
+
+**Answer**: This is fine. Some data (like `canvasCourses`) is too common to wrap in widgets. Keep it at root level alongside widgets.
+
+### 3. Mobile responsiveness with 5 columns?
+
+**Answer**: CSS grid already handles this. Use breakpoints:
+```css
+grid-cols-1  /* Mobile: stack */
+lg:grid-cols-2  /* Tablet: 2 columns */
+xl:grid-cols-3  /* Desktop: 3 columns */
+2xl:grid-cols-5  /* Large: all 5 */
+```
+
+---
+
+## Key Principles for Years to Come
+
+### 1. Backend Owns Intelligence, Frontend Owns Presentation
+
+**Backend:**
+- Generate widgets with all necessary data
+- Handle business logic (task generation, priority scoring)
+- Ensure data quality (consistent field names, valid IDs)
+
+**Frontend:**
+- Parse widgets into component-specific shapes
+- Render widgets based on type
+- Handle user interactions
+
+### 2. Additive Changes Only
+
+**Good changes:**
+- ✅ Add new widget type
+- ✅ Add optional field to existing widget
+- ✅ Add new `displayType` variant
+
+**Bad changes:**
+- ❌ Remove widget type
+- ❌ Remove required field
+- ❌ Change widget structure incompatibly
+
+### 3. Clients Tolerate Unknown Widgets
+
+**All clients must:**
+- Ignore unknown widget types
+- Ignore unknown fields in known widgets
+- Not crash on unexpected data
+
+This enables backend to evolve without coordinating frontend deploys.
+
+### 4. Stable Widget IDs
+
+**Widget IDs must be deterministic:**
+- ✅ `urgent-deadlines` (stable, semantic)
+- ✅ `timeline` (stable, semantic)
+- ✅ `course:${contextId}` (stable, deterministic)
+
+**Not:**
+- ❌ `widget-${Date.now()}` (random)
+- ❌ `widget-${Math.random()}` (random)
+
+This enables real-time delta updates and client-side caching.
+
+### 5. Test Widget Parsers, Not Transformers
+
+**Good test:**
+```typescript
+it('should parse timeline widget', () => {
+  const widget = createMockTimelineWidget();
+  const result = parseTimelineWidget(widget);
+  expect(result[0].title).toBe('CS101');
+});
+```
+
+**Bad test:**
+```typescript
+it('should transform entire composite response', () => {
+  const apiData = createMockEntireResponse(); // 500 lines of mocking
+  const result = transformCompositeResponse(apiData);
+  // Too brittle, too complex
+});
+```
+
+---
+
+## Related Documentation
+
+- [WIDGET_ENVELOPE_IMPLEMENTATION_STATUS](/docs/research/analysis/widgetenvelopeimplementationstatus) - Current widget system status (98% complete)
+- Dashboard BFF V1 Implementation - Backend architecture (production-ready)
+- DormWay LockedIn Architecture - Web app architecture
+
+---
+
+## Action Items
+
+### Immediate (This Week)
+1. ✅ Review this document with team
+2. ✅ Discard "Dashboard Integration Plan v2" proposal
+3. ✅ Create Linear issues for widget parser refactoring
+4. ✅ Start with Phase 1: Widget parsers
+
+### Next Steps (Week 2-3)
+1. Backend task generation
+2. Course widgets
+3. Data quality fixes (consistent courseContextId)
+
+### Future (Week 4+)
+1. Add course column
+2. Smart empty states
+3. Priority visual indicators
+
+---
+
+**Critical Decision**: The widget envelope system is production-ready. We should embrace it, not replace it.
+
+**Owner**: Riley + Ethan
+**Status**: Ready for Implementation
+**Priority**: Critical (corrects previous wrong approach)

@@ -1,0 +1,298 @@
+---
+title: "Personal Access Token Strategy"
+description: "Canvas does **NOT** have a global OAuth system like \"Sign in with Google\" or \"Sign in with GitHub\"."
+---
+
+# Canvas Personal Access Token Strategy
+
+**Decision Date**: 2025-10-04
+**Status**: ✅ Implemented
+**Rationale**: GTM strategy - works at ALL universities without gatekeepers
+
+---
+
+## 🎯 **The Problem with OAuth**
+
+### **Canvas OAuth Limitation**
+
+Canvas does **NOT** have a global OAuth system like "Sign in with Google" or "Sign in with GitHub".
+
+**Why?**
+- Each university runs their own Canvas instance (umich.instructure.com, stanford.instructure.com, etc.)
+- OAuth Developer Keys are **instance-specific**, not global
+- Only **university IT admins** can create Developer Keys
+- Each school would require separate approval
+
+### **Impact on DormWay GTM**
+
+If we required OAuth:
+- ❌ Must contact IT department at **every university**
+- ❌ Approval process takes 3-6 months **per school**
+- ❌ IT can reject us (politics, competing products, etc.)
+- ❌ Can only launch at 1-2 universities initially
+- ❌ Scaling to 50+ universities = years of work
+- ❌ **Kills our startup velocity**
+
+---
+
+## ✅ **The Solution: Personal Access Token**
+
+### **How It Works**
+
+Students create their own Canvas API token:
+
+1. Log in to Canvas
+2. Settings → + New Access Token
+3. Purpose: "DormWay Integration"
+4. Expiry: Leave blank (never expires)
+5. Generate Token
+6. Copy/paste into DormWay
+7. ✅ Done - auto-syncs every 30 min
+
+**Time: 30 seconds**
+
+### **Advantages**
+
+| Factor | OAuth | Personal Access Token |
+|--------|-------|----------------------|
+| **Universities Supported** | 1-5 (manual approval) | ALL (thousands) |
+| **Time to Launch** | 3-6 months per school | Immediate |
+| **IT Gatekeepers** | Required | None |
+| **Scalability** | Slow (approval bottleneck) | Fast (self-service) |
+| **User Friction** | 1 click | 30 seconds |
+| **Can Be Blocked** | Yes (IT can reject) | No (student-controlled) |
+| **Startup-Friendly** | ❌ No | ✅ Yes |
+
+### **Industry Examples**
+
+**Apps Using Personal Access Tokens**:
+- ✅ **Notion** - GitHub integration (personal tokens)
+- ✅ **Todoist** - Google Calendar sync (API keys)
+- ✅ **IFTTT** - Webhooks (user-generated tokens)
+- ✅ **Zapier** - Custom API connections
+- ✅ **Alfred** - GitHub search (personal tokens)
+
+**Why?** Same reason as DormWay - works everywhere, no gatekeepers.
+
+---
+
+## 🏗️ **Implementation**
+
+### **Current Status**
+
+✅ **Both methods implemented**:
+- OAuth2 flow (code complete, ready for future)
+- Personal Access Token flow (primary method)
+
+### **User Flow**
+
+```
+Student visits /dashboard/canvas
+         ↓
+   Not connected
+         ↓
+┌─────────────────────────────────┐
+│  Connect Your Canvas Account    │
+├─────────────────────────────────┤
+│                                 │
+│  Option 1: Personal Token ⭐    │
+│  (Works at ANY university)      │
+│  [Connect with Token]           │
+│                                 │
+│  Option 2: OAuth Login          │
+│  (If your school supports it)   │
+│  [Connect with Canvas Login]    │
+│                                 │
+└─────────────────────────────────┘
+```
+
+### **Token Input UX** (Current)
+
+```
+┌─────────────────────────────────────┐
+│  Paste Your Canvas Access Token     │
+├─────────────────────────────────────┤
+│                                     │
+│  Canvas Instance URL:               │
+│  [umich.instructure.com        ▼]  │
+│                                     │
+│  Access Token:                      │
+│  ┌─────────────────────────────┐   │
+│  │ 1770~JK3xC...               │   │
+│  └─────────────────────────────┘   │
+│                                     │
+│  [Test Connection] [Connect] ✨     │
+│                                     │
+│  ✓ Syncs automatically every 30min  │
+│  ✓ You can revoke access anytime    │
+└─────────────────────────────────────┘
+```
+
+### **Improved UX** (Future Enhancement)
+
+**Additions Needed**:
+1. **Video Tutorial** - 30-second walkthrough (embedded or YouTube)
+2. **Auto-detect Canvas URL** - From student email domain (e.g., riley@umich.edu → umich.instructure.com)
+3. **"Click to Open Canvas Settings" Button** - Direct link to token creation page
+4. **Instant Validation** - Test token immediately when pasted
+5. **Clear Instructions** - Step-by-step with screenshots
+6. **Error Messages** - Helpful hints if token is invalid
+
+---
+
+## 🎯 **Hybrid Strategy: Best of Both Worlds**
+
+### **Phase 1: Personal Access Token (Now)**
+
+**Target**: All universities, immediate launch
+
+**Focus**:
+- Polish Personal Access Token UX
+- Video tutorial
+- Auto-detection
+- Clear instructions
+- Monitor which universities have most users
+
+**Goal**: 1,000+ users across 50+ universities in 6 months
+
+### **Phase 2: OAuth for Top Schools (Later)**
+
+**Target**: Top 5-10 universities with 100+ DormWay users
+
+**Leverage**:
+- "We have 500 UMich students using DormWay via Personal Access Token"
+- "They love it, but OAuth would be smoother"
+- "Can you create a Developer Key for us?"
+
+**IT departments much more likely to approve when**:
+- They see student demand (proof of value)
+- Students are already using it (low risk)
+- It's an improvement, not a new request
+
+**Timeline**: 6-12 months after launch
+
+---
+
+## 🔐 **Security Considerations**
+
+### **Personal Access Token Security**
+
+**Concerns**:
+- Token stored in database (encrypted with `TOKEN_ENCRYPTION_KEY`)
+- Token has full Canvas API access
+- Token never expires (if configured)
+
+**Mitigations**:
+- ✅ AES-256 encryption at rest
+- ✅ HTTPS for transmission
+- ✅ Student can revoke anytime in Canvas settings
+- ✅ DormWay uses read-only operations (no writes)
+- ✅ Rate limiting prevents abuse
+- ✅ Audit logging tracks all API calls
+
+**Risk Level**: Low (same as student's own Canvas access)
+
+### **OAuth Security**
+
+**Better?** Slightly (scoped permissions, auto-refresh)
+
+**Worth the tradeoff?** No (kills GTM strategy)
+
+---
+
+## 📊 **Success Metrics**
+
+### **Track After Launch**
+
+1. **Connection Method**:
+   - % using Personal Access Token
+   - % using OAuth (when available)
+
+2. **University Coverage**:
+   - Number of different universities
+   - Top 10 universities by user count
+
+3. **Drop-off Rates**:
+   - Users who start connection but don't finish
+   - Average time to complete connection
+
+4. **Support Tickets**:
+   - "How do I create a token?"
+   - "Where do I find my Canvas URL?"
+   - "Token not working"
+
+### **Success Criteria**
+
+- ✅ 10+ different universities in first month
+- ✅ <10% drop-off during token connection
+- ✅ <5% support tickets about token creation
+- ✅ 95%+ connection success rate
+
+---
+
+## 🚀 **Next Steps**
+
+### **Immediate** (Before Launch)
+1. Polish Personal Access Token UX
+2. Add error handling for invalid tokens
+3. Test with multiple Canvas instances
+4. Create internal documentation
+
+### **Week 1 Post-Launch**
+1. Monitor connection success rates
+2. Track which universities students are from
+3. Collect feedback on UX friction points
+4. Iterate on instructions/video
+
+### **Month 1-3 Post-Launch**
+1. Build video tutorial
+2. Add auto-detection of Canvas URL
+3. Improve validation error messages
+4. Identify top 5 universities for future OAuth
+
+### **Month 6+ Post-Launch**
+1. Approach top universities for OAuth approval
+2. Add OAuth as optional "premium" connection method
+3. Keep Personal Access Token as fallback
+
+---
+
+## 💡 **Key Insights**
+
+### **Why This Works**
+
+1. **Student-Controlled** - No gatekeepers
+2. **Immediate Launch** - No waiting for approvals
+3. **Universal Support** - Works at ALL universities
+4. **Proven Pattern** - Notion, Todoist, IFTTT use same approach
+5. **Low Friction** - 30 seconds is acceptable for motivated users
+6. **Future-Proof** - Can add OAuth later as enhancement
+
+### **Why OAuth-Only Would Fail**
+
+1. **Slow** - 3-6 months per university
+2. **Risky** - IT can reject for any reason
+3. **Doesn't Scale** - Manual approval doesn't scale
+4. **Kills Momentum** - Can't iterate fast
+5. **Competitive Risk** - Someone else launches with Personal Access Token approach
+
+---
+
+## ✅ **Decision: Personal Access Token Primary, OAuth Optional**
+
+**Implementation Status**: ✅ Complete
+
+**Rationale**:
+- Maximizes university coverage (thousands vs dozens)
+- Eliminates gatekeepers
+- Enables immediate launch
+- Proven industry pattern
+- Can add OAuth later when we have leverage
+
+**Tradeoff**: 30 seconds of manual setup vs 1-click OAuth
+
+**Verdict**: Worth it for GTM velocity and universal support
+
+---
+
+*Last updated: October 4, 2025*

@@ -1,0 +1,128 @@
+---
+title: "Mobile Syllabus Receipts Endpoint Plan"
+description: "The web dashboard calls `/api/proxy/mobile/syllabus/receipts` to fetch “briefing receipts” that explain why a class deliverable is being surfaced (e.g., “Qui..."
+---
+
+# Mobile Syllabus Receipts Endpoint — Implementation Plan
+
+**Last updated:** 2025-10-04
+
+## 1. Problem Statement
+
+The web dashboard calls `/api/proxy/mobile/syllabus/receipts` to fetch “briefing receipts” that explain why a class deliverable is being surfaced (e.g., “Quiz 2 due Fri 11:59 pm · Syllabus”). The endpoint does not exist today, so the client falls back to a warning banner.
+
+## 2. Goals & Non-Goals
+
+- **Goal:** Serve short “why this” receipts for upcoming academic events without re-running heavy LLM flows.
+- **Goal:** Reuse existing structured syllabus / Canvas metadata so receipts match the plan source of truth.
+- **Goal:** Support `start`, `end`, and `include_metadata` query params already used by the UI.
+- **Non-Goal:** Build new extraction logic. We lean on processed syllabus + ingestion artifacts.
+- **Non-Goal:** Generate free-form prose for every event. Fallback text is acceptable when no receipt exists.
+
+## 3. Inputs & Data Sources
+
+| Source | Fields Needed | Notes |
+| --- | --- | --- |
+| `service_data` rows (`method = 'normalized_term_course_data'`) | normalized course objects with `assignments[]`, `contextId`, `courseId`, confidence, source | Primary source produced by `normalizeTermCourseData` in the semester workflow. |
+| Canvas ingestion tables (if available) | announcements, assignment metadata, explanation text | Optional; only if Canvas is connected. |
+| `calendar` events materialized for dashboard | context id, course code, source metadata | Used to match receipts to events. |
+
+## 4. Receipt Model (backend)
+
+```
+type Receipt = {
+  contextId?: string;      // preferred key (calendar context uuid)
+  itemId?: string;         // fallback (calendar event id)
+  id?: string;             // internal assignment id
+  sourceId?: string;       // e.g., syllabus document id
+  why: string;             // short justification, max ~160 chars
+  source?: string;         // display label ("Syllabus", "Canvas", course name)
+  confidence: number;      // 0..1 confidence / freshness score
+  courseCode?: string;     // optional metadata when include_metadata=true
+  dueAt?: string;          // ISO timestamp for reference
+  anchors?: Array<{        // optional highlight snippets
+    text: string;
+    type: 'date' | 'deliverable' | 'policy';
+  }>;
+}
+```
+
+The UI currently reads `contextId | itemId | id | sourceId`, `why | reason | text`, and `source | course | section`. We will keep those names and only add optional metadata guarded by `include_metadata`.
+
+## 5. Matching Strategy
+
+1. **Window filter:** limit to syllabus tasks with due dates between `start` and `end` (JS ISO strings).
+2. **Context join:** map syllabus tasks → calendar contexts via `context_id` or course code + due date heuristics.
+3. **Confidence scoring:**
+   - `1.0` when the syllabus task directly references the exact due timestamp and has a matching context id.
+   - `0.7` when matched by course + due date ±2h.
+   - `0.4` fallback when only course-level evidence exists.
+4. **Text selection:** prefer structured fields (assignment title + due summary). Fall back to the original syllabus snippet.
+5. **Source label:** `Syllabus`, `Canvas`, or `Email` depending on origin metadata.
+
+## 6. API Contract (BFF)
+
+`GET /mobile/syllabus/receipts?start=<iso>&end=<iso>&include_metadata=true|false`
+
+Response `200 OK`:
+
+```
+{
+  "receipts": [Receipt, ...],
+  "generatedAt": "2025-10-04T18:10:22Z"
+}
+```
+
+Return `{ "receipts": [] }` when nothing matches. Errors: `400` for bad params, `401` no user, `500` internal failure.
+
+## 7. Service Flow
+
+1. **API Router Route** (`/mobile/syllabus/receipts`)
+   - Validate query params (`start`, `end`, optional `include_metadata`).
+   - Resolve `userId` from `req.user`.
+   - Call a new `receiptsService.fetchRange(userId, start, end, includeMetadata)`.
+   - Cache results in Redis for 15 minutes keyed by `userId:start:end` to avoid repeated scans.
+
+2. **Receipts Service (new)**
+   - Look up the student context id (e.g., via `contextService.getStudentContext`).
+   - Pull the latest `service_data` row with `context_id = studentContextId` and `method = 'normalized_term_course_data'`.
+   - Extract `data.normalized.courses[*].assignments[*]` and filter by due date/time window.
+   - Optionally merge Canvas/other evidence.
+   - Normalize into Receipt[] (see §4) and return with `generatedAt`.
+
+3. **Engine Support (optional)**
+   - If we later want richer merging logic, add a helper activity that returns receipts from normalized course data so the API router only needs to call Temporal. (Phase 2.)
+
+## 8. Implementation Tasks
+
+1. **Database Access Layer**
+   - Add repository helper for the latest `service_data` row where `context_id = student_context_id` and `method = 'normalized_term_course_data'`.
+   - Filter the in-memory assignments array by due date range.
+
+2. **API Route**
+   - New file `src/routes/mobile-syllabus-receipts.ts` and register under `/mobile` router.
+   - Wire to `receiptsService`.
+   - Shape response to match front-end expectations, respecting `include_metadata` flag.
+
+3. **Service Logic**
+   - Implement `buildReceipts({ normalizedCourses, window })` producing normalized array.
+   - Add Redis caching, invalidated when `normalized_term_course_data` is refreshed (short TTL acceptable initially).
+
+4. **Tests**
+   - Unit tests for receipts builder (assignment → receipt mapping).
+   - Integration test hitting the route with seeded data.
+
+5. **Front-end Follow-up (optional)**
+   - Update inbox banner copy once real receipts ship.
+   - Consider using `confidence` to gate the “Why this?” chip styling.
+
+## 9. Open Questions
+
+1. Where is the canonical assignment store today? (Confirm with Engine/DB owners.)
+2. Should receipts blend sources (Syllabus + Canvas) into a single message when both exist?
+3. Do we need per-user caching invalidation when syllabus processing reruns?
+4. How to represent multiple snippets/anchors if we surface more context in the future?
+
+---
+
+**Next steps:** confirm data availability, finalize the repository query, and schedule backlog work to implement the new route + service.

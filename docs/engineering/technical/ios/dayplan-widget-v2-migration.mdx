@@ -1,0 +1,474 @@
+---
+title: "DayPlan Widget V2 Migration"
+description: "This document details the complete process of migrating the iOS DayPlan widget from the legacy BFF endpoint to the V2 widget API."
+---
+
+# DayPlan Widget V2 Migration
+
+This document details the complete process of migrating the iOS DayPlan widget from the legacy BFF endpoint to the V2 widget API.
+
+## Overview
+
+| Aspect | Before | After |
+|--------|--------|-------|
+| Endpoint | `/dashboard/v1/composite` | `/v2/widgets/dayplan` |
+| Response Format | Bundled composite response | Individual widget envelope |
+| Data Richness | Basic events/actions | Full V2 data (summary, weather, energy, etc.) |
+| Related Linear | DORM-760 | - |
+
+## Why Migrate?
+
+The legacy BFF (`/dashboard/v1/composite`) bundles all widgets together and returns limited data. The V2 widget endpoints provide:
+
+1. **Individual widget fetching** - Only fetch what you need
+2. **Rich data fields** - AI summary, energy curves, weather, suggested blocks
+3. **Better caching** - Per-widget ETags
+4. **Cleaner architecture** - Direct widget-to-endpoint mapping
+
+## Migration Steps
+
+### Step 1: Identify the Current Endpoint
+
+**File**: `DayPlanWidget.swift` → `DayPlanDataSource`
+
+The original implementation used the BFF:
+```swift
+public var endpoint: APIEndpoint {
+    APIEndpoint(path: "/dashboard/v1/composite", method: .GET)
+}
+```
+
+### Step 2: Switch to V2 Endpoint
+
+Update the endpoint to use the dedicated V2 widget route:
+```swift
+public var endpoint: APIEndpoint {
+    // V2 widget endpoint returns full dayplan data from service_data
+    APIEndpoint(path: "/v2/widgets/dayplan", method: .GET)
+}
+```
+
+### Step 3: Create V2 Response Types
+
+The V2 endpoint returns a widget envelope format. Create types to decode it:
+
+```swift
+// MARK: - V2 Widget Response Types
+
+private struct V2DayPlanWidgetResponse: Codable {
+    let success: Bool
+    let data: V2DayPlanWidgetEnvelope?
+    let etag: String?
+}
+
+private struct V2DayPlanWidgetEnvelope: Codable {
+    let id: String
+    let type: String
+    let gridHints: V2GridHints?
+    let content: V2DayPlanRawContent
+    let generatedAt: String?
+}
+
+private struct V2GridHints: Codable {
+    let minWidth: Int?
+    let minHeight: Int?
+    let defaultWidth: Int?
+    let defaultHeight: Int?
+}
+```
+
+### Step 4: Create Raw Content Types
+
+The V2 API may return data in camelCase or snake_case depending on the backend path. Support both:
+
+```swift
+private struct V2DayPlanRawContent: Codable {
+    // Core fields
+    let planId: String?
+    let date: String?
+    let lastUpdated: String?
+    let timezone: String?
+
+    // Events (timeline or events array)
+    let timeline: [V2RawEvent]?
+    let events: [V2RawEvent]?
+
+    // V2 Extended fields
+    let summary: V2RawSummary?
+    let dayFlow: V2RawDayFlow?
+    let weather: V2RawWeather?
+    let suggestedBlocks: [V2RawSuggestedBlock]?
+    let metrics: V2RawMetrics?
+}
+
+private struct V2RawSummary: Codable {
+    let oneLiner: String?
+    let one_liner: String?  // snake_case fallback
+    let dayLoad: String?
+    let day_load: String?
+    let highlights: [String]?
+    let stats: V2RawStats?
+}
+```
+
+### Step 5: Update the Data Model
+
+Extend `DayPlanData` to include V2 fields:
+
+```swift
+public struct DayPlanData: Codable, Sendable {
+    // Existing fields
+    public let planId: String
+    public let date: Date
+    public let events: [DayPlanEvent]
+    public let actions: [DayPlanAction]
+    public let nextEvent: DayPlanEvent?
+    public let nextAction: DayPlanAction?
+    public let confidence: Double
+    public let lastUpdated: Date
+
+    // V2 API Extended Fields
+    public let summary: DayPlanSummary?
+    public let dayFlow: DayFlow?
+    public let weather: DayPlanWeather?
+    public let suggestedBlocks: [SuggestedBlock]?
+    public let notifications: [DayPlanNotification]?
+    public let metrics: DayPlanMetrics?
+}
+```
+
+### Step 6: Implement Response Processing
+
+Update `processResponse` to decode the V2 envelope and map to `DayPlanData`:
+
+```swift
+public func processResponse(_ data: Data) throws -> DayPlanData {
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .iso8601
+
+    // V2 widget endpoint returns { success, data: { content: <dayplan> }, etag }
+    let response = try decoder.decode(V2DayPlanWidgetResponse.self, from: data)
+
+    guard response.success, let envelope = response.data else {
+        DWLogger.widget.error("V2 dayplan response failed")
+        return fallbackData
+    }
+
+    // Map the V2 content to DayPlanData
+    return mapV2DayPlanContent(envelope.content)
+}
+```
+
+### Step 7: Create Mapping Function
+
+The mapping function handles both camelCase and snake_case field names:
+
+```swift
+private func mapV2DayPlanContent(_ content: V2DayPlanRawContent) -> DayPlanData {
+    // Parse events
+    var events: [DayPlanEvent] = []
+    let rawEvents = content.timeline ?? content.events ?? []
+    events = rawEvents.compactMap { event -> DayPlanEvent? in
+        guard let id = event.id,
+              let title = event.title ?? event.metadata?.title,
+              let startTime = parseISODate(event.startTime ?? event.start ?? ""),
+              let endTime = parseISODate(event.endTime ?? event.end ?? "") else { return nil }
+
+        return DayPlanEvent(
+            id: id,
+            title: title,
+            startTime: startTime,
+            endTime: endTime,
+            location: event.location ?? event.metadata?.location,
+            type: event.type ?? "event",
+            confidence: event.confidence ?? 0.8
+        )
+    }
+
+    // Map summary (handle both camelCase and snake_case)
+    let summary: DayPlanSummary?
+    if let s = content.summary {
+        summary = DayPlanSummary(
+            oneLiner: s.oneLiner ?? s.one_liner,
+            dayLoad: s.dayLoad ?? s.day_load,
+            highlights: s.highlights,
+            stats: /* map stats */
+        )
+    }
+
+    // ... map remaining fields (dayFlow, weather, suggestedBlocks, metrics)
+
+    return DayPlanData(
+        planId: content.planId ?? "v2-dayplan",
+        date: date,
+        events: events,
+        actions: [],
+        nextEvent: nextEvent,
+        nextAction: nil,
+        confidence: content.metrics?.confidence ?? 0.8,
+        lastUpdated: parseISODate(content.lastUpdated ?? "") ?? now,
+        summary: summary,
+        dayFlow: dayFlow,
+        weather: weather,
+        suggestedBlocks: suggestedBlocks,
+        metrics: metrics
+    )
+}
+```
+
+## V2 Data Fields Available
+
+The V2 endpoint provides these additional fields (verified in database):
+
+### Summary
+```json
+{
+  "oneLiner": "A light day with one focus block and an evening meeting.",
+  "dayLoad": "light",
+  "highlights": ["Focus block: 11:00 AM", "Dinner with Sarah at 7 PM"],
+  "stats": {
+    "classCount": 0,
+    "studyHours": 2,
+    "freeHours": 6,
+    "assignmentsDue": 0
+  }
+}
+```
+
+### Day Flow (Energy Curve)
+```json
+{
+  "energyCurve": [
+    {"time": "8:00 AM", "level": 60, "label": "Morning"},
+    {"time": "11:00 AM", "level": 85, "label": "Peak Focus"},
+    {"time": "2:00 PM", "level": 55, "label": "Post-lunch dip"},
+    {"time": "5:00 PM", "level": 70, "label": "Evening rebound"},
+    {"time": "9:00 PM", "level": 40, "label": "Wind down"}
+  ],
+  "peakProductivityTime": "11:00AM",
+  "stressPoints": []
+}
+```
+
+### Weather
+```json
+{
+  "current": {
+    "temp": 28,
+    "conditions": "Partly Cloudy",
+    "icon": "partly-cloudy-day",
+    "humidity": 45
+  },
+  "forecast": "Clear skies expected through the afternoon",
+  "threeDay": [/* 3-day forecast */]
+}
+```
+
+### Suggested Blocks
+```json
+[
+  {
+    "id": "study-1",
+    "title": "Deep Work: Project Review",
+    "suggestedStartTime": "11:00 AM",
+    "suggestedEndTime": "1:00 PM",
+    "type": "study",
+    "duration": 120,
+    "reason": "Peak productivity window before lunch",
+    "confidence": 0.85
+  }
+]
+```
+
+## Common Pitfalls
+
+### 1. Don't Modify the BFF
+
+**Wrong approach**: Modifying `/dashboard/v1/composite` to include V2 data
+
+**Right approach**: Switch to `/v2/widgets/dayplan` endpoint directly
+
+### 2. Handle Both Case Styles
+
+The backend may return `oneLiner` or `one_liner`. Always support both:
+```swift
+let oneLiner = s.oneLiner ?? s.one_liner
+```
+
+### 3. Properly Unwrap Coalesced Optionals
+
+When coalescing two optionals, the result is still optional. Use guard:
+```swift
+// WRONG - still produces String?
+startTime: sb.startTime ?? sb.suggestedStartTime
+
+// RIGHT - properly unwrap in guard
+guard let startTime = sb.startTime ?? sb.suggestedStartTime else { return nil }
+return SuggestedBlock(startTime: startTime, ...)
+```
+
+### 4. CRITICAL: Use Double for ALL Numeric Fields
+
+The API may return decimal values for ANY numeric field. **ALWAYS use `Double?` not `Int?`** in Codable structs:
+
+```swift
+// WRONG - will crash on decimal values like 15.48
+let temp: Int?
+let classCount: Int?
+
+// RIGHT - handles both integers and decimals
+let temp: Double?
+let classCount: Double?
+
+// Convert to Int for display only
+Text("\(Int(stats.classCount ?? 0)) classes")
+```
+
+Error you'll see if you use Int:
+```
+Number 15.48 is not representable in Swift.
+```
+
+### 5. Query the API to Verify Types
+
+**ALWAYS query the actual API to see the real data shape before writing types:**
+
+```bash
+# Get user ID first
+doppler run -- bash -c 'psql "$DATABASE_URL_ADMIN" -t -c "SELECT id FROM accounts WHERE email = '\''admin@dormway.app'\'';"'
+
+# Query the API with that user ID
+curl -s "http://127.0.0.1:3001/api/v2/widgets/dayplan" \
+  -H "x-user-id: USER_ID_HERE" | jq '.data.content.weather'
+```
+
+Common type mismatches:
+- `forecast` expected as `String` but is actually an object with `conditions`, `temp_max`, etc.
+- Nested objects like `temperature: { max, min, feelsLike }` instead of flat fields
+
+### 6. Graceful Degradation
+
+All V2 fields should be optional. The widget should work even if V2 data is missing:
+```swift
+// Prefer AI oneLiner if available, fall back to event-based subtitle
+if let oneLiner = dayPlan.summary?.oneLiner {
+    return oneLiner
+}
+// ... fallback logic
+```
+
+## Files Modified
+
+| File | Changes |
+|------|---------|
+| `DayPlanWidget.swift` | Endpoint switch, V2 types, mapping function, extended data model |
+
+## Testing
+
+### Testing API Endpoints Locally
+
+**Step 1: Get a user ID from the database**
+```bash
+doppler run -- bash -c 'psql "$DATABASE_URL_ADMIN" -t -c "SELECT id FROM accounts WHERE email = '\''admin@dormway.app'\'';"'
+```
+
+**Step 2: Query the endpoint with `x-user-id` header**
+```bash
+# Full response
+curl -s "http://127.0.0.1:3001/api/v2/widgets/dayplan" \
+  -H "x-user-id: 058d2a14-ab1a-49c0-aa67-0312fd87e342" | jq '.'
+
+# Just the content
+curl -s "http://127.0.0.1:3001/api/v2/widgets/dayplan" \
+  -H "x-user-id: 058d2a14-ab1a-49c0-aa67-0312fd87e342" | jq '.data.content'
+
+# Specific field (e.g., weather)
+curl -s "http://127.0.0.1:3001/api/v2/widgets/dayplan" \
+  -H "x-user-id: 058d2a14-ab1a-49c0-aa67-0312fd87e342" | jq '.data.content.weather'
+```
+
+**Step 3: Verify response structure matches your Swift types**
+
+Use `jq` to inspect the actual shape before writing Codable structs.
+
+### iOS App Testing
+
+1. Build the iOS app to verify no compile errors
+2. Run with demo user to see V2 data in widget
+3. Verify AI oneLiner appears in widget subtitle
+4. Check weather integration in header
+5. Confirm energy curve renders at larger sizes
+
+## Size-Based Content Adaptation
+
+**Critical**: V2 data is rich but widgets must adapt content to available space.
+
+### ContentLevel Mapping
+
+| ContentLevel | Grid Sizes | What to Show |
+|--------------|------------|--------------|
+| minimal | 1×1 | CellSlots: icon, weather temp, next time, day load |
+| basic | 2×2 | Next event/action only, compact stats text |
+| standard | 3×2 | Next action + 2-3 event timeline, compact stats |
+| detailed | 3×3, 4×2 | Full timeline + energy curve |
+| comprehensive | 4×4+ | Everything: timeline, curve, stress points, suggested blocks |
+
+### ContentStrategy Extensions
+
+Add to widget file:
+```swift
+extension ContentStrategy {
+    var canShowTimeline: Bool {
+        contentLevel == .standard || contentLevel == .detailed || contentLevel == .comprehensive
+    }
+
+    var canShowEnergyCurve: Bool {
+        contentLevel == .detailed || contentLevel == .comprehensive
+    }
+
+    var canShowSuggestedBlocks: Bool {
+        contentLevel == .comprehensive
+    }
+
+    var canShowWeather: Bool {
+        contentLevel == .standard || contentLevel == .detailed || contentLevel == .comprehensive
+    }
+
+    var canShowStats: Bool {
+        contentLevel == .detailed || contentLevel == .comprehensive
+    }
+}
+```
+
+### Compact Layouts for 2×2
+
+For basic (2×2) widgets:
+- Use inline HStack for next event (title + time)
+- Single line oneLiner (truncated)
+- Compact stats: text only, no icons
+- No weather badge in title area
+- No energy curve
+
+```swift
+// Compact next action display
+HStack {
+    Text(nextEvent.title)
+        .lineLimit(1)
+    Spacer()
+    Text(formatTime(nextEvent.startTime))
+}
+```
+
+### Common Layout Mistakes
+
+1. **Showing too much data at small sizes** - 2×2 can't fit energy curves
+2. **Using VStack when HStack works** - Inline layouts save vertical space
+3. **Full-size badges at all sizes** - Use `.minimal` style weather for small widgets
+4. **Not checking contentLevel** - Always gate V2 features by size
+
+## Related Documentation
+
+- [V2 Widget Endpoints](/docs/engineering/architecture/api-v2-design-resource-oriented-rest#v2-widget-endpoints-thin-orchestrators) - Backend V2 endpoint implementation
+- WidgetAPIService - iOS service for calling V2 endpoints
+- [Dashboard BFF Architecture](/docs/engineering/architecture/bff-dashboard-v1) - Legacy BFF pattern (deprecated for widgets)
+- WIDGET_MIGRATION_GUIDE - MicroGrid layout patterns

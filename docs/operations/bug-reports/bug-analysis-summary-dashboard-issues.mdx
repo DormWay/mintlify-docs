@@ -1,0 +1,175 @@
+---
+title: "Bug Analysis Summary   Dashboard Issues"
+description: "Two issues identified by AI agent in dashboard code:"
+---
+
+# Bug Analysis Summary - Dashboard Issues
+
+**Date**: 2025-10-29
+**Analyst**: Claude Code Review
+
+---
+
+## Quick Summary
+
+Two issues identified by AI agent in dashboard code:
+
+| Issue | Status | Severity | Fix Difficulty |
+|-------|--------|----------|----------------|
+| **#1: Placeholder filtering not implemented** | ✅ **REAL BUG** | Medium | Easy |
+| **#2: Aggressive cache bypass** | ⚠️ **Design Issue** | Low | Medium |
+
+---
+
+## Issue #1: Placeholder Filtering Missing ✅ CONFIRMED BUG
+
+### What's Wrong
+
+**Location**: `services/api-router/src/services/dashboard-composite-transformer.ts:1478-1488`
+
+The `pushItem` function has comments claiming it filters placeholders, but it only does deduplication:
+
+```typescript
+const pushItem = (assignment: any, envelope?: any) => {
+  if (!assignment || typeof assignment !== 'object') return;
+  const key = deriveKey(assignment);
+  if (seenKeys.has(key)) return; // Only checks duplicates!
+  seenKeys.add(key);
+  collected.push({ item: assignment, envelope }); // ❌ No placeholder check
+};
+```
+
+**Comments lie**:
+- Line 1658: "backend now filters placeholders at source" ❌ FALSE
+- Line 1667: "Placeholders are filtered at source (pushItem)" ❌ FALSE
+
+**Result**: Users see placeholder assignments like "Log In" in their dashboard.
+
+### Quick Fix
+
+Add 3 lines to `pushItem`:
+
+```typescript
+const pushItem = (assignment: any, envelope?: any) => {
+  if (!assignment || typeof assignment !== 'object') return;
+
+  // ✅ ADD THIS:
+  if (assignment.metadata?.isPlaceholder === true) return;
+  if (assignment.metadata?.isActionable === false) return;
+
+  const key = deriveKey(assignment);
+  if (seenKeys.has(key)) return;
+  seenKeys.add(key);
+  collected.push({ item: assignment, envelope });
+};
+```
+
+### Testing
+
+```bash
+# Test endpoint before/after fix
+curl "http://localhost:3001/dashboard/v1/composite?tab=home" \
+  -H "x-user-id: test-user" | jq '.widgets[] | select(.type=="academic")'
+
+# Should NOT include assignments with title "Log In" or metadata.isPlaceholder=true
+```
+
+---
+
+## Issue #2: Over-Aggressive Cache Bypass ⚠️ NOT A BUG (But Could Be Better)
+
+### What's Happening
+
+**Location**: `services/dormway-lockedin/src/hooks/home/useDashboardComposite.ts:267, 339`
+
+Two layers of cache bypass:
+1. `cache: 'no-store'` - Browser never caches responses
+2. `staleTime: 0` - React Query always considers data stale
+
+**Result**: Every tab switch, window focus, or component mount triggers a new API call.
+
+### Is This a Bug?
+
+**No, it's intentional** to avoid cache synchronization bugs (per comments). But it's overly aggressive:
+
+```typescript
+// Current: ALWAYS fetch
+cache: 'no-store',     // ❌ Never use browser cache
+staleTime: 0,          // ❌ Always stale
+gcTime: 1000,          // ❌ Clear after 1 second
+```
+
+### Impact
+
+- 🐌 Users see loading spinners frequently
+- 📡 Increased server load from unnecessary requests
+- 💸 Higher API costs
+
+### Optimization (Not Critical)
+
+```typescript
+// Proposed: Smart caching
+cache: 'default',           // ✅ Use HTTP caching
+staleTime: 30 * 1000,      // ✅ Fresh for 30 seconds
+gcTime: 5 * 60 * 1000,     // ✅ Keep 5 minutes
+refetchOnWindowFocus: false, // ✅ Don't refetch on focus
+placeholderData: keepPreviousData, // ✅ Show stale while fetching
+```
+
+### When to Fix
+
+- **Not urgent** - current approach works, just inefficient
+- **Fix after** Issue #1 is resolved
+- **Ideal**: Restore ETag support (backend already supports it)
+
+---
+
+## Recommendation
+
+### Immediate Action (This Sprint)
+
+1. ✅ **Fix Issue #1** - Add placeholder filtering to `pushItem`
+2. ✅ **Update comments** - Remove false claims about filtering
+3. ✅ **Add tests** - Verify placeholders are excluded
+4. ✅ **Deploy** - Quick win, high user impact
+
+### Future Improvement (Next Sprint)
+
+1. ⏳ **Optimize caching** - Implement 30-second staleness
+2. ⏳ **Restore ETags** - Best long-term solution
+3. ⏳ **Monitor** - Track API call reduction
+
+---
+
+## Code References
+
+### Files to Edit
+
+```
+services/api-router/src/services/dashboard-composite-transformer.ts
+  Line 1478: pushItem function (add filtering)
+  Line 1658: Remove false comment
+  Line 1667: Remove false comment
+
+services/dormway-lockedin/src/hooks/home/useDashboardComposite.ts
+  Line 267: Change cache policy (future optimization)
+  Line 339: Increase staleTime (future optimization)
+```
+
+### Related Documentation
+
+- [Placeholder Assignment Filtering Bug](/docs/operations/bug-reports/placeholder-assignment-filtering-bug) - Full technical analysis
+- `CLAUDE.md` - Dashboard BFF patterns
+- Linear: Create issue DORM-XXX for tracking
+
+---
+
+## Questions for Team
+
+1. Do we set `metadata.isPlaceholder` correctly in the database?
+2. Are there other places that rely on placeholders being in the API response?
+3. What's the policy on cache TTL for dashboard data?
+
+---
+
+**Next Steps**: Create Linear issue and implement Fix #1

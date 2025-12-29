@@ -1,0 +1,546 @@
+---
+title: "Realtime Adapter"
+description: "import { getRealtimeAdapter } from '@dormway/core/adapters/realtime';"
+---
+
+# Realtime Adapter
+
+## Overview
+
+**RealtimeAdapter** provides a centralized Ably client for real-time pub/sub messaging between services and clients.
+
+**Purpose**: Singleton Ably client for pushing live updates to web/mobile clients and inter-service communication.
+
+**Location**: `@dormway/core/adapters/realtime`
+
+---
+
+## Installation
+
+```typescript
+import { getRealtimeAdapter } from '@dormway/core/adapters/realtime';
+
+const realtime = getRealtimeAdapter();
+```
+
+---
+
+## Channel Naming Conventions
+
+Use structured channel names for routing:
+
+```typescript
+// User-specific channels
+'user:{userId}:updates'           // General user updates
+'user:{userId}:dayplan'           // DayPlan updates
+'user:{userId}:notifications'     // Notifications
+
+// Campus-wide channels
+'campus:{campusId}:announcements' // Campus announcements
+'campus:{campusId}:events'        // Campus events
+
+// System channels
+'system:maintenance'              // System maintenance alerts
+'system:broadcasts'               // Platform-wide broadcasts
+```
+
+---
+
+## Publishing Messages
+
+### publish
+
+Send a message to a channel.
+
+**Signature**:
+```typescript
+publish(channel: string, message: any): Promise<void>
+```
+
+**Examples**:
+
+**Notify user of DayPlan generation**:
+```typescript
+const realtime = getRealtimeAdapter();
+
+await realtime.publish(`user:${userId}:dayplan`, {
+  type: 'dayplan.generated',
+  data: {
+    planId: dayplan.id,
+    date: dayplan.date,
+    generatedAt: new Date().toISOString(),
+  },
+});
+```
+
+**Send notification**:
+```typescript
+await realtime.publish(`user:${userId}:notifications`, {
+  type: 'notification.new',
+  data: {
+    id: notification.id,
+    title: 'Assignment Due Soon',
+    message: 'CS 101 Assignment due in 2 hours',
+    priority: 'high',
+  },
+});
+```
+
+**Campus-wide announcement**:
+```typescript
+await realtime.publish(`campus:${campusId}:announcements`, {
+  type: 'announcement.new',
+  data: {
+    title: 'Weather Alert',
+    message: 'Classes cancelled due to snow',
+    category: 'emergency',
+  },
+});
+```
+
+---
+
+## Message Structure
+
+Use consistent message structure:
+
+```typescript
+interface RealtimeMessage {
+  type: string;              // Event type (domain.action)
+  data: Record<string, unknown>;  // Payload
+  timestamp?: string;        // ISO timestamp (optional)
+  metadata?: {               // Optional metadata
+    source?: string;
+    userId?: string;
+    version?: string;
+  };
+}
+```
+
+**Examples**:
+
+```typescript
+// ✅ Good - structured message
+await realtime.publish(`user:${userId}:updates`, {
+  type: 'profile.updated',
+  data: {
+    userId,
+    changes: ['name', 'email'],
+  },
+  timestamp: new Date().toISOString(),
+  metadata: {
+    source: 'api-router',
+    version: '1.0',
+  },
+});
+
+// ❌ Bad - unstructured
+await realtime.publish(`user:${userId}:updates`, {
+  msg: 'profile updated',
+  user: userId,
+});
+```
+
+---
+
+## Common Patterns
+
+### Pattern 1: Notify After Temporal Workflow
+
+```typescript
+// activities/dayplan.activities.ts
+import { getRealtimeAdapter } from '@dormway/core/adapters/realtime';
+import { createStructuredLogger } from '@dormway/core/logger';
+
+export async function generateDayPlan(userId: string, date: string): Promise<DayPlan> {
+  const logger = createStructuredLogger({ service: 'engine', activity: { name: 'generateDayPlan' } });
+  const realtime = getRealtimeAdapter();
+
+  // Generate dayplan
+  const dayplan = await generateDayPlanLogic(userId, date);
+
+  // Notify user via realtime
+  await realtime.publish(`user:${userId}:dayplan`, {
+    type: 'dayplan.generated',
+    data: {
+      planId: dayplan.id,
+      date: dayplan.date,
+    },
+  });
+
+  logger.info('dayplan.published', 'DayPlan update published', {
+    metadata: { userId, date, channel: `user:${userId}:dayplan` },
+  });
+
+  return dayplan;
+}
+```
+
+### Pattern 2: Broadcast System Event
+
+```typescript
+// routes/admin.routes.ts
+import { getRealtimeAdapter } from '@dormway/core/adapters/realtime';
+
+router.post('/system/maintenance', async (req, res) => {
+  const { message, startTime, endTime } = req.body;
+
+  const realtime = getRealtimeAdapter();
+
+  // Broadcast to all users
+  await realtime.publish('system:maintenance', {
+    type: 'system.maintenance.scheduled',
+    data: {
+      message,
+      startTime,
+      endTime,
+    },
+  });
+
+  res.json({ success: true });
+});
+```
+
+### Pattern 3: User-Specific Updates
+
+```typescript
+async function notifyUserOfUpdate(userId: string, updateType: string, data: any) {
+  const realtime = getRealtimeAdapter();
+
+  await realtime.publish(`user:${userId}:updates`, {
+    type: updateType,
+    data,
+    timestamp: new Date().toISOString(),
+  });
+}
+
+// Usage
+await notifyUserOfUpdate('user-123', 'course.grade.updated', {
+  courseId: 'course-456',
+  grade: 'A',
+  courseName: 'CS 101',
+});
+```
+
+### Pattern 4: Debounced Updates
+
+```typescript
+const updateQueues = new Map<string, any[]>();
+
+async function queueUpdate(userId: string, update: any) {
+  const key = `user:${userId}`;
+
+  if (!updateQueues.has(key)) {
+    updateQueues.set(key, []);
+
+    // Flush queue after 1 second
+    setTimeout(async () => {
+      const updates = updateQueues.get(key) || [];
+      updateQueues.delete(key);
+
+      const realtime = getRealtimeAdapter();
+      await realtime.publish(`user:${userId}:updates`, {
+        type: 'batch.updates',
+        data: { updates },
+      });
+    }, 1000);
+  }
+
+  updateQueues.get(key)!.push(update);
+}
+
+// Multiple rapid updates get batched
+await queueUpdate('user-123', { type: 'event1' });
+await queueUpdate('user-123', { type: 'event2' });
+await queueUpdate('user-123', { type: 'event3' });
+// All sent in one message after 1 second
+```
+
+---
+
+## Client-Side Subscription (Web)
+
+### Next.js/React Example
+
+```typescript
+// hooks/useRealtimeUpdates.ts
+import { useEffect } from 'react';
+import Ably from 'ably';
+
+export function useRealtimeUpdates(userId: string, onUpdate: (message: any) => void) {
+  useEffect(() => {
+    // Create Ably client
+    const ably = new Ably.Realtime({
+      authUrl: '/api/ably/auth',  // Your auth endpoint
+    });
+
+    // Subscribe to user updates
+    const channel = ably.channels.get(`user:${userId}:updates`);
+
+    channel.subscribe((message) => {
+      console.log('Realtime update:', message.data);
+      onUpdate(message.data);
+    });
+
+    // Cleanup
+    return () => {
+      channel.unsubscribe();
+      ably.close();
+    };
+  }, [userId, onUpdate]);
+}
+
+// Usage in component
+function Dashboard() {
+  const { user } = useAuth();
+
+  useRealtimeUpdates(user.id, (message) => {
+    if (message.type === 'dayplan.generated') {
+      toast.success('New DayPlan available!');
+      refreshDayPlan();
+    }
+  });
+
+  return <div>Dashboard</div>;
+}
+```
+
+---
+
+## Server-Side Subscription (Service-to-Service)
+
+```typescript
+// services/sync-service.ts
+import { getRealtimeAdapter } from '@dormway/core/adapters/realtime';
+
+export async function subscribeToSystemEvents() {
+  const realtime = getRealtimeAdapter();
+
+  const channel = realtime.channels.get('system:maintenance');
+
+  channel.subscribe((message) => {
+    console.log('System event received:', message.data);
+
+    // Handle maintenance event
+    if (message.data.type === 'system.maintenance.scheduled') {
+      scheduleMaintenanceMode(message.data.data);
+    }
+  });
+}
+```
+
+---
+
+## Authentication
+
+### Ably Token Auth Endpoint
+
+```typescript
+// routes/ably-auth.routes.ts
+import express from 'express';
+import Ably from 'ably';
+
+const router = express.Router();
+
+router.get('/api/ably/auth', async (req, res) => {
+  const userId = req.user.id;  // From JWT middleware
+
+  const ably = new Ably.Rest({ key: process.env.ABLY_API_KEY });
+
+  // Generate token with permissions
+  const tokenRequest = await ably.auth.createTokenRequest({
+    clientId: userId,
+    capability: {
+      [`user:${userId}:*`]: ['subscribe'],  // Can only subscribe to own channels
+      'system:*': ['subscribe'],            // Can subscribe to system channels
+    },
+  });
+
+  res.json(tokenRequest);
+});
+
+export default router;
+```
+
+---
+
+## Message Types
+
+### Standard Event Types
+
+```typescript
+// User events
+'user.created'
+'user.updated'
+'user.deleted'
+
+// DayPlan events
+'dayplan.generated'
+'dayplan.updated'
+'dayplan.deleted'
+
+// Course events
+'course.grade.updated'
+'course.assignment.created'
+'course.assignment.due'
+
+// Notification events
+'notification.new'
+'notification.read'
+'notification.deleted'
+
+// System events
+'system.maintenance.scheduled'
+'system.maintenance.started'
+'system.maintenance.ended'
+'system.broadcast'
+```
+
+---
+
+## Best Practices
+
+### ✅ Do
+
+- **Use structured channel names** (`prefix:id:category`)
+- **Include event type in message** (`type` field)
+- **Add timestamps** for ordering
+- **Use batch updates** for rapid changes
+- **Authenticate channels** (user-specific channels)
+- **Log published messages** for debugging
+
+### ❌ Don't
+
+- **Don't send sensitive data** (passwords, tokens)
+- **Don't publish huge payloads** (> 100KB)
+- **Don't create unlimited channels** (memory leak)
+- **Don't publish synchronously** in hot paths (use async)
+- **Don't forget error handling**
+
+---
+
+## Error Handling
+
+```typescript
+import { getRealtimeAdapter } from '@dormway/core/adapters/realtime';
+import { createStructuredLogger } from '@dormway/core/logger';
+
+const logger = createStructuredLogger({ service: 'api-router' });
+const realtime = getRealtimeAdapter();
+
+try {
+  await realtime.publish(`user:${userId}:updates`, message);
+
+  logger.info('realtime.published', 'Message published', {
+    metadata: { channel: `user:${userId}:updates`, messageType: message.type },
+  });
+} catch (error) {
+  logger.error('realtime.publish.error', 'Failed to publish message', {
+    error,
+    metadata: { channel: `user:${userId}:updates`, messageType: message.type },
+  });
+
+  // Don't fail the request - realtime is nice-to-have
+  // Continue processing...
+}
+```
+
+---
+
+## Monitoring
+
+### Log All Published Messages
+
+```typescript
+async function publishWithLogging(channel: string, message: any) {
+  const logger = createStructuredLogger({ service: 'api-router' });
+  const realtime = getRealtimeAdapter();
+
+  logger.info('realtime.publish.start', 'Publishing realtime message', {
+    metadata: { channel, messageType: message.type },
+  });
+
+  const startTime = Date.now();
+
+  try {
+    await realtime.publish(channel, message);
+
+    const duration = Date.now() - startTime;
+
+    logger.info('realtime.publish.success', 'Message published successfully', {
+      metadata: { channel, messageType: message.type, durationMs: duration },
+    });
+  } catch (error) {
+    logger.error('realtime.publish.error', 'Failed to publish message', {
+      error,
+      metadata: { channel, messageType: message.type },
+    });
+    throw error;
+  }
+}
+```
+
+---
+
+## Troubleshooting
+
+### Problem: Messages not received by client
+
+**Causes**:
+1. Client not subscribed to correct channel
+2. Authentication issue
+3. Channel name mismatch
+
+**Solution**:
+```typescript
+// Server-side: log published channel
+logger.info('realtime.published', 'Message published', {
+  metadata: { channel: `user:${userId}:updates` },
+});
+
+// Client-side: log subscribed channel
+console.log('Subscribed to:', `user:${userId}:updates`);
+
+// Verify they match!
+```
+
+### Problem: "Insufficient permissions" error
+
+**Cause**: Client token doesn't have permission for channel.
+
+**Solution**: Update token capabilities:
+```typescript
+const tokenRequest = await ably.auth.createTokenRequest({
+  clientId: userId,
+  capability: {
+    [`user:${userId}:*`]: ['subscribe', 'publish'],  // Add permissions
+  },
+});
+```
+
+### Problem: Connection drops frequently
+
+**Cause**: Network issues or connection not maintained.
+
+**Solution**: Enable heartbeat and auto-reconnect:
+```typescript
+const ably = new Ably.Realtime({
+  authUrl: '/api/ably/auth',
+  autoConnect: true,
+  disconnectedRetryTimeout: 15000,  // Retry after 15s
+  suspendedRetryTimeout: 30000,     // Retry after 30s
+});
+```
+
+---
+
+## Related Documentation
+
+- [DormWay Core Library (@dormway-core)](/docs/engineering/technical/dormway-core-library-dormway-core) - Main overview
+- [Temporal Adapter](/docs/engineering/technical/dormway-core/adapters/temporal-adapter) - Workflow orchestration
+- [Cache Adapter](/docs/engineering/technical/dormway-core/adapters/cache-adapter) - Caching layer
+
+---
+
+**Last Updated**: 2025-11-23
+**Maintainer**: Platform Team

@@ -1,0 +1,102 @@
+---
+title: "City Processor Aurora Migration"
+description: "Started migrating the City Processor workflow from Supabase to Aurora as our first workflow migration."
+---
+
+# City Processor Aurora Migration
+
+## Status: In Progress 🟡
+
+Started migrating the City Processor workflow from Supabase to Aurora as our first workflow migration.
+
+## Why City Processor First?
+1. **Uses imported contexts data** - We have 1 city context in Aurora
+2. **Simple data access** - Only reads city context by ID
+3. **Clear boundaries** - Minimal database interactions
+4. **Good test case** - Validates our Aurora setup
+
+## Changes Made
+
+### 1. Created Aurora Service (`/engine/src/services/auroraDb.ts`)
+- Mirrors SupabaseService functionality
+- Handles AWS Secrets Manager password retrieval
+- Implements connection pooling
+- Provides these methods:
+  - `fetchCities(organizationId)` - Get all city contexts
+  - `getContextById(contextId)` - Get single context
+  - `getContextByExternalId(externalId)` - Get by external ID
+  - `insertContext(context)` - Insert new context
+  - `updateContext(contextId, updates)` - Update existing context
+
+### 2. Updated City Activities
+- Changed imports from SupabaseService to AuroraService
+- Updated `fetchAllCities()` to use Aurora
+- Updated `fetchCityContext()` to use Aurora
+
+## Next Steps
+
+### Immediate Tasks
+1. **Update remaining functions in city.activities.ts**:
+   - `saveCityWeatherContext` - Uses `insertServiceData()`
+   - `saveCityForecastContext` - Uses `insertServiceData()`
+   - `saveCityNewsContext` - Uses `insertServiceData()`
+   - `saveTransitContext` - Uses `insertServiceData()`
+   - Weather enrichment functions
+
+2. **Create service_data table in Aurora**:
+   - The `insertServiceData()` function needs a corresponding table
+   - Check if this table exists in Supabase and migrate schema
+
+3. **Test the City Processor workflow**:
+   - Trigger workflow with city ID: `9fbc9a45-9741-4461-aff8-3b89bc88f5a0` (Ann Arbor)
+   - Verify it reads context correctly
+   - Check weather/news data processing
+
+### Technical Considerations
+
+1. **Connection Management**:
+   - Each activity creates a new AuroraService instance
+   - Consider connection pooling at the worker level
+   - Monitor connection limits
+
+2. **Error Handling**:
+   - Aurora service returns `{ data, error }` pattern like Supabase
+   - Ensure all error cases are handled
+
+3. **Environment Variables**:
+   - Engine needs these Aurora env vars:
+     - `AURORA_PROXY_HOST`
+     - `AURORA_DB_NAME`
+     - `AURORA_DB_USER`
+     - `AURORA_DB_PASSWORD_SECRET_ARN`
+
+## Testing Plan
+
+1. **Local Testing**:
+   ```bash
+   cd /dormway/engine
+   doppler run -- npm run workflow -- city-processor --cityId=9fbc9a45-9741-4461-aff8-3b89bc88f5a0
+   ```
+
+2. **Verify Data Access**:
+   - Context fetch works
+   - Weather API calls succeed
+   - Results saved correctly
+
+3. **Production Testing**:
+   - Deploy updated engine
+   - Monitor CloudWatch logs
+   - Verify workflow completion
+
+## Migration Pattern
+
+This migration establishes a pattern for other workflows:
+1. Create Aurora service methods as needed
+2. Replace SupabaseService with AuroraService
+3. Update imports and method calls
+4. Test thoroughly before deploying
+
+## Related Files
+- `/engine/src/services/auroraDb.ts` - Aurora database service
+- `/engine/src/activities/city.activities.ts` - City workflow activities
+- `/engine/src/workflows/cityProcessor.workflow.ts` - City workflow definition

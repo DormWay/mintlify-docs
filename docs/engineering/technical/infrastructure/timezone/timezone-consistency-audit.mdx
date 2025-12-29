@@ -1,0 +1,224 @@
+---
+title: "Timezone Consistency Audit"
+description: "Comprehensive audit of timezone handling across the DormWay platform to ensure consistency in database storage, API responses, notification workflows, and us..."
+---
+
+# Timezone Consistency Audit - DORM-163
+
+## Overview
+Comprehensive audit of timezone handling across the DormWay platform to ensure consistency in database storage, API responses, notification workflows, and user interface display.
+
+## Current State Analysis
+
+### 1. Database Storage Consistency ✅ Mostly Good
+
+#### Good Practices Found:
+- Most tables use `timestamp with time zone` columns:
+  - `student_time_blocks`: `start_time`, `end_time`, `created_at`, `updated_at`
+  - `time_blocks`: `start_time`, `end_time`, `created_at`, `updated_at`
+  - `context_prediction_history`: `timestamp`, `created_at`, `updated_at`
+  - `user_locations`: `recorded_at`, `created_at`
+  - Notification tables: `scheduled_for`, `created_at`, `updated_at`
+
+#### Issues Found:
+- Some legacy tables still use `timestamp without time zone`:
+  - ~~`app_device_tokens`: `created_at`, `last_used`, `updated_at`~~ (No longer used)
+  - ~~`app_notifications`: `created_at`~~ (No longer used)
+  - ~~Functions: `get_device_tokens_with_users`, `get_filtered_notifications_with_users`~~ (No longer used)
+
+### 2. Notification Workflows ⚠️ Needs Improvement
+
+#### Current Issues:
+- Deprecated notification scheduling code in `studentWatcher.workflow.ts`
+- Timezone handling inconsistent in morning/evening notification workflows
+- Some workflows use `Intl.DateTimeFormat().resolvedOptions().timeZone` as fallback
+- Moment.js timezone conversion in `eveningNotificationActivities.ts`
+
+#### Good Practices Found:
+- `getStudentTimezone()` function properly fetches from `accounts.public_data`
+- Timezone-aware scheduling in `scheduleNextEveningNotification()`
+
+### 3. API Responses ⚠️ Inconsistent
+
+#### Issues:
+- Mixed timezone handling in API responses
+- Some endpoints return UTC, others return local timezone
+- Inconsistent use of ISO 8601 format with timezone offsets
+
+#### Good Examples:
+- `formatTimeInUserTimezone()` in test harness properly handles timezone offsets
+- Calendar normalization service stores timezone information
+
+### 4. Display Layer ⚠️ Needs Standardization
+
+#### Current State:
+- Multiple timezone formatting approaches across UI components
+- Some components handle timezone offsets, others don't
+- Inconsistent fallback timezones
+
+#### Good Examples:
+- `formatTimeInUserTimezone()` function in test harness
+- `formatInTimeZone()` usage in calendar display
+
+## Required Actions
+
+### Phase 1: Database Migration
+1. **Migrate legacy tables** to use `timestamp with time zone`
+   - ~~`app_device_tokens`~~ (No longer used)
+   - ~~`app_notifications`~~ (No longer used)
+   - ~~Update related functions~~ (No longer needed)
+
+2. **Create migration script** to convert existing data (if any legacy tables remain)
+
+### Phase 2: API Standardization
+1. **Standardize API responses** to always include timezone information
+2. **Implement consistent timezone conversion** utilities
+3. **Update all API endpoints** to return ISO 8601 with proper offsets
+
+### Phase 3: Workflow Updates
+1. **Update notification workflows** to use consistent timezone handling
+2. **Replace deprecated scheduling code** with timezone-aware implementation
+3. **Standardize timezone fallbacks** across all workflows
+
+### Phase 4: UI/UX Consistency
+1. **Create shared timezone utilities** for frontend components
+2. **Standardize time display** across all interfaces
+3. **Implement proper timezone detection** and user preferences
+
+## Implementation Guidelines
+
+### Database Storage
+- ✅ **Store in UTC** in the database
+- ✅ **Use `timestamp with time zone`** for all timestamp columns
+- ✅ **Include timezone information** in event metadata
+
+### Processing Layer
+- ✅ **Convert to local timezone** when processing (especially for LLMs)
+- ✅ **Use IANA timezone identifiers** (e.g., 'America/New_York')
+- ✅ **Handle timezone transitions** (DST changes)
+
+### API Responses
+- ✅ **Return with proper timezone offsets** in API responses
+- ✅ **Use ISO 8601 format** with timezone information
+- ✅ **Include timezone metadata** when relevant
+
+### Display Layer
+- ✅ **Display correctly in user's local timezone**
+- ✅ **Respect user timezone preferences**
+- ✅ **Handle timezone changes** gracefully
+
+## Files Requiring Updates
+
+### Database Schema
+- `infrastructure/docker/init-scripts/01-schema.sql` (review for any remaining legacy tables)
+
+### Backend Services
+- `services/engine/src/workflows/studentWatcher.workflow.ts` (update notification scheduling)
+- `services/engine/src/activities/eveningNotificationActivities.ts` (standardize timezone handling)
+- `services/api-router/src/routes/context-intelligence-routes.ts` (standardize API responses)
+
+### Frontend Components
+- `services/dw_testharness/app/studentwatcher/page.tsx` (improve timezone utilities)
+
+### New Files to Create
+- Shared timezone utilities library
+- Timezone conversion utilities
+- Timezone-aware date formatting utilities
+
+## Specific Issues Found
+
+### 1. Legacy Tables with `timestamp without time zone`
+
+```sql
+-- Note: app_device_tokens and app_notifications tables are no longer used
+-- These examples are kept for reference of what to avoid in new tables
+
+-- Example of what NOT to do (deprecated tables):
+-- app_device_tokens table (no longer used)
+-- CREATE TABLE public.app_device_tokens (
+--     id uuid DEFAULT gen_random_uuid() NOT NULL,
+--     user_id uuid,
+--     device_token text NOT NULL,
+--     created_at timestamp without time zone DEFAULT now(),  -- ❌ Should be with time zone
+--     device_type text,
+--     last_used timestamp without time zone,                 -- ❌ Should be with time zone
+--     updated_at timestamp without time zone                 -- ❌ Should be with time zone
+-- );
+
+-- app_notifications table (no longer used)
+-- CREATE TABLE public.app_notifications (
+--     id uuid DEFAULT gen_random_uuid() NOT NULL,
+--     user_id uuid,
+--     title text NOT NULL,
+--     message text NOT NULL,
+--     created_at timestamp without time zone DEFAULT now(),  -- ❌ Should be with time zone
+--     status text DEFAULT 'pending'::text
+-- );
+```
+
+### 2. Inconsistent Timezone Handling in Workflows
+
+```typescript
+// ❌ Deprecated code in studentWatcher.workflow.ts
+timezone: timezone || Intl.DateTimeFormat().resolvedOptions().timeZone
+
+// ✅ Good practice in eveningNotificationActivities.ts
+const tomorrow = moment().tz(timezone).add(1, 'day').hour(21).minute(0).second(0);
+```
+
+### 3. Mixed API Response Formats
+
+```typescript
+// ❌ Inconsistent timezone handling
+const date = new Date(block.start_time);
+convertedBlock.start_time = startDate.toLocaleString('en-US', {
+  timeZone: timezone,
+  // ...
+});
+
+// ✅ Good practice with proper timezone handling
+const hasOffset = dateString.match(/[+-]\d{2}:\d{2}$/);
+if (hasOffset) {
+  // Handle timezone offset properly
+}
+```
+
+## Success Criteria
+
+- [ ] All database timestamps use `timestamp with time zone`
+- [ ] All API responses include proper timezone information
+- [ ] Notification workflows handle timezones consistently
+- [ ] UI components display times in user's local timezone
+- [ ] Comprehensive timezone handling documentation created
+- [ ] Timezone utilities library implemented
+- [ ] All timezone-related tests passing
+
+## Migration Strategy
+
+### Step 1: Database Migration
+1. Create migration script to convert `timestamp without time zone` to `timestamp with time zone`
+2. Update all related functions and stored procedures
+3. Test migration on staging environment
+
+### Step 2: Backend Updates
+1. Update notification workflows to use consistent timezone handling
+2. Standardize API response formats
+3. Implement shared timezone utilities
+
+### Step 3: Frontend Updates
+1. Create shared timezone formatting utilities
+2. Update all UI components to use consistent timezone handling
+3. Implement proper timezone detection and user preferences
+
+### Step 4: Testing and Validation
+1. Comprehensive testing across different timezones
+2. DST transition testing
+3. Performance testing with timezone conversions
+
+## Resources and References
+
+- [PostgreSQL Timezone Documentation](https://www.postgresql.org/docs/current/datatype-datetime.html)
+- [IANA Timezone Database](https://www.iana.org/time-zones)
+- [ISO 8601 Date/Time Format](https://en.wikipedia.org/wiki/ISO_8601)
+- [Moment.js Timezone Documentation](https://momentjs.com/timezone/)
+- [date-fns-tz Documentation](https://github.com/marnusw/date-fns-tz)

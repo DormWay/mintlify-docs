@@ -1,0 +1,353 @@
+---
+title: "AI Processing Gaps Analysis"
+description: "1. **syllabus_processor_optimized.py** - Extracts dates, assignments, exams from syllabi 2. **morning_briefing.py** - Generates morning notifications with da..."
+---
+
+# AI Processing Gaps Analysis for User Journey
+
+> **Created**: August 20, 2025  
+> **Purpose**: Identify where AI processing additions are needed, distinguishing between Crews (complex multi-agent reasoning) vs Direct LLM calls (simple tasks)
+
+## Decision Framework: Crew vs Direct LLM
+
+### Use CrewAI When:
+- Multiple steps of reasoning required
+- Need different perspectives/expertise
+- Complex document analysis
+- Cross-referencing multiple data sources
+- Output quality > speed
+
+### Use Direct LLM When:
+- Single transformation task
+- Simple matching/classification
+- Speed is critical (< 500ms)
+- Deterministic outputs
+- Cost sensitive operations
+
+## Current AI Crews (Already Implemented)
+
+### ✅ Existing Crews
+1. **syllabus_processor_optimized.py** - Extracts dates, assignments, exams from syllabi
+2. **morning_briefing.py** - Generates morning notifications with daily overview
+3. **midday_checkin.py** - Mid-day context and reminders
+4. **evening_review.py** - Evening reflection and next-day prep
+5. **campus_events.py** - Processes campus event data
+6. **campus_news.py** - Aggregates campus news
+7. **city_context.py** - City-level context (weather, transit, etc.)
+8. **student_travel_context.py** - Travel planning and logistics
+9. **deep_context_analysis.py** - Deep behavioral analysis
+10. **study_planning_v2.py** - Study session planning
+11. **health_wellness_v2.py** - Health and wellness recommendations
+
+## 🔴 Critical AI Processing Gaps
+
+### 1. **University Detection** (DIRECT LLM - NOT CREW)
+**Purpose**: Simple lookup and fuzzy matching of email domain to university
+**Implementation**: Direct LLM call
+**Model**: **Amazon Nova Micro** (fastest, cheapest for simple matching)
+```typescript
+// Simple LLM call in api-router
+const universityMatch = await llamaClient.complete({
+  model: "amazon.nova-micro-v1",
+  prompt: `Match email domain ${domain} to university name and timezone`,
+  max_tokens: 50
+});
+// < 100ms response time, $0.035/1M tokens
+```
+
+### 2. **Course-Syllabus Matcher** (DIRECT LLM - NOT CREW)
+**Purpose**: Match syllabus course code to user's schedule
+**Implementation**: Direct LLM call with structured output
+**Model**: **GPT-4o-mini** with JSON mode
+```typescript
+// Fast matching with structured output
+const match = await openai.chat.completions.create({
+  model: "gpt-4o-mini",
+  response_format: { type: "json_object" },
+  messages: [{
+    role: "system",
+    content: "Match syllabus course to schedule. Return: {courseId, confidence}"
+  }],
+  temperature: 0.1  // Low temperature for consistency
+});
+// < 500ms, $0.15/1M tokens
+```
+
+### 3. **Semester Workload Analyzer** (FULL CREW - COMPLEX REASONING)
+**Purpose**: Deep analysis across multiple syllabi, conflict detection, strategy
+**Implementation**: Multi-agent CrewAI
+**Models**: 
+- **Claude 3.5 Sonnet** for main analysis agents (best reasoning)
+- **GPT-4o-mini** for formatting/summary agents
+```python
+class SemesterWorkloadCrew(BaseDormWayCrew):
+    """
+    REQUIRES CREW - Complex multi-syllabus analysis
+    
+    Agents:
+    1. Workload Aggregator (Claude 3.5) - Deep reasoning
+    2. Conflict Detector (Claude 3.5) - Pattern recognition  
+    3. Stress Calculator (GPT-4o-mini) - Mathematical
+    4. Strategy Optimizer (Claude 3.5) - Creative solutions
+    
+    Expected runtime: 15-20 seconds (acceptable for background)
+    """
+```
+
+### 4. **Document Processor** (HYBRID APPROACH)
+**Step 1**: OCR/Text extraction (Direct API - not LLM)
+**Step 2**: Content analysis (Direct LLM)
+**Model**: **Gemini 1.5 Flash** (best for long documents, built-in vision)
+```python
+# Direct Gemini call for document processing
+async def process_document(file_bytes, doc_type):
+    # Gemini handles PDFs/images natively
+    response = await gemini.generate_content({
+        "model": "gemini-1.5-flash",
+        "contents": [{
+            "parts": [
+                {"inline_data": {"mime_type": "application/pdf", "data": base64_file}},
+                {"text": "Extract key concepts, generate 5 study questions"}
+            ]
+        }],
+        "generation_config": {"temperature": 0.3}
+    })
+    # < 3 seconds for 20-page PDF, $0.075/1M tokens
+```
+
+### 5. **DayPlan Generator** (DIRECT LLM - NOT CREW)  
+**Purpose**: Merge existing data into daily plan format
+**Implementation**: Single LLM call with context injection
+**Model**: **GPT-4o-mini** (fast, cheap, good enough)
+```typescript
+async function generateDayPlan(context: UserContext) {
+  // Single fast call, no crew needed
+  const dayPlan = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [{
+      role: "system", 
+      content: "Generate DayPlan from context. Be concise."
+    }, {
+      role: "user",
+      content: JSON.stringify(context)
+    }],
+    max_tokens: 2000,
+    temperature: 0.3
+  });
+  // < 1.5 seconds, includes all context
+}
+```
+
+## ✅ Already Implemented (No Changes Needed)
+
+### 1. **Syllabus Processor** (ALREADY COMPLETE!)
+**Current Implementation** (`syllabus_processor_optimized.py`):
+Already extracts ALL of the following:
+- ✅ Professor contact info (via `contact_extractor` agent)
+- ✅ Office hours (via `contact_extraction_task`)
+- ✅ Grading breakdown (via `grading_extractor` agent)
+- ✅ Course policies (via `policy_analyst` agent)
+- ✅ Professor style analysis (via `hidden_insights_agent`)
+- ✅ Workload analysis (via `workload_analyst`)
+- ✅ Cost analysis (via `cost_analyst`)
+- ✅ Grade strategy (via `grade_strategist`)
+
+**No enhancements needed** - This crew is comprehensive!
+
+### 2. **Enhanced Morning Briefing**
+**Current**: Generic daily overview
+**Needed**:
+- Pull from semester workload analysis
+- Include document-based study recommendations
+- Integrate with all user's syllabi
+
+### 3. **DayPlan Generator** (Refactor from Notification Crews)
+**Current**: Separate morning/midday/evening crews
+**Needed**: Single DayPlan generation that includes:
+```python
+class DayPlanGeneratorCrew:
+    """
+    Combines all context into single daily plan
+    - Classes from time_blocks
+    - Assignments from syllabi
+    - Study recommendations from documents
+    - Campus events
+    - Weather/transit
+    """
+```
+
+## Implementation Priority & Approach
+
+### Phase 1: Direct LLM Implementations (2-3 Days)
+These are simple, fast implementations that don't need crews:
+
+1. **University Detection** (Direct LLM)
+   - Model: Amazon Nova Micro
+   - Location: `api-router/src/services/university-matcher.ts`
+   - Time: 2 hours
+
+2. **Course-Syllabus Matcher** (Direct LLM)
+   - Model: GPT-4o-mini with JSON mode
+   - Location: `api-router/src/services/syllabus-matcher.ts`
+   - Time: 3 hours
+
+3. **DayPlan Generator** (Direct LLM)
+   - Model: GPT-4o-mini
+   - Location: `engine/src/activities/dayplan.activities.ts`
+   - Time: 4 hours
+
+### Phase 2: Crew Implementations (Week 1)
+These require multi-agent reasoning:
+
+4. **Semester Workload Analyzer** (CrewAI) - **TOP PRIORITY**
+   - Models: Claude 3.5 Sonnet (main) + GPT-4o-mini (support)
+   - Location: `dormway-crews/crews/semester_workload.py`
+   - Time: 2-3 days
+   - Note: This is the ONLY major crew gap!
+
+### Phase 3: Hybrid Implementations (Week 2)
+6. **Document Processor** (Hybrid)
+   - Model: Gemini 1.5 Flash (native PDF/image support)
+   - Location: `api-router/src/services/document-processor.ts`
+   - Time: 2 days
+
+## Technical Implementation Notes
+
+### Standard Crew Pattern
+```python
+from crews.base import BaseDormWayCrew
+from crewai import Agent, Task, Crew
+
+class NewCrew(BaseDormWayCrew):
+    def __init__(self):
+        super().__init__()
+        
+    def create_agents(self):
+        return [
+            Agent(
+                role="...",
+                goal="...",
+                backstory="...",
+                llm=self.get_llm("gpt-4o-mini")  # Use for speed
+            )
+        ]
+    
+    def create_tasks(self, agents, context):
+        return [
+            Task(
+                description="...",
+                agent=agents[0],
+                expected_output="..."
+            )
+        ]
+    
+    def crew(self) -> Crew:
+        agents = self.create_agents()
+        tasks = self.create_tasks(agents, {})
+        return Crew(
+            agents=agents,
+            tasks=tasks,
+            process="sequential"
+        )
+```
+
+### Data Storage Pattern
+```python
+# All AI outputs stored in service_data table
+INSERT INTO service_data (
+    user_id,
+    context_id,  # Link to course/building/etc
+    method,      # 'processed_semester_workload', etc
+    data,        # JSONB output from crew
+    service_id,
+    fetched_at
+)
+```
+
+### Integration with StudentWatcher
+```typescript
+// Signal StudentWatcher about new AI processing
+await temporalClient.signal(
+    `student-watcher-${userId}`,
+    'custom_signal',
+    { 
+        type: 'ai_processing_complete',
+        crew: 'semester_workload',
+        dataId: result.id
+    }
+);
+```
+
+## Model Selection Rationale & Costs
+
+### Model Comparison Table
+| Model | Best For | Speed | Cost/1M tokens | When to Use |
+|-------|----------|-------|----------------|-------------|
+| **Amazon Nova Micro** | Simple matching | <100ms | $0.035 | University detection, simple lookups |
+| **GPT-4o-mini** | Fast structured output | <500ms | $0.15 | DayPlan, course matching, JSON responses |
+| **Gemini 1.5 Flash** | Long docs, PDFs, images | 2-3s | $0.075 | Document processing, OCR tasks |
+| **Claude 3.5 Sonnet** | Complex reasoning | 3-5s | $3.00 | Crew agents, deep analysis |
+| **GPT-4o** | Highest quality | 5-8s | $5.00 | Only when Claude fails |
+
+### Cost Per User Journey
+```
+Onboarding:
+- University Detection (Nova): $0.00001
+- Course Matching x5 (GPT-4o-mini): $0.00015
+- DayPlan Generation (GPT-4o-mini): $0.00020
+
+Per Syllabus:
+- Processing (Crew w/ Claude): $0.05
+- Semester Analysis (Crew w/ Claude): $0.08
+
+Daily Operations:
+- DayPlan refresh (GPT-4o-mini): $0.00020
+- Total daily: ~$0.001
+
+Monthly per user: ~$0.30 (excluding syllabus processing)
+```
+
+### Performance Requirements
+- **Critical Path** (blocking user): < 2 seconds
+  - Use: Nova Micro, GPT-4o-mini
+- **Interactive** (user waiting): < 5 seconds  
+  - Use: GPT-4o-mini, Gemini Flash
+- **Background** (async): < 30 seconds
+  - Use: Claude 3.5 crews for quality
+
+## Success Metrics
+
+### Coverage
+- [ ] 100% of users get university detected
+- [ ] 90% of syllabi correctly matched to courses
+- [ ] 80% of documents processed successfully
+
+### Quality
+- [ ] Semester workload predictions match reality
+- [ ] DayPlan includes all relevant context
+- [ ] Study recommendations are actionable
+
+### Performance
+- [ ] All critical path crews < 2 seconds
+- [ ] Background crews < 30 seconds
+- [ ] Cost per user < $0.10/day
+
+## Next Steps
+
+1. **Immediate** (Today):
+   - Start implementing University Detection Crew
+   - Design Course-Syllabus Matcher logic
+   
+2. **This Week**:
+   - Build Semester Workload Analyzer
+   - Test with real syllabus data
+   
+3. **Next Week**:
+   - Integrate all crews into onboarding flow
+   - Update StudentWatcher to use new signals
+
+---
+
+*Tags: #ai #crews #gaps-analysis #user-journey*  
+*Status: Planning*  
+*Owner: Engineering Team*

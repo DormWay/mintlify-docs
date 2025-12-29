@@ -1,0 +1,114 @@
+---
+title: "AceLLM iOS Integration Guide"
+description: "This guide shows how the iOS app integrates with the AceLLM API for document search, chat, and streaming responses."
+---
+
+# AceLLM iOS Integration Guide
+
+This guide shows how the iOS app integrates with the AceLLM API for document search, chat, and streaming responses.
+
+## Prerequisites
+
+- Auth0 JWT or equivalent token for authenticated API calls
+- Base API URL for api-router (e.g., http://localhost:4001 in local dev)
+
+## Endpoints
+
+- `POST /api/search/query`
+  - Body: `{ q, scope, filters?, limit?, aiPersonality? }`
+  - Returns: `{ answer, sources[] }`
+
+- `POST /api/search/documents` (multipart)
+  - Fields: `title`, optional `documentId`, optional `partition`, optional `metadata (JSON string)`
+  - File: `document`
+  - Returns: `{ id, partitionKey, status, metadata }`
+
+- `GET /api/search/documents`
+  - Auth-scoped to the current user partition
+  - Returns: `{ items: [...], nextCursor? }`
+
+- `POST /api/search/chat`
+  - Body: `{ message, conversationId?, scope, filters?, limit?, aiPersonality? }`
+  - Returns: `{ conversationId, answer, sources }`
+
+- `POST /api/search/chat/stream` (SSE)
+  - Body: same as `/chat`
+  - SSE events: `sources` (once), repeated `token` events, `done`
+
+- `GET /api/search/chat/:conversationId`
+  - Returns: `{ conversationId, messages }`
+
+## Scopes and Partitions
+
+- Use `scope: { type: 'user', id: userId }` for personal queries
+- For course-scoped queries, `scope: { type: 'course', id: courseContextId }`
+- Use `type: 'multi'` to combine scopes
+
+## Swift Examples
+
+### Query
+
+```swift
+struct QueryRequest: Codable {
+  let q: String
+  let scope: [String: AnyCodable] // user/course/multi
+  let filters: [String: AnyCodable]?
+  let limit: Int?
+  let aiPersonality: [String: String]?
+}
+
+func queryAce(apiBase: String, token: String, body: [String: Any]) async throws -> (String, String: Any) {
+  var req = URLRequest(url: URL(string: "\(apiBase)/api/search/query")!)
+  req.httpMethod = "POST"
+  req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+  req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+  req.httpBody = try JSONSerialization.data(withJSONObject: body)
+  let (data, _) = try await URLSession.shared.data(for: req)
+  let json = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+  let answer = json["answer"] as? String ?? ""
+  let sources = json["sources"] as? String: Any ?? []
+  return (answer, sources)
+}
+```
+
+### Streaming Chat (SSE)
+
+```swift
+func chatStream(apiBase: String, token: String, body: [String: Any], onToken: @escaping (String) -> Void, onDone: @escaping (String) -> Void) {
+  var req = URLRequest(url: URL(string: "\(apiBase)/api/search/chat/stream")!)
+  req.httpMethod = "POST"
+  req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+  req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+  req.httpBody = try? JSONSerialization.data(withJSONObject: body)
+
+  let task = URLSession.shared.dataTask(with: req) { data, _, _ in
+    // SSE is streamed; in production use URLSessionStreamTask or a custom SSE parser
+    guard let data = data, let text = String(data: data, encoding: .utf8) else { return }
+    text.split(separator: "\n\n").forEach { event in
+      let lines = event.split(separator: "\n")
+      let dataLines = lines.filter { $0.starts(with: "data:") }
+      let payload = dataLines.map { $0.replacingOccurrences(of: "data:", with: "").trimmingCharacters(in: .whitespaces) }.joined(separator: "\n")
+      if payload.contains("\"text\":") { onToken(payload) }
+      if payload.contains("\"done\"") { onDone("") }
+    }
+  }
+  task.resume()
+}
+```
+
+Note: For robust SSE, use a dedicated SSE client or wrap with Combine/AsyncSequence.
+
+## Uploads
+
+Use multipart with `document` file field and metadata JSON string if needed. Ensure JWT is attached.
+
+## Error Handling
+
+- 401: invalid/expired token
+- 429: rate limits
+- 5xx: retry with backoff
+
+## Next Steps
+
+- Add connectors via Ragie Connect (future) through Router endpoints.
+- Persist minimal source references for explainability in chat.

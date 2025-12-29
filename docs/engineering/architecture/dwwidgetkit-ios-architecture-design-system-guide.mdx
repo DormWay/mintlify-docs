@@ -1,0 +1,761 @@
+---
+title: "DWWidgetKit   iOS Architecture & Design System Guide"
+description: "You are working on **DormWayFresh**, a modern iOS app for college students built with:"
+---
+
+# DWWidgetKit - iOS Architecture & Design System Guide
+
+**Purpose**: This guide covers iOS implementation patterns, Swift 6.0 best practices, and DWDesign integration for building DormWay widgets. For backend integration (API endpoints, authentication, real-time), see the companion guide: [DWWidgetKit - Backend Integration Guide](/docs/engineering/architecture/dwwidgetkit-backend-integration-guide).
+
+---
+
+## ⚠️ CRITICAL: DWDesign is the Source of Truth
+
+**BEFORE YOU START**: DWDesign (`Packages/DWDesign/`) is the **single source of truth** for ALL design decisions in this project.
+
+### MANDATORY RULES
+
+- ❌ **NEVER** hardcode font sizes, weights, or styles - Use `DS.Typography.*` tokens
+- ❌ **NEVER** hardcode colors - Use `DS.Color.Semantic.*` or `DS.Color.Palette.*` tokens
+- ❌ **NEVER** hardcode spacing values - Use `DS.Spacing.*` tokens
+- ❌ **NEVER** hardcode corner radius - Use `DS.Radius.*` tokens
+- ✅ **ALWAYS** import `DWDesign` in widget view files
+- ✅ **ALWAYS** use `.dsTypography()` modifier for text styling
+- ✅ **ALWAYS** use semantic colors that adapt to light/dark mode
+
+**If you find yourself typing a number for styling (like `8`, `16`, `#FF0000`), STOP and find the DWDesign token instead!**
+
+---
+
+## 📋 Project Overview
+
+You are working on **DormWayFresh**, a modern iOS app for college students built with:
+- **Swift 6.0** with strict concurrency
+- **iOS 18.0+** target
+- **SwiftUI** for UI
+- **WidgetKit** for home screen widgets
+- **Protocol-based dependency injection** (no singletons)
+- **Modular Swift Package Manager** architecture
+
+### Key Architectural Principles
+
+1. **Swift 6.0 Concurrency**: Use `@MainActor`, `async/await`, `@Sendable`, `@preconcurrency` where needed
+2. **No Singletons**: All services injected via DI container
+3. **Protocol-Based**: Services defined by protocols, not concrete types
+4. **Type Safety**: Strong typing throughout, avoid `Any` where possible
+5. **Error Handling**: Comprehensive error handling with user-friendly messages
+6. **Testing**: Write testable code with dependency injection
+
+---
+
+## 📦 Package Structure
+
+```
+Packages/DWWidgetKit/
+├── Package.swift
+├── README.md
+└── Sources/DWWidgetKit/
+    ├── DWWidgetKit.swift (public exports)
+    ├── Models/
+    │   └── WidgetModels.swift (data models)
+    ├── Provider/
+    │   └── WidgetDataProvider.swift (data fetching)
+    ├── Shared/
+    │   └── WidgetExtensions.swift (UI helpers)
+    └── Widgets/
+        ├── AceStudyCommandWidget.swift
+        ├── NextActionWidget.swift
+        └── [Additional widget implementations]
+
+DormWayWidgets/ (Extension Target)
+├── DormWayWidgets.swift (@main WidgetBundle)
+├── Info.plist
+└── DormWayWidgets.entitlements
+```
+
+### Dependencies
+
+**Package.swift includes:**
+```swift
+dependencies: [
+    .package(path: "../DWDesign"),      // Design system
+    .package(path: "../DWNetworking"),  // Network layer
+    .package(path: "../DWCore")         // Core utilities
+]
+```
+
+---
+
+## 🎨 DWDesign Integration
+
+### Typography Tokens
+
+**Available Typography Styles:**
+```swift
+// Body text
+DS.Typography.Body.caption      // Smallest (11pt)
+DS.Typography.Body.small        // Small (13pt)
+DS.Typography.Body.default      // Default (15pt)
+
+// Labels
+DS.Typography.Label.small       // Small label
+DS.Typography.Label.medium      // Medium label
+DS.Typography.Label.large       // Large label
+
+// Headings
+DS.Typography.Heading.h1        // Largest heading
+DS.Typography.Heading.h2
+DS.Typography.Heading.h3
+DS.Typography.Heading.h4        // Smallest heading
+```
+
+**Usage in Widget Views:**
+```swift
+import DWDesign
+import SwiftUI
+
+// ✅ CORRECT
+Text("Next Action")
+    .dsTypography(DS.Typography.Body.default)
+
+Text("Study for CS 101")
+    .dsTypography(DS.Typography.Heading.h3)
+
+Text("Due in 2 hours")
+    .dsTypography(DS.Typography.Body.caption)
+
+// ❌ WRONG - Never hardcode fonts
+Text("Next Action")
+    .font(.system(size: 16, weight: .regular))
+```
+
+### Color Tokens
+
+**Semantic Colors** (Adapt to light/dark mode):
+```swift
+// Text colors
+DS.Color.Semantic.Text.primary      // Primary text
+DS.Color.Semantic.Text.secondary    // Secondary text
+DS.Color.Semantic.Text.tertiary     // Tertiary text
+
+// Background colors
+DS.Color.Semantic.Background.surfacePrimary
+DS.Color.Semantic.Background.surfaceSecondary
+
+// Widget type colors
+DS.Color.Semantic.WidgetType.academic
+DS.Color.Semantic.WidgetType.schedule
+DS.Color.Semantic.WidgetType.wellness
+
+// State colors
+DS.Color.Palette.State.error
+DS.Color.Palette.State.warning
+DS.Color.Palette.State.success
+DS.Color.Palette.State.info
+```
+
+**Usage:**
+```swift
+// ✅ CORRECT
+Text("Error message")
+    .foregroundColor(DS.Color.Palette.State.error)
+
+VStack { }
+    .background(DS.Color.Semantic.Background.surfacePrimary)
+
+// ❌ WRONG - Never use system colors directly
+Text("Error message")
+    .foregroundColor(.red)
+```
+
+### Spacing Tokens
+
+```swift
+DS.Spacing.xs    // 4pt
+DS.Spacing.sm    // 8pt
+DS.Spacing.md    // 16pt
+DS.Spacing.lg    // 24pt
+DS.Spacing.xl    // 32pt
+DS.Spacing.xxl   // 48pt
+```
+
+**Usage:**
+```swift
+// ✅ CORRECT
+VStack(spacing: DS.Spacing.sm) {
+    Text("Title")
+    Text("Subtitle")
+}
+.padding(DS.Spacing.md)
+
+// ❌ WRONG - Never hardcode spacing
+VStack(spacing: 8) {
+    Text("Title")
+}
+.padding(16)
+```
+
+### Radius Tokens
+
+```swift
+DS.Radius.sm    // 4pt
+DS.Radius.md    // 8pt
+DS.Radius.lg    // 12pt
+DS.Radius.xl    // 16pt
+```
+
+**Usage:**
+```swift
+// ✅ CORRECT
+RoundedRectangle(cornerRadius: DS.Radius.md)
+
+// ❌ WRONG
+RoundedRectangle(cornerRadius: 8)
+```
+
+---
+
+## 🏗️ Widget View Structure
+
+### Complete Example: Correct Widget View
+
+```swift
+import WidgetKit
+import SwiftUI
+import DWDesign
+
+struct AceWidgetEntryView: View {
+    let entry: AceEntry
+    @Environment(\.widgetFamily) var family
+
+    var body: some View {
+        switch family {
+        case .systemSmall:
+            SmallAceView(content: entry.content)
+        case .systemMedium:
+            MediumAceView(content: entry.content)
+        default:
+            EmptyView()
+        }
+    }
+}
+
+struct SmallAceView: View {
+    let content: AceWidgetContent
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: DS.Spacing.sm) {
+            // Header
+            HStack(spacing: DS.Spacing.xs) {
+                Image(systemName: "brain.head.profile")
+                    .foregroundColor(DS.Color.Semantic.WidgetType.academic)
+                    .font(.system(size: 12)) // Icon sizing OK
+
+                Text("Ace")
+                    .dsTypography(DS.Typography.Label.medium)
+                    .foregroundColor(DS.Color.Semantic.Text.secondary)
+
+                Spacer()
+
+                // Confidence indicator
+                ConfidenceIndicator(level: content.confidence)
+            }
+
+            Spacer()
+
+            // Main content
+            Text(content.suggestion)
+                .dsTypography(DS.Typography.Body.default)
+                .foregroundColor(DS.Color.Semantic.Text.primary)
+                .lineLimit(3)
+
+            Spacer()
+
+            // Course info with accent color
+            HStack(spacing: DS.Spacing.xs) {
+                Circle()
+                    .fill(Color(hex: content.course.color))
+                    .frame(width: 8, height: 8)
+
+                Text(content.course.code)
+                    .dsTypography(DS.Typography.Label.small)
+                    .foregroundColor(DS.Color.Semantic.Text.secondary)
+            }
+        }
+        .padding(DS.Spacing.md)
+        .background(DS.Color.Semantic.Background.surfacePrimary)
+        .widgetBackground() // DWDesign helper
+    }
+}
+
+struct MediumAceView: View {
+    let content: AceWidgetContent
+
+    var body: some View {
+        HStack(spacing: DS.Spacing.md) {
+            // Left: Icon and course
+            VStack(alignment: .leading, spacing: DS.Spacing.sm) {
+                Image(systemName: "brain.head.profile")
+                    .font(.system(size: 32))
+                    .foregroundColor(DS.Color.Semantic.WidgetType.academic)
+
+                Spacer()
+
+                VStack(alignment: .leading, spacing: DS.Spacing.xs) {
+                    Text(content.course.code)
+                        .dsTypography(DS.Typography.Label.medium)
+                        .foregroundColor(DS.Color.Semantic.Text.primary)
+
+                    Text(content.course.name)
+                        .dsTypography(DS.Typography.Body.caption)
+                        .foregroundColor(DS.Color.Semantic.Text.secondary)
+                        .lineLimit(1)
+                }
+            }
+            .frame(width: 80)
+
+            // Right: Content
+            VStack(alignment: .leading, spacing: DS.Spacing.sm) {
+                HStack {
+                    Text("Ace Recommendation")
+                        .dsTypography(DS.Typography.Label.medium)
+                        .foregroundColor(DS.Color.Semantic.Text.secondary)
+
+                    Spacer()
+
+                    ConfidenceIndicator(level: content.confidence)
+                }
+
+                Text(content.suggestion)
+                    .dsTypography(DS.Typography.Body.default)
+                    .foregroundColor(DS.Color.Semantic.Text.primary)
+                    .lineLimit(4)
+
+                Spacer()
+
+                // Metadata
+                if let duration = content.estimatedDuration {
+                    HStack(spacing: DS.Spacing.xs) {
+                        Image(systemName: "clock")
+                            .font(.system(size: 10))
+                        Text("\(duration) min")
+                            .dsTypography(DS.Typography.Body.caption)
+                    }
+                    .foregroundColor(DS.Color.Semantic.Text.tertiary)
+                }
+            }
+        }
+        .padding(DS.Spacing.md)
+        .background(DS.Color.Semantic.Background.surfacePrimary)
+        .widgetBackground()
+    }
+}
+
+// Reusable component
+struct ConfidenceIndicator: View {
+    let level: Double
+
+    var color: Color {
+        switch level {
+        case 0.8...1.0:
+            return DS.Color.Palette.State.success
+        case 0.5..<0.8:
+            return DS.Color.Palette.State.info
+        default:
+            return DS.Color.Palette.State.warning
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(0..<3) { index in
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(Double(index) < level * 3 ? color : Color.gray.opacity(0.3))
+                    .frame(width: 4, height: 12)
+            }
+        }
+    }
+}
+```
+
+---
+
+## 🎯 Widget Size Guidelines
+
+### systemSmall (158×158 pt)
+- **Content**: 1-2 key pieces of information
+- **Text**: Keep concise (20-30 characters max)
+- **Lines**: 3-4 lines of text maximum
+- **Icons**: Single prominent icon (24-32pt)
+- **Spacing**: Use `DS.Spacing.sm` for tight layouts
+
+### systemMedium (338×158 pt)
+- **Content**: 3-5 pieces of information
+- **Text**: More detail (50-70 characters)
+- **Lines**: 4-6 lines of text
+- **Icons**: Multiple icons or larger single icon
+- **Layout**: Horizontal split common (icon left, content right)
+- **Spacing**: Use `DS.Spacing.md` for comfortable layouts
+
+---
+
+## 🛠️ Error and Loading States
+
+### Loading State
+
+```swift
+struct WidgetLoadingView: View {
+    var body: some View {
+        VStack(spacing: DS.Spacing.md) {
+            ProgressView()
+                .tint(DS.Color.Semantic.WidgetType.academic)
+
+            Text("Loading...")
+                .dsTypography(DS.Typography.Body.small)
+                .foregroundColor(DS.Color.Semantic.Text.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(DS.Color.Semantic.Background.surfacePrimary)
+        .widgetBackground()
+    }
+}
+```
+
+### Error State
+
+```swift
+struct WidgetErrorView: View {
+    let error: WidgetError
+
+    var body: some View {
+        VStack(spacing: DS.Spacing.sm) {
+            Image(systemName: errorIcon)
+                .font(.system(size: 24))
+                .foregroundColor(DS.Color.Palette.State.error)
+
+            Text(error.localizedDescription)
+                .dsTypography(DS.Typography.Body.small)
+                .foregroundColor(DS.Color.Semantic.Text.primary)
+                .multilineTextAlignment(.center)
+                .lineLimit(3)
+        }
+        .padding(DS.Spacing.md)
+        .background(DS.Color.Semantic.Background.surfacePrimary)
+        .widgetBackground()
+    }
+
+    var errorIcon: String {
+        switch error {
+        case .authenticationRequired:
+            return "person.crop.circle.badge.exclamationmark"
+        case .networkUnavailable:
+            return "wifi.slash"
+        case .timeout:
+            return "clock.badge.exclamationmark"
+        default:
+            return "exclamationmark.triangle"
+        }
+    }
+}
+```
+
+### Empty State
+
+```swift
+struct WidgetEmptyView: View {
+    let message: String
+
+    var body: some View {
+        VStack(spacing: DS.Spacing.sm) {
+            Image(systemName: "tray")
+                .font(.system(size: 32))
+                .foregroundColor(DS.Color.Semantic.Text.tertiary)
+
+            Text(message)
+                .dsTypography(DS.Typography.Body.small)
+                .foregroundColor(DS.Color.Semantic.Text.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .padding(DS.Spacing.md)
+        .background(DS.Color.Semantic.Background.surfacePrimary)
+        .widgetBackground()
+    }
+}
+```
+
+---
+
+## 📐 Swift 6.0 Concurrency Patterns
+
+### Widget Provider with Proper Concurrency
+
+```swift
+import WidgetKit
+import DWNetworking
+
+struct AceWidgetProvider: TimelineProvider {
+    // No @MainActor needed for provider
+
+    func placeholder(in context: Context) -> AceEntry {
+        AceEntry.placeholder
+    }
+
+    func getSnapshot(in context: Context, completion: @escaping (AceEntry) -> Void) {
+        Task {
+            do {
+                let content = try await fetchWidgetData()
+                completion(AceEntry(date: Date(), content: content))
+            } catch {
+                completion(AceEntry.error(error))
+            }
+        }
+    }
+
+    func getTimeline(in context: Context, completion: @escaping (Timeline<AceEntry>) -> Void) {
+        Task {
+            do {
+                let content = try await fetchWidgetData()
+                let entry = AceEntry(date: Date(), content: content)
+
+                // Refresh in 30 minutes
+                let refreshDate = Calendar.current.date(
+                    byAdding: .minute,
+                    value: 30,
+                    to: Date()
+                )!
+
+                let timeline = Timeline(
+                    entries: [entry],
+                    policy: .after(refreshDate)
+                )
+                completion(timeline)
+            } catch {
+                let entry = AceEntry.error(error)
+                // Retry in 15 minutes on error
+                let refreshDate = Calendar.current.date(
+                    byAdding: .minute,
+                    value: 15,
+                    to: Date()
+                )!
+
+                let timeline = Timeline(
+                    entries: [entry],
+                    policy: .after(refreshDate)
+                )
+                completion(timeline)
+            }
+        }
+    }
+
+    // Data fetching (can be async)
+    private func fetchWidgetData() async throws -> AceWidgetContent {
+        // See Backend Integration Guide for implementation
+        fatalError("Implement using Backend Integration Guide")
+    }
+}
+```
+
+### Main Actor for UI Components
+
+```swift
+@MainActor
+class WidgetUIHelper {
+    func formatWidgetText(_ text: String, maxLength: Int) -> String {
+        if text.count > maxLength {
+            return String(text.prefix(maxLength - 3)) + "..."
+        }
+        return text
+    }
+
+    func adaptiveSpacing(for family: WidgetFamily) -> CGFloat {
+        switch family {
+        case .systemSmall:
+            return DS.Spacing.sm
+        case .systemMedium:
+            return DS.Spacing.md
+        default:
+            return DS.Spacing.lg
+        }
+    }
+}
+```
+
+---
+
+## ♿ Accessibility
+
+### VoiceOver Labels
+
+```swift
+Text("Study for CS 101")
+    .dsTypography(DS.Typography.Body.default)
+    .accessibilityLabel("Study for Computer Science 101")
+    .accessibilityHint("Your next recommended action")
+
+Image(systemName: "brain.head.profile")
+    .accessibilityLabel("Ace recommendation")
+```
+
+### Dynamic Type Support
+
+DWDesign typography tokens automatically support Dynamic Type. No additional work needed when using `.dsTypography()`.
+
+### Color Contrast
+
+All `DS.Color.Semantic.*` colors meet WCAG AA contrast requirements in both light and dark modes.
+
+---
+
+## 🧪 Testing Patterns
+
+### Unit Tests for Widget Views
+
+```swift
+import XCTest
+import SnapshotTesting
+@testable import DWWidgetKit
+
+class AceWidgetViewTests: XCTestCase {
+    func testSmallWidgetLayout() {
+        let content = AceWidgetContent(
+            suggestion: "Review Chapter 5 notes",
+            course: CourseInfo(code: "CS 101", name: "Intro to CS", color: "#FF0000"),
+            confidence: 0.85
+        )
+
+        let view = SmallAceView(content: content)
+
+        // Snapshot test
+        assertSnapshot(matching: view, as: .image(layout: .fixed(width: 158, height: 158)))
+    }
+
+    func testMediumWidgetLayout() {
+        // Similar snapshot test for medium size
+    }
+
+    func testLongTextTruncation() {
+        let longSuggestion = String(repeating: "A", count: 200)
+        let content = AceWidgetContent(
+            suggestion: longSuggestion,
+            course: CourseInfo(code: "CS 101", name: "Intro to CS", color: "#FF0000"),
+            confidence: 0.85
+        )
+
+        let view = SmallAceView(content: content)
+        // Verify truncation works
+    }
+}
+```
+
+---
+
+## 📚 DWDesign Quick Reference
+
+### Common Patterns
+
+```swift
+// Widget header
+HStack {
+    Image(systemName: icon)
+        .foregroundColor(DS.Color.Semantic.WidgetType.academic)
+    Text("Title")
+        .dsTypography(DS.Typography.Label.medium)
+        .foregroundColor(DS.Color.Semantic.Text.secondary)
+    Spacer()
+}
+
+// Main content text
+Text(content)
+    .dsTypography(DS.Typography.Body.default)
+    .foregroundColor(DS.Color.Semantic.Text.primary)
+    .lineLimit(3)
+
+// Metadata/caption
+Text("Due in 2 hours")
+    .dsTypography(DS.Typography.Body.caption)
+    .foregroundColor(DS.Color.Semantic.Text.tertiary)
+
+// Card background
+VStack { }
+    .padding(DS.Spacing.md)
+    .background(DS.Color.Semantic.Background.surfacePrimary)
+    .cornerRadius(DS.Radius.md)
+```
+
+### Course Color Usage
+
+Course colors should be used as **accents**, not primary colors:
+
+```swift
+// ✅ CORRECT - Course color as accent
+HStack {
+    Circle()
+        .fill(Color(hex: course.color))  // Course color for dot
+        .frame(width: 8, height: 8)
+
+    Text(course.code)
+        .foregroundColor(DS.Color.Semantic.Text.primary)  // DWDesign for text
+}
+
+// ❌ WRONG - Don't use course color for all text
+Text(course.code)
+    .foregroundColor(Color(hex: course.color))  // Too much color
+```
+
+---
+
+## 🎯 Widget Design Checklist
+
+Before submitting widget code, verify:
+
+- ✅ All typography uses `DS.Typography.*`
+- ✅ All colors use `DS.Color.Semantic.*` or `DS.Color.Palette.*`
+- ✅ All spacing uses `DS.Spacing.*`
+- ✅ All corner radius uses `DS.Radius.*`
+- ✅ Course colors used only as accents
+- ✅ Loading state implemented and styled
+- ✅ Error state implemented with helpful message
+- ✅ Empty state implemented if applicable
+- ✅ VoiceOver labels added for accessibility
+- ✅ Text truncation tested for long content
+- ✅ Both small and medium sizes implemented
+- ✅ Dark mode appearance verified (semantic colors auto-adapt)
+- ✅ Swift 6.0 concurrency patterns followed
+- ✅ No `@MainActor` on Timeline providers
+- ✅ Async operations use `Task { }`
+
+---
+
+## 🔗 Related Documentation
+
+**Backend Integration:**
+- [DWWidgetKit - Backend Integration Guide](/docs/engineering/architecture/dwwidgetkit-backend-integration-guide) - API endpoints, authentication, real-time updates, data models
+
+**General iOS Architecture:**
+- DormWay iOS App - Complete Package & Architecture Guide - Full app architecture
+- iOS Dashboard BFF Integration - Dashboard integration patterns
+
+**Design System:**
+- `Packages/DWDesign/README.md` - Complete design system documentation
+- `Packages/DWDesign/Sources/DWDesign/Foundations/` - Token definitions
+
+---
+
+## 💡 Key Takeaways
+
+1. **DWDesign is mandatory** - No hardcoded values for fonts, colors, spacing, or radius
+2. **Swift 6.0 concurrency** - Use proper isolation, avoid `@MainActor` on providers
+3. **Accessibility matters** - Add VoiceOver labels, use semantic colors
+4. **Test all sizes** - Small and medium widgets have different constraints
+5. **Handle errors gracefully** - Show helpful error states, not crashes
+6. **Course colors = accents** - Don't overuse them, DWDesign provides base colors
+
+**Remember:** If you type a number for styling, stop and find the DWDesign token!
+
+---
+
+**Last Updated:** 2025-11-06
+**Owner:** iOS Team
+**Status:** Current
+
+For backend integration details, continue to: [DWWidgetKit - Backend Integration Guide](/docs/engineering/architecture/dwwidgetkit-backend-integration-guide)

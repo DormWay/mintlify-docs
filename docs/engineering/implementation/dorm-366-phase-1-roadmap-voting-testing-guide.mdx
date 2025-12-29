@@ -1,0 +1,441 @@
+---
+title: "DORM 366 Phase 1   Roadmap Voting Testing Guide"
+description: "Phase 1 implements voting functionality on Sanity roadmap timeline events, allowing users to influence product priorities without relying on external tools l..."
+---
+
+# DORM-366 Phase 1: Roadmap Voting - Testing Guide
+
+**Status:** Implementation Complete
+**Feature Branch:** `feat/roadmap-voting-phase1`
+**Linear Issue:** [DORM-366](https://linear.app/dormwayllc/issue/DORM-366)
+**Phase:** 1 of 6 (Roadmap Voting)
+
+---
+
+## Overview
+
+Phase 1 implements voting functionality on Sanity roadmap timeline events, allowing users to influence product priorities without relying on external tools like Canny.io.
+
+## Implementation Summary
+
+### Backend Changes (api-router)
+
+#### 1. New Routes
+**File:** `services/api-router/src/routes/roadmap-voting-routes.ts`
+
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `/api/roadmap/votes` | POST | Required | Cast a vote on a timeline event |
+| `/api/roadmap/votes/:eventId` | DELETE | Required | Remove a vote |
+| `/api/roadmap/my-votes` | GET | Required | Get current user's votes |
+| `/api/roadmap/vote-counts` | GET | Public | Get all vote counts |
+| `/api/roadmap/votes/:eventId/count` | GET | Public | Get single event vote count |
+
+#### 2. Ably Integration
+**File:** `services/api-router/src/routes/realtime-routes.ts`
+
+- Added `roadmap:votes` channel capability (subscribe-only)
+- Publishes `vote_updated` events on vote changes
+- Real-time vote count synchronization across all clients
+
+**Event Format:**
+```typescript
+{
+  type: 'vote_updated',
+  data: {
+    sanity_event_id: string,
+    vote_count: number,
+    user_id: string,
+    action: 'added' | 'removed',
+    timestamp: number
+  }
+}
+```
+
+#### 3. Database
+Uses existing schema from `20251024_feature_voting_system.sql`:
+
+**Tables:**
+- `timeline_event_votes` - Individual votes (user_id, sanity_event_id)
+- Constraint: `unique_user_event_vote` (prevents duplicates)
+
+**Helper Functions:**
+- `get_timeline_event_vote_count(event_id)` → INTEGER
+- `has_user_voted_on_timeline_event(user_id, event_id)` → BOOLEAN
+
+**Views:**
+- `timeline_event_vote_counts` - Aggregated vote counts per event
+
+### Frontend Changes (LockedIn)
+
+#### InteractiveTimeline Component
+**File:** `services/dormway-lockedin/src/components/InteractiveTimeline.tsx`
+
+**New Features:**
+- ✅ Vote button with up arrow icon
+- ✅ Real-time vote count display
+- ✅ Visual feedback for voted items (purple glow + filled icon)
+- ✅ Auth prompt for unauthenticated users
+- ✅ Ably subscription for real-time updates
+- ✅ Loading state during vote submission
+- ✅ Optimistic UI updates
+
+**UI States:**
+| State | Button Style | Icon |
+|-------|-------------|------|
+| Not voted | Neutral gray | Outline arrow |
+| Voted | Purple glow | Filled arrow |
+| Loading | Opacity 50% | Disabled |
+| Unauthenticated | Hover hint | Redirects to login |
+
+---
+
+## Testing Checklist
+
+### Prerequisites
+
+```bash
+# Ensure services are running
+cd ~/Development/GitHub/dormway-platform
+make dev
+
+# Check database schema exists
+docker exec dormway-postgres-local psql -U dormway_admin -d dormway -c "\d timeline_event_votes"
+```
+
+### 1. Database Schema Verification
+
+```bash
+# Verify tables exist
+docker exec dormway-postgres-local psql -U dormway_admin -d dormway -c "
+  SELECT tablename FROM pg_tables WHERE tablename IN ('timeline_event_votes', 'feature_requests');
+"
+
+# Verify helper functions exist
+docker exec dormway-postgres-local psql -U dormway_admin -d dormway -c "
+  SELECT proname FROM pg_proc WHERE proname LIKE '%timeline_event%';
+"
+
+# Verify view exists
+docker exec dormway-postgres-local psql -U dormway_admin -d dormway -c "
+  SELECT viewname FROM pg_views WHERE viewname = 'timeline_event_vote_counts';
+"
+```
+
+### 2. API Endpoint Testing
+
+**Setup:**
+```bash
+# Option 1: Use Zuplo gateway (recommended)
+export API_URL="http://localhost:9000"
+
+# Option 2: Direct to api-router (requires Auth0 token)
+export API_URL="http://localhost:3001"
+export AUTH_TOKEN="your_auth0_jwt_token"
+```
+
+**Test Cases:**
+
+#### Test 1: Get Vote Counts (Public)
+```bash
+curl -X GET "$API_URL/api/roadmap/vote-counts" | jq
+```
+**Expected:**
+```json
+{
+  "success": true,
+  "counts": {}
+}
+```
+
+#### Test 2: Vote Creation (Authenticated)
+```bash
+export EVENT_ID="your_sanity_event_id"
+
+curl -X POST "$API_URL/api/roadmap/votes" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $AUTH_TOKEN" \
+  -d "{\"sanity_event_id\": \"$EVENT_ID\"}" | jq
+```
+**Expected:**
+```json
+{
+  "success": true,
+  "vote_count": 1,
+  "is_new_vote": true
+}
+```
+
+#### Test 3: Get User Votes
+```bash
+curl -X GET "$API_URL/api/roadmap/my-votes" \
+  -H "Authorization: Bearer $AUTH_TOKEN" | jq
+```
+**Expected:**
+```json
+{
+  "success": true,
+  "votes": [
+    {
+      "sanity_event_id": "...",
+      "created_at": "2025-10-25T..."
+    }
+  ]
+}
+```
+
+#### Test 4: Vote Removal
+```bash
+curl -X DELETE "$API_URL/api/roadmap/votes/$EVENT_ID" \
+  -H "Authorization: Bearer $AUTH_TOKEN" | jq
+```
+**Expected:**
+```json
+{
+  "success": true,
+  "vote_count": 0,
+  "was_deleted": true
+}
+```
+
+#### Test 5: Idempotency
+```bash
+# Vote twice - second vote should not increment count
+curl -X POST "$API_URL/api/roadmap/votes" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $AUTH_TOKEN" \
+  -d "{\"sanity_event_id\": \"$EVENT_ID\"}" | jq
+
+curl -X POST "$API_URL/api/roadmap/votes" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $AUTH_TOKEN" \
+  -d "{\"sanity_event_id\": \"$EVENT_ID\"}" | jq
+```
+**Expected (second call):**
+```json
+{
+  "success": true,
+  "vote_count": 1,
+  "is_new_vote": false
+}
+```
+
+### 3. Frontend Testing (LockedIn)
+
+**Setup:**
+```bash
+cd services/dormway-lockedin
+npm run dev
+# Navigate to http://localhost:3008/roadmap
+```
+
+**Manual Test Cases:**
+
+#### Test Case 1: Unauthenticated User
+- [ ] Open `/roadmap` without signing in
+- [ ] Vote counts should be visible
+- [ ] Click vote button → Redirected to `/api/auth/login?returnTo=/roadmap`
+
+#### Test Case 2: Authenticated User
+- [ ] Sign in via Auth0
+- [ ] Open `/roadmap`
+- [ ] Vote button shows current vote count
+- [ ] Click vote → Button turns purple with filled arrow icon
+- [ ] Vote count increments by 1
+- [ ] Click again → Vote removed, button returns to neutral state
+- [ ] Vote count decrements by 1
+
+#### Test Case 3: Real-time Updates (Multi-Tab)
+- [ ] Open `/roadmap` in two browser tabs (both authenticated as different users)
+- [ ] Vote in Tab 1 → Vote count updates in Tab 2 within 1-2 seconds
+- [ ] Remove vote in Tab 2 → Count decreases in Tab 1
+- [ ] Console shows: `Subscribed to roadmap:votes channel`
+
+#### Test Case 4: Error Handling
+- [ ] Network offline → Vote button shows error in console
+- [ ] Rapid clicking → Button disabled during request (opacity 50%)
+- [ ] Invalid event ID → Error logged to console
+
+### 4. Ably Real-time Verification
+
+**Check Ably Channel Subscription:**
+1. Open browser DevTools → Console
+2. Navigate to `/roadmap`
+3. Look for: `Subscribed to roadmap:votes channel`
+
+**Monitor Ably Events:**
+1. Open two browser tabs on `/roadmap`
+2. Open DevTools Console in both
+3. Vote in Tab 1
+4. In Tab 2 console, you should see Ably message received
+5. Vote count should update without page refresh
+
+**Check Ably Token Request:**
+1. Open DevTools → Network tab
+2. Reload `/roadmap`
+3. Look for request to `/api/realtime/ably-auth`
+4. Verify response includes `tokenRequest` object
+5. Verify token has `roadmap:votes` capability
+
+### 5. Database Verification
+
+**Check Vote Records:**
+```bash
+# View all votes
+docker exec dormway-postgres-local psql -U dormway_admin -d dormway -c "
+  SELECT user_id, sanity_event_id, created_at
+  FROM timeline_event_votes
+  ORDER BY created_at DESC
+  LIMIT 10;
+"
+
+# View vote counts
+docker exec dormway-postgres-local psql -U dormway_admin -d dormway -c "
+  SELECT * FROM timeline_event_vote_counts;
+"
+```
+
+**Test Unique Constraint:**
+```bash
+# Try inserting duplicate vote manually (should fail)
+docker exec dormway-postgres-local psql -U dormway_admin -d dormway -c "
+  INSERT INTO timeline_event_votes (user_id, sanity_event_id)
+  VALUES ('test-user-id', 'test-event-id');
+
+  INSERT INTO timeline_event_votes (user_id, sanity_event_id)
+  VALUES ('test-user-id', 'test-event-id');
+"
+```
+**Expected:** `ERROR: duplicate key value violates unique constraint "unique_user_event_vote"`
+
+---
+
+## Performance Testing
+
+### Load Testing
+```bash
+# Install hey if needed: brew install hey
+
+# 100 requests, 10 concurrent
+hey -n 100 -c 10 -m POST \
+  -H "Authorization: Bearer $AUTH_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"sanity_event_id\": \"$EVENT_ID\"}" \
+  "$API_URL/api/roadmap/votes"
+```
+
+**Success Criteria:**
+- Success rate > 95%
+- Average latency < 500ms
+- No database deadlocks
+
+### Database Performance
+```bash
+# Check query performance
+docker exec dormway-postgres-local psql -U dormway_admin -d dormway -c "
+  EXPLAIN ANALYZE
+  SELECT * FROM timeline_event_vote_counts
+  ORDER BY vote_count DESC;
+"
+
+# Verify index usage
+docker exec dormway-postgres-local psql -U dormway_admin -d dormway -c "
+  SELECT indexname, indexdef
+  FROM pg_indexes
+  WHERE tablename = 'timeline_event_votes';
+"
+```
+
+**Expected Indexes:**
+- `idx_timeline_event_votes_user_id`
+- `idx_timeline_event_votes_sanity_event_id`
+- `idx_timeline_event_votes_created_at`
+
+---
+
+## Known Issues / Limitations
+
+1. **Ably Connection:** Requires valid Auth0 session, device key auth excluded
+2. **Sanity Event IDs:** Must exist in Sanity CMS (no validation in backend yet)
+3. **Rate Limiting:** No rate limiting on voting endpoints (future enhancement)
+4. **Mobile Support:** Only web implementation in Phase 1 (iOS/Android in future phases)
+5. **Offline Support:** No offline vote queuing (requires network connection)
+
+---
+
+## Success Criteria
+
+- [x] All API endpoints return expected responses
+- [x] Vote counts update in real-time across multiple clients
+- [x] Database constraints prevent duplicate votes
+- [x] Unauthenticated users prompted to sign in
+- [ ] No console errors or warnings in browser
+- [ ] Ably connection established successfully
+- [ ] Vote button UI reflects voted state correctly
+- [ ] Performance acceptable (<500ms for vote operations)
+
+---
+
+## Rollback Plan
+
+If issues are discovered:
+
+```bash
+# Option 1: Revert to main branch
+git checkout main
+
+# Option 2: Rollback specific files
+git checkout main services/api-router/src/routes/roadmap-voting-routes.ts
+git checkout main services/api-router/src/routes/index.ts
+git checkout main services/api-router/src/routes/realtime-routes.ts
+git checkout main services/dormway-lockedin/src/components/InteractiveTimeline.tsx
+
+# Restart services
+./scripts/dev/dev-with-doppler.sh restart api-router
+cd services/dormway-lockedin && npm run build
+```
+
+---
+
+## Next Steps (Phase 2)
+
+After successful Phase 1 deployment:
+
+1. **Feature Request Submission** (Week 1, Days 4-7)
+   - User submission form
+   - Feature request browsing
+   - Voting on user requests
+   - Full-text search
+
+2. **Admin Management** (Week 2, Days 1-4)
+   - Admin dashboard for managing requests
+   - Status updates (pending → under_review → planned → completed)
+   - Promotion to roadmap
+
+3. **Notifications** (Week 2, Days 5-7)
+   - Push notifications for status updates
+   - Real-time in-app notifications
+   - Email digests
+
+4. **Linear Integration** (Week 3, Days 1-3)
+   - Auto-create Linear issues for 25+ votes
+   - Sync status back from Linear
+
+5. **Changelog Publishing** (Week 3, Days 4-5)
+   - Changelog page
+   - Shipped feature announcements
+
+---
+
+## Related Documents
+
+- DORM-366 Implementation Plan - Full 6-phase implementation plan
+- Database Schema - Feature Voting System - Database design
+- Ably Real-time Architecture - Real-time messaging patterns
+- Auth0 Integration Guide - Authentication setup
+
+---
+
+## Tags
+
+#implementation #testing #roadmap #voting #phase1 #dorm-366

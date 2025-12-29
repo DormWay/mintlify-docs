@@ -1,0 +1,319 @@
+---
+title: "REALTIME_ARCHITECTURE"
+description: "This document describes DormWay's real-time data synchronization architecture."
+---
+
+# Real-Time Architecture: Signal-Based Invalidation
+
+This document describes DormWay's real-time data synchronization architecture.
+
+## Overview
+
+DormWay uses a **Signal-Based Invalidation** system for real-time updates. This is the same pattern used by Linear, Notion, and other modern applications.
+
+### The Core Principle
+
+```
+Server mutation → Ably signal → Cache invalidation → React Query refetch
+```
+
+Instead of sending complex "delta patches" that the client must apply, the server simply signals "data changed" and the client refetches fresh data.
+
+## Why Signal-Based (Not Delta-Based)
+
+### Delta-Based (Old Approach)
+
+```typescript
+// Server computes diff
+const delta = { op: 'upsert', id: 'task-1', data: { title: 'New Title' } };
+await publishDelta(userId, delta);
+
+// Client applies patch
+queryClient.setQueryData(['tasks'], (old) => {
+  return old.map(t => t.id === delta.id ? { ...t, ...delta.data } : t);
+});
+```
+
+**Problems:**
+- Complex delta computation on server
+- Complex delta application on client
+- State drift if messages arrive out of order
+- State drift if client misses a message
+- Hard to debug ("what sequence of deltas led to this state?")
+
+### Signal-Based (New Approach)
+
+```typescript
+// Server signals change
+await publishInvalidation({ userId, resource: 'tasks' });
+
+// Client invalidates cache
+queryClient.invalidateQueries(['tasks']);
+// React Query automatically refetches
+```
+
+**Benefits:**
+- Simple signal payload (~100 bytes)
+- Server is always source of truth
+- Self-healing: missed signal → next signal fixes state
+- Easy to debug: just look at GET response
+- Scales with HTTP (CDNs, read replicas)
+
+## Architecture
+
+### System Components
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                           FRONTEND                                   │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  ┌──────────────────┐     ┌──────────────────────────────────────┐ │
+│  │  RealtimeProvider │────▶│  useRealtimeInvalidation            │ │
+│  │  (Ably client)    │     │  - Listens for 'invalidate' events  │ │
+│  └──────────────────┘     │  - Maps resource → query keys        │ │
+│          │                │  - Debounces rapid signals           │ │
+│          │                └──────────────────────────────────────┘ │
+│          │                              │                          │
+│          ▼                              ▼                          │
+│  ┌──────────────────┐     ┌──────────────────────────────────────┐ │
+│  │  Window Event    │     │  React Query                         │ │
+│  │  'realtime:event'│     │  - invalidateQueries()               │ │
+│  └──────────────────┘     │  - Automatic refetch                 │ │
+│                           └──────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    │ HTTP GET (refetch)
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                           BACKEND                                    │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  ┌──────────────────┐     ┌──────────────────────────────────────┐ │
+│  │  API Handler     │────▶│  publishInvalidation()               │ │
+│  │  (mutation)      │     │  { userId, resource: 'tasks' }       │ │
+│  └──────────────────┘     └──────────────────────────────────────┘ │
+│                                         │                          │
+│                                         ▼                          │
+│                           ┌──────────────────────────────────────┐ │
+│                           │  Ably                                │ │
+│                           │  channel: user:{userId}:updates      │ │
+│                           │  event: 'invalidate'                 │ │
+│                           └──────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### Signal Payload
+
+```typescript
+interface InvalidationSignal {
+  type: 'invalidate';
+  resource: 'dashboard' | 'tasks' | 'schedule' | 'academic' | 'canvas' | 'courses' | 'profile' | 'notifications';
+  entityId?: string;  // Optional: specific entity that changed
+  ts: string;         // Timestamp for deduplication
+}
+```
+
+### Resource → Query Key Mapping
+
+| Resource | Query Keys Invalidated |
+|----------|----------------------|
+| `dashboard` | `['dashboard-composite']` |
+| `tasks` | `['tasks']`, `['dashboard-composite']` |
+| `schedule` | `['schedule']`, `['dashboard-composite']` |
+| `academic` | `['academic']`, `['dueSoon']`, `['dashboard-composite']` |
+| `canvas` | `['canvas']`, `['dashboard-composite']` |
+| `courses` | `['courses']`, `['dashboard-composite']` |
+| `profile` | `['profile']`, `['user']` |
+| `notifications` | `['notifications']` |
+
+## Implementation Guide
+
+### Frontend: Receiving Signals
+
+The `useRealtimeInvalidation` hook is already set up in the dashboard layout. It automatically:
+1. Listens for `invalidate` events from Ably
+2. Maps resources to query keys
+3. Debounces rapid signals (100ms)
+4. Deduplicates identical signals
+
+```typescript
+// Already in home/page.tsx and home-v2/page.tsx
+useRealtimeInvalidation();
+```
+
+### Backend: Sending Signals
+
+After any mutation that changes user data:
+
+```typescript
+import { publishInvalidation, publishInvalidationBatch } from './services/ably-service';
+
+// After creating a task
+async function createTask(userId: string, data: TaskData) {
+  const task = await db.tasks.create({ ...data, userId });
+
+  // Signal that tasks changed
+  await publishInvalidation({ userId, resource: 'tasks' });
+
+  return task;
+}
+
+// After Canvas sync (multiple resources)
+async function syncCanvas(userId: string) {
+  await canvasService.sync(userId);
+
+  // Signal multiple resources changed
+  await publishInvalidationBatch({
+    userId,
+    resources: ['canvas', 'academic', 'dashboard'],
+  });
+}
+```
+
+### Optimistic Updates
+
+For instant UI feedback, use optimistic updates in your mutations:
+
+```typescript
+import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { createOptimisticContext, rollbackOptimisticUpdate } from '@/lib/queryClient';
+
+function useCreateTask() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (data) => api.post('/tasks', data),
+
+    // Instant UI update
+    onMutate: async (newTask) => {
+      return createOptimisticContext(queryClient, ['tasks'], (old) => {
+        return [...(old || []), { ...newTask, id: `temp-${Date.now()}` }];
+      });
+    },
+
+    // Rollback on error
+    onError: (err, vars, context) => {
+      rollbackOptimisticUpdate(queryClient, context);
+    },
+
+    // No onSuccess needed - backend sends invalidation signal
+  });
+}
+```
+
+### Using the Factory Helper
+
+For simpler code, use `createOptimisticMutation`:
+
+```typescript
+import { createOptimisticMutation } from '@/lib/queryClient';
+
+const mutation = useMutation(
+  createOptimisticMutation({
+    queryClient,
+    queryKey: ['tasks'],
+    mutationFn: (data) => api.post('/tasks', data),
+    optimisticUpdate: (old, newTask) => [...(old || []), newTask],
+  })
+);
+```
+
+## Migration from Delta-Based
+
+### Phase 1: Parallel Operation (Current)
+
+Both systems run in parallel:
+- `useAblyDashboard` (deprecated) - handles legacy delta events
+- `useRealtimeInvalidation` (new) - handles signal events
+
+The new hook also converts legacy delta events to signals for backwards compatibility.
+
+### Phase 2: Backend Migration
+
+Update backend endpoints to use `publishInvalidation` instead of `publishDashboardDelta`:
+
+```typescript
+// Before (deprecated)
+await publishDashboardDelta({
+  userId,
+  tab: 'home',
+  context: 'campus',
+  baseEtag: currentEtag,
+  ops: [{ op: 'upsert', id: task.id, value: task }],
+});
+
+// After
+await publishInvalidation({ userId, resource: 'tasks' });
+```
+
+### Phase 3: Cleanup
+
+Once all backends use signal-based publishing:
+1. Remove `useAblyDashboard` from components
+2. Remove backwards compatibility from `useRealtimeInvalidation`
+3. Delete deprecated hooks entirely
+
+## Debugging
+
+### Check Signal Flow
+
+1. **Browser DevTools → Network**: Watch for GET requests after mutations
+2. **RealtimeProvider Debug Panel** (dev only): Shows incoming Ably events
+3. **React Query DevTools**: Shows cache invalidation and refetch timing
+
+### Common Issues
+
+**Data not updating:**
+- Check backend is calling `publishInvalidation`
+- Check Ably connection is established
+- Check `useRealtimeInvalidation` is mounted
+
+**Too many refetches:**
+- Check for multiple components calling invalidation
+- Debounce is set to 100ms by default
+
+**Optimistic update not rolling back:**
+- Ensure `onError` handler calls `rollbackOptimisticUpdate`
+- Check context is being returned from `onMutate`
+
+## Performance Considerations
+
+### Signal Size
+
+```json
+{ "type": "invalidate", "resource": "tasks", "ts": "2025-01-01T00:00:00Z" }
+```
+~80 bytes per signal vs ~2KB+ for delta payloads
+
+### Refetch Batching
+
+React Query automatically batches multiple invalidations:
+- Signal for `tasks` and `schedule` within 100ms → single batch refetch
+- Dashboard composite contains both → single HTTP request
+
+### Cache Stale Time
+
+Default: 30 seconds. Data is:
+- **Fresh** (0-30s): Use cache, no refetch
+- **Stale** (30s+): Use cache, background refetch
+- **Invalidated**: Immediate refetch
+
+Invalidation signals bypass stale time and trigger immediate refetch.
+
+## Files Reference
+
+| File | Purpose |
+|------|---------|
+| `src/hooks/useRealtimeInvalidation.ts` | Signal handler hook |
+| `src/hooks/useAblyDashboard.ts` | (Deprecated) Delta handler |
+| `src/hooks/useRealtimeWidget.ts` | (Deprecated) Widget delta handler |
+| `src/lib/queryClient.ts` | Query utilities and helpers |
+| `src/components/RealtimeProvider.tsx` | Ably connection management |
+| `api-router/src/services/ably-service.ts` | Backend signal publishing |
+
+## Further Reading
+
+- [React Query Optimistic Updates](https://tanstack.com/query/latest/docs/react/guides/optimistic-updates)
+- [Ably Pub/Sub](https://ably.com/docs/realtime)
+- [Linear's Real-Time Architecture](https://linear.app/blog/real-time-sync)

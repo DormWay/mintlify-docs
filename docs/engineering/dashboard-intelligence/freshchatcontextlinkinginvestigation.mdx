@@ -1,0 +1,414 @@
+---
+title: "FRESH_CHAT_CONTEXT_LINKING_INVESTIGATION"
+description: "When syllabi are uploaded via `POST /api/syllabus/upload`: 1. ✅ Files upload to S3 successfully 2. ✅ Temporal workflow `processSyllabusFromWebhook` triggers..."
+---
+
+# Fresh Chat: Context Linking Investigation
+
+**Created**: 2025-12-08
+**Priority**: HIGH - Core infrastructure affecting all users
+**Purpose**: Investigate why syllabi aren't being linked to student contexts after processing
+
+---
+
+## The Problem
+
+When syllabi are uploaded via `POST /api/syllabus/upload`:
+1. ✅ Files upload to S3 successfully
+2. ✅ Temporal workflow `processSyllabusFromWebhook` triggers
+3. ✅ AI extraction runs and populates `service_data` with `method='processed_syllabus_crew'`
+4. ✅ Course contexts are created (e.g., `COMM-404-SYLLABUS`, `230-001`)
+5. ❌ **BROKEN**: Courses are NOT linked to the student context
+6. ❌ **RESULT**: Dashboard BFF can't find syllabi when querying user's courses
+
+### Evidence
+
+```sql
+-- Syllabi exist in service_data
+SELECT context_id, data->'grading' FROM service_data
+WHERE method = 'processed_syllabus_crew' AND user_id = '71cfc173-ee86-4ef0-996e-bd577ab52fdf';
+-- Returns 2 rows with context_ids: 1bee517c..., 3b7121c1...
+
+-- Course contexts exist
+SELECT id, name, parent_id FROM contexts WHERE id IN ('1bee517c-eda6-4466-a8a7-94b2805b6e8b', '3b7121c1-8c2d-4bf7-abb1-45b5c99c3fcc');
+-- Returns: COMM-404-SYLLABUS (parent: a7729dde... which is CAMPUS, not student)
+
+-- Student context exists
+SELECT id FROM contexts WHERE user_id = '71cfc173-ee86-4ef0-996e-bd577ab52fdf' AND type = 'student';
+-- Returns: 81178819-692f-4442-b795-d7d74a92499d
+
+-- BUT: No context_dependencies linking student to courses!
+SELECT * FROM context_dependencies WHERE parent_context_id = '81178819-692f-4442-b795-d7d74a92499d';
+-- Returns: EMPTY
+```
+
+---
+
+## Investigation Steps
+
+### 1. Understand the Intended Architecture
+
+Search Obsidian for the context system design:
+```bash
+npm run obsidian:search -- "context hierarchy"
+npm run obsidian:search -- "context_dependencies"
+npm run obsidian:search -- "student course enrollment"
+npm run obsidian:search -- "syllabus context linking"
+```
+
+Key questions to answer:
+- What is the intended relationship between student → course → syllabus?
+- Should courses be children of students (parent_id) or linked via context_dependencies?
+- How does the "enrolled_in" dependency type work?
+- Is there a separate enrollment flow that should create these links?
+
+### 2. Trace the Syllabus Processing Workflow
+
+**Files to examine:**
+
+1. **Workflow entry**: `services/engine/src/workflows/syllabusProcessor.workflow.ts`
+   - Find where course contexts are created
+   - Find where student-course links SHOULD be created
+   - Check the `processSyllabus()` function flow
+
+2. **Activities**: `services/engine/src/activities/`
+   - `syllabus.activities.ts` - Main syllabus processing
+   - `braingains.activities.ts` - May have context creation logic
+   - Look for `createCourseContext`, `linkStudentToCourse`, `createEnrollment`
+
+3. **Database layer**: `services/engine/src/services/auroraDb.ts`
+   - How are contexts created?
+   - Is there a `createContextDependency` function?
+
+### 3. Check the Dashboard BFF Query
+
+**File**: `services/api-router/src/services/dashboard-aurora-service.ts`
+
+Find `getStudentCourses()` or similar - how does it expect to find courses?
+```typescript
+// Does it query via:
+// A) parent_id (courses as children of student context)
+// B) context_dependencies (enrolled_in relationship)
+// C) user_id on service_data (current broken approach)
+```
+
+### 4. Compare with Working Systems
+
+If Canvas integration creates course enrollments, check:
+- `services/engine/src/activities/canvas.activities.ts`
+- How does Canvas create the student-course relationship?
+- Can syllabus upload reuse that pattern?
+
+---
+
+## Key Files Reference
+
+| File | Purpose |
+|------|---------|
+| `services/engine/src/workflows/syllabusProcessor.workflow.ts` | Main syllabus workflow |
+| `services/engine/src/activities/syllabus.activities.ts` | Syllabus processing activities |
+| `services/engine/src/activities/braingains.activities.ts` | Document processing (overlaps) |
+| `services/api-router/src/services/dashboard-aurora-service.ts` | Dashboard data fetching |
+| `services/api-router/src/services/dashboard-composite-transformer.ts` | BFF response building |
+| `infrastructure/database/migrations/` | Schema definitions |
+
+---
+
+## Database Schema Context
+
+### contexts table
+```sql
+id              UUID PRIMARY KEY
+parent_id       UUID (self-referencing FK)
+type            TEXT ('city', 'campus', 'building', 'course', 'student')
+name            TEXT
+user_id         UUID (for student contexts, links to accounts)
+external_id     TEXT
+metadata        JSONB
+```
+
+### context_dependencies table
+```sql
+parent_context_id   UUID (source)
+child_context_id    UUID (target)
+dependency_type     TEXT ('enrolled_in', 'attends', 'lives_in', etc.)
+metadata            JSONB
+```
+
+### Expected relationships for a student with courses:
+```
+contexts:
+  [campus] University of Michigan (parent: city)
+    [student] student:71cfc... (parent: campus, user_id: 71cfc...)
+  [course] COMM 404 (parent: campus OR student?)
+
+context_dependencies:
+  parent: student context
+  child: course context
+  type: 'enrolled_in'
+```
+
+---
+
+## Scale Considerations
+
+This fix must work for:
+- **6,134 universities** in campus_registry
+- **Millions of students** across all campuses
+- **Multiple syllabi per student** (typically 4-6 per semester)
+- **PLG (Product-Led Growth)** uploads from non-authenticated users
+- **Authenticated uploads** from logged-in students
+- **Canvas sync** automatically creating enrollments
+
+Questions for scale:
+1. Should PLG uploads create temporary student contexts?
+2. How do we merge PLG data when user later authenticates?
+3. How do we prevent duplicate course contexts across students?
+4. Should courses be campus-level (shared) or student-level (duplicated)?
+
+---
+
+## Possible Fixes (Evaluate These)
+
+### Option A: Fix syllabus workflow to create context_dependencies
+Add activity after course context creation:
+```typescript
+await createContextDependency({
+  parentContextId: studentContextId,
+  childContextId: courseContextId,
+  dependencyType: 'enrolled_in',
+  metadata: { source: 'syllabus_upload' }
+});
+```
+
+### Option B: Change course parent_id to point to student
+Instead of campus as parent, use student as parent:
+```typescript
+await createCourseContext({
+  name: courseCode,
+  type: 'course',
+  parentId: studentContextId,  // Not campusId
+});
+```
+
+### Option C: Update BFF to query by user_id on service_data
+Instead of traversing contexts, just query:
+```sql
+SELECT * FROM service_data
+WHERE user_id = $1 AND method = 'processed_syllabus_crew';
+```
+
+### Option D: Hybrid - campus-level courses with student enrollments
+Courses are children of campus (shared), students link via dependencies:
+```
+[campus] UMich
+  [course] COMM 404 (shared across all students)
+  [student] Riley
+    -> enrolled_in -> COMM 404
+```
+
+---
+
+## Deliverables
+
+After investigation, create:
+
+1. **Architecture decision document** explaining the correct approach
+2. **Implementation plan** with specific file changes
+3. **Migration strategy** for existing data (2 orphaned syllabi for rileync@umich.edu)
+4. **Test cases** to verify the fix works end-to-end
+
+---
+
+## Test User Data
+
+```
+Email: rileync@umich.edu
+User ID: 71cfc173-ee86-4ef0-996e-bd577ab52fdf
+Student Context: 81178819-692f-4442-b795-d7d74a92499d
+
+Orphaned Course Contexts:
+- 1bee517c-eda6-4466-a8a7-94b2805b6e8b (COMM-404-SYLLABUS)
+- 3b7121c1-8c2d-4bf7-abb1-45b5c99c3fcc (230-001)
+
+Syllabi uploaded (need processing):
+- DIGITAL 202
+- ENTR 490
+- ASTR 104
+- COMM 404 (processed, not linked)
+- COMM 230 (processed, not linked)
+```
+
+---
+
+## Commands to Start
+
+```bash
+# Search documentation
+npm run obsidian:search -- "context hierarchy student course"
+
+# Check syllabus workflow
+cat services/engine/src/workflows/syllabusProcessor.workflow.ts | head -200
+
+# Check how contexts are created
+grep -r "createCourseContext\|type.*course" services/engine/src/
+
+# Check context_dependencies usage
+grep -r "context_dependencies\|enrolled_in" services/
+```
+
+---
+
+## ✅ INVESTIGATION COMPLETE (2025-12-08)
+
+### Root Cause Found
+
+The `createStudentCourseRelationship` function in `braingains.activities.ts:2176` **IS called** by the workflow at line 1746-1747 of `syllabusProcessor.workflow.ts`:
+
+```typescript
+await syllabusActivities.createStudentCourseRelationship(resolvedUserId, courseContextId, syllabusId, courseCode);
+```
+
+However, this function has a **critical early exit condition** at lines 2209-2216:
+
+```typescript
+if (studentError || !studentContext) {
+  logger.error('No student context found - it should have been created by processSyllabusWithCrew', {
+    userId,
+    courseCode,
+    error: studentError
+  });
+  // Don't create a new context here - this indicates a problem in the workflow
+  return;  // ← SILENTLY EXITS, NO DEPENDENCY CREATED
+}
+```
+
+**The issue**: When `getStudentContextByUserId(userId)` fails to find a student context, the function silently returns without creating the `context_dependency`. The workflow doesn't check the return value (it's `Promise<void>`), so processing continues as if enrollment succeeded.
+
+### Confirmed Architecture
+
+The intended architecture (Option D from above) is **CORRECT**:
+- **Courses** are children of **campus** (`parent_id` = campus context)
+- **Students** are linked to courses via `context_dependencies` with `dependency_type = 'enrolled_in'`
+- This is N-to-N graph traversal, not hierarchical tree
+
+**Working example from Canvas/Schedule import** (`course.activities.ts:811-1034`):
+- `createCourseEnrollments()` properly creates `context_dependencies`
+- Uses `supabase.upsertContextDependency(studentContextId, courseContextId, 'enrolled_in', ...)`
+
+**Dashboard BFF query** (`dashboard-aurora-service.ts:270-294`) correctly expects this:
+```typescript
+const enrollments = await graph.getDependents(studentContext.id, {
+  dependencyTypes: ['enrolled_in', 'provisional_enrollment'],
+  contextTypes: ['course'],
+});
+```
+
+### Why It's Failing
+
+1. **Student context creation timing**: The syllabus workflow expects the student context to already exist (created by `processSyllabusWithCrew`)
+2. **Silent failure**: If no student context exists, `createStudentCourseRelationship` exits silently
+3. **No error propagation**: The workflow considers processing successful even when enrollment fails
+
+---
+
+## 🔧 IMPLEMENTATION PLAN
+
+### Phase 1: Fix the Immediate Bug (~2 hours)
+
+**File**: `services/engine/src/activities/braingains.activities.ts`
+
+1. **Ensure student context creation** before attempting enrollment:
+   - If no student context exists, create one with proper campus hierarchy
+   - Reuse pattern from `processSyllabusWithCrew` which creates student contexts
+
+2. **Make function return success/failure**:
+   ```typescript
+   async createStudentCourseRelationship(...): Promise<{ success: boolean; error?: string }>
+   ```
+
+3. **Log failures clearly** instead of silent return
+
+### Phase 2: Data Migration (~1 hour)
+
+Fix orphaned syllabi for rileync@umich.edu:
+
+```sql
+-- Create missing enrollments for existing processed syllabi
+INSERT INTO context_dependencies (parent_context_id, child_context_id, dependency_type, metadata)
+SELECT
+  '81178819-692f-4442-b795-d7d74a92499d' as parent_context_id,  -- student context
+  context_id as child_context_id,
+  'enrolled_in' as dependency_type,
+  jsonb_build_object('source', 'migration_fix', 'migrated_at', now()::text) as metadata
+FROM service_data
+WHERE user_id = '71cfc173-ee86-4ef0-996e-bd577ab52fdf'
+  AND method = 'processed_syllabus_crew'
+ON CONFLICT (parent_context_id, child_context_id, dependency_type) DO NOTHING;
+```
+
+### Phase 3: Verification (~30 mins)
+
+1. Upload new syllabus for test user
+2. Verify `context_dependencies` row created
+3. Verify dashboard shows course with syllabus data
+4. Test PLG flow (email-only user)
+
+---
+
+## Key Files for Implementation
+
+| File | Change |
+|------|--------|
+| `services/engine/src/activities/braingains.activities.ts:2176-2260` | Fix `createStudentCourseRelationship` to create student context if missing, return success/failure |
+| `services/engine/src/workflows/syllabusProcessor.workflow.ts:1746` | Handle failure from `createStudentCourseRelationship` |
+| Migration SQL | Backfill existing orphaned syllabi |
+
+---
+
+## Context Graph Service Reference
+
+The `@dormway/core` package has comprehensive graph traversal in:
+`services/shared/dormway-core/src/database/context-graph/context-graph.service.ts`
+
+Key methods:
+- `getDependents(contextId, { dependencyTypes: ['enrolled_in'] })` - Get courses a student is enrolled in
+- `getDependencies(contextId, ...)` - Get reverse direction
+- `getDependencyEdges(contextId, 'outgoing')` - Get raw edges
+
+---
+
+## ✅ IMPLEMENTATION COMPLETE (2025-12-08)
+
+### Code Changes Made
+
+**File 1**: `services/engine/src/activities/braingains.activities.ts:2176-2420`
+- Changed `createStudentCourseRelationship` to get-or-create student context
+- If no student context exists, gets course context to find campus (parent_id)
+- Creates student context with campus as parent
+- Returns `{ success: boolean; studentContextId?: string; error?: string }` instead of void
+
+**File 2**: `services/engine/src/workflows/syllabusProcessor.workflow.ts:1745-1765, 2447-2465`
+- Updated both call sites to handle the new return type
+- Logs success/failure with studentContextId for debugging
+
+**File 3**: `infrastructure/database/migrations/20251208b_fix_orphaned_course_enrollments.sql`
+- Creates missing enrollments for all orphaned syllabi
+- Handles both directions (student→course, course→student)
+- Uses proper enrollment type based on user creation method
+
+### Testing Steps
+
+1. Deploy code changes
+2. Run migration: `make db-migrate`
+3. Verify rileync@umich.edu now has enrollments:
+   ```sql
+   SELECT * FROM context_dependencies
+   WHERE parent_context_id = '81178819-692f-4442-b795-d7d74a92499d';
+   ```
+4. Upload new syllabus and verify enrollment is created
+
+---
+
+## Tags
+#investigation #context-system #syllabus #broken-linking #high-priority #resolved #implemented

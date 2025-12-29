@@ -1,0 +1,115 @@
+---
+title: "Ably Real Time Patterns"
+description: "Ably is used for real-time pub/sub messaging across the DormWay platform. The `ablyRealtime` singleton is initialized in `services/api-router/src/services/ab..."
+---
+
+# Ably Real-Time Patterns
+
+## Context
+
+Ably is used for real-time pub/sub messaging across the DormWay platform. The `ablyRealtime` singleton is initialized in `services/api-router/src/services/ably-service.ts` and can be `null` if the `ABLY_API_KEY` environment variable is not set.
+
+## Correct Pattern for Using `ablyRealtime`
+
+**✅ CORRECT:**
+
+```typescript
+import { ablyRealtime } from '../services/ably-service';
+
+// In your route handler:
+try {
+  if (!ablyRealtime) return;  // Early return if not initialized
+  
+  await ablyRealtime.channels.get('channel-name').publish('event-name', {
+    // event data
+    timestamp: Date.now(),
+  });
+} catch (error) {
+  logger.warn('Failed to publish to Ably', { error });
+}
+```
+
+**❌ INCORRECT:**
+
+```typescript
+// DON'T: Create a variable and try to check it
+const ably = ablyRealtime;
+if (!ably) return;  // TypeScript still thinks ably might be null
+await ably.channels.get('...');  // ❌ Error: ably is possibly null
+
+// DON'T: Use getAblyRealtime() function
+const ably = await getAblyRealtime();  // ❌ This function doesn't exist
+
+// DON'T: Wrap in if-else blocks unnecessarily
+if (!ablyRealtime) {
+  logger.warn('Ably not initialized');
+} else {
+  await ablyRealtime.channels.get('...');  // Makes code verbose
+}
+```
+
+## Key Points
+
+1. **Direct access**: Use `ablyRealtime` directly, don't assign to a variable
+2. **Early return**: Check `if (!ablyRealtime) return;` at the start
+3. **Try-catch**: Wrap in try-catch since publishing can fail
+4. **Graceful degradation**: The early return allows code to continue without Ably
+5. **Logging**: Warn in catch block, but don't throw errors
+
+## Example: Publishing Feature Request Updates
+
+```typescript
+import { ablyRealtime } from '../services/ably-service';
+import { logger } from '../utils/logger';
+
+// Publish real-time update for new feature request
+try {
+  if (!ablyRealtime) return;
+  
+  await ablyRealtime.channels
+    .get('feature-requests:new')
+    .publish('request_created', {
+      id: requestId,
+      user_id: userId,
+      title,
+      category,
+      timestamp: Date.now(),
+    });
+} catch (ablyError) {
+  logger.warn('Failed to publish new request to Ably', { error: ablyError });
+}
+```
+
+## Channel Naming Conventions
+
+- **Global events**: `feature-requests:new`, `feature-requests:updates`
+- **Scoped events**: `feature-requests:${id}:comments`, `user:${userId}:updates`
+- **Votes**: `feature-requests:votes`, `roadmap-events:votes`
+
+## Service Wrapper Functions
+
+For common patterns, use the helper functions in `ably-service.ts`:
+
+```typescript
+import { publishUserUpdate, publishAblyEvent } from '../services/ably-service';
+
+// Publish to user-specific channel
+await publishUserUpdate({
+  userId,
+  event: 'profile_updated',
+  data: { name, email }
+});
+
+// Generic event publishing
+await publishAblyEvent({
+  channelName: 'dashboard:updates',
+  eventName: 'data_refresh',
+  data: { tab: 'home', context: 'campus' }
+});
+```
+
+These functions handle the null checks and error logging internally.
+
+---
+
+*Last updated: 2025-01-26*

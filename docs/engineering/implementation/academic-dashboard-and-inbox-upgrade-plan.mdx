@@ -1,0 +1,120 @@
+---
+title: "Academic Dashboard and Inbox Upgrade Plan"
+description: "status: draft owner: product_engineering last_updated: 2025-10-20 related_docs:"
+---
+
+# Academic Dashboard & Inbox Upgrade Plan
+
+---
+status: draft
+owner: product_engineering
+last_updated: 2025-10-20
+related_docs:
+  - [Assignment-Task Flow Revamp Plan](/docs/engineering/implementation/assignment-task-flow-revamp-plan)
+  - [Tasks vs Assignments - Two-Table Architecture Decision](/docs/engineering/architecture/tasks-vs-assignments-two-table-architecture-decision)
+  - dormway-platform/services/dormway-lockedin/src/app/dashboard/academic/page.tsx
+  - dormway-platform/services/dormway-lockedin/src/components/dashboard/inbox/InboxPageClient.tsx
+  - dormway-platform/services/api-router/src/routes/mobile-routes.ts
+---
+
+## 1. Objectives
+
+- **Single source of truth**: Both the Academic dashboard and Inbox consume the `/dashboard/v1/composite` response (plus Ably deltas) instead of rebuilding data from bespoke API calls.
+- **Planner-first workflows**: Scheduling actions from Academic or Inbox create real `student_time_blocks`, keep task metadata aligned, and update caches in real time.
+- **Stateful inbox**: Dismissals, filters, and quick captures persist server-side so students see the same inbox state across devices.
+- **Consistent completion prompts**: Reuse the bidirectional task↔assignment sync prompt to notify students in Academic or Inbox contexts.
+
+## 2. Dependencies
+
+- `Assignment-Task Flow Revamp Plan` backend work (task completion prompt and auto-complete helper).
+- Planner API from `mobile-routes.ts` (already available, may need enhancements for batch scheduling & context metadata).
+- Ably realtime infrastructure exposed by `/api/proxy/realtime/ably-auth`.
+
+## 3. Work Breakdown
+
+### 3.1 Shared Data Contract
+
+1. **Enhance BFF composite payload** (services/api-router):
+   - Include planner blocks summary (next three blocks, conflicts) under a `planner` section.
+   - Ensure `dueSoon`, `unscheduledTasks`, and Canvas submission metadata mirror the `DueItem`/`Deliverable` types required by Academic and Inbox.
+   - Emit versioned schema (`dashboard_version: 'v1.1'`) to gate rollout.
+
+2. **Front-end data layer**:
+   - Replace `useAcademicData`/`lib/academic/data.ts` fetch logic with a selector on `useDashboardComposite`.
+   - Add `useInboxData` hook that derives bundles (due soon, study suggestions, captures) from composite result plus planner block query.
+   - Wire Ably updates (canvas sync, task completion, planner changes) to invalidate relevant query keys.
+
+### 3.2 Academic Dashboard
+
+1. **Planner integrations**:
+   - Implement `handleStartClick` and `handleConfirmTimeBlock` to call `useCreatePlannerBlock`, passing assignment/task metadata and receiving persisted block.
+   - After scheduling, optimistically update local state (mark task as “scheduled”, show next planned session) and rely on Ably/composite refetch for confirmation.
+   - Write hook to unschedule or adjust blocks via `useUpdatePlannerBlock` / `useDeletePlannerBlock`.
+
+2. **Completion prompts**:
+   - Listen for prompt payload returned from `completeTask` mutation (via shared helper) and render a toast with “Mark assignment complete” action that posts to `/academic/assignments/:id/complete`.
+   - Surface auto-complete status (badge “Auto-completed” with timestamp) in `AcademicCard`.
+
+3. **UI refinements**:
+   - Replace placeholder logging with accessible toasts.
+   - Expose inline “Plan 45m tomorrow” chips that prefill `PlannerDrawer` using data-driven suggestions (based on composite timeline).
+
+### 3.3 Inbox Revamp
+
+1. **Server-backed dismissals & captures**:
+   - Extend API Router to store dismissed item IDs and quick capture drafts in Aurora (table `inbox_states` or reuse `user_preferences` JSONB).
+   - Update `loadQuickCaptures`/`removeQuickCapture` to hit the new endpoints; keep localStorage as fallback only for offline mode.
+   - Add TTL enforcement server-side instead of relying on `DISMISS_TTL_MS`.
+
+2. **Bundle builders** (`lib/inbox/bundleBuilders.ts`):
+   - Refactor to accept composite response and planner metadata, reducing client-side normalization code.
+   - Add heuristics that leverage new sync data (e.g., highlight assignments where all tasks complete but not submitted).
+
+3. **Planner actions**:
+   - Update bundle action handlers (e.g., “Schedule focus block”) to call `useCreatePlannerBlock` with context ID/course info.
+   - After scheduling, fire `trackEvent` and publish telemetry via `useRealtime` to keep focus session context aligned.
+   - For due-soon items tied to assignments, also trigger `completeTask` or prompt logic where appropriate.
+
+4. **Accessibility & layout**:
+   - Ensure bundle accordions persist expanded state server-side (e.g., store preferences keyed by bundle ID).
+   - Add loading/error states for planner mutations so students see immediate feedback.
+
+### 3.4 Backend Enhancements (if needed)
+
+1. **Planner metadata**:
+   - Allow `POST /mobile/planner/blocks` to accept optional `assignmentId` and `taskId`, storing them inside `metadata`.
+   - When blocks are created/updated, emit Ably event to `planner:user:{id}` channel for real-time updates.
+
+2. **Inbox state endpoints**:
+   - `GET/POST /api/mobile/inbox/state` to fetch/update dismissed bundle items and saved drafts.
+   - Implement soft expiry based on `expires_at` column instead of relying on client TTL.
+
+3. **Composite pipeline**:
+   - Ensure new data (planner summary, inbox state) is cached appropriately in BFF and invalidated on mutation.
+
+## 4. Testing Strategy
+
+- **Unit**: Selectors converting composite payload to Academic/Inbox models; planner action handlers; API Router endpoints for inbox state.
+- **Integration**: Endpoints `POST /mobile/planner/blocks` with assignment metadata; `POST /api/mobile/inbox/state` storing dismissals; Ably event emissions.
+- **End-to-End**: scenarios covering scheduling from Inbox, receiving completion prompt on Academic, data consistency across views.
+- **Regression**: Verify mobile clients unaffected—feature flag gating recommended (`WEB_COMPOSITE_V1_1`, `WEB_INBOX_SERVER_STATE`).
+
+## 5. Rollout Plan
+
+1. **Phase 0**: Behind feature flag, switch Academic dashboard to composite-backed selector. Validate data parity.
+2. **Phase 1**: Enable planner scheduling actions + completion prompts in Academic for internal users.
+3. **Phase 2**: Roll out Inbox server state + planner actions to beta cohort; monitor dismissal persistence and planner success rate.
+4. **Phase 3**: Full release; remove legacy fetch logic and localStorage fallbacks once telemetry shows stability.
+
+## 6. Open Questions
+
+- Do we want to expose planner suggestions in Inbox as calendar overlays? Requires timeline data from composite.
+- Should dismissed items sync across mobile and web? If yes, mobile client updates required.
+- How to handle students without planner access (feature flag)? Need guard rails to hide scheduling actions gracefully.
+
+## 7. Next Steps
+
+- [ ] Finalize data contract changes with backend BFF owners.
+- [ ] Align design on new Inbox interactions and Academic planner affordances.
+- [ ] Draft analytics spec for new events (`planner_block_created_web`, `inbox_item_dismissed_server`, etc.).
+- [ ] Schedule QA pass once feature flags are wired.

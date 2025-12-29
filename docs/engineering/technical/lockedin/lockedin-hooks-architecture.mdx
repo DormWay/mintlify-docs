@@ -1,0 +1,308 @@
+---
+title: "LockedIn Hooks Architecture"
+description: "This document describes the React Query hooks architecture in dormway-lockedin, with focus on the V2 Tasks hooks completed as part of **DORM-787** and the co..."
+---
+
+# LockedIn Hooks Architecture
+
+This document describes the React Query hooks architecture in dormway-lockedin, with focus on the V2 Tasks hooks completed as part of **DORM-787** and the course colors system.
+
+## Overview
+
+LockedIn uses React Query (TanStack Query) for server state management. All hooks follow a consistent pattern:
+- Query hooks for fetching data
+- Mutation hooks for modifications
+- Automatic cache invalidation after mutations
+- Optimistic updates for instant UI feedback
+
+## Directory Structure
+
+```
+src/hooks/
+├── home/
+│   ├── index.ts              # Re-exports all hooks
+│   ├── useTasksV2.ts         # V2 Tasks API (current)
+│   ├── useTasks.ts           # Legacy tasks (deprecated)
+│   ├── useQuickCapture.ts    # Quick task capture
+│   ├── useDashboardComposite.ts
+│   └── ...
+├── useCourseColors.ts        # Course color preferences
+├── useAcademicData.ts
+├── useScheduleEvents.ts
+└── ...
+```
+
+## Tasks V2 Hooks
+
+**Location**: `src/hooks/home/useTasksV2.ts`
+
+The V2 hooks provide a unified interface matching the iOS client pattern.
+
+### Query Key
+
+```typescript
+export const TASKS_V2_QUERY_KEY = 'tasks-v2';
+```
+
+All task mutations invalidate this key plus `['dashboard-composite']`.
+
+### Available Hooks
+
+| Hook | Purpose | Endpoint |
+|------|---------|----------|
+| `useTasksV2(filters?)` | Fetch all tasks | `GET /v2/students/me/tasks` |
+| `useCreateTaskV2()` | Create task | `POST /v2/students/me/tasks` |
+| `useUpdateTaskV2()` | Update task | `PATCH /v2/students/me/tasks/:id` |
+| `useCompleteTaskV2()` | Complete task | `PATCH /v2/students/me/tasks/:id` |
+| `useDeleteTaskV2()` | Soft delete | `PATCH /v2/students/me/tasks/:id` |
+| `useScheduleTaskV2()` | Schedule to timeline | `POST /v2/students/me/tasks/:id/schedule` |
+| `useUnscheduleTaskV2()` | Unschedule | `POST /v2/students/me/tasks/:id/unschedule` |
+| `useQuickCaptureV2()` | Quick capture | `POST /v2/students/me/tasks/quick-capture` |
+
+### Usage Examples
+
+#### Fetching Tasks
+
+```typescript
+import { useTasksV2 } from '@/hooks/home/useTasksV2';
+
+function TaskList() {
+  const { data, isLoading } = useTasksV2({
+    status: 'pending',
+    source: 'manual'
+  });
+
+  if (isLoading) return <Loading />;
+
+  return (
+    <ul>
+      {data?.items.map(task => (
+        <li key={task.id}>{task.title}</li>
+      ))}
+    </ul>
+  );
+}
+```
+
+#### Creating Tasks
+
+```typescript
+import { useCreateTaskV2 } from '@/hooks/home/useTasksV2';
+
+function AddTaskButton() {
+  const createTask = useCreateTaskV2();
+
+  const handleAdd = async () => {
+    await createTask.mutateAsync({
+      title: 'Study for exam',
+      estimatedDuration: 60,
+      priority: 'high',
+      courseCode: 'EECS281'
+    });
+  };
+
+  return (
+    <button onClick={handleAdd} disabled={createTask.isPending}>
+      Add Task
+    </button>
+  );
+}
+```
+
+#### Completing Tasks
+
+```typescript
+import { useCompleteTaskV2 } from '@/hooks/home/useTasksV2';
+
+function TaskItem({ task }: { task: TaskItem }) {
+  const completeTask = useCompleteTaskV2();
+
+  return (
+    <button onClick={() => completeTask.mutate(task.id)}>
+      Complete
+    </button>
+  );
+}
+```
+
+#### Scheduling Tasks
+
+```typescript
+import { useScheduleTaskV2 } from '@/hooks/home/useTasksV2';
+
+function ScheduleButton({ taskId }: { taskId: string }) {
+  const scheduleTask = useScheduleTaskV2();
+
+  const handleSchedule = () => {
+    scheduleTask.mutate({
+      taskId,
+      schedule: {
+        startTime: '2025-12-26T14:00:00Z',
+        endTime: '2025-12-26T15:00:00Z'
+      }
+    });
+  };
+
+  return <button onClick={handleSchedule}>Schedule</button>;
+}
+```
+
+## Course Colors Hook
+
+**Location**: `src/hooks/useCourseColors.ts`
+
+The `useCourseColors` hook manages user-customizable course color preferences with localStorage caching and backend sync.
+
+### Core Functions
+
+| Function | Purpose |
+|----------|---------|
+| `getCourseColor(courseCode)` | Get color preset for a course |
+| `hasCustomColor(courseCode)` | Check if user has a custom color set |
+| `setCourseColor(courseCode, presetId)` | Set custom color |
+| `removeCourseColor(courseCode)` | Reset to default |
+| `getCourseColorStyles(courseCode)` | Get inline CSS styles |
+
+### Color Presets
+
+Available presets: `blue`, `purple`, `pink`, `red`, `orange`, `amber`, `yellow`, `lime`, `green`, `teal`, `cyan`, `indigo`, `violet`, `slate`
+
+Each preset provides theme-aware colors:
+```typescript
+interface CourseColorPreset {
+  id: string;
+  name: string;
+  light: { bg, text, border, bgHover };
+  dark: { bg, text, border, bgHover };
+}
+```
+
+### Widget Integration
+
+The `useWidgetCourseColors` wrapper (in `widgets/shared.tsx`) provides widget-optimized color functions:
+
+```typescript
+const { getColor, getAccentColor, getStyles } = useWidgetCourseColors();
+
+// Text color (theme-optimized)
+<span style={{ color: getColor('CS 101') }}>CS 101</span>
+
+// Accent color (solid RGB for bars/dots)
+<div style={{ backgroundColor: getAccentColor('MATH 240') }} />
+```
+
+### Color Priority
+
+1. **User customization exists** → Use user's chosen preset color
+2. **No customization** → Fall back to `COURSE_COLOR_MAP` department-based colors
+3. **Department not found** → Use default CSS variable
+
+The `hasCustomColor()` function (added 2025-12-26) properly distinguishes between "user never set a color" and "user explicitly chose blue", fixing a bug where user preferences were bypassed.
+
+### Storage
+
+- **Immediate**: localStorage (`dormway_course_colors`)
+- **Synced**: Backend preferences API (cross-device)
+- Debounced backend saves (500ms) to reduce API calls
+
+### Events
+
+Color changes dispatch:
+```typescript
+window.dispatchEvent(new CustomEvent("course:colors:changed"));
+```
+
+---
+
+## Cache Invalidation Strategy
+
+All task mutations automatically invalidate:
+
+```typescript
+// Primary caches
+queryClient.invalidateQueries({ queryKey: [TASKS_V2_QUERY_KEY] });
+queryClient.invalidateQueries({ queryKey: ['dashboard-composite'] });
+
+// Schedule/unschedule also invalidate:
+queryClient.invalidateQueries({ queryKey: ['timeBlocks'] });
+queryClient.invalidateQueries({ queryKey: ['schedule-events'] });
+```
+
+## Optimistic Updates
+
+The `DragDropContext.tsx` implements optimistic updates for instant feedback:
+
+```typescript
+const scheduleTaskMutation = useMutation({
+  onMutate: async ({ taskId }) => {
+    // Cancel outgoing refetches
+    await queryClient.cancelQueries({ queryKey: ['dashboard-composite'] });
+
+    // Snapshot for rollback
+    const previousData = queryClient.getQueryData(['dashboard-composite']);
+
+    // Optimistically update
+    queryClient.setQueryData(['dashboard-composite'], (old) => ({
+      ...old,
+      unscheduledTasks: old?.unscheduledTasks?.filter(t => t.id !== taskId)
+    }));
+
+    return { previousData };
+  },
+  onError: (error, variables, context) => {
+    // Rollback on error
+    if (context?.previousData) {
+      queryClient.setQueryData(['dashboard-composite'], context.previousData);
+    }
+  }
+});
+```
+
+## Migration from V1
+
+### V1 to V2 Hook Mapping
+
+| V1 (Legacy) | V2 (Current) |
+|-------------|--------------|
+| `useTasks()` | `useTasksV2()` |
+| `useCreateTask()` | `useCreateTaskV2()` |
+| `useUpdateTask(taskId)` | `useUpdateTaskV2()` with `{ taskId, updates }` |
+| `useCompleteTask(taskId)` | `useCompleteTaskV2()` with `taskId` |
+| `useDeleteTask()` | `useDeleteTaskV2()` |
+| `useScheduleTask(taskId)` | `useScheduleTaskV2()` with `{ taskId, schedule }` |
+| `useUnscheduleTask(taskId)` | `useUnscheduleTaskV2()` with `taskId` |
+
+### Key Differences
+
+1. **Field names**: V2 uses camelCase (`estimatedDuration`) vs V1 snake_case (`estimated_duration_minutes`)
+2. **Response shape**: V2 returns `{ success, data }` vs V1 `{ task }`
+3. **Delete method**: V2 uses PATCH with `status: 'deleted'` vs V1 DELETE
+4. **Parameter passing**: V2 mutations take object params, V1 used curried hooks
+
+## Related Files
+
+### Consumers of V2 Hooks
+
+| File | Usage |
+|------|-------|
+| `components/home/DragDropContext.tsx` | Schedule/delete via V2 |
+| `components/home/taskbank/AddTaskModal.tsx` | Create via V2 |
+| `components/home/taskbank/TaskBankList.tsx` | Complete via V2 |
+| `lib/planner/api.ts` | Complete/unschedule via V2 |
+| `lib/smart-scheduling.ts` | Create/schedule via V2 |
+| `hooks/home/useQuickCapture.ts` | Quick capture via V2 |
+
+### Type Definitions
+
+- `types/tasks-v2.ts` - V2 response types
+- `hooks/home/useTasks.ts` - Legacy types (deprecated)
+
+## Related Documents
+
+- [Tasks-API-V2](/docs/engineering/technical/api/tasks-api-v2) - API endpoint documentation
+- DormWay Platform Architecture
+
+---
+
+**Linear Issue:** DORM-787
+**Completed:** 2025-12-25

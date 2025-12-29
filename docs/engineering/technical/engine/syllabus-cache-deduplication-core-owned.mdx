@@ -1,0 +1,37 @@
+---
+title: "Syllabus Cache Deduplication (Core Owned)"
+description: "Avoid re-parsing the same syllabus content N times (e.g. 50 students uploading the same PDF). Cache is keyed by **SHA-256 of raw bytes** + `SYLLABUS_PARSER_V..."
+---
+
+# Syllabus Cache Deduplication (Core-Owned)
+
+## Goal
+
+Avoid re-parsing the same syllabus content N times (e.g. 50 students uploading the same PDF). Cache is keyed by **SHA-256 of raw bytes** + `SYLLABUS_PARSER_VERSION`.
+
+## Rules (DRY)
+
+- **Do not** call these DB functions directly from Engine activities/services:
+  - `get_syllabus_cache_entry`
+  - `upsert_syllabus_cache`
+  - `link_user_to_syllabus_cache`
+- **Do** use `@dormway/core`:
+  - `SyllabusCacheService`
+  - `SYLLABUS_PARSER_VERSION`
+  - Standard shapes: `SyllabusAnalysis`, `SyllabusCacheEntry`
+
+Engine enforces this via `services/engine/package.json` script `lint:syllabus-cache`.
+
+## Canonical Implementation
+
+- Core implementation: `services/shared/dormway-core/src/domains/syllabus-cache/`
+- Engine usage:
+  - `services/engine/src/activities/braingains.activities.ts` (cache check/upsert/link/update-hash)
+  - `services/engine/src/services/syllabusHasher.ts` (shared helpers wrapping core service)
+
+## Migration Guidance
+
+If you find another one-off syllabus cache query in Engine:
+1. Replace SQL with `SyllabusCacheService` calls.
+2. Normalize to `courseInfo.courseCode` (avoid `course_code`).
+3. Keep error handling behavior (cache failures should degrade to a cache miss).

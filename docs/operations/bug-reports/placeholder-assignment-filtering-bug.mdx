@@ -1,0 +1,309 @@
+---
+title: "Placeholder Assignment Filtering Bug"
+description: "The `pushItem` function in `dashboard-composite-transformer.ts` **does not filter out placeholder assignments**, despite comments claiming it does. This mean..."
+---
+
+# Bug Report: Placeholder Assignment Filtering Not Implemented
+
+**Status**: ✅ CONFIRMED - Real Bug
+**Severity**: Medium
+**Affected Files**:
+- `services/api-router/src/services/dashboard-composite-transformer.ts` (lines 1478-1488, 1655-1671)
+- `services/dormway-lockedin/src/hooks/home/useDashboardComposite.ts`
+
+---
+
+## Issue #1: Placeholder Assignments Not Filtered in Backend
+
+### Problem Description
+
+The `pushItem` function in `dashboard-composite-transformer.ts` **does not filter out placeholder assignments**, despite comments claiming it does. This means placeholder assignments (like "Log In") will be displayed to users in the UI.
+
+### Evidence
+
+**Comment claims filtering happens** (line 1658):
+```typescript
+// Metadata flags removed - backend now filters placeholders at source
+// All assignments returned are actionable by design
+```
+
+**Comment claims filtering happens** (line 1667):
+```typescript
+// Note: Placeholders are filtered at source (pushItem), so they never reach this point
+```
+
+**Actual `pushItem` implementation** (lines 1478-1488):
+```typescript
+const pushItem = (assignment: any, envelope?: any) => {
+  if (!assignment || typeof assignment !== 'object') {
+    return;
+  }
+  const key = deriveKey(assignment);
+  if (seenKeys.has(key)) {
+    return;  // Only deduplicates, doesn't filter placeholders
+  }
+  seenKeys.add(key);
+  collected.push({ item: assignment, envelope });  // ❌ No placeholder check!
+};
+```
+
+**Client-side filtering was removed** (confirmed by grep search):
+- `isActionableDueItem()` function removed
+- `isPlaceholderDueItem()` function removed
+- No filtering in `normalizeDueSoonItem()` or `useDashboardComposite`
+
+### Impact
+
+1. **Users see placeholder assignments** like "Log In" in their due items list
+2. **Misleading UI** - users may try to interact with non-actionable items
+3. **Code comments are incorrect** - future developers will be misled
+
+### Root Cause
+
+Client-side filtering logic was removed (probably during a refactor) with the intention of moving it to the backend, but the backend implementation was never completed. The comments were added prematurely.
+
+---
+
+## Proposed Fix #1: Add Placeholder Filtering to `pushItem`
+
+### Option A: Filter by metadata flag (Recommended)
+
+```typescript
+const pushItem = (assignment: any, envelope?: any) => {
+  if (!assignment || typeof assignment !== 'object') {
+    return;
+  }
+
+  // ✅ Filter out placeholders
+  if (assignment.metadata?.isPlaceholder === true) {
+    return;
+  }
+
+  // ✅ Filter out non-actionable items
+  if (assignment.metadata?.isActionable === false) {
+    return;
+  }
+
+  const key = deriveKey(assignment);
+  if (seenKeys.has(key)) {
+    return;
+  }
+  seenKeys.add(key);
+  collected.push({ item: assignment, envelope });
+};
+```
+
+### Option B: Filter by title pattern (Fallback)
+
+If metadata flags aren't reliable, filter by known placeholder titles:
+
+```typescript
+const PLACEHOLDER_TITLES = [
+  'Log In',
+  'Get Started',
+  'Quick Start',
+  'Tutorial',
+  'Sample Assignment',
+];
+
+const pushItem = (assignment: any, envelope?: any) => {
+  if (!assignment || typeof assignment !== 'object') {
+    return;
+  }
+
+  // ✅ Filter by title pattern
+  const title = String(assignment.title || assignment.name || '').trim();
+  if (PLACEHOLDER_TITLES.some(p => title.includes(p))) {
+    return;
+  }
+
+  const key = deriveKey(assignment);
+  if (seenKeys.has(key)) {
+    return;
+  }
+  seenKeys.add(key);
+  collected.push({ item: assignment, envelope });
+};
+```
+
+### Option C: Hybrid approach (Most Robust)
+
+```typescript
+const PLACEHOLDER_TITLES = ['Log In', 'Get Started', 'Quick Start'];
+
+const pushItem = (assignment: any, envelope?: any) => {
+  if (!assignment || typeof assignment !== 'object') {
+    return;
+  }
+
+  // Check metadata flags first
+  if (assignment.metadata?.isPlaceholder === true) {
+    return;
+  }
+  if (assignment.metadata?.isActionable === false) {
+    return;
+  }
+
+  // Fallback: filter by title pattern (defensive)
+  const title = String(assignment.title || assignment.name || '').trim();
+  if (PLACEHOLDER_TITLES.some(p => title.includes(p))) {
+    return;
+  }
+
+  const key = deriveKey(assignment);
+  if (seenKeys.has(key)) {
+    return;
+  }
+  seenKeys.add(key);
+  collected.push({ item: assignment, envelope });
+};
+```
+
+### Testing Checklist
+
+After implementing the fix:
+
+- [ ] Verify placeholder assignments don't appear in API response
+- [ ] Check `/dashboard/v1/composite?tab=home` endpoint
+- [ ] Test with user who has only placeholder data
+- [ ] Test with user who has mix of real and placeholder data
+- [ ] Verify `isPlaceholder` and `isActionable` metadata are set correctly in database
+- [ ] Check if any legitimate assignments are being filtered out
+
+---
+
+## Issue #2: Aggressive Cache Bypass in Dashboard Hook
+
+### Problem Description
+
+The `useDashboardComposite` hook uses **both** `cache: 'no-store'` (browser cache bypass) and `staleTime: 0` (React Query immediate staleness), resulting in a new network request on every component mount, tab switch, or window focus.
+
+### Evidence
+
+**`authorizedFetch` configuration** (line 267):
+```typescript
+const response = await authorizedFetch(url, {
+  cache: 'no-store', // NEVER cache - Chrome caches aggressively with 'no-cache'
+});
+```
+
+**React Query configuration** (lines 339-344):
+```typescript
+// SIMPLIFIED CACHING: Always fetch fresh data to eliminate cache sync bugs
+staleTime: 0, // Always consider data stale (fetch fresh every time)
+gcTime: 1000, // Clear from cache after 1s when component unmounts
+enabled,
+refetchOnWindowFocus: true,
+refetchOnReconnect: true,
+refetchOnMount: true,
+```
+
+### Impact
+
+1. **Excessive API calls** - every tab switch, window focus triggers new request
+2. **Poor user experience** - loading states on every navigation
+3. **Increased server load** - unnecessary API traffic
+4. **Slower perceived performance** - users see spinners frequently
+
+### Analysis
+
+This is **NOT a bug, but a deliberate choice** to avoid cache synchronization issues. However, it's overly aggressive and could be optimized.
+
+---
+
+## Proposed Fix #2: Implement Smart Caching Strategy
+
+### Option A: Short-term caching (Recommended for quick win)
+
+```typescript
+return useQuery({
+  queryKey: ['dashboard-composite', tab, context, date, startDate, endDate],
+  queryFn: async () => {
+    // ... existing fetch logic ...
+    const response = await authorizedFetch(url, {
+      // ✅ Allow browser HTTP caching with short TTL
+      cache: 'default',
+    });
+    // ...
+  },
+  // ✅ Cache for 30 seconds
+  staleTime: 30 * 1000,
+  // ✅ Keep in memory for 5 minutes
+  gcTime: 5 * 60 * 1000,
+  enabled,
+  // ✅ Only refetch on mount if data is stale
+  refetchOnWindowFocus: false,
+  refetchOnReconnect: true,
+  refetchOnMount: 'always',
+  placeholderData: keepPreviousData,
+});
+```
+
+### Option B: ETag-based caching (Best long-term solution)
+
+Restore ETag support that was removed:
+
+```typescript
+const response = await authorizedFetch(url, {
+  cache: 'default',
+  headers: {
+    'If-None-Match': previousETag || '',
+  },
+});
+
+if (response.status === 304) {
+  // Return cached data, no parsing needed
+  return previousData;
+}
+
+const newETag = response.headers.get('etag');
+// Store newETag for next request
+```
+
+### Option C: Optimistic updates with background refresh
+
+```typescript
+staleTime: 2 * 60 * 1000, // 2 minutes
+gcTime: 10 * 60 * 1000,   // 10 minutes
+refetchOnWindowFocus: 'always', // Background refresh
+refetchOnMount: false,
+placeholderData: keepPreviousData, // Show stale data while fetching
+```
+
+### Recommendation
+
+**Implement Option A immediately** for quick improvement, then migrate to **Option B (ETag)** for optimal caching behavior. The backend already supports ETags (mentioned in code comments), so we just need to restore the client-side handling.
+
+### Testing Checklist
+
+After implementing caching fix:
+
+- [ ] Verify reduced network requests in browser DevTools
+- [ ] Test tab switching doesn't trigger unnecessary requests
+- [ ] Verify data updates properly when invalidated
+- [ ] Check background refresh works on window focus
+- [ ] Test with slow network (3G throttling)
+- [ ] Verify stale data is shown while fetching fresh data
+
+---
+
+## Priority
+
+1. **High Priority**: Fix Issue #1 (Placeholder filtering) - affects user experience directly
+2. **Medium Priority**: Fix Issue #2 (Caching) - performance optimization
+
+---
+
+## Related Files to Review
+
+- `services/api-router/src/services/dashboard-composite-transformer.ts` (main transformer)
+- `services/dormway-lockedin/src/hooks/home/useDashboardComposite.ts` (React Query hook)
+- `services/dormway-lockedin/src/lib/authorizedFetch.ts` (fetch wrapper)
+- Database schema for assignment metadata (check if `isPlaceholder` flag exists)
+
+---
+
+**Reported**: 2025-10-29
+**Reported By**: AI Code Review Agent
+**Verified By**: Claude Code Analysis
+**Tags**: #bug #dashboard #caching #performance #data-quality

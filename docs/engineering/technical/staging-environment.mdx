@@ -1,0 +1,435 @@
+---
+title: "Staging Environment"
+description: "make staging-status"
+---
+
+# DormWay Staging Environment
+
+> Full staging environment for testing changes against production-like data before deployment.
+
+## Quick Reference
+
+### Commands
+```bash
+# Check staging status
+make staging-status
+
+# Deploy to staging (via GitHub Actions)
+make staging-deploy BRANCH=main SERVICES=all
+
+# Refresh staging database from production
+make staging-refresh
+
+# Show staging URLs
+make staging-urls
+
+# Connect to staging database
+./scripts/staging/manage-staging.sh connect-db
+```
+
+### Staging URLs
+
+| Service | URL |
+|---------|-----|
+| API Router | https://staging-api.dormway.app |
+| Admin Dashboard | https://staging-admin.dormway.app |
+| LockedIn Web | https://staging.lockedin.dormway.app |
+| Temporal UI | https://cloud.temporal.io/namespaces/dormway-staging.wvrom |
+| Neon Console | https://console.neon.tech/app/projects/misty-queen-56829089 |
+
+---
+
+## Architecture Overview
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    STAGING ENVIRONMENT                          │
+├─────────────────────────────────────────────────────────────────┤
+│  Doppler: staging config                                        │
+│  ├── DATABASE_URL → Neon staging branch                        │
+│  ├── TEMPORAL_NAMESPACE → dormway-staging.wvrom                 │
+│  ├── PORTKEY_CONFIG → pc-dormwa-staging                        │
+│  └── CLERK_* → Shared dev instance                              │
+├─────────────────────────────────────────────────────────────────┤
+│  Railway (staging environment) - Backend Services               │
+│  ├── api-router (3001)                                          │
+│  ├── engine (3030)                                              │
+│  ├── dormway-crews (8000)                                       │
+│  ├── ably-relay (3032)                                          │
+│  └── redis-staging                                              │
+├─────────────────────────────────────────────────────────────────┤
+│  Vercel (staging projects) - Frontend Apps                      │
+│  ├── dormway-admin → staging-admin.dormway.app                  │
+│  └── dormway-lockedin → staging.lockedin.dormway.app           │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Key Differences from Production
+
+| Aspect | Production | Staging |
+|--------|------------|---------|
+| Database | Neon `main` branch | Neon `staging` branch (can be reset) |
+| Temporal | `dormway-prod.wvrom` | `dormway-staging.wvrom` |
+| Deployment | Auto on merge to main | Manual trigger only |
+| Data | Live user data | Copy from production (refreshable) |
+| Clerk | Production instance | Shared dev instance |
+
+---
+
+## Service Configuration
+
+### Neon Database
+
+- **Project ID**: `misty-queen-56829089`
+- **Staging Branch**: `staging` (branched from `main`)
+- **Refresh**: On-demand via `make staging-refresh`
+
+The staging database is a Neon branch of production. This means:
+- Instant creation (copy-on-write)
+- Real production data for testing
+- Can be reset at any time without affecting production
+- Compute scales independently
+
+### Temporal Workflows
+
+- **Namespace**: `dormway-staging.wvrom`
+- **Region**: us-east-1
+- **Retention**: 7 days (shorter than production)
+
+All workflow task queues are shared:
+- `student-worker`
+- `campus-worker`
+- `city-worker`
+- `syllabus-processor`
+- `plugin-runner`
+
+### Portkey AI Gateway
+
+- **Config ID**: `pc-dormwa-staging`
+- **Virtual Keys**: Shared with production (OpenAI, Anthropic, Google)
+- **Caching**: Enabled (300s TTL)
+
+AI usage is tracked separately via Portkey metadata `{"environment": "staging"}`.
+
+### Redis
+
+- **Instance**: Railway Redis (staging environment)
+- **Purpose**: Session cache, rate limiting, job queues
+- **Isolated**: Completely separate from production Redis
+
+---
+
+## Deployment Process
+
+### Manual Deployment (GitHub Actions)
+
+1. Go to [GitHub Actions](https://github.com/DormWay/dormway-platform/actions)
+2. Select "Deploy to Staging" workflow
+3. Click "Run workflow"
+4. Configure:
+   - **Branch**: Branch to deploy (default: `main`)
+   - **Services**: `all` or specific services (e.g., `api-router,engine`)
+   - **Skip tests**: Check to skip pre-deploy tests
+5. Click "Run workflow"
+
+### Deployment Flow
+
+```
+┌──────────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
+│   Validate   │ -> │     Test     │ -> │    Deploy    │ -> │ Health Check │
+│   (parse)    │    │  (optional)  │    │  (Railway)   │    │   (curl)     │
+└──────────────┘    └──────────────┘    └──────────────┘    └──────────────┘
+```
+
+### Deploy via CLI
+
+```bash
+# Deploy all services from main
+make staging-deploy BRANCH=main SERVICES=all
+
+# Deploy specific services from feature branch
+make staging-deploy BRANCH=feat/my-feature SERVICES=api-router,engine
+
+# Or use the script directly
+./scripts/staging/manage-staging.sh deploy feat/my-feature api-router
+```
+
+---
+
+## Database Management
+
+### Refresh from Production
+
+Reset staging database to match current production state:
+
+```bash
+make staging-refresh
+```
+
+**WARNING**: This deletes all staging-specific data!
+
+The script will:
+1. Prompt for confirmation
+2. Delete existing staging branch
+3. Create new branch from production `main`
+4. Output new connection string
+
+### Connect to Database
+
+```bash
+# Interactive psql session
+./scripts/staging/manage-staging.sh connect-db
+
+# Run a query
+doppler run --config staging --project dormway -- \
+  bash -c 'psql "$DATABASE_URL" -c "SELECT COUNT(*) FROM accounts;"'
+```
+
+### Run Migrations
+
+Migrations are applied automatically during deployment. To run manually:
+
+```bash
+cd .repos/dormway-platform
+doppler run --config staging -- make db-migrate
+```
+
+---
+
+## Authentication
+
+### Clerk Configuration
+
+Staging uses the **same Clerk dev instance** as local development:
+- Instance: `humorous-peacock-79.clerk.accounts.dev`
+- No additional cost
+- Test users shared with dev
+
+### Test Users
+
+| Email | Role | Purpose |
+|-------|------|---------|
+| staging-user@dormway.app | user | General intern testing |
+| staging-admin@dormway.app | admin | Admin dashboard testing |
+
+**Credentials**: Stored in Doppler `staging` config (never commit to code!)
+
+To retrieve test credentials:
+```bash
+doppler secrets get STAGING_USER_PASSWORD --config staging --project dormway
+```
+
+---
+
+## Monitoring & Debugging
+
+### View Logs
+
+```bash
+# All services (requires Railway CLI)
+railway logs --environment staging
+
+# Specific service
+railway logs --environment staging --service api-router
+
+# Via workspace script
+./scripts/staging/manage-staging.sh logs
+```
+
+### Temporal Workflow Debugging
+
+1. Open [Temporal UI](https://cloud.temporal.io/namespaces/dormway-staging.wvrom)
+2. Search workflows by:
+   - Workflow ID
+   - Workflow type (e.g., `StudentWatcher`)
+   - Status (Running, Completed, Failed)
+3. View workflow history for debugging
+
+### Health Checks
+
+```bash
+# Check all services
+curl https://staging-api.dormway.app/ready
+curl https://staging-api.dormway.app/health
+
+# Check specific endpoints
+curl https://staging-api.dormway.app/v1/status
+```
+
+---
+
+## Intern Onboarding Checklist
+
+### Prerequisites
+
+- [ ] GitHub account with repository access
+- [ ] Doppler account (invite from admin)
+- [ ] Railway account (invite from admin)
+- [ ] Clerk dev access (shared instance)
+
+### Setup Steps
+
+1. **Clone workspace**
+   ```bash
+   git clone git@github.com:DormWay/dormway-workspace.git ~/dormway-intern
+   cd ~/dormway-intern
+   ./scripts/bootstrap.sh
+   ```
+
+2. **Configure Doppler**
+   ```bash
+   doppler login
+   doppler setup  # Select: dormway, config: staging
+   ```
+
+3. **Verify staging access**
+   ```bash
+   make staging-status
+   make staging-urls
+   ```
+
+4. **Test deployment** (with mentor supervision)
+   ```bash
+   # Create a test branch
+   cd .repos/dormway-platform
+   git checkout -b test/intern-name-setup
+
+   # Make a small change (e.g., add comment)
+   # Deploy to staging
+   make staging-deploy BRANCH=test/intern-name-setup SERVICES=api-router
+   ```
+
+5. **Clean up test branch**
+   ```bash
+   git checkout main
+   git branch -d test/intern-name-setup
+   ```
+
+### Daily Workflow
+
+1. Pull latest changes: `./scripts/repo.sh pull`
+2. Create feature branch from `main`
+3. Develop and test locally
+4. Deploy to staging: `make staging-deploy BRANCH=your-branch SERVICES=all`
+5. Test on staging URLs
+6. Create PR when ready
+
+---
+
+## Troubleshooting
+
+### Deployment Fails
+
+**Check GitHub Actions logs:**
+1. Go to [Actions tab](https://github.com/DormWay/dormway-platform/actions)
+2. Click on failed workflow run
+3. Expand failed job for error details
+
+**Common issues:**
+- **Build failure**: Check for TypeScript errors or missing dependencies
+- **Railway timeout**: Service may need longer startup time
+- **Health check fails**: Service crashed on startup, check logs
+
+### Database Connection Issues
+
+```bash
+# Verify Doppler has correct DATABASE_URL
+doppler secrets get DATABASE_URL --config staging --project dormway
+
+# Test connection
+doppler run --config staging --project dormway -- \
+  bash -c 'psql "$DATABASE_URL" -c "SELECT 1;"'
+```
+
+If branch was reset, connection string may have changed. Update in Doppler if needed.
+
+### Temporal Workflow Stuck
+
+1. Check [Temporal UI](https://cloud.temporal.io/namespaces/dormway-staging.wvrom)
+2. Find stuck workflow by ID
+3. Options:
+   - **Cancel**: Terminate gracefully
+   - **Terminate**: Force stop immediately
+   - **Reset**: Replay from beginning
+
+### Service Not Starting
+
+```bash
+# Check Railway logs
+railway logs --environment staging --service <service-name>
+
+# Common causes:
+# - Missing environment variables
+# - Database connection timeout
+# - Port already in use (check Railway config)
+```
+
+---
+
+## Environment Variables Reference
+
+All variables managed in Doppler `staging` config:
+
+| Variable | Description |
+|----------|-------------|
+| `DATABASE_URL` | Neon staging connection string |
+| `TEMPORAL_NAMESPACE` | `dormway-staging.wvrom` |
+| `TEMPORAL_ADDRESS` | Temporal Cloud endpoint |
+| `TEMPORAL_API_KEY` | Staging namespace API key |
+| `PORTKEY_CONFIG` | `pc-dormwa-staging` |
+| `PORTKEY_API_KEY` | Shared Portkey API key |
+| `REDIS_URL` | Railway Redis connection |
+| `CLERK_SECRET_KEY` | Shared dev Clerk key |
+| `NEXT_PUBLIC_API_BASE_URL` | `https://staging-api.dormway.app` |
+| `NODE_ENV` | `staging` |
+
+---
+
+## DNS Configuration
+
+Staging uses custom subdomains with CNAME records pointing to Railway (backend) and Vercel (frontend).
+
+### Required DNS Records
+
+**Railway (Backend Services):**
+| Subdomain | Record Type | Target |
+|-----------|-------------|--------|
+| `staging-api.dormway.app` | CNAME | Railway api-router URL |
+| `staging-relay.dormway.app` | CNAME | Railway ably-relay URL |
+
+**Vercel (Frontend Apps):**
+| Subdomain | Record Type | Target |
+|-----------|-------------|--------|
+| `staging-admin.dormway.app` | CNAME | `cname.vercel-dns.com` |
+| `staging.lockedin.dormway.app` | CNAME | `cname.vercel-dns.com` |
+
+### Adding a Railway Custom Domain (Backend)
+
+1. Deploy service to Railway staging environment
+2. In Railway: Service → Settings → Domains → Add Custom Domain
+3. Enter your desired subdomain
+4. Copy the Railway target URL provided
+5. In DNS provider: Create CNAME record pointing to Railway target
+6. Wait for propagation (5-30 min)
+7. Railway auto-provisions SSL
+
+### Adding a Vercel Custom Domain (Frontend)
+
+1. In Vercel: Project → Settings → Domains
+2. Add custom domain (e.g., `staging-admin.dormway.app`)
+3. In DNS provider: Create CNAME record pointing to `cname.vercel-dns.com`
+4. Configure staging environment variables in Vercel project settings
+5. Wait for propagation and SSL verification
+
+---
+
+## Related Documentation
+
+- [Architecture Documentation](/docs/engineering/architecture/architecture-documentation) - System architecture overview
+- DormWay Error Handling System - Error handling patterns
+- [Ably Relay Service Architecture](/docs/engineering/architecture/ably-relay-service-architecture) - Real-time messaging
+- DormWay iOS Build Guide - Mobile app testing
+
+---
+
+*Last updated: 2025-12-01*

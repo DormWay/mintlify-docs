@@ -1,0 +1,250 @@
+---
+title: "Semester Term Management"
+description: "This document outlines the semester/term management system in DormWay, including the current implementation state and the planned \"semester reset/transition\"..."
+---
+
+# Semester/Term Management System
+
+**Status**: In Planning
+**Priority**: High - Future Critical Feature
+**Linear Ticket**: Pending
+**Created**: 2025-12-08
+**Last Updated**: 2025-12-08
+
+## Overview
+
+This document outlines the semester/term management system in DormWay, including the current implementation state and the planned "semester reset/transition" feature that enables students to prepare for and switch to future semesters.
+
+## Current State
+
+### What Exists Today
+
+#### 1. Term Data Storage
+- **`campus_configs.current_term_data`** (JSONB): Stores current semester/quarter dates, breaks, finals week
+- **`campus_configs.academic_calendar`** (JSONB): Full academic year calendar with all terms
+- **`canvas_term_map`**: Maps campus contexts to Canvas enrollment term IDs
+
+#### 2. Term Detection Logic
+The system can determine the current active term based on:
+- Start/end dates from academic calendar
+- Current date comparison
+- Campus timezone awareness
+
+#### 3. Data Model
+```sql
+-- Example campus_configs structure
+{
+  "current_term_data": {
+    "term_name": "Fall 2025",
+    "start_date": "2025-08-26",
+    "end_date": "2025-12-15",
+    "finals_start": "2025-12-08",
+    "breaks": [
+      {"name": "Thanksgiving", "start": "2025-11-27", "end": "2025-11-30"}
+    ]
+  },
+  "academic_calendar": {
+    "terms": [
+      {
+        "name": "Fall 2025",
+        "start": "2025-08-26",
+        "end": "2025-12-15"
+      },
+      {
+        "name": "Winter 2026",
+        "start": "2026-01-06",
+        "end": "2026-04-24"
+      }
+    ]
+  }
+}
+```
+
+## Gap Analysis - What's Missing
+
+### 1. Semester Transition ("Reset") Process
+**Problem**: No mechanism for users to:
+- Prepare their next semester before it starts
+- Clear/archive old semester data
+- Switch active view between semesters
+
+**Impact**: Students can't set up Winter 2026 courses while still in Fall 2025.
+
+### 2. Multi-Semester Data Management
+**Problem**:
+- Service data is partitioned by month, not by term
+- No clear separation between "current term data" and "historical data"
+- Course enrollments don't have explicit term associations
+
+### 3. User-Initiated Term Selection
+**Problem**: No UI for students to:
+- View available semesters
+- Select which semester they're setting up
+- Preview upcoming semester workload
+
+## Proposed Solution: Semester Reset System
+
+### Core Concept
+Allow students to "set up" their next semester while the current one is still active, with a clear transition process when the new term begins.
+
+### User Flow
+
+#### Phase 1: Preparation (2-4 weeks before term end)
+1. User receives notification: "Ready to set up Winter 2026?"
+2. User can upload syllabi tagged for next term
+3. User can connect Canvas courses for upcoming term
+4. Data is stored but not displayed as "current"
+
+#### Phase 2: Transition (Term changeover)
+1. System detects term end date passed
+2. Prompts user: "Winter 2026 has started. Switch now?"
+3. User confirms → old term archived, new term becomes active
+4. OR automatic transition based on dates
+
+#### Phase 3: Archive
+1. Previous term data remains accessible
+2. Grades, notes, completed assignments preserved
+3. Historical view available in settings/archive
+
+### Data Architecture
+
+#### Option A: Term-Tagged Service Data
+Add `term_id` to service_data for explicit term association:
+```sql
+ALTER TABLE service_data ADD COLUMN term_id TEXT;
+-- Example: "Fall_2025", "Winter_2026"
+```
+
+#### Option B: Context-Based Term Management
+Create term contexts in the hierarchy:
+```
+Student Context
+├── Fall 2025 Term Context
+│   ├── Course: EECS 281
+│   ├── Course: MATH 215
+│   └── ...
+└── Winter 2026 Term Context
+    ├── Course: EECS 370
+    └── ...
+```
+
+#### Option C: Temporal Partitioning (Current Approach)
+Rely on `fetched_at` timestamps + `academic_calendar` to determine term membership.
+
+**Recommendation**: Start with Option A (lightweight) with migration path to Option B for full flexibility.
+
+### API Endpoints Needed
+
+```typescript
+// Get available terms for user's campus
+GET /api/v1/terms
+Response: { terms: [{ id, name, start, end, isCurrent, canSetUp }] }
+
+// Switch active term context
+POST /api/v1/terms/switch
+Body: { term_id: "Winter_2026" }
+
+// Archive current term
+POST /api/v1/terms/archive
+Body: { term_id: "Fall_2025" }
+
+// Get setup status for upcoming term
+GET /api/v1/terms/:termId/setup-status
+Response: { syllabi: 3, courses: 5, calendarsConnected: true }
+```
+
+### UI Components
+
+#### 1. Term Selector
+- Dropdown/toggle in header showing current term
+- Ability to switch views between terms
+- Clear indicator of which term is "live"
+
+#### 2. Setup Wizard
+- "Set up next semester" card on dashboard
+- Progress tracker (syllabi uploaded, courses connected)
+- Estimated workload preview
+
+#### 3. Transition Modal
+- Appears when new term starts
+- Shows what will change
+- Confirm/delay transition
+
+#### 4. Archive Access
+- Historical term viewer
+- Grades and performance summary
+- Export options
+
+## Implementation Phases
+
+### Phase 1: Foundation (MVP)
+- [ ] Add `term_id` field to service_data
+- [ ] Create terms API endpoint
+- [ ] Basic term selector UI
+- [ ] Manual term switch capability
+
+### Phase 2: Automation
+- [ ] Automatic term detection from academic calendar
+- [ ] Pre-term setup notifications
+- [ ] Transition prompts and workflow
+
+### Phase 3: Intelligence
+- [ ] Cross-term insights (GPA trends, workload comparison)
+- [ ] Smart archive recommendations
+- [ ] Multi-year academic planning view
+
+## Integration Points
+
+### Canvas Integration
+- Already have `canvas_term_map` for term ID resolution
+- Need to query Canvas for "upcoming term" enrollments
+- Handle Canvas enrollment states (invited, active)
+
+### BrainGains/Syllabus System
+- Tag syllabi with term
+- Allow pre-upload for next semester
+- Clear syllabus-to-term association
+
+### Notifications (Customer.io)
+- "Set up your next semester" campaign
+- "Your term is ending" reminder
+- "New term starting" transition notice
+
+### Dashboard/Widgets
+- Term-aware data filtering
+- "Next semester preview" widget
+- Workload comparison across terms
+
+## Open Questions
+
+1. **Retroactive Term Assignment**: How do we handle existing data without term tags?
+2. **Quarter vs Semester**: Different term cadences at different schools
+3. **Summer Terms**: Optional, shorter duration
+4. **Cross-Listed Courses**: Courses spanning multiple terms
+5. **Transfer Students**: Mid-year school changes
+
+## Related Documents
+
+- [Total Semester View](/docs/product/features/total-semester-view) - Semester-wide analysis feature
+- Canvas Integration - LMS connection
+- BrainGains - Syllabus processing
+- [5 Core User Journeys](/docs/plans/planning/5-core-user-journeys) - User experience framework
+- [Onboarding](/docs/product/features/onboarding/onboarding) - Initial setup flow
+
+## Technical References
+
+### Database Migrations
+- `20250821_create_syllabus_ingestion_config.sql` - Initial term data structure
+- `20250824_rename_to_campus_configs.sql` - Campus configuration
+- `20251021_canvas_term_map.sql` - Canvas term mapping
+
+### Code Locations
+- Term detection: `services/engine/src/activities/campus/`
+- Dashboard composite: `services/api-router/src/routes/dashboard/`
+- Academic calendar: `services/engine/src/services/academicCalendar.ts`
+
+---
+
+*This is a living document. Updates will be made as the feature develops.*
+
+*Tags: #feature #planning #semester #critical*

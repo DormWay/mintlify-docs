@@ -1,0 +1,93 @@
+---
+title: "Zuplo Local Development Pivot"
+description: "1. **Zuplo Edge Gateway** handles routing, inbound Clerk validation (or legacy Auth0), and outbound shared-secret headers. 2. **Inbound Policies** (layered):"
+---
+
+# Zuplo-Based Local Development Pivot
+
+**Status**: ✅ ACTIVE (Implemented October 2, 2025)
+**Replaces**: LocalStack for local API Gateway development
+
+## Goals
+- Remove the Localstack + API Gateway requirement from day-to-day development while preserving production parity.
+- Keep authorization logic centralized in Zuplo so every request (local, staging, prod) passes through consistent policies.
+- Provide a low-friction local workflow that lets engineers run the stack with Docker Compose and a Zuplo dev server, without ngrok tunnels or identity-provider round-trips.
+
+## Current Pain Points
+- Lambda authorizers and API Gateway mocks require Localstack, adding heavy startup cost and flakiness.
+- Legacy Auth0 + API Gateway validation depends on IAM-style responses; reproducing this locally is cumbersome.
+- Engineers currently rely on ngrok or custom tunnels when they want Zuplo or external services to reach their Docker containers.
+
+## Target Architecture (Dev & Prod)
+1. **Zuplo Edge Gateway** handles routing, inbound Clerk validation (or legacy Auth0), and outbound shared-secret headers.
+2. **Inbound Policies** (layered):
+   - `clerk-jwt-auth-inbound` verifies real Clerk tokens (staging/prod).
+   - `clerk-enrichment` extracts DormWay identity (backend UUID, role arrays, etc.) and stamps it into headers for downstream services.
+   - Optional dev bypass inside the enrichment policy injects a fake auth context when `devMode` is enabled and `environment.ENVIRONMENT !== 'production'`.
+3. **Outbound Policy** adds `backend-secret: $env(BACKEND_SECRET)` so only Zuplo-sourced traffic reaches the API container.
+4. **Backend Services** (api-router, engine, etc.) run in Docker and verify the shared secret before processing requests.
+
+## Local Development Workflow
+1. Run the backend stack with Docker Compose (Postgres, Redis, api-router, engine, etc.).
+2. Start Zuplo’s dev server (`zuplo dev --env dev`) pointing at `http://host.docker.internal:<port>` for each service.
+3. Enable `devMode` in the enrichment policy; Zuplo will inject a canned user context instead of calling Clerk.
+4. Backend verifies the shared secret header and trusts the injected headers (`x-user-id`, `x-user-role`, etc.).
+5. No ngrok required—Zuplo dev server can forward directly to the Docker host.
+
+## Environment Configuration
+- **Zuplo**
+  - `BACKEND_SECRET` (secret) – shared value added by the outbound set-header policy.
+  - `CLERK_FRONTEND_API_URL` – used by the Clerk inbound policy in staging/prod.
+  - `DEV_MODE` (policy option) – enables stub auth in local dev.
+- **Backend Containers**
+  - `BACKEND_SECRET` – compare against `req.header('backend-secret')` in a simple middleware.
+  - No Localstack variables needed; runtime uses the Zuplo-provided headers for auth context.
+
+## Auth Simulation Strategy
+- In dev mode the enrichment policy short-circuits and writes a synthetic identity to headers.
+- Production/staging continue to require valid Clerk JWTs; the dev bypass is gated by environment.
+
+## Security Considerations
+- Backend middleware rejects requests missing or mismatching `backend-secret`.
+- For prod deploys, combine the shared secret with network controls (Zuplo egress allowlist, AWS PrivateLink/mTLS if required).
+- Log rejection reasons both in Zuplo (policy-level logging) and in the container for auditing.
+
+## Migration Steps
+
+### ✅ Completed (October 2, 2025)
+1. ✅ Stand up Zuplo dev environment alongside the current API Gateway to validate routing and policies.
+2. ✅ Implement the enrichment policy and backend header verification.
+3. ✅ Update Docker Compose / docs to start Zuplo dev server as part of the local stack.
+4. ✅ Remove Localstack dependency from onboarding docs and scripts.
+
+### 🔄 In Progress
+5. Gradually move staging/prod traffic from API Gateway to Zuplo once monitoring and dashboards are ready.
+
+## Implementation Status (October 2025)
+
+### ✅ Completed
+- Docker Compose integration (`infrastructure/docker/docker-compose.zuplo.yml`)
+- Makefile commands: `make zuplo`, `make zuplo-stop`, `make zuplo-logs`, `make zuplo-restart`, `make zuplo-build`
+- Test harness updated to use Zuplo endpoint (port 9000)
+- README and CLAUDE.md documentation updated
+- LocalStack marked as deprecated
+
+### 📍 Repository Structure
+```
+/Users/yourname/Development/GitHub/
+├── dormway-platform/          # This repo
+│   └── infrastructure/docker/
+│       └── docker-compose.zuplo.yml
+└── dormway-api-2/             # Zuplo gateway repo (separate)
+    ├── config/
+    ├── modules/
+    └── Dockerfile.dev
+```
+
+**Important**: The `dormway-api-2` repository must be cloned as a sibling to `dormway-platform` for the Docker Compose volume mounts to work correctly.
+
+### 🔄 Open Items
+- Decide whether to publish short-lived JWTs from Zuplo to prevent replay attacks (optional hardening)
+- Determine if any existing services depend on API Gateway-specific features (usage plans, WebSocket APIs) before decommissioning
+- Update CI pipelines to lint/test Zuplo policies and diff environment variable requirements
+- Production/staging traffic migration (pending monitoring setup)

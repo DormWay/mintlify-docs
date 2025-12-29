@@ -1,0 +1,38 @@
+---
+title: "term view refresh strategy"
+---
+
+# Term View Refresh Strategy
+
+## Goals
+- Keep Term View aligned with the latest per-course intelligence as students upload new material.
+- Minimize compute costs by refreshing incrementally while preserving a full-fidelity semester summary.
+- Ensure downstream workflows (Academic Pulse, Course Command Center, Workload Intelligence) stay in sync with course-scoped knowledge.
+
+## Document Segmentation & Metadata
+- Partition Ragie indices by user (e.g., `user:{userId}`) and tag every chunk with:
+  - `courseContextId` (primary join key), plus `courseId`, `termId`, `sourceType`, `ingestionVersion`.
+  - Optional `classificationState` (`unclassified`, `pendingApproval`, `active`).
+- Uploader + Padlock flow must require course/context assignment before release. When uncertain, drop into an `unclassified` holding area and surface a prompt to the student to resolve.
+- Enforce dedupe by hashing file contents; reuse metadata when a document is reassigned between courses.
+
+## Ragie Retrieval Pattern
+- Retrieval queries stay within the user partition and filter on `courseContextId == targetCourse` (additional filters for sourceType or recency as needed).
+- Store Ragie vector IDs in a lightweight **Course Knowledge Catalog** (Dynamo/Postgres) keyed by `courseContextId` so workflows can detect which courses gained new material.
+- Catalog entry tracks `lastIngestedAt`, document hashes, and vector counts to simplify delta detection.
+
+## Workflow Integration
+- Term processor builds the base packet (syllabus normalization + time blocks), then fetches `augmentedDocuments` via Ragie using the course filter.
+- Merge augmented insights per course, annotate outputs with the same `courseContextId`, and persist back into `semester_summary` (and any per-course caches) with version metadata.
+- If the Ragie query returns empty for a course, log a warning and fall back to normalized syllabus data.
+
+## Refresh Cadence & Triggering
+- Padlock pipeline updates the Course Knowledge Catalog whenever a document is approved, then enqueues a **Course Delta** task.
+- Scheduler batches course deltas into a nightly (daily) Term View refresh job to limit cost; urgent user-triggered refreshes can still enqueue immediate runs.
+- Nightly job walks the catalog for each user with pending deltas, reruns the term processor only for affected courses, and then rebuilds cross-course aggregates.
+- Maintain observability: metrics for queue depth, refresh duration, cache hit rate, and Ragie query volume.
+
+## Outstanding Questions
+- Define policy for long-running terms (quarter/semester vs trimester) and whether to decay archived documents after term end.
+- Decide where to expose “unclassified documents” alerts in the UI so students resolve gaps quickly.
+- Align nightly refresh timing with Doppler secret rotation / maintenance windows to avoid conflicts.

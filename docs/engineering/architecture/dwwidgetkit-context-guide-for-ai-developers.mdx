@@ -1,0 +1,549 @@
+---
+title: "DWWidgetKit   Context Guide for AI Developers"
+description: "1. **Aggregates everything** - Calendar sync, syllabus parsing, grade tracking, campus events 2. **Automates the boring stuff** - No manual entry, AI extract..."
+---
+
+# DWWidgetKit - Context Guide for AI Developers
+
+**Purpose**: This document provides essential context about DormWay's mission, users, architecture, and product vision to help AI developers understand **WHY** they're building widget features, not just **HOW**. Read this before diving into implementation guides.
+
+**Audience**: AI agents, external developers, new team members working on widget implementation
+
+---
+
+## 📖 What is DormWay?
+
+### Vision Statement
+
+**DormWay is an AI-powered College Command Center** that helps students manage every aspect of their campus life—automatically populating schedules, tracking assignments, recommending events, and providing contextual assistance without overwhelming students with complexity.
+
+### The Problem We Solve
+
+**Students are drowning in fragmented tools:**
+- Canvas for courses, Google Calendar for schedules, email for announcements
+- Manual data entry (typing syllabus due dates by hand)
+- No integration between academic, social, and wellness tools
+- Missed deadlines, confusion about campus resources, academic stress
+- No automatic awareness of context (location, time, semester progress)
+
+### The DormWay Solution
+
+**A unified, intelligent platform that:**
+1. **Aggregates everything** - Calendar sync, syllabus parsing, grade tracking, campus events
+2. **Automates the boring stuff** - No manual entry, AI extracts assignment dates from syllabi
+3. **Context-aware intelligence** - Knows where you are (campus, building), what time it is, what's due soon
+4. **Real-time updates** - Live schedule changes, assignment notifications, campus alerts
+5. **Subtle, optional wellness** - Study break nudges, reflection prompts (never intrusive)
+
+---
+
+## 🎯 Core Value Proposition
+
+### For Students
+
+- **Immediate utility** - Works out of the box, no complicated setup
+- **Time savings** - Automated schedule population, assignment tracking
+- **Context-aware recommendations** - Right information, right place, right time
+- **Privacy-first** - Consent defaults to FALSE, opt-in for everything
+- **No stigma** - Not framed as "therapy" or "self-help," just practical tools
+
+### Key Differentiators
+
+1. **Deep university integration** - Canvas LMS, campus APIs, official data sources
+2. **Automated syllabus parsing** - OCR + AI to extract due dates, exams, class times
+3. **Spatial awareness** - PostGIS detects campus/building automatically (6,000+ campuses)
+4. **AI-powered insights** - CrewAI analyzes syllabi, optimizes schedules, personalizes recommendations
+5. **Cross-platform** - iOS (primary), web apps (LockedIn), admin tools
+
+---
+
+## 👥 Target Users
+
+### Primary User: College Students
+
+**Demographics:**
+- Undergraduate students (18-22 years old)
+- Tech-savvy, mobile-first generation
+- iOS primary, some Android (future)
+- Overwhelmed by academic workload
+
+**Key Behaviors:**
+- Check phone constantly throughout day
+- Use widgets for quick glances (no app opening)
+- Expect instant information (no loading spinners)
+- Value automation over manual work
+- Privacy-conscious (want control over data)
+
+**User Needs:**
+- "What do I have to do today?"
+- "When is my next class?"
+- "What assignments are due this week?"
+- "Where should I study right now?"
+- "What's happening on campus today?"
+
+### The Widget User Specifically
+
+**Context:**
+- On the go between classes
+- Checking phone quickly during break
+- Standing in line, walking to building
+- Need information in <5 seconds
+
+**Widget Use Cases:**
+- Glance at home screen to see next class
+- Check assignments without opening app
+- See AI study recommendation ("Review CS 101 Chapter 5")
+- View weather and campus events at a glance
+- Quick access to most important information
+
+---
+
+## 🏗️ Platform Architecture (High-Level)
+
+### System Overview
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    Client Layer                         │
+├──────────────┬──────────────┬──────────────┬───────────┤
+│  iOS App     │  Widgets     │  LockedIn    │  Admin    │
+│  (SwiftUI)   │  (WidgetKit) │  (Next.js)   │  (React)  │
+└──────────────┴──────────────┴──────────────┴───────────┘
+                         ▼
+┌─────────────────────────────────────────────────────────┐
+│           Zuplo API Gateway (Port 9000)                 │
+│  Auth0/Clerk JWT validation, Rate limiting, Routing     │
+└─────────────────────────────────────────────────────────┘
+                         ▼
+┌─────────────────────────────────────────────────────────┐
+│                  Backend Services                       │
+├──────────────┬──────────────┬──────────────┬───────────┤
+│ API Router   │  Engine      │  DW Crews    │ Ably      │
+│ (Express)    │  (Temporal)  │  (FastAPI)   │ (Real-time)│
+│ Port 3001    │  Port 3030   │  Port 8000   │ Port 3032 │
+└──────────────┴──────────────┴──────────────┴───────────┘
+                         ▼
+┌─────────────────────────────────────────────────────────┐
+│  PostgreSQL + PostGIS (5432) | Redis (6379)             │
+│  User data, Contexts, Spatial | Cache, Sessions         │
+└─────────────────────────────────────────────────────────┘
+                         ▼
+┌─────────────────────────────────────────────────────────┐
+│                 External Services                       │
+│  Canvas LMS | Google Cal | OpenAI | Customer.io         │
+│  Auth0/Clerk | Ably | APNS | AWS (S3, ECS)              │
+└─────────────────────────────────────────────────────────┘
+```
+
+### Key Architectural Concepts
+
+#### 1. Context Hierarchy (Critical!)
+
+DormWay organizes the world hierarchically:
+
+```
+City (Boston)
+ └─ Campus (Boston University)
+     └─ Building (Mugar Library)
+         └─ Course (CS 101)
+             └─ Student (User)
+```
+
+**Why this matters for widgets:**
+- Widgets can be **context-aware** (campus-specific, course-specific)
+- Backend filters data by context
+- Location detection uses PostGIS spatial queries
+- Different widgets for different contexts (campus dining vs. course assignments)
+
+#### 2. Real-Time Architecture (Ably)
+
+DormWay uses **pub/sub messaging** for instant updates:
+- User-specific channels: `user:{userId}:dashboard`
+- Campus-wide channels: `campus:{campusId}:events`
+- Delta coalescing (500ms window, 2 msg/sec rate limit)
+
+**Why this matters for widgets:**
+- Widgets can receive push updates (not just poll)
+- Backend publishes when data changes
+- Lower battery usage, fresher data
+
+#### 3. Composite API Pattern
+
+Backend returns **all widget data in one request**:
+- Endpoint: `GET /dashboard/v1/composite`
+- Returns: widgets array + due items + Canvas courses + metadata
+- ETag caching for efficiency
+
+**Why this matters for widgets:**
+- Single network call = faster loading
+- Consistent timestamp across all widgets
+- Backend handles complexity, client stays simple
+
+---
+
+## 🚀 The 5 Core User Journeys (Beta Launch Scope)
+
+**Status**: Line is snapped (locked July 12, 2025). No scope creep.
+
+### 1. First-Time Onboarding
+- App Store → Authenticated user with profile
+- Campus/building context created
+- Privacy consent (defaults FALSE)
+
+### 2. Syllabus Upload
+- Upload PDF/Word → AI extraction → Calendar events
+- **Immediate value delivery** (retention hook)
+- Study insights generation
+
+### 3. Calendar Connection
+- iOS calendar permission → Event sync
+- Timezone handling (EST, PST, UTC)
+- Comprehensive schedule view
+
+### 4. First BrainGains/Ace Use
+- Context-aware AI responses
+- Syllabus + calendar integration
+- Study planning assistance
+
+### 5. Daily Return User
+- **Smart notifications** (widgets support this!)
+- **Personalized dashboard** (widgets are the dashboard!)
+- Progress tracking, habit formation
+
+### What's NOT Included (Post-Launch)
+
+❌ Study groups, grade tracking, dining integration, transportation, social networking, course selection, professor ratings, textbook marketplace, note-taking, flashcards
+
+**Why this matters for widgets:**
+- Focus on **schedule, assignments, AI recommendations, weather**
+- Don't build widgets for features not in scope
+- Prioritize daily return user experience
+
+---
+
+## 🎨 Widget Role in Product Vision
+
+### Why Widgets Matter
+
+**Widgets are the primary engagement surface for daily return users.**
+
+Students don't want to open the app 20 times a day. They want:
+- Glance at home screen → see next class
+- Glance at home screen → see AI recommendation
+- Glance at home screen → see assignments due today
+
+**Widgets reduce friction** between user need and information.
+
+### Widget Strategy
+
+**Core Widgets (Must Have):**
+1. **Next Action** - "What should I do right now?"
+2. **Ace Recommendation** - AI study suggestion (contextual)
+3. **Schedule** - Upcoming classes and events
+4. **Assignments** - Due items (sorted by urgency)
+
+**Secondary Widgets (Nice to Have):**
+- Academic Momentum - Weekly progress tracking
+- Course Intelligence - Per-course insights
+- Study Blocks - Optimal study time recommendations
+- Weather - Campus-specific weather
+
+### Widget Design Principles
+
+1. **Glanceable** - Information in <5 seconds, no scrolling
+2. **Actionable** - Clear next step ("Review Chapter 5 notes")
+3. **Contextual** - Show relevant info for time/location/semester
+4. **Minimal** - Only most important information
+5. **Consistent** - Use DWDesign system (no custom styling)
+6. **Privacy-respecting** - No sensitive info on lock screen
+
+---
+
+## 🔑 Key Technical Principles
+
+### 1. Privacy First
+
+- **Consent defaults to FALSE** (GDPR, CCPA compliance)
+- Opt-in for all data collection
+- No tracking without explicit permission
+- Widgets respect privacy settings
+
+### 2. Context-Aware Everything
+
+- Widgets adapt to user's context (campus, course, time)
+- Backend filters data by context
+- PostGIS spatial queries for location
+- Timezone-aware (campus local time)
+
+### 3. Automation Over Manual Work
+
+- AI extracts syllabus data (no manual entry)
+- Calendar auto-sync (no typing events)
+- Widgets auto-refresh (no manual refresh)
+
+### 4. Real-Time by Default
+
+- Ably pub/sub for instant updates
+- Push notifications for important changes
+- Widgets receive delta updates
+
+### 5. DWDesign System is Law
+
+- **NEVER hardcode fonts, colors, spacing, radius**
+- Use `DS.Typography.*`, `DS.Color.Semantic.*`, `DS.Spacing.*`, `DS.Radius.*`
+- Design system ensures consistency and accessibility
+- See [DWWidgetKit - iOS Architecture & Design System Guide](/docs/engineering/architecture/dwwidgetkit-ios-architecture-design-system-guide)
+
+---
+
+## 📊 Current Status (Beta Phase)
+
+### Platform Maturity
+
+**Overall**: Beta (November 2025)
+- iOS app: Alpha → Beta transition
+- Backend: Production-ready infrastructure
+- Web app (LockedIn): 15% complete
+- Canvas integration: Backend complete (60% overall)
+
+### Widget Status
+
+**Current Implementation:**
+- ✅ Widget extension created
+- ✅ 2 widgets implemented (Ace, Next Action)
+- ✅ DWDesign system established
+- ✅ Backend composite API operational
+- ⚠️ Real-time updates (not yet integrated)
+- ⚠️ Additional widget types (not yet built)
+
+**Your Mission:**
+- Enhance existing widgets with real backend data
+- Add 2-4 more widget types
+- Integrate real-time updates (Ably)
+- Ensure ETag caching works
+- Make context-aware
+
+---
+
+## 🗣️ Key DormWay Terminology
+
+### Product Terms
+
+- **BrainGains/Ace** - AI assistant (name evolving, same feature)
+- **LockedIn** - Student web app (Next.js)
+- **DayPlan** - Optimized daily schedule generated at 5am campus time
+- **Context** - Hierarchical location/entity (city, campus, building, course, student)
+- **Widget** - Modular UI component (backend term, not iOS WidgetKit specifically)
+- **Composite API** - Single endpoint returning all dashboard data
+
+### Technical Terms
+
+- **Temporal** - Workflow orchestration engine (Python activities)
+- **Zuplo** - API gateway (port 9000, handles auth/routing)
+- **Ably** - Real-time pub/sub messaging service
+- **PostGIS** - PostgreSQL spatial extension (campus detection)
+- **CrewAI** - AI agent framework (syllabus analysis, recommendations)
+- **ETag** - HTTP caching mechanism (304 Not Modified responses)
+
+### iOS-Specific Terms
+
+- **DWDesign** - Design system package (tokens, components)
+- **DWWidgetKit** - Widget implementation package
+- **App Groups** - iOS mechanism for sharing data between app and widgets
+- **Device Key** - Mobile authentication method (preferred over JWT for widgets)
+
+---
+
+## 🎯 How Widgets Fit Into User Journeys
+
+### Journey 5: Daily Return User (Widgets are KEY)
+
+**Scenario**: Student wakes up, checks phone
+
+**Widget Experience:**
+1. **Glance at home screen** (no app opening)
+2. **See Next Action widget**: "Study for CS 101 Midterm (in 3 days)"
+3. **See Schedule widget**: "Next: ECON 201 at 10:00 AM (in 45 min)"
+4. **See Assignments widget**: "3 assignments due this week"
+5. **Tap widget** → Opens app to relevant section
+
+**Without Widgets:**
+1. Unlock phone
+2. Find app icon
+3. Wait for app to open
+4. Wait for data to load
+5. Navigate to schedule tab
+6. **Total time: 10-15 seconds**
+
+**With Widgets:**
+1. Glance at home screen
+2. **Total time: 2 seconds**
+
+**This is why widgets matter.** They're not a nice-to-have, they're essential for daily engagement.
+
+---
+
+## 💡 Design Philosophy (Subtle AI)
+
+### The DormWay Approach
+
+**NOT**: "AI-powered! Machine learning! ChatGPT for students!"
+**YES**: "Here's what's due today. Here's what to study. It just works."
+
+**Principles:**
+1. **AI is invisible** - Works behind the scenes, users see results
+2. **No jargon** - Never say "AI analyzed your syllabus," just show the results
+3. **Helpful, not pushy** - Suggestions, not commands
+4. **Opt-in wellness** - Reflection prompts optional, never intrusive
+5. **No stigma** - Not therapy, not self-help, just practical tools
+
+### Widget-Specific Philosophy
+
+**Widgets should feel like magic:**
+- Information appears automatically (no refresh button)
+- Always up-to-date (real-time updates)
+- Context-aware (right info at right time)
+- No configuration needed (works out of the box)
+
+**Widgets should NOT:**
+- Show loading spinners (use cached data)
+- Display errors prominently (show helpful fallback)
+- Require user interaction (glance only)
+- Use confusing AI terminology ("ML-powered recommendation")
+
+---
+
+## 📚 Essential Reading (In Order)
+
+### For Widget Implementation
+
+1. **[DWWidgetKit - Context Guide for AI Developers](/docs/engineering/architecture/dwwidgetkit-context-guide-for-ai-developers)** (this doc) - Read first!
+2. **[DWWidgetKit - iOS Architecture & Design System Guide](/docs/engineering/architecture/dwwidgetkit-ios-architecture-design-system-guide)** - Swift patterns, DWDesign
+3. **[DWWidgetKit - Backend Integration Guide](/docs/engineering/architecture/dwwidgetkit-backend-integration-guide)** - API integration, real-time, caching
+
+### For Broader Context
+
+4. **DormWay Platform - Comprehensive Guide** (`.workspace/current-state/architecture/DORMWAY_COMPREHENSIVE_GUIDE.md`) - Full platform overview
+5. **DormWay Product Overview** (`obsidian-vault/DormWay/Plans/Planning/DormWay Product Overview.md`) - Vision and mission
+6. **5 Core User Journeys** (`obsidian-vault/DormWay/Product/Features/5 Core User Journeys/README.md`) - Beta scope
+
+### For Specific Features
+
+7. **WIDGET_API_GUIDE.md** (workspace root) - Complete backend API reference
+8. **WIDGET_IMPLEMENTATION_OVERVIEW.md** (`.repos/ios-clean/`) - Current iOS implementation
+9. **REALTIME_ABLY_SPECIFICATION.md** (`obsidian-vault/DormWay/Product/Beta/`) - Real-time architecture
+
+---
+
+## 🎓 Decision-Making Framework
+
+When implementing widgets, ask yourself:
+
+### 1. Does this serve a daily return user?
+- ✅ Yes → Prioritize
+- ❌ No → Deprioritize (focus on core journeys)
+
+### 2. Is this glanceable?
+- ✅ Information visible in <5 seconds → Good widget
+- ❌ Requires scrolling or interaction → Reconsider
+
+### 3. Does this use real backend data?
+- ✅ Yes, from composite API → Correct
+- ❌ Using mock data → Fix before proceeding
+
+### 4. Is this context-aware?
+- ✅ Shows relevant info for time/location → Good
+- ❌ Generic, not personalized → Add context filtering
+
+### 5. Does this follow DWDesign?
+- ✅ All styling from DWDesign tokens → Correct
+- ❌ Hardcoded fonts/colors/spacing → Fix immediately
+
+### 6. Is this privacy-respecting?
+- ✅ No sensitive info on lock screen → Good
+- ❌ Shows grades/private data → Add privacy filter
+
+---
+
+## 🚦 When to Ask for Guidance
+
+You're an AI developer, but you should seek clarification when:
+
+### Red Flags (Stop and Ask)
+
+1. **Scope creep detected** - Feature not in 5 core journeys
+2. **Privacy concerns** - Unsure if data is sensitive
+3. **API doesn't exist** - Endpoint you need is missing
+4. **Architecture conflict** - Pattern conflicts with system design
+5. **Performance issues** - Widget takes >2 seconds to load
+6. **Design system gaps** - DWDesign token doesn't exist for your need
+
+### Green Lights (Proceed Confidently)
+
+1. **Implementing core widgets** - Schedule, assignments, Ace, next action
+2. **Using composite API** - `GET /dashboard/v1/composite`
+3. **Following DWDesign** - Using all tokens, no hardcoded values
+4. **Adding real-time** - Ably integration for push updates
+5. **Improving error states** - Better loading/error UX
+6. **Adding tests** - Unit tests, snapshot tests
+
+---
+
+## 🎯 Your Mission (Summary)
+
+As an AI developer working on DormWay widgets, your goal is:
+
+**Build widgets that help students succeed by providing the right information at the right time, automatically, with zero friction.**
+
+**Key Success Criteria:**
+1. **Glanceable** - Info in <5 seconds
+2. **Context-aware** - Relevant to time/location/user
+3. **Real-time** - Always up-to-date
+4. **Privacy-respecting** - Consent-driven, secure
+5. **DWDesign compliant** - Consistent, accessible
+6. **Daily engagement** - Students check widgets 10+ times/day
+
+**Remember:**
+- Widgets are the primary engagement surface
+- Daily return users are the key to retention
+- Automation beats manual work every time
+- Context awareness is our differentiator
+- Privacy is non-negotiable
+
+---
+
+## 📞 Key Contacts & Resources
+
+### Documentation
+
+- **This workspace**: `dormway-beta-workspace/`
+- **iOS repo**: `.repos/ios-clean/`
+- **Backend repo**: `.repos/dormway-platform/`
+- **Obsidian vault**: `obsidian-vault/DormWay/`
+
+### Quick Links
+
+- **CLAUDE.md files**: Guidance for AI developers (you!)
+- **Widget guides**: `obsidian-vault/DormWay/Engineering/Architecture/DWWidgetKit*.md`
+- **Beta specs**: `.workspace/current-state/beta-specs/`
+- **Implementation plans**: `.workspace/implementation-plans/widgets/`
+
+### When You're Stuck
+
+1. Check **CLAUDE.md** files (workspace and repos)
+2. Review **Architecture/** docs in obsidian-vault
+3. Search **Memory/** for recent context
+4. Check **Bug Reports/** for known issues
+5. Ask user for clarification (don't guess!)
+
+---
+
+**Last Updated:** 2025-11-06
+**Owner:** iOS Team
+**Status:** Current
+
+**Next Steps**: Read [DWWidgetKit - iOS Architecture & Design System Guide](/docs/engineering/architecture/dwwidgetkit-ios-architecture-design-system-guide) to learn implementation patterns.
+
+---
+
+**Welcome to DormWay! You're building something that will help thousands of students succeed. Let's make it amazing. 🚀**

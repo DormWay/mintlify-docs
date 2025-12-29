@@ -1,0 +1,500 @@
+---
+title: "Datetime Utilities"
+description: "import { convertUTCToLocal, convertLocalToUTC, formatForDisplay, formatForAPIResponse, formatForLLM, getCurrentTimeInTimezone, convertTimeBlocksForLLM, ensur..."
+---
+
+# Datetime Utilities
+
+## Overview
+
+**@dormway/core/utils/datetime** provides timezone-aware date formatting for API responses, LLM prompts, and display using date-fns and date-fns-tz.
+
+**Purpose**: Centralized date/time handling with proper timezone conversion for multi-campus system spanning US timezones.
+
+**Location**: `@dormway/core/utils/datetime`
+
+---
+
+## Installation
+
+```typescript
+import {
+  convertUTCToLocal,
+  convertLocalToUTC,
+  formatForDisplay,
+  formatForAPIResponse,
+  formatForLLM,
+  getCurrentTimeInTimezone,
+  convertTimeBlocksForLLM,
+  ensureDateInText,
+} from '@dormway/core/utils/datetime/formatting';
+```
+
+---
+
+## Format Presets
+
+**Built-in format presets**:
+
+| Preset | Format | Example | Use Case |
+|--------|--------|---------|----------|
+| `iso` | ISO 8601 with offset | `2025-11-23T14:30:00.000-05:00` | API storage |
+| `display` | Human-readable | `Nov 23, 2025 2:30 PM EST` | UI display |
+| `llm` | Simple local time | `11/23/2025 14:30` | LLM prompts |
+| `api` | ISO 8601 | `2025-11-23T14:30:00.000-05:00` | API responses |
+| `date_only` | Date only | `11/23/2025` | Calendar views |
+| `time_only` | Time only | `2:30 PM` | Time pickers |
+| `full` | Full readable | `Saturday, November 23, 2025 at 2:30 PM EST` | Notifications |
+
+---
+
+## Functions
+
+### convertUTCToLocal
+
+Convert UTC timestamp to local timezone.
+
+**Signature**:
+```typescript
+convertUTCToLocal(utcTimestamp: string | Date, timezone: string): string
+```
+
+**Example**:
+```typescript
+const utc = '2025-11-23T19:30:00.000Z';
+const est = convertUTCToLocal(utc, 'America/New_York');
+// "2025-11-23 14:30:00 EST"
+
+const pst = convertUTCToLocal(utc, 'America/Los_Angeles');
+// "2025-11-23 11:30:00 PST"
+```
+
+---
+
+### convertLocalToUTC
+
+Convert local timezone timestamp to UTC.
+
+**Signature**:
+```typescript
+convertLocalToUTC(localTimestamp: string | Date, timezone: string): string
+```
+
+**Example**:
+```typescript
+const local = '2025-11-23T14:30:00';
+const utc = convertLocalToUTC(local, 'America/New_York');
+// "2025-11-23T19:30:00.000Z"
+```
+
+---
+
+### formatForDisplay
+
+Format date for display in user's timezone.
+
+**Signature**:
+```typescript
+formatForDisplay(
+  timestamp: string | Date,
+  timezone: string,
+  preset?: DateFormatPreset
+): string
+```
+
+**Examples**:
+```typescript
+const ts = '2025-11-23T19:30:00.000Z';
+
+// Display format (default)
+formatForDisplay(ts, 'America/New_York');
+// "Nov 23, 2025 2:30 PM EST"
+
+// Date only
+formatForDisplay(ts, 'America/New_York', 'date_only');
+// "11/23/2025"
+
+// Time only
+formatForDisplay(ts, 'America/New_York', 'time_only');
+// "2:30 PM"
+
+// Full format
+formatForDisplay(ts, 'America/New_York', 'full');
+// "Saturday, November 23, 2025 at 2:30 PM EST"
+```
+
+---
+
+### formatForAPIResponse
+
+Format date for API response with timezone offset.
+
+**Signature**:
+```typescript
+formatForAPIResponse(timestamp: string | Date, timezone: string): string
+```
+
+**Example**:
+```typescript
+const ts = new Date('2025-11-23T14:30:00');
+const apiFormat = formatForAPIResponse(ts, 'America/New_York');
+// "2025-11-23T14:30:00.000-05:00"
+```
+
+---
+
+### formatForLLM
+
+Format date for LLM processing (simple local time string).
+
+**Signature**:
+```typescript
+formatForLLM(timestamp: string | Date, timezone: string): string
+```
+
+**Example**:
+```typescript
+const ts = '2025-11-23T19:30:00.000Z';
+const llmFormat = formatForLLM(ts, 'America/New_York');
+// "11/23/2025 14:30"
+
+// Use in LLM prompt
+const prompt = `
+Current time: ${llmFormat}
+Student's schedule starts at ${formatForLLM(classStart, timezone)}
+`;
+```
+
+**Why simple format for LLMs?**
+- LLMs work better with simple date formats in local time
+- Avoids confusion with UTC offsets and timezone abbreviations
+- More human-readable for LLM understanding
+
+---
+
+### getCurrentTimeInTimezone
+
+Get current time in specified timezone.
+
+**Signature**:
+```typescript
+getCurrentTimeInTimezone(timezone: string): string
+```
+
+**Example**:
+```typescript
+const nyTime = getCurrentTimeInTimezone('America/New_York');
+// "2025-11-23 14:30:00 EST"
+
+const laTime = getCurrentTimeInTimezone('America/Los_Angeles');
+// "2025-11-23 11:30:00 PST"
+```
+
+---
+
+### ensureDateInText
+
+Ensure date is present in text for LLM prompts (critical for temporal context).
+
+**Signature**:
+```typescript
+ensureDateInText(text: string): string
+```
+
+**Examples**:
+```typescript
+// Text without date
+const text = "Generate a dayplan for the student.";
+const withDate = ensureDateInText(text);
+// "Current date/time: Saturday, November 23, 2025 at 2:30 PM\n\nGenerate a dayplan for the student."
+
+// Text already has date
+const textWithDate = "Today is 11/23/2025. Generate dayplan.";
+ensureDateInText(textWithDate);
+// Returns original text (no change)
+```
+
+**Detected date patterns**:
+- `MM/DD/YYYY`
+- `YYYY-MM-DD`
+- `Month DD, YYYY`
+- Day of week names
+- "current date", "today is", etc.
+
+---
+
+### convertTimeBlocksForLLM
+
+Convert time blocks to user's timezone for LLM processing.
+
+**Signature**:
+```typescript
+convertTimeBlocksForLLM(timeBlocks: unknown[], timezone: string): unknown[]
+```
+
+**Example**:
+```typescript
+const blocks = [
+  {
+    id: 1,
+    title: 'Math 101',
+    start_time: '2025-11-23T14:00:00.000Z',
+    end_time: '2025-11-23T15:30:00.000Z',
+  },
+  {
+    id: 2,
+    title: 'Study Session',
+    start_time: '2025-11-23T16:00:00.000Z',
+    end_time: '2025-11-23T18:00:00.000Z',
+  },
+];
+
+const localBlocks = convertTimeBlocksForLLM(blocks, 'America/New_York');
+// [
+//   {
+//     id: 1,
+//     title: 'Math 101',
+//     start_time: '11/23/2025 09:00',
+//     end_time: '11/23/2025 10:30',
+//   },
+//   {
+//     id: 2,
+//     title: 'Study Session',
+//     start_time: '11/23/2025 11:00',
+//     end_time: '11/23/2025 13:00',
+//   },
+// ]
+```
+
+---
+
+### convertTimeBlocksForAPI
+
+Convert time blocks to API response format with timezone metadata.
+
+**Signature**:
+```typescript
+convertTimeBlocksForAPI(timeBlocks: unknown[], timezone: string): unknown[]
+```
+
+**Example**:
+```typescript
+const blocks = [
+  {
+    id: 1,
+    title: 'Math 101',
+    start_time: '2025-11-23T14:00:00',
+    end_time: '2025-11-23T15:30:00',
+  },
+];
+
+const apiBlocks = convertTimeBlocksForAPI(blocks, 'America/New_York');
+// [
+//   {
+//     id: 1,
+//     title: 'Math 101',
+//     start_time: '2025-11-23T14:00:00.000-05:00',
+//     end_time: '2025-11-23T15:30:00.000-05:00',
+//     timezone: 'America/New_York',
+//   },
+// ]
+```
+
+---
+
+## Common Patterns
+
+### Pattern 1: API Response Formatting
+
+```typescript
+import { formatForAPIResponse } from '@dormway/core/utils/datetime/formatting';
+
+async function getDayPlan(userId: string, date: string) {
+  const dayplan = await fetchDayPlan(userId, date);
+  const timezone = await getUserTimezone(userId);
+
+  return {
+    ...dayplan,
+    generated_at: formatForAPIResponse(dayplan.generated_at, timezone),
+    items: dayplan.items.map((item) => ({
+      ...item,
+      start_time: formatForAPIResponse(item.start_time, timezone),
+      end_time: formatForAPIResponse(item.end_time, timezone),
+    })),
+  };
+}
+```
+
+---
+
+### Pattern 2: LLM Prompt Preparation
+
+```typescript
+import { formatForLLM, ensureDateInText, convertTimeBlocksForLLM } from '@dormway/core/utils/datetime/formatting';
+
+async function generateDayPlanPrompt(student: Student, date: string) {
+  const timezone = student.campus.timezone;
+  const schedule = await getStudentSchedule(student.id, date);
+
+  // Convert schedule to local time for LLM
+  const localSchedule = convertTimeBlocksForLLM(schedule, timezone);
+
+  // Build prompt with date context
+  const prompt = ensureDateInText(`
+    Generate a dayplan for ${student.name}.
+    Current time: ${formatForLLM(new Date(), timezone)}
+    Target date: ${date}
+
+    Schedule:
+    ${JSON.stringify(localSchedule, null, 2)}
+  `);
+
+  return prompt;
+}
+```
+
+---
+
+### Pattern 3: Multi-Campus Time Display
+
+```typescript
+import { getCurrentTimeInTimezone } from '@dormway/core/utils/datetime/formatting';
+
+function displayCampusTimes(campuses: Campus[]) {
+  return campuses.map((campus) => ({
+    campus: campus.name,
+    localTime: getCurrentTimeInTimezone(campus.timezone),
+  }));
+}
+
+// Example output:
+// [
+//   { campus: 'University of Michigan', localTime: '2025-11-23 14:30:00 EST' },
+//   { campus: 'UCLA', localTime: '2025-11-23 11:30:00 PST' },
+// ]
+```
+
+---
+
+### Pattern 4: User-Specific Time Conversion
+
+```typescript
+import { convertUTCToLocal, formatForDisplay } from '@dormway/core/utils/datetime/formatting';
+
+async function getUpcomingAssignments(userId: string) {
+  const assignments = await fetchAssignments(userId);
+  const timezone = await getUserTimezone(userId);
+
+  return assignments.map((assignment) => ({
+    ...assignment,
+    due_date_display: formatForDisplay(assignment.due_date, timezone, 'full'),
+    due_date_local: convertUTCToLocal(assignment.due_date, timezone),
+  }));
+}
+```
+
+---
+
+### Pattern 5: Calendar Event Formatting
+
+```typescript
+import { formatForDisplay } from '@dormway/core/utils/datetime/formatting';
+
+function formatCalendarEvent(event: CalendarEvent, timezone: string) {
+  return {
+    id: event.id,
+    title: event.title,
+    start: formatForDisplay(event.start_time, timezone, 'display'),
+    end: formatForDisplay(event.end_time, timezone, 'time_only'),
+    date: formatForDisplay(event.start_time, timezone, 'date_only'),
+  };
+}
+
+// Example output:
+// {
+//   id: 'event-123',
+//   title: 'Math 101 Exam',
+//   start: 'Nov 23, 2025 2:00 PM EST',
+//   end: '3:30 PM',
+//   date: '11/23/2025',
+// }
+```
+
+---
+
+### Pattern 6: Timezone-Aware Filtering
+
+```typescript
+import { convertLocalToUTC } from '@dormway/core/utils/datetime/formatting';
+
+async function getEventsInTimeRange(
+  userId: string,
+  startLocal: string,
+  endLocal: string
+) {
+  const timezone = await getUserTimezone(userId);
+
+  // Convert local time range to UTC for database query
+  const startUTC = convertLocalToUTC(startLocal, timezone);
+  const endUTC = convertLocalToUTC(endLocal, timezone);
+
+  const query = `
+    SELECT * FROM events
+    WHERE user_id = $1
+      AND start_time >= $2
+      AND start_time <= $3
+  `;
+
+  return pool.query(query, [userId, startUTC, endUTC]);
+}
+```
+
+---
+
+## Best Practices
+
+### ✅ Do
+
+- **Always use IANA timezone identifiers** (e.g., `America/New_York`, not `EST`)
+- **Store dates in UTC** in the database, convert to local for display
+- **Use formatForLLM** for LLM prompts (simple format works better)
+- **Use formatForAPIResponse** for API responses (includes timezone offset)
+- **Use ensureDateInText** for all LLM prompts requiring temporal context
+- **Convert time blocks** before sending to LLM or API
+- **Handle invalid dates gracefully** (functions return fallback strings)
+
+### ❌ Don't
+
+- **Don't use timezone abbreviations** (EST, PST) - use IANA identifiers
+- **Don't forget timezone conversion** when displaying dates to users
+- **Don't send UTC timestamps to LLMs** - convert to local time first
+- **Don't hardcode date formats** - use presets for consistency
+- **Don't assume user's timezone** - always fetch from user/campus context
+- **Don't mix local and UTC** without clear labeling
+- **Don't skip ensureDateInText** for LLM prompts with temporal context
+
+---
+
+## Common Timezones
+
+**US Campus Timezones**:
+- `America/New_York` - Eastern (EST/EDT)
+- `America/Chicago` - Central (CST/CDT)
+- `America/Denver` - Mountain (MST/MDT)
+- `America/Los_Angeles` - Pacific (PST/PDT)
+- `America/Phoenix` - Arizona (no DST)
+- `America/Anchorage` - Alaska
+- `Pacific/Honolulu` - Hawaii (no DST)
+
+---
+
+## Related Documentation
+
+- [DormWay Core Library (@dormway-core)](/docs/engineering/technical/dormway-core-library-dormway-core) - Main overview
+- [DayPlanDataService](/docs/engineering/technical/dormway-core/domain-services/dayplandataservice) - Uses datetime formatting for dayplan generation
+- [CampusService](/docs/engineering/technical/dormway-core/domain-services/campusservice) - Campus timezone management
+
+---
+
+**Last Updated**: 2025-11-23
+**Maintainer**: Platform Team

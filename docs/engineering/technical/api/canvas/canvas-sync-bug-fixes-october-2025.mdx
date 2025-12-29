@@ -1,0 +1,362 @@
+---
+title: "Canvas Sync Bug Fixes   October 2025"
+description: "Fixed critical multi-tenant data corruption bug in Canvas sync that would have overwritten course data when multiple universities have courses with the same..."
+---
+
+# Canvas Sync Bug Fixes - October 2025
+
+**Date**: October 21, 2025
+**Status**: ✅ Production Ready
+**Priority**: 🔴 Critical - Required before multi-campus deployment
+**Tags**: #canvas #bugfix #migration #database #production-blocker
+
+---
+
+## Executive Summary
+
+Fixed critical multi-tenant data corruption bug in Canvas sync that would have overwritten course data when multiple universities have courses with the same code (e.g., "MATH 101"). Implemented course filtering system to prevent orientation/sandbox courses from syncing. All fixes tested and validated.
+
+### Test Results ✅
+- **Courses synced**: 12/12 (100%)
+- **Assignments synced**: 182 assignments across all courses
+- **Time blocks created**: Successfully created without errors
+- **Deduplication**: Working correctly (1 duplicate detected and handled)
+- **Database constraints**: Multi-tenant safe
+- **Lifecycle status**: Semantic correctness restored
+- **PostgreSQL errors**: ZERO constraint violations
+
+---
+
+## Critical Fixes Implemented
+
+### 1. Multi-Tenant Course Unique Constraint (Production Blocker)
+
+**Problem**: The unique constraint on `contexts` table was `(external_id, type)`, but `external_id` does NOT include organization info. Two different universities with "MATH 101" would both have `external_id = "course:MATH-101"`, causing the second campus to overwrite the first's data.
+
+**Root Cause**:
+```typescript
+// buildCourseExternalId() in utils/courseCode.ts
+export function buildCourseExternalId(meta: CourseCodeMetadata): string {
+  return `course:${meta.canonicalWithSection}`;  // e.g., "course:MATH-101"
+  // ❌ NO organization info included!
+}
+```
+
+**Fix**:
+- **Migration**: `082_fix_course_unique_constraint.sql`
+  - Dropped old constraint: `(external_id, type)`
+  - Created new constraint: `(external_id, type, organization_id)`
+  - Added supporting index for lookups
+
+**Files Changed**:
+- `infrastructure/database/migrations/082_fix_course_unique_constraint.sql`
+- `services/engine/src/activities/course.activities.ts:257`
+
+---
+
+### 2. Lifecycle Status Semantic Correctness
+
+**Problem**: Using `'superseded'` for completed/submitted assignments was semantically incorrect. `'superseded'` means "replaced by a newer version", not "finished/done".
+
+**Fix**:
+- **Migration**: `083_add_completed_lifecycle_status.sql`
+  - Added `'completed'` to `time_block_lifecycle_status` enum
+  - Migrated existing `'superseded'` Canvas records to `'completed'`
+
+**Code Update**:
+```typescript
+// BEFORE (semantic hack):
+const lifecycleStatus = hasSubmission ? 'superseded' : 'active';
+
+// AFTER (semantically correct):
+const lifecycleStatus = hasSubmission ? 'completed' : 'active';
+```
+
+**Files Changed**:
+- `infrastructure/database/migrations/083_add_completed_lifecycle_status.sql`
+- `services/engine/src/activities/canvas.activities.ts:973`
+
+---
+
+### 3. Time Block Deduplication & Source-Aware Uniqueness
+
+**Problem**: PostgreSQL error "ON CONFLICT DO UPDATE command cannot affect row a second time" when batch contains multiple rows with same `(user_id, start_time, label)`. Additionally, the original constraint would cause Canvas and Google Calendar events to conflict.
+
+**Fix Part 1 - Migration 085**: Include `source` in unique constraint
+- **Migration**: `085_fix_time_block_unique_constraint_source.sql`
+  - Dropped old constraint: `(user_id, start_time, label)`
+  - Created new constraint: `(user_id, start_time, label, source)`
+  - Now Canvas and Google Calendar can coexist at same time/label
+
+**Fix Part 2 - Deduplication Logic**:
+```typescript
+async upsertTimeBlocks(blocks: any[]): Promise<{ error: any }> {
+  // Deduplicate blocks by unique constraint (user_id, start_time, label, source)
+  const uniqueBlocks = new Map<string, any>();
+  blocks.forEach((block) => {
+    // Normalize key components to match DB constraint exactly:
+    const normalizedTimestamp = new Date(block.start_time).toISOString();
+    const normalizedLabel = (block.label || '').trim().replace(/\s+/g, ' ');
+    const normalizedSource = (block.source || 'unknown').trim().toLowerCase();
+
+    const key = `${block.user_id}|${normalizedTimestamp}|${normalizedLabel}|${normalizedSource}`;
+    uniqueBlocks.set(key, block); // Last occurrence wins
+  });
+
+  const deduplicatedBlocks = Array.from(uniqueBlocks.values());
+  // ... upsert logic
+}
+```
+
+**Files Changed**:
+- `infrastructure/database/migrations/085_fix_time_block_unique_constraint_source.sql`
+- `services/engine/src/services/auroraDb.ts:1345-1372`
+
+---
+
+### 4. Canvas Course Filtering System
+
+**Problem**: Orientation/sandbox courses and past courses were being synced, cluttering student schedules.
+
+**Solution**: Implemented comprehensive course classification system with:
+- **TermResolver** (`src/lib/term/TermResolver.ts`)
+  - Resolves current academic term window for a campus
+  - Extracts dominant `canvas_enrollment_term_id` from existing courses
+  - Computes term dates (start/end) based on current semester
+  - Caches term mappings in `canvas_term_map` table
+
+- **CanvasCourseSelector** (`src/lib/canvas/CanvasCourseSelector.ts`)
+  - Classifies courses as: `current`, `recent_past`, `past`, or `misc_nonterm`
+  - Filters to only current-term courses
+  - Logs dropped courses with detailed reasons
+
+**Classification Priority**:
+1. **Evergreen Pattern Match** → `misc_nonterm` (DROPPED)
+   - Matches: `/orientation/i`, `/onboarding/i`, `/sandbox/i`, `/demo/i`, `/training/i`
+2. **Exact Term ID Match** → `current` (KEPT)
+3. **Section/Course Date Overlap** → `current` (KEPT)
+4. **Recent Past** → `recent_past` (DROPPED by default)
+5. **Past** → `past` (DROPPED)
+
+**Files Created**:
+- `services/engine/src/lib/term/TermResolver.ts`
+- `services/engine/src/lib/canvas/CanvasCourseSelector.ts`
+- `services/engine/src/lib/canvas/constants.ts`
+
+---
+
+### 5. Code Quality Improvements
+
+**Consolidated Timezone Utilities**:
+- Deleted duplicate `timezoneUtils.ts`
+- Kept `timezone.utils.ts` (comprehensive, 11KB)
+- Removed hidden defaults (fail fast on missing timezone)
+
+**Centralized Patterns**:
+- Created `src/lib/canvas/constants.ts` with `EVERGREEN_COURSE_PATTERNS`
+- Prevents pattern drift across codebase
+
+**De-duplicated Course Sync Logging**:
+- Added de-duplication by `courseContextId` before sync loop
+- Prevents redundant "Synced course X" logs
+
+**Code Quality Metrics**:
+- **Deleted**: 341 lines (duplicate files + dead code)
+- **Added**: ~200 lines (tests, migrations, constants)
+- **Net**: -141 lines with improved maintainability
+
+---
+
+## Database Schema Changes
+
+### New Constraints
+```sql
+-- Course contexts now require organization_id for uniqueness
+CREATE UNIQUE INDEX contexts_external_id_type_org_key
+  ON contexts (external_id, type, organization_id)
+  WHERE external_id IS NOT NULL;
+
+-- Time blocks now include source for cross-source coexistence
+CREATE UNIQUE INDEX unique_time_block_per_source
+  ON student_time_blocks (user_id, start_time, label, source);
+```
+
+### New Enum Value
+```sql
+-- time_block_lifecycle_status enum now includes:
+'active'      -- Active/pending work
+'deleted'     -- Soft deleted
+'superseded'  -- Replaced by newer version
+'completed'   -- ✨ NEW: Finished/submitted work
+```
+
+### New Table
+```sql
+-- Cache for Canvas term mappings
+CREATE TABLE canvas_term_map (
+  campus_id UUID NOT NULL REFERENCES contexts(id) ON DELETE CASCADE,
+  term_name TEXT NOT NULL,
+  enrollment_term_id INTEGER NOT NULL,
+  created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (campus_id, term_name)
+);
+```
+
+---
+
+## Deployment Instructions
+
+### Prerequisites
+```bash
+# Ensure you're on latest main
+git pull origin main
+
+# Ensure engine is rebuilt
+cd services/engine
+npm run build && npm run build:workflow
+```
+
+### Migration Steps
+```bash
+# 1. Run migrations (local)
+make db-migrate
+
+# 2. Restart engine with new code
+./scripts/dev/dev-with-doppler.sh up -d engine
+
+# 3. Test Canvas sync
+docker exec docker-engine-1 node /app/test-canvas-sync.js
+
+# 4. Verify database state
+docker exec dormway-postgres-local psql -U dormway_admin -d dormway -c "\d contexts"
+```
+
+### Production Deployment
+- Migrations run automatically via migration runner
+- Engine redeployed via GitHub Actions on merge to main
+
+---
+
+## Operational Runbooks
+
+### Triggering Canvas Sync
+```bash
+curl -X POST localhost:3001/api/temporal/workflow/start \
+  -H "Content-Type: application/json" \
+  -d '{
+    "workflowName": "fullCanvasSync",
+    "args": ["USER_ID"],
+    "taskQueue": "student-worker"
+  }'
+```
+
+### Viewing Sync Logs
+```bash
+# Check Engine logs for course filtering
+make logs s=engine | grep "Canvas course"
+
+# Check for dropped courses
+make logs s=engine | grep "Dropping non-current course"
+
+# Check term resolution
+make logs s=engine | grep "Resolved term window"
+```
+
+### Debugging Dominant Term ID
+```sql
+SELECT
+  metadata->>'canvas_enrollment_term_id' as term_id,
+  COUNT(*) as count
+FROM contexts
+WHERE parent_id = 'CAMPUS_ID'
+  AND type = 'course'
+  AND status = 'active'
+  AND metadata->>'canvas_enrollment_term_id' IS NOT NULL
+GROUP BY metadata->>'canvas_enrollment_term_id'
+ORDER BY count DESC;
+```
+
+---
+
+## Monitoring & Alerts
+
+### Metrics to Monitor
+```sql
+-- Check for duplicate time blocks (should always be 0)
+SELECT COUNT(*) as duplicate_blocks
+FROM (
+  SELECT user_id, start_time, label, source, COUNT(*) as count
+  FROM student_time_blocks
+  WHERE source='canvas'
+  GROUP BY 1,2,3,4
+  HAVING COUNT(*) > 1
+) duplicates;
+```
+
+### Alerting Thresholds
+1. **Deduplication rate > 5%**: Investigate Canvas API response quality
+2. **Any "ON CONFLICT" errors**: Immediate investigation (should be ZERO)
+3. **Course context collisions**: Alert if same `(external_id, type)` exists for multiple `organization_id` values
+
+---
+
+## Related Documentation
+
+- [Canvas API Documentation - Complete Reference](/docs/engineering/technical/api/canvas/canvas-api-documentation-complete-reference)
+- Canvas Integration - Developer Quick Reference
+- [Canvas Sync Service Implementation](/docs/engineering/technical/api/canvas/canvas-sync-service-implementation)
+- Database Migrations:
+  - `082_fix_course_unique_constraint.sql`
+  - `083_add_completed_lifecycle_status.sql`
+  - `085_fix_time_block_unique_constraint_source.sql`
+
+---
+
+## Code References
+
+### Key Files Modified
+- `services/engine/src/activities/canvas.activities.ts:332` - fetchCanvasCourses()
+- `services/engine/src/activities/canvas.activities.ts:579` - De-duplication logic
+- `services/engine/src/activities/canvas.activities.ts:973` - Lifecycle status
+- `services/engine/src/activities/course.activities.ts:257` - Multi-tenant constraint
+- `services/engine/src/services/auroraDb.ts:1345-1372` - Time block deduplication
+
+### New Files Created
+- `services/engine/src/lib/term/TermResolver.ts:187` - resolveTermWindow()
+- `services/engine/src/lib/canvas/CanvasCourseSelector.ts:82` - classifyCourse()
+- `services/engine/src/lib/canvas/constants.ts:24` - EVERGREEN_COURSE_PATTERNS
+- `services/engine/src/tests/canvasCourseSelector.test.ts` - Unit tests
+
+---
+
+## Breaking Changes
+
+### ⚠️ None - All changes are backwards compatible
+
+- Old course contexts without `organization_id` in conflict clause will still work
+- Migration automatically updates existing `'superseded'` Canvas records to `'completed'`
+- Date range changes only affect fallback mode (term-based logic unchanged)
+
+---
+
+## Future Improvements
+
+### Short Term (Before Beta)
+- [ ] Add automated integration test for Canvas sync
+- [ ] Implement concurrency guard to prevent cross-batch races
+- [ ] Add DataDog/Sentry metric for deduplication rate
+- [ ] Monitor for course context collisions across organizations
+
+### Long Term (Post Beta)
+- [ ] Consider including campus slug in `external_id` to make it globally unique
+- [ ] Campus-specific term windows from campus_configs
+- [ ] Support quarter systems (not just semesters)
+- [ ] Dynamic grace period per campus
+
+---
+
+**Author**: Engineering Team
+**Reviewer**: @riley @ethan
+**Status**: ✅ Ready for Production
+**Last Updated**: October 21, 2025

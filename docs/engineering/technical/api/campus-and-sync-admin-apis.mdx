@@ -1,0 +1,157 @@
+---
+title: "Campus and Sync Admin APIs"
+description: "Last updated: August 2025"
+---
+
+# Campus and Sync Admin APIs
+
+Last updated: August 2025
+
+## Overview
+Admin and mobile endpoints enabling multi‑institution onboarding, configuration, and orchestration.
+
+## Endpoints
+- Admin
+  - `GET /api/admin/sync/orchestrate` – Priority sync for cities/campuses (auto, dry‑run, limits)
+  - `GET /api/admin/cities` and related – City registry/config ops
+  - `GET /api/admin/sync/status/*` – Sync status visibility
+  - `POST/PUT /api/admin/campus-config/*` – Manage `campus_configs`
+- Mobile
+  - `GET /api/mobile/campus/typeahead` – Campus search for onboarding
+  - `GET /api/mobile/campus/config/:campusName` – Campus config snapshot for iOS UI
+
+## Sync Orchestrator (Admin)
+```mermaid
+sequenceDiagram
+  participant Cron as Cron/Manual
+  participant API as Admin /sync/orchestrate
+  participant DB as Aurora
+  participant TMP as Temporal
+
+  Cron->>API: GET /orchestrate?mode=auto&dry_run=false&limit=10
+  API->>DB: SELECT prioritized candidates (cities,campuses)
+  API->>API: Evaluate resource limits + recency
+  API-->>Cron: Summary (counts, cascades)
+  alt Execute
+    API->>TMP: start processSingleCity / processSingleCampus
+    TMP-->>API: workflow handles
+    API->>DB: Update sync tracking
+  end
+```
+
+## Campus Metadata (Mobile + Admin)
+```mermaid
+sequenceDiagram
+  participant App as iOS App
+  participant API as API Router
+  participant DB as Aurora
+  participant LLM as Perplexity/LLM
+
+  App->>API: GET /api/mobile/campus/config/:campusName
+  API->>DB: Ensure campus_configs exists (or seed)
+  API->>LLM: Enrich with calendar/metadata
+  LLM-->>API: Metadata JSON
+  API->>DB: UPDATE campus_configs.campus_metadata
+  API-->>App: Config + flags + summary
+```
+
+## Sync Status Endpoints (Admin)
+```mermaid
+sequenceDiagram
+  participant Admin
+  participant API as /api/admin/sync-status*
+  participant DB as Aurora
+
+  Admin->>API: GET /sync-status
+  API->>DB: SELECT cities/campuses + calculated priority
+  DB-->>API: rows
+  API-->>Admin: JSON list
+
+  Admin->>API: GET /sync-status/pending
+  API->>DB: SELECT where next_sync_at <= now()
+  DB-->>API: rows
+  API-->>Admin: JSON list
+
+  Admin->>API: GET /sync-status/stats
+  API->>DB: WITH sync_stats by type + overall
+  DB-->>API: summary
+  API-->>Admin: aggregates
+
+  Admin->>API: POST /sync-status/:id/recalculate
+  API->>DB: UPDATE sync_priority_score, next_sync_at
+  DB-->>API: updated row
+  API-->>Admin: JSON
+```
+
+## Cities Management (Admin)
+```mermaid
+sequenceDiagram
+  participant Admin
+  participant API as /api/admin/cities
+  participant DB as Aurora
+
+  Admin->>API: GET /
+  API->>DB: JOIN city_configs + contexts + campus_configs
+  DB-->>API: City rows + counts
+  API-->>Admin: JSON { cities: [...] }
+
+  Admin->>API: PUT /:cityId
+  API->>DB: UPDATE city_configs SET feature_flags,...
+  DB-->>API: RETURNING *
+  API-->>Admin: JSON { city }
+
+  Admin->>API: POST /:cityId/sync
+  API->>DB: UPDATE city_configs.next_sync_at = now()
+  API-->>Admin: { success: true }
+```
+
+## Sync Status Dashboard Overview
+```mermaid
+graph LR
+  subgraph Admin UI
+    A[Sync Dashboard]
+  end
+  subgraph API Router
+    S1[/GET /sync-status/]
+    S2[/GET /sync-status/pending/]
+    S3[/GET /sync-status/stats/]
+    O[/GET /sync/orchestrate/]
+  end
+  subgraph Temporal
+    W1[processSingleCity]
+    W2[processSingleCampus]
+  end
+  subgraph Aurora
+    C[(contexts)]
+    CC[(city_configs)]
+    KC[(campus_configs)]
+  end
+
+  A --> S1
+  A --> S2
+  A --> S3
+  A --> O
+  S1 --> C
+  S2 --> C
+  S3 --> C
+  O --> W1
+  O --> W2
+  W1 --> C
+  W2 --> C
+  W1 --> CC
+  W2 --> KC
+```
+
+## Typeahead (Mobile)
+```mermaid
+flowchart LR
+  A[Query q] --> B[ranked_results CTE]
+  B -->|priority| C{Order}
+  C --> D[Exact name match]
+  C --> E[Short alias match]
+  C --> F[Starts with / Contains]
+  C --> G[Domain match]
+  D & E & F & G --> H[Top N results]
+```
+
+See also: [Multi-Institution Architecture Upgrade](/docs/engineering/technical/implementation-patterns/multi-institution-architecture-upgrade), Engineering/Technical/API/DormWay API Router.

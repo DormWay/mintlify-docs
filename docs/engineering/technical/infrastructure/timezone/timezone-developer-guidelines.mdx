@@ -1,0 +1,363 @@
+---
+title: "Timezone Developer Guidelines"
+description: "This document provides comprehensive guidelines for handling timezones consistently across the DormWay platform. Following these guidelines ensures that all..."
+---
+
+# Timezone Developer Guidelines
+
+## Overview
+This document provides comprehensive guidelines for handling timezones consistently across the DormWay platform. Following these guidelines ensures that all timestamps are handled correctly, users see times in their local timezone, and the system maintains data integrity.
+
+## Core Principles
+
+### 1. Store in UTC
+- **Always store timestamps in UTC** in the database
+- Use `timestamp with time zone` columns for all timestamp fields
+- Never store local time without timezone information
+
+### 2. Convert for Processing
+- **Convert to local timezone** when processing data (especially for LLMs)
+- Use IANA timezone identifiers (e.g., 'America/New_York')
+- Handle timezone transitions (DST changes) properly
+
+### 3. Return with Offsets
+- **Return timestamps with proper timezone offsets** in API responses
+- Use ISO 8601 format with timezone information
+- Include timezone metadata when relevant
+
+### 4. Display Locally
+- **Display times in user's local timezone** in the UI
+- Respect user timezone preferences
+- Handle timezone changes gracefully
+
+## Database Guidelines
+
+### Column Types
+```sql
+-- ✅ Correct: Use timestamp with time zone
+CREATE TABLE events (
+    id UUID PRIMARY KEY,
+    start_time TIMESTAMPTZ NOT NULL,
+    end_time TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- ❌ Incorrect: Don't use timestamp without time zone
+CREATE TABLE events (
+    id UUID PRIMARY KEY,
+    start_time TIMESTAMP NOT NULL,  -- Missing timezone info
+    end_time TIMESTAMP NOT NULL,    -- Missing timezone info
+    created_at TIMESTAMP DEFAULT NOW()
+);
+```
+
+### Migrations
+When creating new tables or modifying existing ones:
+```sql
+-- ✅ Always use TIMESTAMPTZ for new columns
+ALTER TABLE existing_table 
+ADD COLUMN new_timestamp TIMESTAMPTZ DEFAULT NOW();
+
+-- ✅ Convert existing columns when possible
+ALTER TABLE existing_table 
+ALTER COLUMN old_timestamp TYPE TIMESTAMPTZ 
+USING old_timestamp AT TIME ZONE 'UTC';
+```
+
+## Backend Guidelines
+
+### Using the Timezone Utilities
+
+Import the timezone utilities:
+```typescript
+import { 
+  getUserTimezone, 
+  convertUTCToLocal, 
+  formatForDisplay, 
+  formatForAPIResponse,
+  formatForLLM 
+} from '../utils/timezone.utils';
+```
+
+### Getting User Timezone
+```typescript
+// ✅ Get user timezone with fallbacks
+const userTimezone = await getUserTimezone(userId, db);
+
+// ❌ Don't hardcode timezones
+const timezone = 'America/New_York'; // Hardcoded timezone
+```
+
+### Processing Data for LLMs
+```typescript
+// ✅ Convert time blocks to user's timezone for LLM processing
+const timeBlocks = await db.getTimeBlocks(userId);
+const userTimezone = await getUserTimezone(userId, db);
+const llmBlocks = convertTimeBlocksForLLM(timeBlocks, userTimezone);
+
+// ❌ Don't send UTC times to LLMs
+const llmBlocks = timeBlocks; // Raw UTC times
+```
+
+### API Response Formatting
+```typescript
+// ✅ Format timestamps for API responses with timezone info
+const apiResponse = {
+  event: {
+    id: event.id,
+    start_time: formatForAPIResponse(event.start_time, userTimezone),
+    end_time: formatForAPIResponse(event.end_time, userTimezone),
+    timezone: userTimezone,
+    timezone_offset: getTimezoneOffset(userTimezone)
+  }
+};
+
+// ❌ Don't return raw UTC timestamps
+const apiResponse = {
+  event: {
+    id: event.id,
+    start_time: event.start_time, // Raw UTC
+    end_time: event.end_time      // Raw UTC
+  }
+};
+```
+
+### Notification Scheduling
+```typescript
+// ✅ Schedule notifications in user's timezone
+const userTimezone = await getUserTimezone(userId, db);
+const scheduledTime = moment().tz(userTimezone).hour(9).minute(0).second(0);
+
+// ❌ Don't schedule in server timezone
+const scheduledTime = new Date();
+scheduledTime.setHours(9, 0, 0, 0); // Server timezone
+```
+
+## Frontend Guidelines
+
+### Displaying Times
+```typescript
+// ✅ Use timezone utilities for consistent display
+import { formatForDisplay } from '../utils/timezone.utils';
+
+const displayTime = formatForDisplay(event.start_time, userTimezone);
+
+// ❌ Don't use raw Date methods without timezone
+const displayTime = new Date(event.start_time).toLocaleString();
+```
+
+### Handling User Timezone Changes
+```typescript
+// ✅ Update display when user timezone changes
+useEffect(() => {
+  if (userTimezone) {
+    const formattedEvents = events.map(event => ({
+      ...event,
+      displayStartTime: formatForDisplay(event.start_time, userTimezone),
+      displayEndTime: formatForDisplay(event.end_time, userTimezone)
+    }));
+    setDisplayEvents(formattedEvents);
+  }
+}, [userTimezone, events]);
+```
+
+### Timezone Selection
+```typescript
+// ✅ Provide timezone selection with proper validation
+const timezoneOptions = [
+  { value: 'America/New_York', label: 'Eastern Time' },
+  { value: 'America/Chicago', label: 'Central Time' },
+  { value: 'America/Denver', label: 'Mountain Time' },
+  { value: 'America/Los_Angeles', label: 'Pacific Time' }
+];
+
+const handleTimezoneChange = (newTimezone: string) => {
+  if (isValidTimezone(newTimezone)) {
+    setUserTimezone(newTimezone);
+    updateUserPreferences({ timezone: newTimezone });
+  }
+};
+```
+
+## Common Patterns
+
+### 1. Event Creation
+```typescript
+// ✅ Create events with proper timezone handling
+async function createEvent(eventData: any, userTimezone: string) {
+  // Convert local time to UTC for storage
+  const utcStartTime = convertLocalToUTC(eventData.startTime, userTimezone);
+  const utcEndTime = convertLocalToUTC(eventData.endTime, userTimezone);
+  
+  const event = await db.createEvent({
+    ...eventData,
+    start_time: utcStartTime,
+    end_time: utcEndTime,
+    timezone: userTimezone
+  });
+  
+  return event;
+}
+```
+
+### 2. Event Retrieval
+```typescript
+// ✅ Retrieve and format events for display
+async function getEvents(userId: string) {
+  const events = await db.getEvents(userId);
+  const userTimezone = await getUserTimezone(userId, db);
+  
+  return events.map(event => ({
+    ...event,
+    displayStartTime: formatForDisplay(event.start_time, userTimezone),
+    displayEndTime: formatForDisplay(event.end_time, userTimezone),
+    timezone: userTimezone
+  }));
+}
+```
+
+### 3. LLM Context Preparation
+```typescript
+// ✅ Prepare time blocks for LLM with local times
+async function prepareLLMContext(userId: string) {
+  const timeBlocks = await db.getTimeBlocks(userId);
+  const userTimezone = await getUserTimezone(userId, db);
+  
+  const llmBlocks = convertTimeBlocksForLLM(timeBlocks, userTimezone);
+  
+  return {
+    schedule: llmBlocks,
+    timezone: userTimezone,
+    currentTime: getCurrentTimeInTimezone(userTimezone)
+  };
+}
+```
+
+## Error Handling
+
+### Invalid Timezones
+```typescript
+// ✅ Validate timezones before use
+if (!isValidTimezone(userTimezone)) {
+  logger.warn('Invalid timezone provided, using default', { userTimezone });
+  userTimezone = DEFAULT_TIMEZONE_CONFIG.defaultTimezone;
+}
+```
+
+### Invalid Dates
+```typescript
+// ✅ Handle invalid dates gracefully
+try {
+  const formattedTime = formatForDisplay(timestamp, timezone);
+  return formattedTime;
+} catch (error) {
+  logger.error('Error formatting timestamp', { error, timestamp, timezone });
+  return 'Invalid time';
+}
+```
+
+### Fallback Timezones
+```typescript
+// ✅ Provide fallback timezones
+const timezone = await getUserTimezone(userId, db) || 
+                 DEFAULT_TIMEZONE_CONFIG.defaultTimezone;
+```
+
+## Testing Guidelines
+
+### Unit Tests
+```typescript
+// ✅ Test timezone conversions
+describe('Timezone utilities', () => {
+  it('should convert UTC to local timezone', () => {
+    const utcTime = '2025-01-27T14:00:00.000Z';
+    const localTime = convertUTCToLocal(utcTime, 'America/New_York');
+    expect(localTime).toContain('America/New_York');
+  });
+  
+  it('should handle invalid timezones', () => {
+    const result = isValidTimezone('Invalid/Timezone');
+    expect(result).toBe(false);
+  });
+});
+```
+
+### Integration Tests
+```typescript
+// ✅ Test with real database
+describe('User timezone retrieval', () => {
+  it('should get timezone from accounts table', async () => {
+    const timezone = await getUserTimezone('test-user', mockDb);
+    expect(timezone).toBe('America/New_York');
+  });
+});
+```
+
+### DST Testing
+```typescript
+// ✅ Test daylight saving time transitions
+describe('DST handling', () => {
+  it('should handle DST transitions correctly', () => {
+    const winterDate = new Date('2025-01-15T14:00:00.000Z');
+    const summerDate = new Date('2025-07-15T14:00:00.000Z');
+    
+    const winterOffset = getTimezoneOffset('America/New_York', winterDate);
+    const summerOffset = getTimezoneOffset('America/New_York', summerDate);
+    
+    expect(winterOffset).not.toBe(summerOffset);
+  });
+});
+```
+
+## Performance Considerations
+
+### Caching
+```typescript
+// ✅ Cache timezone information
+const timezoneCache = new Map<string, string>();
+
+async function getCachedUserTimezone(userId: string, db: any): Promise<string> {
+  if (timezoneCache.has(userId)) {
+    return timezoneCache.get(userId)!;
+  }
+  
+  const timezone = await getUserTimezone(userId, db);
+  timezoneCache.set(userId, timezone);
+  return timezone;
+}
+```
+
+### Batch Processing
+```typescript
+// ✅ Process multiple events efficiently
+function formatEventsForAPI(events: any[], timezone: string) {
+  return events.map(event => ({
+    ...event,
+    start_time: formatForAPIResponse(event.start_time, timezone),
+    end_time: formatForAPIResponse(event.end_time, timezone),
+    timezone,
+    timezone_offset: getTimezoneOffset(timezone)
+  }));
+}
+```
+
+## Migration Checklist
+
+When updating existing code to follow these guidelines:
+
+- [ ] Replace `timestamp` columns with `TIMESTAMPTZ`
+- [ ] Update all timezone-related functions to use the utilities
+- [ ] Add timezone validation where user input is accepted
+- [ ] Update API responses to include timezone information
+- [ ] Add error handling for timezone operations
+- [ ] Update tests to cover timezone scenarios
+- [ ] Document timezone requirements in API documentation
+
+## Resources
+
+- [Timezone Utilities Documentation](TIMEZONE_UTILITIES.md)
+- [PostgreSQL Timezone Documentation](https://www.postgresql.org/docs/current/datatype-datetime.html)
+- [IANA Timezone Database](https://www.iana.org/time-zones)
+- [date-fns-tz Documentation](https://github.com/marnusw/date-fns-tz)
+- [Moment.js Timezone Documentation](https://momentjs.com/timezone/)

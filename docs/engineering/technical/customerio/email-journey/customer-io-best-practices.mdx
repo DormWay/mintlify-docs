@@ -1,0 +1,380 @@
+---
+title: "CUSTOMER IO BEST PRACTICES"
+description: "This is the most important constraint to understand when building emails in Customer.io."
+---
+
+# Customer.io Best Practices for DormWay Emails
+
+## ⚠️ Critical Understanding: Snippet Scope Limitation
+
+**Customer.io snippets CANNOT access message body variables!**
+
+This is the most important constraint to understand when building emails in Customer.io.
+
+---
+
+## What Works ✅
+
+### 1. Layouts (Base Template)
+**Purpose**: Header, footer, consistent branding across all emails
+
+**File**: `customerio-liquid-base-template.html`
+
+**How it works**:
+- Upload to Customer.io → Content → Layouts
+- Set as default for campaigns
+- Content is inserted via `{{{ content }}}` placeholder
+- Layout can access Customer.io data: `{{customer.email}}`, `{{unsubscribe_url}}`
+
+✅ **Use layouts for**: Headers, footers, social icons, legal text
+
+---
+
+### 2. Direct HTML in Message Body
+**Purpose**: Email content (hero, cards, buttons, lists)
+
+**How it works**:
+- Copy HTML from `liquid-snippets-library.md`
+- Paste directly into message body in Customer.io
+- Replace placeholder text with Customer.io variables
+
+**Example**:
+```html
+<!-- Paste this directly into message body -->
+<table role="presentation" width="100%">
+    <tr>
+        <td style="padding: 40px; background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%); border-radius: 12px;">
+            <h1 style="color: #ffffff;">Welcome {{customer.first_name}}</h1>
+            <p style="color: rgba(255, 255, 255, 0.9);">You're at {{customer.campus_name}}</p>
+        </td>
+    </tr>
+</table>
+```
+
+✅ **Use direct HTML for**: All email content, dynamic data
+
+---
+
+### 3. Customer.io Data Variables
+**Purpose**: Personalization and dynamic content
+
+**Customer Attributes** (set via identify/API):
+```liquid
+{{customer.first_name}}
+{{customer.last_name}}
+{{customer.email}}
+{{customer.campus_name}}
+{{customer.campus_id}}
+```
+
+**Event Data** (passed when triggering):
+```liquid
+{{event.course_name}}
+{{event.assignment_count}}
+{{event.assignments}}  <!-- Array -->
+```
+
+**Built-in Variables**:
+```liquid
+{{unsubscribe_url}}
+{{preferences_url}}
+```
+
+**Conditional Logic**:
+```liquid
+{% if customer.campus_name %}
+  Welcome {{customer.campus_name}} student!
+{% else %}
+  Welcome to DormWay!
+{% endif %}
+```
+
+**Loops**:
+```liquid
+{% for assignment in event.assignments %}
+  <p>{{assignment.name}} - Due {{assignment.due_date}}</p>
+{% endfor %}
+```
+
+✅ **Use variables for**: Names, campus info, course data, assignments
+
+---
+
+## What Doesn't Work ❌
+
+### 1. Snippets with Message Body Variables
+❌ **This does NOT work**:
+```liquid
+<!-- In message body -->
+{% assign hero_title = "Welcome" %}
+{{snippets.hero}}  <!-- Snippet can't see hero_title! -->
+```
+
+**Why**: Snippets have their own scope and can't access message-level variables.
+
+---
+
+### 2. Parameterized Components
+❌ **This does NOT work**:
+```liquid
+<!-- In message body -->
+{% assign button_text = "Click me" %}
+{% assign button_url = "https://example.com" %}
+{{snippets.primary_button}}  <!-- Can't pass parameters! -->
+```
+
+**Why**: Customer.io snippets don't support parameter passing.
+
+---
+
+### 3. Include/Extends Pattern
+❌ **This does NOT work**:
+```liquid
+{% include 'hero' with title: "Welcome" %}
+```
+
+**Why**: Customer.io uses `{{snippets.name}}` syntax, not Liquid's `{% include %}`.
+
+---
+
+## Recommended Architecture
+
+### Structure
+```
+DormWay Email System
+│
+├── Layout (ONE base template)
+│   └── customerio-liquid-base-template.html
+│       ├── <html> wrapper
+│       ├── Header with logo
+│       ├── {{{ content }}} ← Message body goes here
+│       └── Footer with social icons + legal
+│
+└── Message Bodies (MANY emails)
+    ├── welcome-email.html
+    ├── syllabus-success.html
+    ├── weekly-digest.html
+    └── ... (paste HTML directly, no snippets)
+```
+
+### Workflow
+
+1. **One-time setup**: Upload base layout to Customer.io
+2. **For each email**:
+   - Create new message in Customer.io
+   - Select base layout
+   - Copy HTML from `liquid-snippets-library.md`
+   - Paste into message body
+   - Replace placeholders with `{{customer.*}}` or `{{event.*}}`
+   - Preview and test
+
+---
+
+## Example: Building Welcome Email
+
+### Step 1: Base Layout (already done)
+Upload `customerio-liquid-base-template.html` → Set as default
+
+### Step 2: Message Body
+```html
+<!-- Copy from library and paste into Customer.io message body -->
+
+<!-- Hero -->
+<table role="presentation" width="100%">
+    <tr>
+        <td style="padding: 40px 32px; background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%); border-radius: 12px; text-align: center;">
+            <h1 style="font-size: 32px; color: #ffffff; margin: 0 0 12px;">Welcome to DormWay</h1>
+            <p style="font-size: 16px; color: rgba(255, 255, 255, 0.9); margin: 0;">The OS for College Life</p>
+        </td>
+    </tr>
+</table>
+
+<!-- Greeting with Customer.io data -->
+<p style="font-size: 18px; color: #ffffff; margin: 24px 0 16px;">Hi {{customer.first_name}},</p>
+
+<!-- Body text -->
+<p style="font-size: 16px; color: #cbd5e1; line-height: 1.6; margin: 0 0 24px;">
+    You're about to experience college differently.
+</p>
+
+<!-- CTA Button -->
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin: 24px auto;">
+    <tr>
+        <td align="center">
+            <a href="https://app.dormway.com/onboarding" style="display: inline-block; padding: 14px 32px; background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%); color: #ffffff; font-size: 16px; font-weight: 600; text-decoration: none; border-radius: 12px;">
+                Complete Your Profile
+            </a>
+        </td>
+    </tr>
+</table>
+```
+
+### Step 3: Trigger from Backend
+```typescript
+// Send welcome email when user signs up
+await cio.track(userId, {
+  name: 'user_created',
+  data: {
+    first_name: user.firstName,
+    campus_name: user.campus.name
+  }
+});
+```
+
+---
+
+## Sending Data to Emails
+
+### Via Customer Attributes (identify)
+```typescript
+// Set once during signup/login
+import { CustomerIO } from 'customerio-node';
+const cio = new CustomerIO(siteId, apiKey);
+
+await cio.identify({
+  id: user.id,
+  email: user.email,
+  first_name: user.firstName,
+  last_name: user.lastName,
+  campus_name: user.campus.name,
+  campus_id: user.campus.id,
+  created_at: Math.floor(Date.now() / 1000)
+});
+```
+
+Access in emails: `{{customer.first_name}}`, `{{customer.campus_name}}`
+
+---
+
+### Via Event Data (transactional)
+```typescript
+// Send specific data with each email trigger
+await cio.sendEmail({
+  transactional_message_id: 'syllabus-processed',
+  to: user.email,
+  identifiers: { id: user.id },
+  message_data: {
+    course_name: 'Introduction to Computer Science',
+    course_code: 'CS 101',
+    assignment_count: 12,
+    instructor: 'Prof. Sarah Smith',
+    assignments: [
+      { name: 'Problem Set 1', due_date: 'Oct 15, 2025', priority: 'high' },
+      { name: 'Lab Report', due_date: 'Oct 20, 2025', priority: 'medium' },
+      { name: 'Reading Quiz', due_date: 'Oct 22, 2025', priority: 'low' }
+    ]
+  }
+});
+```
+
+Access in emails: `{{event.course_name}}`, `{{event.assignments}}`
+
+Loop through arrays:
+```html
+{% for assignment in event.assignments %}
+  <div style="padding: 16px; background: rgba(255,255,255,0.03); border-radius: 8px; margin-bottom: 12px;">
+    <strong style="color: #ffffff;">{{assignment.name}}</strong>
+    <p style="color: #94a3b8; margin: 4px 0 0;">
+      Due: {{assignment.due_date}}
+      {% if assignment.priority == 'high' %}
+        <span style="color: #ef4444; font-weight: 600;">HIGH PRIORITY</span>
+      {% endif %}
+    </p>
+  </div>
+{% endfor %}
+```
+
+---
+
+## Common Patterns
+
+### Conditional Content
+```html
+{% if customer.campus_name %}
+  <p>Welcome {{customer.campus_name}} student!</p>
+{% else %}
+  <p>Complete your profile to personalize your experience</p>
+{% endif %}
+```
+
+### Dynamic URLs
+```html
+<a href="https://app.dormway.com/courses/{{event.course_id}}">View Course</a>
+<a href="https://app.dormway.com/profile?campus={{customer.campus_id}}">Update Profile</a>
+```
+
+### Fallback Values
+```html
+<h1>Welcome {{customer.first_name | default: "Student"}}</h1>
+```
+
+### Date Formatting
+```html
+<p>Joined on {{customer.created_at | date: "%B %d, %Y"}}</p>
+```
+
+### Number Formatting
+```html
+<p>You have {{event.assignment_count}} assignments</p>
+```
+
+---
+
+## Testing Checklist
+
+Before sending any email:
+
+- [ ] Preview in Customer.io editor
+- [ ] Send test to yourself
+- [ ] Check Gmail (web + mobile app)
+- [ ] Check Outlook (Windows + Mac)
+- [ ] Check Apple Mail (iOS + macOS)
+- [ ] Verify all `{{customer.*}}` variables render
+- [ ] Verify all `{{event.*}}` variables render
+- [ ] Test dark mode rendering
+- [ ] Check mobile responsive layout
+- [ ] Verify unsubscribe link works
+- [ ] Verify all CTAs link correctly
+- [ ] Check UTM parameters on links
+
+---
+
+## Performance Tips
+
+1. **Keep HTML compact** - Email size affects deliverability
+2. **Inline all CSS** - Email clients strip `<style>` tags
+3. **Optimize images** - Use CDN, compress files
+4. **Test load time** - Slow emails get marked as spam
+5. **Use tables** - Flexbox/Grid don't work in email
+6. **Avoid JavaScript** - Not supported in email clients
+
+---
+
+## Summary
+
+✅ **DO**:
+- Use layouts for base template
+- Paste HTML directly into message body
+- Use Customer.io variables (`{{customer.*}}`, `{{event.*}}`)
+- Copy from `liquid-snippets-library.md` as templates
+- Send rich data from backend when triggering emails
+
+❌ **DON'T**:
+- Create Customer.io snippets with parameters
+- Assign variables in message body for snippets
+- Expect snippets to access message scope
+- Use `{% include %}` pattern
+
+---
+
+## Questions?
+
+See documentation:
+- `customerio-liquid-base-template.html` - Base layout
+- `liquid-snippets-library.md` - HTML templates to copy
+- `example-welcome-email-liquid.html` - Complete example
+- [Customer.io Docs](https://customer.io/docs/journeys/liquid/)
+
+---
+
+_Last updated: September 30, 2025_

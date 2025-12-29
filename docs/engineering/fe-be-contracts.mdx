@@ -1,0 +1,87 @@
+---
+title: "FE BE Contracts"
+description: "Last updated: {{DATE}}"
+---
+
+# Mobile Frontend → Backend Contracts (DormWay)
+
+Last updated: {{DATE}}
+
+## Ably Realtime Auth
+- Route: POST `/v1/realtime/ably-auth`
+- Request: JWT Bearer (mobile user)
+- Response (JSON):
+```
+{ "token": "<ablyToken or TokenDetails>", "clientId": "<backend UUID lowercase>", "capability": { "user:{UUID}:dashboard": ["subscribe"], "user:{UUID}:updates": ["subscribe","presence"], "dev-telemetry": ["publish","presence"] } }
+```
+- Notes:
+  - Capability must include publish+presence for `dev-telemetry` and subscribe(+presence) for `user:{UUID}:updates`.
+  - ClientId should match backend UUID (not Auth0 ID).
+
+## Dashboard Composite v1
+- Route: GET `/dashboard/v1/composite?tab={home|campus|me}&context={home|campus|off_hours|...}`
+- Realtime: subscribe to `user:{userId}:dashboard` and `user:{userId}:dashboard:*` (tab‑scoped). Clients have subscribe‑only permissions on user channels. `telemetry` publish allowed; `dev‑telemetry` publish non‑prod only.
+
+Delta message (Ably):
+```json
+{
+  "type": "dashboard.delta",
+  "baseEtag": "W/\"dcv1-...\"",
+  "seq": 42,
+  "ops": [ { "op": "upsert", "id": "weather", "value": { /* ... */ } } ],
+  "version": "1.0",
+  "ts": "2025-09-01T23:07:53.407Z"
+}
+```
+- Response (JSON):
+```
+{
+  "version":"1.0",
+  "request": { "tab":"home", "context":"home", "generatedAt":"ISO" },
+  "widgets": [
+    {
+      "id":"weather",
+      "type":"weather",
+      "title":"Weather",
+      "priority":5,
+      "content": { 
+        "displayType":"current_with_forecast",
+        "data": { "current": {"status":"unavailable","message":"..."}, "forecast":[], "location":"Campus", "status":"unavailable", "lastUpdated":"ISO" }
+      }
+    },
+    { "id":"schedule", "type":"schedule", "title":"Schedule", "priority":10,
+      "content": { "displayType":"upcoming_classes", "data": { "items":[{"status":"empty","message":"No scheduled items"}] } } 
+    },
+    { "id":"context_status", "type":"context_status", "title":"Status", "priority":1,
+      "content": { "displayType":"status_card", "data": { "context":"home", "status":"At Home", "subtitle":"...", "actionable":true, "lastUpdated":"ISO" } }
+    }
+  ],
+  "metadata": { "requestId":"req-...", "processingTimeMs":0, "cache": {"hit": false, "ttl": 300} }
+}
+```
+- Contract rules:
+  - Widgets array is authoritative. Each widget envelope contains `content`, which MAY wrap data as `{ displayType, data: {...} }`. The app now tolerates both wrapped and unwrapped `content.data`.
+  - `request.context` MUST echo the requested context (e.g., "home").
+  - Empty/unavailable states are valid; provide minimal `data` objects with sentinel fields rather than omitting the widget.
+
+## ETag + Deltas
+- Composite requests send `If-None-Match: W/"dcv1-<hash>"`.
+- Responses:
+  - 200 with full payload and `Etag: W/"dcv1-<hash>"`.
+  - 304 when unchanged.
+- Realtime channel: `user:{UUID}:dashboard` for deltas; messages contain partial widget updates.
+- Ordering: apply deltas in receive order; each delta includes `sinceEtag` and `nextEtag`.
+
+## Telemetry
+- Primary: Ably channel `dev-telemetry` (requires publish + presence).
+- Fallback: HTTP `POST /v1/mobile/telemetry/background` with body:
+```
+{ "id":"uuid", "type":"<name>", "timestamp": epoch, "data": { ... } }
+```
+- Rate limits: Client respects `Retry-After` on 429 and coalesces duplicate events within 2s.
+
+## Dev Headers (local only)
+- When `127.0.0.1`, server accepts `X-User-Id: {UUID}`, `X-User-Role: authenticated` for local simulation.
+
+## Examples
+- See latest samples in `currentconsole.cleaned.txt` around composite and telemetry events.

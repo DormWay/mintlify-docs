@@ -1,0 +1,732 @@
+---
+title: "Database Adapter"
+description: "import { getDatabaseAdapter } from '@dormway/core/adapters/database';"
+---
+
+# Database Adapter
+
+## Overview
+
+**DatabaseAdapter** provides a centralized PostgreSQL connection pool with automatic SSL detection, health checks, and transaction support.
+
+**Purpose**: Singleton connection pool preventing connection leaks and ensuring consistent database access across all services.
+
+**Location**: `@dormway/core/adapters/database`
+
+**Supported Providers (code-level)**:
+- **Neon** (neon.tech) - Primary for DormWay
+- **Railway** (railway.app) - Legacy fallback, not used by DormWay
+- **AWS RDS** - Legacy fallback, not used by DormWay
+- **Local PostgreSQL** - Legacy fallback, not used by DormWay
+
+**Note**: DormWay standardizes on Neon. Avoid local/AWS setups unless explicitly directed.
+
+---
+
+## Installation
+
+```typescript
+import { getDatabaseAdapter } from '@dormway/core/adapters/database';
+
+const db = getDatabaseAdapter();
+```
+
+---
+
+## Key Features
+
+✅ **Singleton Pattern** - One pool per application lifecycle
+✅ **Auto SSL Detection** - Automatically configures SSL based on hostname
+✅ **Connection Pooling** - Max 20 connections, 30s idle timeout
+✅ **Transaction Support** - Automatic BEGIN/COMMIT/ROLLBACK
+✅ **Health Checks** - Database connectivity verification
+✅ **Migration Status** - Track table row counts
+✅ **Test Mode Support** - Skips pool creation in test environment
+✅ **Error Recovery** - Automatic pool recreation on errors
+
+---
+
+## API Reference
+
+### getDatabaseAdapter
+
+Get or create the **singleton** database adapter instance.
+
+**Signature**:
+```typescript
+getDatabaseAdapter(options?: DatabaseAdapterOptions): DatabaseAdapter
+```
+
+**Options**:
+```typescript
+interface DatabaseAdapterOptions {
+  connectionString?: string;       // Defaults to DATABASE_URL env var
+  logger?: AdapterLogger;          // Logger instance
+  maxConnections?: number;         // Max pool size (default: 20)
+  idleTimeoutMs?: number;          // Idle timeout (default: 30000)
+  connectionTimeoutMs?: number;    // Connection timeout (default: 2000)
+  forceSSL?: boolean | { rejectUnauthorized: boolean };  // Override SSL detection
+}
+```
+
+**Example**:
+```typescript
+import { getDatabaseAdapter } from '@dormway/core/adapters/database';
+import { createStructuredLogger } from '@dormway/core/logger';
+
+const logger = createStructuredLogger({ service: 'api-router' });
+
+const db = getDatabaseAdapter({
+  logger,
+  maxConnections: 25,
+  idleTimeoutMs: 60000,
+});
+```
+
+---
+
+### query
+
+Execute a SQL query and return all rows.
+
+**Signature**:
+```typescript
+query<T = unknown>(sql: string, params?: unknown[]): Promise<T[]>
+```
+
+**Examples**:
+
+**Simple query**:
+```typescript
+const db = getDatabaseAdapter();
+
+const users = await db.query<User>(
+  'SELECT * FROM accounts WHERE campus_id = $1',
+  [campusId]
+);
+
+users.forEach(user => console.log(user.email));
+```
+
+**With type safety**:
+```typescript
+interface Account {
+  id: string;
+  email: string;
+  created_at: Date;
+}
+
+const accounts = await db.query<Account>(
+  'SELECT id, email, created_at FROM accounts WHERE email = $1',
+  ['user@example.com']
+);
+
+const account = accounts[0];
+console.log(account.email); // Type-safe!
+```
+
+**Complex join**:
+```typescript
+const enrollments = await db.query(
+  `SELECT
+    c.id as context_id,
+    c.name as course_name,
+    sd.data->>'grade' as grade
+   FROM contexts c
+   JOIN service_data sd ON sd.context_id = c.id
+   WHERE c.parent_id = $1
+     AND c.type = 'course'
+     AND sd.method = 'fetch_canvas_grades'`,
+  [studentContextId]
+);
+```
+
+---
+
+### querySingle
+
+Execute a SQL query and return **first row only** (or null).
+
+**Signature**:
+```typescript
+querySingle<T = unknown>(sql: string, params?: unknown[]): Promise<T | null>
+```
+
+**Examples**:
+
+**Get single user**:
+```typescript
+const user = await db.querySingle<Account>(
+  'SELECT * FROM accounts WHERE id = $1',
+  [userId]
+);
+
+if (user) {
+  console.log(user.email);
+} else {
+  console.log('User not found');
+}
+```
+
+**Check existence**:
+```typescript
+const exists = await db.querySingle<{ exists: boolean }>(
+  'SELECT EXISTS(SELECT 1 FROM accounts WHERE email = $1) as exists',
+  ['test@example.com']
+);
+
+if (exists?.exists) {
+  console.log('Email already registered');
+}
+```
+
+---
+
+### transaction
+
+Execute a function within a database transaction.
+
+**Signature**:
+```typescript
+transaction<T>(callback: (client: PoolClient) => Promise<T>): Promise<T>
+```
+
+**Automatically handles**:
+- `BEGIN` - Start transaction
+- `COMMIT` - Commit on success
+- `ROLLBACK` - Rollback on error
+- Connection cleanup
+
+**Examples**:
+
+**Simple transaction**:
+```typescript
+await db.transaction(async (client) => {
+  await client.query(
+    'INSERT INTO accounts (id, email) VALUES ($1, $2)',
+    [userId, email]
+  );
+
+  await client.query(
+    'INSERT INTO contexts (id, user_id, type) VALUES ($1, $2, $3)',
+    [contextId, userId, 'student']
+  );
+});
+```
+
+**With error handling**:
+```typescript
+try {
+  const result = await db.transaction(async (client) => {
+    // Insert account
+    const account = await client.query(
+      'INSERT INTO accounts (id, email) VALUES ($1, $2) RETURNING *',
+      [userId, email]
+    );
+
+    // Insert context
+    const context = await client.query(
+      'INSERT INTO contexts (id, user_id, type, parent_id) VALUES ($1, $2, $3, $4) RETURNING *',
+      [contextId, userId, 'student', campusId]
+    );
+
+    return { account: account.rows[0], context: context.rows[0] };
+  });
+
+  console.log('User created:', result.account.email);
+} catch (error) {
+  console.error('Transaction failed, rolled back:', error);
+}
+```
+
+**Complex multi-step transaction**:
+```typescript
+await db.transaction(async (client) => {
+  // Step 1: Create account
+  await client.query(
+    'INSERT INTO accounts (id, email, role) VALUES ($1, $2, $3)',
+    [userId, email, 'user']
+  );
+
+  // Step 2: Create student context
+  const contextResult = await client.query(
+    'INSERT INTO contexts (id, user_id, type, parent_id) VALUES ($1, $2, $3, $4) RETURNING id',
+    [contextId, userId, 'student', campusId]
+  );
+
+  // Step 3: Enroll in courses
+  for (const courseId of courseIds) {
+    await client.query(
+      'INSERT INTO contexts (id, parent_id, type, external_id) VALUES ($1, $2, $3, $4)',
+      [uuidv4(), contextResult.rows[0].id, 'course', courseId]
+    );
+  }
+
+  // Step 4: Set preferences
+  await client.query(
+    'INSERT INTO user_preferences (user_id, preferences) VALUES ($1, $2)',
+    [userId, { theme: 'dark', notifications: true }]
+  );
+});
+```
+
+---
+
+### healthCheck
+
+Test database connectivity.
+
+**Signature**:
+```typescript
+healthCheck(): Promise<boolean>
+```
+
+**Returns**: `true` if connection successful, `false` otherwise
+
+**Example**:
+```typescript
+const db = getDatabaseAdapter();
+
+const isHealthy = await db.healthCheck();
+
+if (isHealthy) {
+  console.log('✅ Database connection OK');
+} else {
+  console.error('❌ Database connection failed');
+}
+```
+
+**In API health endpoint**:
+```typescript
+// routes/health.routes.ts
+import { getDatabaseAdapter } from '@dormway/core/adapters/database';
+
+router.get('/health', async (req, res) => {
+  const db = getDatabaseAdapter();
+  const dbHealthy = await db.healthCheck();
+
+  res.status(dbHealthy ? 200 : 503).json({
+    status: dbHealthy ? 'healthy' : 'unhealthy',
+    database: dbHealthy,
+    timestamp: new Date().toISOString(),
+  });
+});
+```
+
+---
+
+### getMigrationStatus
+
+Get row counts for specified tables (useful for deployment verification).
+
+**Signature**:
+```typescript
+getMigrationStatus(tables?: string[]): Promise<MigrationStatus>
+```
+
+**Returns**:
+```typescript
+interface MigrationStatus {
+  tables: TableMigrationStatus[];  // Table name + row count
+  totalTables: number;              // Number of tables
+  totalRows: number;                // Total rows across all tables
+}
+```
+
+**Example**:
+```typescript
+const status = await db.getMigrationStatus([
+  'accounts',
+  'contexts',
+  'service_data',
+]);
+
+console.log(`Total tables: ${status.totalTables}`);
+console.log(`Total rows: ${status.totalRows}`);
+
+status.tables.forEach(table => {
+  console.log(`${table.tablename}: ${table.row_count} rows`);
+});
+```
+
+**Default tables checked** (if none specified):
+```typescript
+[
+  'accounts',
+  'roles',
+  'contexts',
+  'external_services',
+  'config',
+  'accounts_memberships',
+  'role_permissions',
+  'user_preferences',
+]
+```
+
+---
+
+### getPoolHealth
+
+Get connection pool health metrics.
+
+**Signature**:
+```typescript
+getPoolHealth(): Promise<PoolHealth | null>
+```
+
+**Returns**:
+```typescript
+interface PoolHealth {
+  totalConnections: number;   // Total connections in pool
+  idleConnections: number;    // Idle connections
+  waitingClients: number;     // Clients waiting for connection
+}
+```
+
+**Example**:
+```typescript
+const health = await db.getPoolHealth();
+
+if (health) {
+  console.log(`Total: ${health.totalConnections}`);
+  console.log(`Idle: ${health.idleConnections}`);
+  console.log(`Waiting: ${health.waitingClients}`);
+
+  // Alert if pool exhausted
+  if (health.waitingClients > 0) {
+    console.warn('⚠️ Connection pool exhausted!');
+  }
+}
+```
+
+---
+
+### close
+
+Close the database connection pool (for graceful shutdown).
+
+**Signature**:
+```typescript
+close(): Promise<void>
+```
+
+**Example**:
+```typescript
+// On application shutdown
+process.on('SIGTERM', async () => {
+  const db = getDatabaseAdapter();
+  await db.close();
+  console.log('Database connection pool closed');
+  process.exit(0);
+});
+```
+
+---
+
+## Common Patterns
+
+### Pattern 1: Simple CRUD Operations
+
+```typescript
+import { getDatabaseAdapter } from '@dormway/core/adapters/database';
+import { NotFoundError } from '@dormway/core/errors';
+
+const db = getDatabaseAdapter();
+
+// Create
+async function createUser(email: string, name: string): Promise<string> {
+  const result = await db.querySingle<{ id: string }>(
+    'INSERT INTO accounts (email, name) VALUES ($1, $2) RETURNING id',
+    [email, name]
+  );
+  return result!.id;
+}
+
+// Read
+async function getUser(userId: string): Promise<User> {
+  const user = await db.querySingle<User>(
+    'SELECT * FROM accounts WHERE id = $1',
+    [userId]
+  );
+
+  if (!user) {
+    throw new NotFoundError('User not found', { userId });
+  }
+
+  return user;
+}
+
+// Update
+async function updateUser(userId: string, updates: Partial<User>): Promise<void> {
+  await db.query(
+    'UPDATE accounts SET name = $1, updated_at = NOW() WHERE id = $2',
+    [updates.name, userId]
+  );
+}
+
+// Delete (soft delete)
+async function deleteUser(userId: string): Promise<void> {
+  await db.query(
+    'UPDATE accounts SET deleted_at = NOW() WHERE id = $1',
+    [userId]
+  );
+}
+```
+
+### Pattern 2: Complex Transaction with Rollback
+
+```typescript
+import { getDatabaseAdapter } from '@dormway/core/adapters/database';
+import { createStructuredLogger } from '@dormway/core/logger';
+
+const db = getDatabaseAdapter();
+const logger = createStructuredLogger({ service: 'api-router' });
+
+async function enrollStudentInCourse(
+  studentId: string,
+  courseId: string
+): Promise<void> {
+  try {
+    await db.transaction(async (client) => {
+      // Check if already enrolled
+      const existing = await client.query(
+        'SELECT 1 FROM context_dependencies WHERE parent_context_id = $1 AND child_context_id = $2',
+        [studentId, courseId]
+      );
+
+      if (existing.rows.length > 0) {
+        throw new Error('Student already enrolled');
+      }
+
+      // Create enrollment relationship
+      await client.query(
+        'INSERT INTO context_dependencies (parent_context_id, child_context_id, dependency_type) VALUES ($1, $2, $3)',
+        [studentId, courseId, 'enrolled_in']
+      );
+
+      // Update student metadata
+      await client.query(
+        `UPDATE contexts SET metadata = jsonb_set(
+          COALESCE(metadata, '{}'::jsonb),
+          '{enrolled_courses}',
+          COALESCE(metadata->'enrolled_courses', '[]'::jsonb) || $1::jsonb
+        ) WHERE id = $2`,
+        [JSON.stringify([courseId]), studentId]
+      );
+
+      logger.info('enrollment.created', 'Student enrolled in course', {
+        metadata: { studentId, courseId },
+      });
+    });
+  } catch (error) {
+    logger.error('enrollment.failed', 'Failed to enroll student', {
+      error,
+      metadata: { studentId, courseId },
+    });
+    throw error;
+  }
+}
+```
+
+### Pattern 3: Batch Insert with Transaction
+
+```typescript
+async function bulkInsertServiceData(
+  records: ServiceDataRecord[]
+): Promise<void> {
+  const db = getDatabaseAdapter();
+
+  await db.transaction(async (client) => {
+    for (const record of records) {
+      await client.query(
+        `INSERT INTO service_data (context_id, user_id, method, data, fetched_at)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [record.contextId, record.userId, record.method, record.data, record.fetchedAt]
+      );
+    }
+  });
+}
+```
+
+### Pattern 4: Connection Pool with Logging
+
+```typescript
+import { getDatabaseAdapter } from '@dormway/core/adapters/database';
+import { createStructuredLogger } from '@dormway/core/logger';
+
+const logger = createStructuredLogger({ service: 'engine' });
+
+const db = getDatabaseAdapter({
+  logger,
+  maxConnections: 30,
+  idleTimeoutMs: 60000,
+});
+
+// All queries automatically logged
+const users = await db.query('SELECT * FROM accounts WHERE active = true');
+```
+
+### Pattern 5: Health Check with Retry
+
+```typescript
+async function waitForDatabase(maxRetries = 10, delayMs = 1000): Promise<void> {
+  const db = getDatabaseAdapter();
+
+  for (let i = 0; i < maxRetries; i++) {
+    const isHealthy = await db.healthCheck();
+
+    if (isHealthy) {
+      console.log('✅ Database connection established');
+      return;
+    }
+
+    console.log(`⏳ Database not ready, retrying... (${i + 1}/${maxRetries})`);
+    await new Promise(resolve => setTimeout(resolve, delayMs));
+  }
+
+  throw new Error('Database connection failed after max retries');
+}
+
+// Use on application startup
+await waitForDatabase();
+```
+
+---
+
+## SSL Configuration
+
+**Automatic SSL Detection** based on hostname:
+
+| Provider | Hostname Pattern | SSL Config |
+|----------|------------------|------------|
+| **Neon** | `*.neon.tech` | `{ rejectUnauthorized: false }` |
+| **Railway** | `*.railway.app` | `{ rejectUnauthorized: false }` |
+| **Local (legacy)** | `localhost`, `127.0.0.1`, `postgres-local` | `false` (disabled) |
+| **AWS RDS (legacy)** | Other | `{ rejectUnauthorized: true }` |
+
+**Force SSL override**:
+```typescript
+const db = getDatabaseAdapter({
+  forceSSL: { rejectUnauthorized: false },
+});
+```
+
+---
+
+## Environment Variables
+
+**Required**:
+- `DATABASE_URL` - PostgreSQL connection string
+
+**Format**:
+```bash
+# Neon (primary)
+DATABASE_URL=postgresql://user:password@ep-xxx-xxx.us-east-2.aws.neon.tech/dormway?sslmode=require
+```
+
+---
+
+## Test Mode
+
+**Automatic test detection**:
+- Skips pool creation when `NODE_ENV=test` or `JEST_WORKER_ID` is set
+- Returns empty arrays for queries
+- Allows tests to run without database
+
+**Example**:
+```typescript
+// test.ts
+process.env.NODE_ENV = 'test';
+
+const db = getDatabaseAdapter();
+
+const users = await db.query('SELECT * FROM accounts');
+// Returns [] without hitting database
+```
+
+---
+
+## Best Practices
+
+### ✅ Do
+
+- **Use singleton** - Call `getDatabaseAdapter()` everywhere (same pool)
+- **Use parameterized queries** - Prevents SQL injection
+- **Use transactions** for multi-step operations
+- **Close pool on shutdown** - Graceful cleanup
+- **Check health on startup** - Ensure database is ready
+- **Log with structured logger** - Better observability
+- **Use type generics** - Type-safe query results
+
+### ❌ Don't
+
+- **Don't create multiple adapters** - Use singleton pattern
+- **Don't concatenate SQL** - Use parameterized queries instead
+- **Don't forget error handling** - Wrap queries in try/catch
+- **Don't commit credentials** - Use Doppler for DATABASE_URL
+- **Don't forget transactions** - Multi-step operations need transactions
+- **Don't leak connections** - Always use pool, not direct clients
+
+---
+
+## Troubleshooting
+
+### Problem: "No database connection string provided"
+
+**Cause**: Missing `DATABASE_URL` environment variable.
+
+**Solution**: Set `DATABASE_URL` in Doppler:
+```bash
+doppler secrets set DATABASE_URL "postgresql://..."
+```
+
+### Problem: "SSL connection failed"
+
+**Cause**: SSL misconfiguration.
+
+**Solution**: Override SSL setting:
+```typescript
+const db = getDatabaseAdapter({
+  forceSSL: { rejectUnauthorized: false },
+});
+```
+
+### Problem: Connection pool exhausted
+
+**Cause**: Too many concurrent queries.
+
+**Solution**: Increase pool size:
+```typescript
+const db = getDatabaseAdapter({
+  maxConnections: 50,
+});
+```
+
+Or check for connection leaks:
+```typescript
+const health = await db.getPoolHealth();
+console.log(`Waiting clients: ${health?.waitingClients}`);
+```
+
+### Problem: Queries hanging in tests
+
+**Cause**: Test mode not detected.
+
+**Solution**: Set test environment:
+```typescript
+process.env.NODE_ENV = 'test';
+```
+
+---
+
+## Related Documentation
+
+- [DormWay Core Library (@dormway-core)](/docs/engineering/technical/dormway-core-library-dormway-core) - Main overview
+- [ContextsService](/docs/engineering/technical/dormway-core/domain-services/contextsservice) - Uses DatabaseAdapter
+- [ServiceDataService](/docs/engineering/technical/dormway-core/domain-services/servicedataservice) - Uses DatabaseAdapter
+- [Structured Logger](/docs/engineering/technical/dormway-core/utilities/structured-logger) - Logging database operations
+
+---
+
+**Last Updated**: 2025-11-23
+**Maintainer**: Platform Team

@@ -1,0 +1,300 @@
+---
+title: "Dashboard Composite Contract"
+description: "status: current last_reviewed: 2025-08-31 owner: team version: v1.0"
+---
+
+# Dashboard Composite API Contract
+
+---
+status: current
+last_reviewed: 2025-08-31
+owner: team
+version: v1.0
+---
+
+## Overview
+
+The Dashboard Composite API (`/dashboard/v1/composite`) provides a unified interface for fetching all dashboard widgets in a single request with ETag caching support.
+
+## Endpoint
+
+```
+GET /dashboard/v1/composite?tab={tab}&context={context}
+```
+
+### Authentication
+- **Required**: Yes
+- **Header**: `Authorization: Bearer {token}`
+
+### Query Parameters
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `tab` | string | Yes | `home` | Dashboard tab (home, campus, me) |
+| `context` | string | Yes | `on_campus` | User context (on_campus, commuting, home) |
+| `refresh` | boolean | No | `false` | Force refresh bypassing cache |
+
+### Headers
+| Header | Required | Description |
+|--------|----------|-------------|
+| `If-None-Match` | No | ETag for conditional requests (304 support) |
+
+## Response Format
+
+### Success Response (200)
+```typescript
+{
+  "version": "1.0",
+  "request": {
+    "tab": "home",
+    "context": "on_campus", 
+    "generatedAt": "2025-08-31T16:48:28.693Z"
+  },
+  "widgets": [
+    {
+      "id": "next_action",
+      "type": "action_cta",
+      "title": "Next Up",
+      "priority": 20,
+      "content": {
+        "data": {
+          "nextAction": {
+            "id": "action1",
+            "title": "Chemistry Lab Preparation", 
+            "actionTime": "2025-08-31T17:48:28.693Z",
+            "actionType": "task",
+            "priority": "high",
+            "message": "Review molecular structures",
+            "ctaText": "Start Review",
+            "timeUntil": 60
+          },
+          "urgencyLevel": "high",
+          "lastUpdated": "2025-08-31T16:48:28.693Z"
+        }
+      }
+    }
+  ],
+  "metadata": {
+    "requestId": "req-123",
+    "processingTimeMs": 245,
+    "cache": {
+      "hit": false,
+      "ttl": 300
+    }
+  }
+}
+```
+
+### Not Modified Response (304)
+- **Body**: Empty
+- **Headers**: `ETag` header present
+
+### Error Response (4xx/5xx)
+```typescript
+{
+  "error": "Unauthorized",
+  "message": "Authentication required",
+  "statusCode": 401
+}
+```
+
+## Widget Types & IDs
+
+### Pinned Widgets (Always Included)
+| Widget ID | Type | Description | Priority |
+|-----------|------|-------------|-----------|
+| `next_action` | `action_cta` | Primary action from DayPlan | 20 |
+| `deviation_alerts` | `alert` | Critical deviations requiring attention | 25 |
+| `academic_panic_prevention` | `academic` | AI academic analysis (feature flag) | 30 |
+
+### Standard Widgets
+| Widget ID | Type | Description | Priority |
+|-----------|------|-------------|-----------|
+| `schedule` | `schedule` | Class schedule and events | 10 |
+| `weather` | `weather` | Weather forecast | 5 |
+| `dayplan_timeline` | `dayplan` | Daily timeline | 15 |
+| `context_status` | `context_status` | User context info | 1 |
+| `announcements` | `announcements` | News and bulletins | 6 |
+
+### Tab-Specific Widgets
+| Tab | Widget IDs | Description |
+|-----|------------|-------------|
+| `campus` | `campus_events`, `dining_options`, `campus_resources`, `campus_parking` | Campus-focused widgets |
+| `me` | `personal_goals`, `personal_insights`, `user_preferences` | Personal/profile widgets |
+
+## Widget Envelope Schema
+
+Each widget follows a consistent envelope format:
+
+```typescript
+interface WidgetEnvelope {
+  id: string;           // Stable identifier (snake_case)
+  type: string;         // Widget family/renderer type  
+  title?: string;       // Display title
+  priority?: number;    // Display priority (higher = more important)
+  content: {
+    displayType?: string;
+    data: unknown;      // Widget-specific payload
+  };
+  grid?: {             // Layout hints
+    w?: number;
+    h?: number; 
+    x?: number;
+    y?: number;
+  };
+}
+```
+
+## Widget Data Schemas
+
+### Action CTA (`next_action`)
+```typescript
+{
+  "nextAction": {
+    "id": string,
+    "title": string,
+    "actionTime": string,        // ISO 8601
+    "actionType": "task" | "setup" | "reminder" | "link",
+    "priority": "low" | "normal" | "high" | "critical", 
+    "message"?: string,
+    "ctaText": string,
+    "timeUntil": number,         // minutes
+    "secondaryAction"?: {
+      "url": string,
+      "title"?: string
+    }
+  },
+  "urgencyLevel": "low" | "normal" | "high" | "critical",
+  "lastUpdated": string         // ISO 8601
+}
+```
+
+### Alerts (`deviation_alerts`)
+```typescript
+{
+  "items": [
+    {
+      "id": string,
+      "severity": "info" | "warning" | "critical",
+      "title": string,
+      "message"?: string,
+      "requiresAction"?: boolean,
+      "link"?: {
+        "url": string,
+        "title"?: string  
+      }
+    }
+  ],
+  "totalCount": number
+}
+```
+
+## Configuration
+
+### Environment Variables
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DASHBOARD_MAX_WIDGETS` | `12` | Maximum widgets returned per request |
+| `ACADEMIC_WIDGET_ENABLED` | `false` | Enable academic AI widget (auto-enabled in development) |
+
+### Widget Capping
+- Maximum widgets controlled by `DASHBOARD_MAX_WIDGETS`
+- Pinned widgets always included regardless of cap
+- Remaining slots filled by priority order
+
+## ETag Caching Behavior
+
+### Server-Side
+- ETag generated from widget content hash + metadata
+- 304 returned when `If-None-Match` matches current ETag
+- Cache invalidation on data updates
+
+### Client-Side  
+- Include `If-None-Match` header with last received ETag
+- Handle 304 responses by using cached data
+- Track hit rates for performance monitoring
+
+## Aliases & Migration
+
+### Widget ID Aliases (Backward Compatibility)
+| Current ID | Legacy Aliases | Status |
+|------------|----------------|---------|
+| `next_action` | `action_cta`, `primary_cta`, `hero_action` | Active |
+| `deviation_alerts` | `alert`, `critical_alerts`, `attention` | Active |
+| `academic_panic_prevention` | `academic`, `academics` | Active |
+
+## Error Handling
+
+### Common Error Codes
+- `400` - Invalid tab or context parameter
+- `401` - Authentication required  
+- `403` - Insufficient permissions
+- `404` - User or resource not found
+- `500` - Internal server error
+- `503` - Service temporarily unavailable
+
+### Graceful Degradation
+- Individual widget failures don't break entire response
+- Fallback data provided for failed widgets
+- Academic widget fails gracefully when crew unavailable
+
+## Performance Characteristics
+
+### Response Times
+- **Target**: < 500ms for cache hits (304)
+- **Target**: < 2000ms for cache misses (200)
+- **Timeout**: 10 seconds server-side
+
+### Payload Sizes
+- **Typical**: 5-15 KB per response
+- **Maximum**: ~50 KB with all widgets
+- **Compression**: gzip enabled
+
+## Testing & Validation
+
+### Test Commands
+```bash
+# Basic request
+curl -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:3001/dashboard/v1/composite?tab=home&context=on_campus"
+
+# ETag conditional request  
+curl -H "Authorization: Bearer $TOKEN" \
+     -H "If-None-Match: W/\"abc123\"" \
+  "http://localhost:3001/dashboard/v1/composite?tab=home&context=on_campus"
+
+# Test script
+npx ts-node scripts/test-dashboard-composite.ts
+```
+
+### Validation Checklist
+- [ ] All pinned widgets present
+- [ ] Widget count ≤ MAX_WIDGETS
+- [ ] ETag header present in 200 responses
+- [ ] 304 responses have matching ETag  
+- [ ] Academic widget appears when flag enabled
+- [ ] Graceful fallbacks for missing data
+
+---
+
+**📋 Contract Status**: This document reflects the actual implementation as of August 31, 2025. Report inconsistencies to the team immediately.
+## Type Aliases and V2 Schema
+
+To support a gradual rollout, the API Router can emit canonical v1 type names or v2 aliases under feature flags.
+
+- v1 → v2 mapping:
+  - `action_cta` → `next_action`
+  - `context_status` → `daily_status`
+  - `academic` → `academics`
+  - `schedule` → `schedule` (same)
+  - `weather` → `weather` (same)
+
+- Server flags and query overrides:
+  - Env: `DASHBOARD_EMIT_V2_TYPES=true` to emit v2 names
+  - Env: `DASHBOARD_VALIDATE_V2=true` to validate against v2 JSON Schema and drop invalid (log-only)
+  - Per-request overrides: `?emitV2Types=true&validateV2=true`
+
+- V2 JSON Schema:
+  - File: `services/api-router/src/schemas/widgetEnvelope.v2.schema.json`
+  - Enum types: `next_action`, `schedule`, `weather`, `daily_status`, `academics`
+
+Validation behavior: when enabled, widgets failing schema are dropped from the response; the composite still returns 200. Selection metrics are logged for QA.

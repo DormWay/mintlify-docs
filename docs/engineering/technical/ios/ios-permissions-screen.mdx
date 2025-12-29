@@ -1,0 +1,326 @@
+---
+title: "iOS Permissions Screen"
+description: "DormWay's **Settings → Permissions** tab provides comprehensive permission management for all five permission types with real system integration, proper UI s..."
+---
+
+# iOS Permissions Screen
+
+**Status**: ✅ **PRODUCTION READY** - Complete implementation completed May 26, 2025
+
+DormWay's **Settings → Permissions** tab provides comprehensive permission management for all five permission types with real system integration, proper UI states, and professional status indicators.
+
+## 🏆 Major Implementation (May 26, 2025)
+
+### **Complete Permission System**
+- **All 5 Permission Types**: Notifications, Location, Calendar, Health, Screen Time
+- **Real System Integration**: Proper framework usage (UNUserNotificationCenter, CLLocationManager, EventKit, HealthKit, FamilyControls)
+- **Accurate Status Detection**: Fixed critical Health permission bug affecting status accuracy
+- **Professional UI**: Consistent status pills with uniform styling and design system integration
+
+### **Critical Bug Fix - Health Permissions**
+**Problem**: Health permissions showed "Not Set" even when granted
+**Root Cause**: HealthManager only checked step count authorization, not all 7 health data types
+**Solution**: Enhanced to check all requested health data types
+**Impact**: Accurate health status across Permissions and Integrations screens
+
+## 📱 Current Architecture
+
+The modern Permissions screen uses the new Settings store architecture with comprehensive functionality:
+
+```swift
+struct PermissionsFlowView: View {
+    @EnvironmentObject var store: SettingsStore
+    @StateObject private var locationDelegate = LocationManagerDelegate()
+    
+    var body: some View {
+        Form {
+            Section(header: Text("App Permissions")) {
+                // All 5 permission types with real implementations
+                permissionRow(
+                    permissionType: .notifications,
+                    title: "Push Notifications",
+                    description: "Get notified about important updates, deadlines, and campus events.",
+                    status: store.state.permissionsState.status(for: .notifications),
+                    onToggle: { store.send(.permissions(.requestPermission(.notifications))) }
+                )
+                
+                permissionRow(
+                    permissionType: .location,
+                    title: "Location Services", 
+                    description: "Enable features like campus navigation and location-aware suggestions.",
+                    status: locationDelegate.locationStatus,
+                    onToggle: { store.send(.permissions(.requestPermission(.location))) }
+                )
+                
+                permissionRow(
+                    permissionType: .calendar,
+                    title: "Calendar Access",
+                    description: "Sync with your device calendar for comprehensive schedule management.",
+                    status: store.state.permissionsState.status(for: .calendar),
+                    onToggle: { store.send(.permissions(.requestPermission(.calendar))) }
+                )
+                
+                permissionRow(
+                    permissionType: .health,
+                    title: "Health Data",
+                    description: "Track wellness metrics and activity patterns for better insights.",
+                    status: store.state.permissionsState.status(for: .health),
+                    onToggle: { store.send(.permissions(.requestPermission(.health))) }
+                )
+                
+                permissionRow(
+                    permissionType: .screenTime,
+                    title: "Screen Time",
+                    description: "Monitor app usage and digital wellness patterns.",
+                    status: store.state.permissionsState.status(for: .screenTime),
+                    onToggle: { store.send(.permissions(.requestPermission(.screenTime))) }
+                )
+            }
+        }
+    }
+}
+```
+
+## 🔧 Permission Implementations
+
+### **1. Push Notifications (UNUserNotificationCenter)**
+```swift
+case .notifications:
+    let center = UNUserNotificationCenter.current()
+    let settings = await center.notificationSettings()
+    switch settings.authorizationStatus {
+    case .authorized, .provisional, .ephemeral: return .granted
+    case .denied: return .denied
+    case .notDetermined: return .notDetermined
+    @unknown default: return .notDetermined
+    }
+```
+
+### **2. Location Services (CLLocationManager)**
+```swift
+case .location:
+    let manager = CLLocationManager()
+    let status = manager.authorizationStatus
+    switch status {
+    case .authorizedAlways, .authorizedWhenInUse: return .granted
+    case .denied: return .denied
+    case .restricted: return .restricted
+    case .notDetermined: return .notDetermined
+    @unknown default: return .notDetermined
+    }
+```
+
+### **3. Calendar Access (EventKit)**
+```swift
+case .calendar:
+    let eventStore = EKEventStore()
+    let status = EKEventStore.authorizationStatus(for: .event)
+    switch status {
+    case .authorized: return .granted
+    case .denied: return .denied
+    case .restricted: return .restricted
+    case .notDetermined: return .notDetermined
+    @unknown default: return .notDetermined
+    }
+```
+
+### **4. Health Data (HealthKit) - Enhanced Implementation**
+```swift
+case .health:
+    let healthManager = HealthManager.shared
+    
+    let isAvailable = await MainActor.run {
+        healthManager.isHealthDataAvailable
+    }
+    
+    guard isAvailable else { return .restricted }
+    
+    // Check all health data types, not just step count
+    let hasAuth = await MainActor.run {
+        healthManager.hasAuthorization
+    }
+    
+    return hasAuth ? .granted : .notDetermined
+```
+
+**Enhanced HealthManager.hasAuthorization**:
+```swift
+var hasAuthorization: Bool {
+    guard isHealthDataAvailable else { return false }
+    
+    // Check authorization for all health data types we request
+    let healthDataTypes = [
+        HKObjectType.quantityType(forIdentifier: .stepCount),
+        HKObjectType.quantityType(forIdentifier: .distanceWalkingRunning),
+        HKObjectType.quantityType(forIdentifier: .activeEnergyBurned),
+        HKObjectType.quantityType(forIdentifier: .dietaryWater),
+        HKObjectType.categoryType(forIdentifier: .sleepAnalysis),
+        HKObjectType.quantityType(forIdentifier: .heartRate),
+        HKObjectType.quantityType(forIdentifier: .restingHeartRate)
+    ].compactMap { $0 }
+    
+    // Check if we have authorization for at least one health data type
+    return healthDataTypes.contains { type in
+        healthStore.authorizationStatus(for: type) == .sharingAuthorized
+    }
+}
+```
+
+### **5. Screen Time (FamilyControls)**
+```swift
+case .screenTime:
+    let status = AuthorizationCenter.shared.authorizationStatus
+    switch status {
+    case .approved: return .granted
+    case .denied: return .denied
+    case .notDetermined: return .notDetermined
+    @unknown default: return .notDetermined
+    }
+```
+
+## 🎨 Professional UI Components
+
+### **Status Pills - Enhanced Design**
+```swift
+private func statusPill(status: PermissionStatus) -> some View {
+    Text(simplifiedPermissionText(for: status))
+        .dsTypography(DormWayDesignSystem.Typography.Label.medium)
+        .padding(.horizontal, DormWayDesignSystem.Spacing.medium)
+        .padding(.vertical, DormWayDesignSystem.Spacing.small)
+        .foregroundColor(statusPillTextColor(for: status))
+        .background(statusPillBackgroundColor(for: status))
+        .clipShape(Capsule())
+        .frame(minWidth: 80) // Consistent minimum width
+}
+
+private func simplifiedPermissionText(for status: PermissionStatus) -> String {
+    switch status {
+    case .granted: return "Granted"
+    case .denied: return "Denied"
+    case .restricted: return "Restricted"
+    case .notDetermined: return "Not Set"
+    case .limited: return "Limited"
+    }
+}
+```
+
+### **Professional Color Scheme**
+```swift
+private func statusPillBackgroundColor(for status: PermissionStatus) -> Color {
+    switch status {
+    case .granted, .limited:
+        return DormWayDesignSystem.Color.Palette.State.success
+    case .denied, .restricted:
+        return DormWayDesignSystem.Color.Palette.State.error
+    case .notDetermined:
+        return DormWayDesignSystem.Color.Palette.State.warning
+    }
+}
+```
+
+## 🔄 Permission Request Flow
+
+### **Button Logic Enhancement**
+```swift
+if status == .granted || status == .limited {
+    statusPill(status: status)
+} else if status == .notDetermined && canRequestDirectly {
+    Button("Enable", action: onToggle)
+        .font(.callout)
+        .foregroundColor(.blue)
+} else if status == .denied || status == .restricted {
+    Button("Settings", action: { store.send(.permissions(.openAppSettings)) })
+        .font(.callout)
+        .foregroundColor(.gray)
+}
+```
+
+### **Rationale Sheets**
+For sensitive permissions like Health and Screen Time, rationale sheets explain why the permission is needed:
+```swift
+.sheet(item: $activeSheet) { sheetType in
+    switch sheetType {
+    case .permissionRationale(let permission):
+        PermissionRationaleSheetView(permissionType: permission)
+            .environmentObject(store)
+    }
+}
+```
+
+## 📊 Permission Status Tracking
+
+### **Store Integration**
+```swift
+public struct PermissionsState: Equatable {
+    public var permissionStatuses: [PermissionType: PermissionStatus] = [:]
+    public var isLoading: Bool = false
+    public var error: SettingsError?
+    
+    public func status(for type: PermissionType) -> PermissionStatus {
+        return permissionStatuses[type] ?? .notDetermined
+    }
+}
+```
+
+### **Effects for Permission Requests**
+```swift
+public static func requestSystemPermission(type: PermissionType, services: AppServicesProtocol) -> Effect<SettingsAction> {
+    .run { send in
+        let newStatus = await services.requestSystemPermission(for: type)
+        await send(.permissions(.permissionStatusChanged(type, newStatus)))
+    }
+}
+```
+
+## 🚀 Production Features
+
+### **Real-Time Status Updates**
+- **Location**: Uses CLLocationManagerDelegate for live updates
+- **Health**: Integrated with existing HealthManager.shared
+- **All Permissions**: Accurate status checking on app foreground
+
+### **Error Handling**
+- **Network Issues**: Graceful degradation with cached states
+- **System Restrictions**: Clear messaging for restricted permissions
+- **User Guidance**: Direct links to Settings app when needed
+
+### **Accessibility**
+- **VoiceOver Support**: Proper accessibility labels and hints
+- **Dynamic Type**: Text scales with user font size preferences
+- **Contrast**: High contrast color scheme for status indicators
+
+## 🔗 Integration Points
+
+### **Settings Store Architecture**
+- **Actions**: `PermissionsAction` for all permission-related actions
+- **Effects**: `SettingsEffects` for system permission requests
+- **State**: `PermissionsState` for comprehensive permission tracking
+
+### **Cross-Screen Consistency**
+- **Integrations Screen**: Same permission status logic for health integration
+- **Dashboard**: Permission-gated features based on actual status
+- **Onboarding**: Optional permission setup during user registration
+
+## 📈 Testing & Validation
+
+### **Status Accuracy** ✅
+1. **Health Permission**: Now accurately detects when any health data type is authorized
+2. **Cross-Screen Consistency**: Same status shown on both Permissions and Integrations screens
+3. **System Integration**: Proper framework integration for all 5 permission types
+
+### **UI Polish** ✅
+1. **Status Pills**: Consistent professional appearance with uniform widths
+2. **Button States**: Proper logic for Enable/Settings/Status display
+3. **Design System**: Full integration with DormWayDesignSystem colors and typography
+
+### **User Experience** ✅
+1. **Clear Guidance**: Descriptive text explaining each permission's purpose
+2. **Easy Management**: One-tap permission requests with proper system prompts
+3. **Settings Navigation**: Direct links to iOS Settings when needed
+
+---
+
+**Related Documentation**:
+- Settings & Profile UI - Complete Settings system overview
+- Permissions Implementation Worklog
+- Health Manager Integration

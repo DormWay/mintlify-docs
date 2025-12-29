@@ -1,0 +1,459 @@
+---
+title: "Validation Utilities"
+description: "import { // Schemas uuidSchema, emailSchema, urlSchema, dateSchema, contextIdSchema, contextTypeSchema,"
+---
+
+# Validation Utilities
+
+## Overview
+
+**@dormway/core/utils/validation** provides Zod schemas and validation helpers for common data types used across DormWay services.
+
+**Purpose**: Centralized validation schemas for UUIDs, emails, URLs, dates, and context-specific data with clear error messages.
+
+**Location**: `@dormway/core/utils/validation`
+
+---
+
+## Installation
+
+```typescript
+import {
+  // Schemas
+  uuidSchema,
+  emailSchema,
+  urlSchema,
+  dateSchema,
+  contextIdSchema,
+  contextTypeSchema,
+
+  // Helpers
+  validateUUID,
+  validateEmail,
+  validateURL,
+  isValidContextType,
+  sanitizeInput,
+} from '@dormway/core/utils/validation';
+```
+
+---
+
+## Validation Schemas
+
+### uuidSchema
+
+Validate UUID format.
+
+**Schema**:
+```typescript
+const uuidSchema = z.string().uuid('Invalid UUID format');
+```
+
+**Example**:
+```typescript
+import { uuidSchema } from '@dormway/core/utils/validation';
+
+uuidSchema.parse('550e8400-e29b-41d4-a716-446655440000'); // Valid
+uuidSchema.parse('not-a-uuid'); // Throws ZodError
+```
+
+---
+
+### emailSchema
+
+Validate email format.
+
+**Schema**:
+```typescript
+const emailSchema = z.string().email('Invalid email address');
+```
+
+**Example**:
+```typescript
+import { emailSchema } from '@dormway/core/utils/validation';
+
+emailSchema.parse('student@umich.edu'); // Valid
+emailSchema.parse('invalid-email'); // Throws ZodError
+```
+
+---
+
+### urlSchema
+
+Validate URL format.
+
+**Schema**:
+```typescript
+const urlSchema = z.string().url('Invalid URL format');
+```
+
+**Example**:
+```typescript
+import { urlSchema } from '@dormway/core/utils/validation';
+
+urlSchema.parse('https://dormway.app'); // Valid
+urlSchema.parse('not-a-url'); // Throws ZodError
+```
+
+---
+
+### dateSchema
+
+Validate ISO date string or Date object.
+
+**Schema**:
+```typescript
+const dateSchema = z.union([
+  z.string().datetime(),
+  z.date(),
+]);
+```
+
+**Example**:
+```typescript
+import { dateSchema } from '@dormway/core/utils/validation';
+
+dateSchema.parse('2025-11-23T14:30:00.000Z'); // Valid
+dateSchema.parse(new Date()); // Valid
+dateSchema.parse('invalid-date'); // Throws ZodError
+```
+
+---
+
+### contextTypeSchema
+
+Validate context type enum.
+
+**Schema**:
+```typescript
+const contextTypeSchema = z.enum([
+  'city',
+  'campus',
+  'building',
+  'student',
+  'course',
+]);
+```
+
+**Example**:
+```typescript
+import { contextTypeSchema } from '@dormway/core/utils/validation';
+
+contextTypeSchema.parse('campus'); // Valid
+contextTypeSchema.parse('invalid'); // Throws ZodError
+```
+
+---
+
+## Validation Helpers
+
+### validateUUID
+
+Validate UUID with clear error message.
+
+**Signature**:
+```typescript
+validateUUID(value: unknown): { valid: boolean; error?: string }
+```
+
+**Examples**:
+```typescript
+import { validateUUID } from '@dormway/core/utils/validation';
+
+validateUUID('550e8400-e29b-41d4-a716-446655440000');
+// { valid: true }
+
+validateUUID('not-a-uuid');
+// { valid: false, error: 'Invalid UUID format' }
+
+validateUUID(null);
+// { valid: false, error: 'UUID is required' }
+```
+
+---
+
+### validateEmail
+
+Validate email address.
+
+**Signature**:
+```typescript
+validateEmail(value: unknown): { valid: boolean; error?: string }
+```
+
+**Examples**:
+```typescript
+import { validateEmail } from '@dormway/core/utils/validation';
+
+validateEmail('student@umich.edu');
+// { valid: true }
+
+validateEmail('invalid-email');
+// { valid: false, error: 'Invalid email address' }
+```
+
+---
+
+### validateURL
+
+Validate URL format.
+
+**Signature**:
+```typescript
+validateURL(value: unknown): { valid: boolean; error?: string }
+```
+
+**Examples**:
+```typescript
+import { validateURL } from '@dormway/core/utils/validation';
+
+validateURL('https://dormway.app');
+// { valid: true }
+
+validateURL('not-a-url');
+// { valid: false, error: 'Invalid URL format' }
+```
+
+---
+
+### isValidContextType
+
+Check if string is valid context type.
+
+**Signature**:
+```typescript
+isValidContextType(type: string): boolean
+```
+
+**Example**:
+```typescript
+import { isValidContextType } from '@dormway/core/utils/validation';
+
+isValidContextType('campus'); // true
+isValidContextType('student'); // true
+isValidContextType('invalid'); // false
+```
+
+---
+
+### sanitizeInput
+
+Sanitize user input (trim, remove control characters).
+
+**Signature**:
+```typescript
+sanitizeInput(input: string): string
+```
+
+**Example**:
+```typescript
+import { sanitizeInput } from '@dormway/core/utils/validation';
+
+sanitizeInput('  Hello World  ');
+// "Hello World"
+
+sanitizeInput('Text\x00with\x01control\x02chars');
+// "Textwithcontrolchars"
+```
+
+---
+
+## Common Patterns
+
+### Pattern 1: Request Validation Middleware
+
+```typescript
+import { z } from 'zod';
+import { uuidSchema, emailSchema } from '@dormway/core/utils/validation';
+
+const createUserSchema = z.object({
+  email: emailSchema,
+  name: z.string().min(1, 'Name is required'),
+  campusId: uuidSchema,
+});
+
+function validateCreateUser(req: Request, res: Response, next: NextFunction) {
+  const result = createUserSchema.safeParse(req.body);
+
+  if (!result.success) {
+    return res.status(400).json({
+      error: 'Validation failed',
+      details: result.error.errors,
+    });
+  }
+
+  req.body = result.data; // Type-safe validated data
+  next();
+}
+```
+
+---
+
+### Pattern 2: Query Parameter Validation
+
+```typescript
+import { z } from 'zod';
+import { uuidSchema, dateSchema } from '@dormway/core/utils/validation';
+
+const getDayPlanQuerySchema = z.object({
+  userId: uuidSchema,
+  date: dateSchema,
+  includeWeather: z.boolean().optional(),
+});
+
+async function getDayPlan(req: Request, res: Response) {
+  const result = getDayPlanQuerySchema.safeParse(req.query);
+
+  if (!result.success) {
+    return res.status(400).json({ error: result.error.errors });
+  }
+
+  const { userId, date, includeWeather } = result.data;
+  // Type-safe params
+}
+```
+
+---
+
+### Pattern 3: Safe Input Sanitization
+
+```typescript
+import { sanitizeInput } from '@dormway/core/utils/validation';
+
+async function createNote(req: Request, res: Response) {
+  const title = sanitizeInput(req.body.title);
+  const content = sanitizeInput(req.body.content);
+
+  // Sanitized inputs are safe to store
+  await pool.query(
+    'INSERT INTO notes (title, content) VALUES ($1, $2)',
+    [title, content]
+  );
+}
+```
+
+---
+
+### Pattern 4: Context Type Guards
+
+```typescript
+import { isValidContextType } from '@dormway/core/utils/validation';
+
+async function getContextById(contextId: string, type?: string) {
+  if (type && !isValidContextType(type)) {
+    throw new Error(`Invalid context type: ${type}`);
+  }
+
+  const query = `
+    SELECT * FROM contexts
+    WHERE id = $1
+    ${type ? 'AND type = $2' : ''}
+  `;
+
+  return pool.query(query, type ? [contextId, type] : [contextId]);
+}
+```
+
+---
+
+### Pattern 5: Bulk Validation
+
+```typescript
+import { validateUUID, validateEmail } from '@dormway/core/utils/validation';
+
+function validateBulkUserData(users: unknown[]) {
+  const errors: string[] = [];
+
+  users.forEach((user: any, index) => {
+    const idValidation = validateUUID(user.id);
+    if (!idValidation.valid) {
+      errors.push(`User ${index}: ${idValidation.error}`);
+    }
+
+    const emailValidation = validateEmail(user.email);
+    if (!emailValidation.valid) {
+      errors.push(`User ${index}: ${emailValidation.error}`);
+    }
+  });
+
+  return errors.length > 0 ? { valid: false, errors } : { valid: true };
+}
+```
+
+---
+
+## Best Practices
+
+### ✅ Do
+
+- **Validate at boundaries** (API endpoints, external data sources)
+- **Use safeParse** for non-throwing validation
+- **Sanitize user input** before storage
+- **Provide clear error messages** with field names
+- **Type guard with validated data** after parsing
+- **Validate arrays** with `z.array(schema)`
+- **Use optional/nullable** for optional fields
+
+### ❌ Don't
+
+- **Don't skip validation** on user input
+- **Don't trust client-side validation** alone
+- **Don't expose Zod errors** directly to users (map to friendly messages)
+- **Don't validate trusted internal data** (only boundaries)
+- **Don't forget to sanitize** HTML content
+- **Don't use regex** when Zod schema exists
+
+---
+
+## Troubleshooting
+
+### Validation failing unexpectedly
+
+**Problem**: Valid data fails validation
+
+**Solution**:
+```typescript
+// Debug validation errors
+const result = schema.safeParse(data);
+if (!result.success) {
+  console.log('Validation errors:', result.error.errors);
+  // [{ path: ['email'], message: 'Invalid email address', code: 'invalid_string' }]
+}
+
+// Check actual value types
+console.log(typeof data.userId); // string or number?
+console.log(data.userId); // "uuid-string" or null?
+```
+
+---
+
+### UUID validation fails on valid UUIDs
+
+**Problem**: Valid UUIDs rejected
+
+**Solution**:
+```typescript
+// ❌ Wrong - missing hyphens
+validateUUID('550e8400e29b41d4a716446655440000');
+
+// ✅ Correct - with hyphens
+validateUUID('550e8400-e29b-41d4-a716-446655440000');
+
+// Normalize UUIDs
+function normalizeUUID(uuid: string): string {
+  return uuid.replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, '$1-$2-$3-$4-$5');
+}
+```
+
+---
+
+## Related Documentation
+
+- [DormWay Core Library (@dormway-core)](/docs/engineering/technical/dormway-core-library-dormway-core) - Main overview
+- [Configuration](/docs/engineering/technical/dormway-core/utilities/configuration) - Config validation with Zod
+- [Error Handling](/docs/engineering/technical/dormway-core/utilities/error-handling) - Error response formatting
+
+---
+
+**Last Updated**: 2025-11-23
+**Maintainer**: Platform Team

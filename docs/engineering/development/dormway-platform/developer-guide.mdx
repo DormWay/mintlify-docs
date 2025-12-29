@@ -1,0 +1,88 @@
+---
+title: "Developer Guide"
+description: "This guide consolidates local development setup, environment conventions, and git workflow for future developers."
+---
+
+# Developer Guide – DormWay Platform (Consolidated)
+
+This guide consolidates local development setup, environment conventions, and git workflow for future developers.
+
+## 1) Local Development (OrbStack + Doppler + Zuplo)
+
+- Preferred Docker runtime on macOS: OrbStack.
+- Always pass `DOCKER_CONTEXT=orbstack` for Make targets.
+
+Commands:
+```bash
+DOCKER_CONTEXT=orbstack make preflight   # health checks
+DOCKER_CONTEXT=orbstack make smoke       # connectivity tests
+DOCKER_CONTEXT=orbstack make dev         # start services
+```
+
+Tips:
+- If Docker not reachable: start OrbStack, re-run preflight.
+- Preflight/smoke must pass before `make dev`.
+
+## 2) Devbox (optional)
+
+- Use `devbox.json` for a reproducible shell.
+```bash
+devbox shell
+DOCKER_CONTEXT=orbstack make dev
+```
+
+## 3) Environment Configuration
+
+- Secrets via Doppler CLI; Make targets auto-inject env.
+- Standard container hostnames: `postgres-local`, `redis-local`.
+- Zuplo gateway runs in a parallel repo (`dormway-api-2`).
+
+Useful checks:
+```bash
+doppler configure
+docker --context "$DOCKER_CONTEXT" info
+```
+
+## 4) Git Workflow (Feature Branch + PR Required)
+
+- `main` is protected; push via PR only.
+
+Flow:
+```bash
+# ensure local main is current
+git checkout main && git pull origin main
+
+# branch
+git checkout -b yourname/feature-or-fix
+
+# commit in logical groups; rebase regularly
+git pull --rebase origin main
+
+# push and open PR
+git push -u origin yourname/feature-or-fix
+```
+
+Conflict hotspots to watch:
+- `services/dormway-lockedin/src/middleware.ts` (auth/onboarding logic)
+- `services/dormway-lockedin/src/app/dashboard/schedule/page.tsx` (large UI file)
+
+## 5) After Clone / Fresh Setup
+
+```bash
+make bootstrap
+DOCKER_CONTEXT=orbstack make preflight && make smoke
+DOCKER_CONTEXT=orbstack make dev
+```
+
+## 6) Troubleshooting
+
+- Docker unreachable → Start OrbStack, verify `docker info` with context.
+- Doppler not configured → `doppler login && doppler setup`.
+- Ports busy → `lsof -i :PORT` then kill process, re-run preflight.
+
+## 7) References (internal)
+
+- Zuplo Gateway Migration
+- Obsidian: Development notes live under `DormWay/Engineering/Development/dormway-platform/`
+
+(Keep this guide concise; add deep dives as separate notes if truly needed.)

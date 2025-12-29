@@ -1,0 +1,314 @@
+---
+title: "Web Dashboard Elastic Widget System"
+description: "The **Elastic Widget System** is the architecture powering the dormway-lockedin web dashboard. It enables widgets to render beautifully at **any size** - fro..."
+---
+
+# Web Dashboard Elastic Widget System
+
+## Overview
+
+The **Elastic Widget System** is the architecture powering the dormway-lockedin web dashboard. It enables widgets to render beautifully at **any size** - from a tiny 2x2 compact view to a massive 12x6 full-screen panel.
+
+**Key Innovation**: Instead of traditional T-shirt sizing (small/medium/large), widgets receive raw grid dimensions and adapt fluidly using utility functions.
+
+## Executive Summary
+
+- **Problem**: Widgets must render at ANY size (3x9 tall skinny, 12x1 ticker, 6x4 standard, etc.)
+- **Solution**: Elastic Design Pattern - widgets receive `gridSize: { w, h }` and make intelligent layout decisions
+- **Components**: Layout utilities, WidgetFocusContainer (expansion overlay), design tokens
+- **Status**: Production-ready with AcademicWidget, AttendanceWidget, ScheduleWidget, DayPlanWidget
+
+## Architecture
+
+### Directory Structure
+
+```
+services/dormway-lockedin/src/app/dashboard/home-v2/
+├── page.tsx                    # Main dashboard page with react-grid-layout
+├── widget-components.tsx       # Widget routing by type
+├── WidgetPicker.tsx           # Modal for adding widgets
+└── widgets/
+    ├── index.ts               # Central exports
+    ├── types.ts               # Type definitions + utility functions
+    ├── shared.tsx             # WidgetFocusContainer, WidgetHeader, MetricCard
+    ├── AcademicWidget.tsx     # Assignments - Gold Standard implementation
+    ├── AttendanceWidget.tsx   # "Can I Skip?" - Skip tracking
+    ├── DayPlanWidget.tsx      # Daily timeline
+    └── ScheduleWidget.tsx     # Class schedule
+```
+
+### Data Flow
+
+```
+API Response (WidgetEnvelope[])
+    ↓
+page.tsx (react-grid-layout)
+    ↓
+WidgetContent (routes by widget.type)
+    ↓
+Individual Widget (receives gridSize + content.data)
+    ↓
+Layout Selection (utility functions)
+    ↓
+Rendered Component (adaptive layout)
+```
+
+## The Elastic Design Pattern
+
+### Core Principle
+
+Widgets make layout decisions based on actual dimensions, not size categories:
+
+```typescript
+interface GridSize {
+  w: number;  // Width in grid columns (1-12)
+  h: number;  // Height in grid rows
+}
+
+// Instead of: if (size === 'small') { ... }
+// We use: if (isTickerMode(gridSize)) { ... }
+```
+
+### Layout Utility Functions
+
+```typescript
+// Ticker mode: h=1, w>=4 (horizontal strip)
+export function isTickerMode(gridSize: GridSize): boolean {
+  return gridSize.h === 1 && gridSize.w >= 4;
+}
+
+// Compact: 2x2 or smaller
+export function isCompactSize(gridSize: GridSize): boolean {
+  return gridSize.w <= 2 && gridSize.h <= 2;
+}
+
+// Orientation for content flow
+export function getLayoutOrientation(gridSize: GridSize): 'horizontal' | 'vertical' {
+  const aspectRatio = gridSize.w / gridSize.h;
+  return aspectRatio >= 1.5 ? 'horizontal' : 'vertical';
+}
+
+// Content density
+export function getContentDensity(gridSize: GridSize): 'minimal' | 'compact' | 'standard' | 'expanded' {
+  const area = gridSize.w * gridSize.h;
+  if (area <= 4) return 'minimal';
+  if (area <= 8) return 'compact';
+  if (area <= 16) return 'standard';
+  return 'expanded';
+}
+```
+
+### Layout Modes
+
+| Mode | Condition | Description | Example |
+|------|-----------|-------------|---------|
+| **Ticker** | h=1, w>=4 | Horizontal scrolling strip | `[CS: 2 due] [MATH: 1 due]` |
+| **Compact** | w<=2, h<=2 | Single metric + icon | "3 Due Today" |
+| **Wide** | aspectRatio >= 1.5 | Horizontal content layout | Scoreboard view |
+| **Standard** | Default | Card-based layout | List with details |
+| **Expanded** | WidgetFocusContainer | Full overlay with all data | Complete view |
+
+## Focus State Pattern (WidgetFocusContainer)
+
+### Concept: "Object Permanence"
+
+When users click "See More" or expand a widget, it transforms into an overlay **without navigation**. The dashboard remains visible behind a backdrop - the widget simply grows to show more content.
+
+**Why?**
+- Users maintain spatial awareness of their dashboard
+- No jarring page transitions
+- Easy dismissal (click backdrop, press Escape, or click X)
+- Widget identity is preserved during expansion
+
+### Implementation
+
+```tsx
+import { WidgetFocusContainer } from './shared';
+
+function MyWidget({ gridSize, data }: Props) {
+  const isCompact = isCompactSize(gridSize);
+
+  if (isCompact) {
+    return <CompactLayout data={data} />;
+  }
+
+  // Standard and larger sizes get focus capability
+  return (
+    <WidgetFocusContainer
+      title="My Widget"
+      subtitle="Summary text"
+      canExpand={true}
+      expandedContent={<ExpandedLayout data={data} />}
+    >
+      <StandardLayout data={data} />
+    </WidgetFocusContainer>
+  );
+}
+```
+
+### Props
+
+```typescript
+interface WidgetFocusContainerProps {
+  children: React.ReactNode;      // Default collapsed content
+  title?: string;                 // Overlay header title
+  subtitle?: string;              // Overlay header subtitle
+  canExpand?: boolean;            // Enable expansion (default: true)
+  expandedContent?: React.ReactNode;  // Content shown when expanded
+  onExpand?: () => void;          // Callback when expansion starts
+  onCollapse?: () => void;        // Callback when collapsing
+  className?: string;
+}
+```
+
+### User Interactions
+
+- **Expand**: Click card or "See More" button
+- **Collapse**: Click backdrop, press Escape, or click X button
+- **Scroll**: Expanded content scrolls independently
+- **Animations**: Smooth scale/opacity transitions
+
+## Design Token System
+
+### Widget-Specific Tokens
+
+Each widget type has dedicated CSS variables in `globals.css`:
+
+```css
+/* Academic Widget */
+--ds-widget-academic-icon: #f59e0b;     /* Amber - urgency */
+--ds-widget-academic-bg: rgba(245, 158, 11, 0.1);
+--ds-widget-academic-border: rgba(245, 158, 11, 0.2);
+
+/* Attendance Widget */
+--ds-widget-attendance-icon: #10b981;   /* Emerald - safety */
+--ds-widget-attendance-bg: rgba(16, 185, 129, 0.1);
+--ds-widget-attendance-border: rgba(16, 185, 129, 0.2);
+
+/* Schedule Widget */
+--ds-widget-schedule-icon: #3b82f6;     /* Blue - time */
+--ds-widget-schedule-bg: rgba(59, 130, 246, 0.1);
+--ds-widget-schedule-border: rgba(59, 130, 246, 0.2);
+```
+
+### Usage Pattern
+
+```tsx
+<div
+  className="rounded-xl p-4"
+  style={{
+    backgroundColor: 'var(--ds-widget-academic-bg)',
+    borderColor: 'var(--ds-widget-academic-border)'
+  }}
+>
+  <IconComponent style={{ color: 'var(--ds-widget-academic-icon)' }} />
+</div>
+```
+
+## Current Widget Status
+
+| Widget | Layout Modes | Focus State | Backend Data |
+|--------|--------------|-------------|--------------|
+| AcademicWidget | Ticker, Compact, Wide, Standard, Expanded | Yes | Yes (partial) |
+| AttendanceWidget | Ticker, Compact, Wide, Standard, Expanded | Yes | Demo only |
+| ScheduleWidget | Compact, Standard | Yes | Yes |
+| DayPlanWidget | Compact, Standard | Yes | Yes |
+
+## Backend Integration
+
+### BFF Endpoint
+
+The dashboard uses a Backend-for-Frontend pattern:
+
+```
+GET /dashboard/v1/composite?tab=home
+```
+
+Returns `WidgetEnvelope[]`:
+
+```typescript
+interface WidgetEnvelope {
+  id: string;           // "widget:academic"
+  type: string;         // Widget type key
+  title?: string;
+  priority?: number;
+  content: {
+    displayType?: string;  // Layout hint
+    data: WidgetData;      // Widget-specific payload
+  };
+  grid?: {
+    w?: number;
+    h?: number;
+    minW?: number;
+    minH?: number;
+  };
+}
+```
+
+### Data Contracts
+
+See [Web Dashboard Widget Data Contract](/docs/engineering/architecture/web-dashboard-widget-data-contract) for complete TypeScript interfaces for each widget type.
+
+## Adding New Widgets
+
+### Step-by-Step
+
+1. **Define types** in `types.ts`:
+   ```typescript
+   export interface MyWidgetData {
+     items: MyItem[];
+     summary?: number;
+   }
+   ```
+
+2. **Add design tokens** in `globals.css`:
+   ```css
+   --ds-widget-mywidget-icon: #color;
+   --ds-widget-mywidget-bg: rgba(r, g, b, 0.1);
+   ```
+
+3. **Create widget component** (`MyWidget.tsx`):
+   - Import grid utilities from `types.ts`
+   - Check `isTickerMode()`, `isCompactSize()`, etc.
+   - Render appropriate layout
+   - Wrap standard+ sizes in `WidgetFocusContainer`
+
+4. **Export** from `index.ts`:
+   ```typescript
+   export { MyWidget } from './MyWidget';
+   ```
+
+5. **Route** in `widget-components.tsx`:
+   ```typescript
+   case 'mywidget':
+     return <MyWidget gridSize={gridSize} data={content.data} />;
+   ```
+
+### Best Practices
+
+- **Always handle all sizes**: Ticker, Compact, Standard minimum
+- **Use semantic tokens**: Never hardcode colors
+- **Implement Focus State**: For widgets with hidden data in compact view
+- **Test at multiple sizes**: Use grid inspector in dev tools
+- **Keep expanded content scrollable**: Don't assume viewport fits
+
+## Related Documentation
+
+- [Web Dashboard Widget Data Contract](/docs/engineering/architecture/web-dashboard-widget-data-contract) - Backend data shapes
+- Dashboard Backend-for-Frontend (BFF) - API architecture
+- DormWay Widget System - iOS widget system (separate implementation)
+- DormWay Design System - Design tokens and patterns
+
+## File Locations
+
+| Purpose | Location |
+|---------|----------|
+| Source of Truth | `services/dormway-lockedin/src/app/dashboard/home-v2/widgets/` |
+| Implementation Specs | `services/dormway-lockedin/WIDGET_IMPLEMENTATION_SPECS.md` |
+| Data Contract | `services/dormway-lockedin/WIDGET_DATA_CONTRACT.md` |
+| Knowledge Doc | `services/dormway-lockedin/WIDGET_SYSTEM_KNOWLEDGE.md` |
+
+---
+
+*Last updated: 2025-11-26*
+*Related Linear: Widget system implementation*

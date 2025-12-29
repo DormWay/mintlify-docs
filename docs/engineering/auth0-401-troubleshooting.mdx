@@ -1,0 +1,179 @@
+---
+title: "Auth0 401 Troubleshooting"
+description: "Getting a 401 Unauthorized error when the Auth0 Post-Login Action tries to fetch user context:"
+---
+
+# Auth0 Post-Login Action 401 Error Troubleshooting
+
+## Problem
+Getting a 401 Unauthorized error when the Auth0 Post-Login Action tries to fetch user context:
+
+```
+[Post-Login Action] Processing login for user: auth0|688a9ab5029bc3265682f8c3
+[Post-Login Action] Failed to fetch user context: 401
+```
+
+## Root Causes
+
+The 401 error occurs when the Auth0 Action cannot authenticate with the API Router. The system authentication middleware requires:
+
+1. **Authorization header**: `Bearer {SYSTEM_API_KEY}`
+2. **X-Auth0-Action header**: Must be `'post-login'` or `'post-registration'`
+
+## Troubleshooting Steps
+
+### 1. Verify System API Key
+
+The `SYSTEM_API_KEY` in Auth0 must match the one in your environment.
+
+**Local Environment Key:**
+```bash
+# Get your local system API key
+doppler secrets get SYSTEM_API_KEY --plain
+```
+
+Expected value starts with: `O2RJ7GBrSg...`
+
+**Auth0 Dashboard:**
+1. Go to Auth0 Dashboard → Actions → Library
+2. Select your Post-Login Action
+3. Click on the Secrets tab
+4. Check the value of `SYSTEM_API_KEY`
+5. **It must match exactly** with your local/production key
+
+### 2. Verify API Gateway URL
+
+Check the `API_GATEWAY_URL` in Auth0 matches your actual API endpoint.
+
+**For Local Development:**
+- Should be: `http://localhost:3001` or `http://api-router:3001` (if in Docker)
+- NOT: `https://bp67gdk1c5.execute-api.us-east-1.amazonaws.com`
+
+**For Production:**
+- Should be: `https://bp67gdk1c5.execute-api.us-east-1.amazonaws.com`
+- Make sure there's no trailing slash
+
+### 3. Check Headers in Auth0 Action
+
+The Post-Login Action must send both required headers:
+
+```javascript
+const contextResponse = await fetch(
+  `${event.secrets.API_GATEWAY_URL}/users/${encodedUserId}/context`,
+  {
+    headers: {
+      'Authorization': `Bearer ${event.secrets.SYSTEM_API_KEY}`,
+      'X-Auth0-Action': 'post-login'  // ← This is required!
+    }
+  }
+);
+```
+
+### 4. Test the Endpoint Directly
+
+Test if the endpoint works with correct authentication:
+
+```bash
+# Replace with your actual values
+API_URL="http://localhost:3001"  # or your production URL
+SYSTEM_KEY="O2RJ7GBrSglUnlPM63mR4W5JBAtfG5kK6B7RS5WZrqH"  # your actual key
+AUTH0_ID="auth0|688a9ab5029bc3265682f8c3"  # the user's auth0 ID
+
+# Test the context endpoint
+curl -X GET "$API_URL/users/$AUTH0_ID/context" \
+  -H "Authorization: Bearer $SYSTEM_KEY" \
+  -H "X-Auth0-Action: post-login" \
+  -H "Content-Type: application/json"
+```
+
+Expected response:
+- **200 OK**: User found, returns context
+- **404 Not Found**: User doesn't exist in database yet
+- **401 Unauthorized**: Authentication failed (wrong key or missing header)
+
+### 5. Check Database for User
+
+Verify the user exists in the database:
+
+```sql
+-- Connect to database
+make db
+
+-- Check if user exists with this auth0_id
+SELECT id, auth0_id, email, name, onboarding_status 
+FROM accounts 
+WHERE auth0_id = 'auth0|688a9ab5029bc3265682f8c3';
+```
+
+If no results, the user hasn't been created yet (Post-Registration action may have failed).
+
+## Common Fixes
+
+### Fix 1: Update Auth0 Action Secrets
+
+In Auth0 Dashboard:
+1. Go to Actions → Library → Your Post-Login Action
+2. Click Secrets tab
+3. Update `SYSTEM_API_KEY` to match your environment
+4. For local testing, update `API_GATEWAY_URL` to `http://localhost:3001`
+5. Save and Deploy
+
+### Fix 2: Create Missing User
+
+If user doesn't exist in database, manually trigger creation:
+
+```bash
+# Using the test script
+curl -X POST "http://localhost:3001/users/create" \
+  -H "Authorization: Bearer $SYSTEM_KEY" \
+  -H "X-Auth0-Action: post-registration" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "auth0_id": "auth0|688a9ab5029bc3265682f8c3",
+    "email": "ethan@dormway.app",
+    "email_verified": true,
+    "full_name": "Ethan",
+    "onboarding_status": "pending"
+  }'
+```
+
+### Fix 3: Update Post-Login Action
+
+Ensure your Post-Login Action handles 404 gracefully (user not found):
+
+```javascript
+if (contextResponse.status === 404) {
+  // User doesn't exist in backend yet
+  // Add minimal claims and mark for provisioning
+  api.idToken.setCustomClaim(`${namespace}/needs_provisioning`, true);
+  // ... handle gracefully
+}
+```
+
+## Environment-Specific Settings
+
+### Local Development
+```
+API_GATEWAY_URL=http://localhost:3001
+SYSTEM_API_KEY={your-local-key-from-doppler}
+```
+
+### Production
+```
+API_GATEWAY_URL=https://bp67gdk1c5.execute-api.us-east-1.amazonaws.com
+SYSTEM_API_KEY={your-production-key-from-doppler}
+```
+
+## Next Steps
+
+1. **Verify all secrets match** between Auth0 and your environment
+2. **Test the endpoint directly** with curl to confirm it works
+3. **Check database** for user existence
+4. **Update Auth0 Action** if needed
+5. **Test login flow** again
+
+## Related Files
+
+- `/services/api-router/src/routes/auth0-routes.ts` - API endpoints
+- `/services/api-router/src/middleware/system-auth.ts` - Authentication middleware
+- `/docs/obsidian/Engineering/Auth0-Post-Login-Action-Amplitude.md` - Updated action code

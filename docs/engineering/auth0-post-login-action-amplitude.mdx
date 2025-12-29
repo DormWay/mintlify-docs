@@ -1,0 +1,274 @@
+---
+title: "Auth0 Post Login Action Amplitude"
+description: "This is the updated Auth0 Post-Login Action that integrates with Amplitude instead of directly with Customer.io. Amplitude will automatically sync user data..."
+---
+
+# Auth0 Post-Login Action - Amplitude Integration
+
+## Overview
+
+This is the updated Auth0 Post-Login Action that integrates with Amplitude instead of directly with Customer.io. Amplitude will automatically sync user data and events to Customer.io through their native integration.
+
+## Key Changes
+
+1. **Replaced Customer.io API calls with Amplitude HTTP API**
+2. **Uses backend user ID as primary identifier** when available
+3. **Tracks new event** `user_login_needs_provisioning` for users without backend accounts
+4. **Maintains all existing token claims** for backward compatibility
+
+## Required Auth0 Secrets
+
+- `API_GATEWAY_URL` - Your API Gateway endpoint
+- `SYSTEM_API_KEY` - System authentication key
+- `AMPLITUDE_API_KEY` - Your Amplitude project API key (replaces Customer.io keys)
+
+## Updated Post-Login Action Code
+
+```javascript
+/**
+ * Handler that will be called during the execution of a PostLogin flow.
+ *
+ * @param {Event} event - Details about the user and the context in which they are logging in.
+ * @param {PostLoginAPI} api - Interface whose methods can be used to change the behavior of the login.
+ */
+exports.onExecutePostLogin = async (event, api) => {
+  const { user } = event;
+  const encodedUserId = encodeURIComponent(event.user.user_id);
+  const namespace = 'https://dormway.app';
+
+  console.log(`[Post-Login Action] Processing login for user: ${user.user_id}`);
+
+  try {
+    // 1. Fetch user context and profile from DormWay API
+    // NOTE: Uses your co-founder's ACTUAL endpoint structure (no /api prefix)
+    const contextResponse = await fetch(
+      `${event.secrets.API_GATEWAY_URL}/users/${encodedUserId}/context`,
+      {
+        headers: {
+          'Authorization': `Bearer ${event.secrets.SYSTEM_API_KEY}`,
+          'X-Auth0-Action': 'post-login'
+        }
+      }
+    );
+
+    if (contextResponse.ok) {
+      const userData = await contextResponse.json();
+      const backendUserId = userData.account_id; // Your co-founder's format
+
+      console.log(`[Post-Login Action] Found existing user with backend ID: ${backendUserId}`);
+
+      // CRITICAL: Add the backend UUID to both tokens with correct claim names
+      // These are the exact claim names expected by the Lambda Authorizer
+      api.accessToken.setCustomClaim(`${namespace}/user_id`, backendUserId);
+      api.accessToken.setCustomClaim(`${namespace}/backend_user_id`, backendUserId);
+      api.idToken.setCustomClaim(`${namespace}/user_id`, backendUserId);
+      api.idToken.setCustomClaim(`${namespace}/backend_user_id`, backendUserId);
+
+      // Access token claims (for API authorization)
+      api.accessToken.setCustomClaim(`${namespace}/auth0_id`, user.user_id);
+      api.accessToken.setCustomClaim(`${namespace}/email`, user.email);
+      api.accessToken.setCustomClaim(`${namespace}/roles`, userData.roles || ['user']);
+      api.accessToken.setCustomClaim(`${namespace}/onboarding_status`, userData.onboarding_status || 'pending');
+
+      // ID token claims (for client-side user info)
+      api.idToken.setCustomClaim(`${namespace}/user_profile`, {
+        backend_user_id: backendUserId,
+        auth0_id: user.user_id,
+        email: user.email,
+        full_name: userData.full_name || user.name || '',
+        avatar_url: userData.avatar_url || user.picture || '',
+        onboarding_status: userData.onboarding_status || 'pending',
+      });
+
+      // Store in app metadata for persistence across logins
+      api.user.setAppMetadata('backend_user_id', backendUserId);
+      api.user.setAppMetadata('onboarding_status', userData.onboarding_status);
+
+      // 2. Update last login timestamp
+      await fetch(
+        `${event.secrets.API_GATEWAY_URL}/users/${encodedUserId}/last-login`,
+        {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${event.secrets.SYSTEM_API_KEY}`,
+            'X-Auth0-Action': 'post-login'
+          },
+          body: JSON.stringify({
+            last_login_at: new Date().toISOString(),
+            login_count: (user.logins_count || 0) + 1,
+            login_ip: event.request.ip,
+            login_user_agent: event.request.userAgent
+          })
+        }
+      );
+
+      // 3. Track login event in Amplitude (which syncs to Customer.io)
+      const amplitudeEventResponse = await fetch(
+        'https://api2.amplitude.com/2/httpapi',
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json'
+          },
+          body: JSON.stringify({
+            api_key: event.secrets.AMPLITUDE_API_KEY,
+            events: [{
+              user_id: backendUserId, // Use backend user ID as primary identifier
+              event_type: 'user_login',
+              time: Date.now(),
+              event_properties: {
+                login_method: event.connection.name,
+                ip_address: event.request.ip,
+                user_agent: event.request.userAgent,
+                login_count: (user.logins_count || 0) + 1,
+                backend_user_id: backendUserId,
+                auth0_id: user.user_id,
+                source: 'auth0_action'
+              },
+              user_properties: {
+                email: user.email,
+                full_name: userData.full_name || user.name || '',
+                backend_user_id: backendUserId,
+                auth0_id: user.user_id,
+                onboarding_status: userData.onboarding_status || 'pending'
+              }
+            }]
+          })
+        }
+      );
+
+      if (!amplitudeEventResponse.ok) {
+        console.error('[Post-Login Action] Failed to track login event in Amplitude:', await amplitudeEventResponse.text());
+        // Don't throw - allow login to continue
+      }
+
+    } else if (contextResponse.status === 404) {
+      console.log(`[Post-Login Action] User not found in backend (404), will trigger provisioning in iOS app`);
+      
+      // User doesn't exist in backend yet - add minimal claims
+      // iOS app will detect missing backend_user_id and provision the user
+      api.idToken.setCustomClaim(`${namespace}/user_profile`, {
+        auth0_id: user.user_id,
+        email: user.email,
+        full_name: user.name || user.nickname || '',
+        needs_provisioning: true
+      });
+
+      // Add standard claims for new users
+      api.idToken.setCustomClaim(`${namespace}/auth0_id`, user.user_id);
+      api.idToken.setCustomClaim(`${namespace}/email`, user.email);
+      api.idToken.setCustomClaim(`${namespace}/email_verified`, user.email_verified || false);
+
+      // Mark user as needing backend creation
+      api.user.setAppMetadata('needs_backend_creation', true);
+
+      // Track login attempt for user needing provisioning in Amplitude
+      const amplitudeEventResponse = await fetch(
+        'https://api2.amplitude.com/2/httpapi',
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json'
+          },
+          body: JSON.stringify({
+            api_key: event.secrets.AMPLITUDE_API_KEY,
+            events: [{
+              user_id: user.user_id, // Use Auth0 ID since no backend ID yet
+              event_type: 'user_login_needs_provisioning',
+              time: Date.now(),
+              event_properties: {
+                login_method: event.connection.name,
+                ip_address: event.request.ip,
+                user_agent: event.request.userAgent,
+                auth0_id: user.user_id,
+                source: 'auth0_action'
+              },
+              user_properties: {
+                email: user.email,
+                full_name: user.name || user.nickname || '',
+                auth0_id: user.user_id,
+                needs_provisioning: true
+              }
+            }]
+          })
+        }
+      );
+
+      if (!amplitudeEventResponse.ok) {
+        console.error('[Post-Login Action] Failed to track provisioning event in Amplitude:', await amplitudeEventResponse.text());
+      }
+
+    } else {
+      console.error(`[Post-Login Action] Failed to fetch user context: ${contextResponse.status}`);
+      
+      // Add minimal claims even on error to allow login to continue
+      api.idToken.setCustomClaim(`${namespace}/auth0_id`, user.user_id);
+      api.idToken.setCustomClaim(`${namespace}/email`, user.email);
+      api.idToken.setCustomClaim(`${namespace}/email_verified`, user.email_verified || false);
+    }
+
+    console.log(`[Post-Login Action] Successfully processed login for user: ${user.user_id}`);
+
+  } catch (error) {
+    console.error('[Post-Login Action] Error:', error);
+    
+    // Add minimal claims even on error to allow login to continue
+    api.idToken.setCustomClaim(`${namespace}/auth0_id`, user.user_id);
+    api.idToken.setCustomClaim(`${namespace}/email`, user.email);
+    api.idToken.setCustomClaim(`${namespace}/email_verified`, user.email_verified || false);
+  }
+};
+```
+
+## Event Tracking Details
+
+### For Existing Users (with backend account)
+
+**Event**: `user_login`
+- **User ID**: Backend UUID (primary identifier)
+- **Properties**:
+  - `login_method`: Authentication method used
+  - `ip_address`: User's IP address
+  - `user_agent`: Browser/device information
+  - `login_count`: Total login count
+  - `backend_user_id`: Backend UUID
+  - `auth0_id`: Auth0 identifier
+  - `source`: 'auth0_action'
+
+### For New Users (needing provisioning)
+
+**Event**: `user_login_needs_provisioning`
+- **User ID**: Auth0 ID (no backend ID yet)
+- **Properties**:
+  - Same as above, but without `backend_user_id`
+  - Includes `needs_provisioning: true` in user properties
+
+## Deployment Instructions
+
+1. **Copy the code** from this document
+2. **Navigate to Auth0 Dashboard** → Actions → Flows → Login
+3. **Edit your Post-Login Action**
+4. **Replace the existing code** with the updated version
+5. **Update Secrets**:
+   - Remove: `CUSTOMERIO_SITE_ID`, `CUSTOMERIO_API_KEY`
+   - Add: `AMPLITUDE_API_KEY`
+6. **Deploy** the action
+7. **Test** with a login flow
+
+## Benefits
+
+1. **Unified Analytics Pipeline**: All events flow through Amplitude first
+2. **Automatic Customer.io Sync**: Amplitude's native integration handles the sync
+3. **Better User Tracking**: Consistent user identification across platforms
+4. **Provisioning Visibility**: Track users who need backend account creation
+5. **Simplified Configuration**: Only one analytics API key needed
+
+## Notes
+
+- The action is designed to be resilient - tracking failures don't block login
+- All existing token claims are preserved for backward compatibility
+- The backend user ID is used as the primary identifier when available
+- For new users without backend accounts, Auth0 ID is used temporarily

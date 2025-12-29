@@ -1,0 +1,38 @@
+---
+title: "DORM 172 manual editor"
+description: "1. **Meetings / room details** – edit `data.meetings[*]` (location, schedule blocks) using either index-based or identifier matching. 2. **Course metadata**..."
+---
+
+# DORM-172 – Manual Syllabus Editing (Incremental overlay updates)
+
+## Current implementation (2025-10-11)
+
+- **Overlay pipeline**  
+  - Introduced a new overlay operation kind `instructor` that merges onto `service_data.data.instructor` without mutating the base `processed_syllabus_crew` record.  
+  - Engine + API reuse the shared merge helper so overlays are applied consistently for fetch, fold, and student personalization.
+
+- **Admin tooling**  
+  - Added a “Manual Edits” tab in the syllabus admin viewer with:
+    - Assignment add/replace controls (existing workflow) for quick grading fixes.
+    - A new instructor/contact editor for updating name, title, email, phone, office, and office hours.  
+  - The form issues overlays via `/api/admin/syllabus/:id/overlays`, recording audit metadata (`admin-instructor-editor`) and refreshing the merged preview.  
+  - Blank fields resolve to `null`, allowing admins to intentionally remove stale contact info while keeping an audit trail.
+
+- **Validation**  
+  - API-side normalization ensures the new overlay kind is accepted alongside existing assignment/note updates.  
+  - Manual editor guards against no-op submissions and requires a target user id before writing overlays.
+
+## Next steps / open items
+
+- Extend overlays + UI to cover:
+  1. **Meetings / room details** – edit `data.meetings[*]` (location, schedule blocks) using either index-based or identifier matching.  
+  2. **Course metadata** – update fields such as `course_code`, `section`, `credits`, `campus`.  
+  3. **Policy / logistics** – evaluate whether “general” overlays should map to structured keys (e.g., policy text, syllabus URLs) rather than free-form notes.
+
+- Once additional kinds are implemented, add regression coverage (unit tests for merge helpers + Cypress/Playwright smoke for the admin UI).
+
+## References
+
+- Admin UI: `services/dormway-admin/src/components/SyllabusManualEditor.tsx`  
+- API overlay merge: `services/api-router/src/services/syllabus-overlay-merge.ts`  
+- Engine overlay merge (Temporal fold workflow): `services/engine/src/utils/syllabusOverlayMerge.ts`

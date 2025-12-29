@@ -1,0 +1,1298 @@
+---
+title: "Plugin_Output_Schema_draft"
+description: "Describe the JSON contract that campus/city plugin executions must emit. DormWay ingestion workflows consume this document and apply the results to canonical..."
+---
+
+# Plugin Output Schema (Draft)
+
+**Purpose**
+
+Describe the JSON contract that campus/city plugin executions must emit. DormWay ingestion workflows consume this document and apply the results to canonical storage (service_data, time blocks, alerts, etc.).
+
+## Envelope Structure
+
+```json
+{
+  "pluginId": "umich-events",
+  "pluginVersion": "1.0.0",
+  "runId": "2025-10-12T03:25:00Z",
+  "target": {
+    "type": "campus",
+    "campusId": "umich"
+  },
+  "generatedAt": "2025-10-12T03:25:00Z",
+  "instructions": {
+    "mode": "replace",
+    "expiresAt": "2025-10-19T03:25:00Z",
+    "upstreamContext": {
+      "source": "rss",
+      "entity": "events"
+    }
+  },
+  "payload": {
+    "events": [],
+    "alerts": [],
+    "metadata": {}
+  },
+  "executedTasks": [
+    {
+      "taskId": "fetch-events",
+      "modules": ["events"],
+      "startedAt": "2025-10-12T03:24:30Z",
+      "completedAt": "2025-10-12T03:24:59Z",
+      "status": "success"
+    }
+  ]
+}
+```
+
+Notes:
+- `pluginId` matches the registration entry in `campus_configs`/plugin registry.
+- `pluginVersion` uses semver; assists ingestion in compatibility decisions.
+- `runId` provides idempotency (ingestion audit record or storage key).
+- `target` indicates campus/city scope (future: global?).
+- `instructions.mode` options:
+  - `replace`: treat payload as the new canonical dataset for that source.
+  - `merge`: upsert; maintain previous items unless explicitly removed.
+  - `diff`: payload includes `add` / `remove` sections.
+- `expiresAt` optional; ingestion can auto-expire data (e.g., alerts).
+- `upstreamContext` optional hints for logging/observability.
+- `executedTasks` optional trace describing which internal tasks ran during this execution. Modules omitted from the payload should not appear in `modules`.
+
+## Payload Types
+
+Each payload key corresponds to a module the ingestion workflow understands. Modules can be mixed within the same document; omit modules that do not have updates for a given run. Unless stated otherwise, array items must provide stable `id` values to enable deduplication.
+
+### Events
+
+Used for campus events (alerts, dining specials, campus happenings). Ingested into `service_data` and optionally `student_time_blocks`.
+
+```json
+"events": [
+  {
+    "id": "event-123",
+    "title": "Football vs OSU",
+    "description": "Go Blue!",
+    "start": "2025-11-29T17:00:00-05:00",
+    "end": "2025-11-29T21:00:00-05:00",
+    "timezone": "America/Detroit",
+    "location": {
+      "name": "Michigan Stadium",
+      "address": "1201 S Main St, Ann Arbor, MI"
+    },
+    "tags": ["athletics", "football"],
+    "source": {
+      "type": "rss",
+      "url": "https://mgoblue.com/rss"
+    },
+    "metadata": {
+      "ticketUrl": "https://mgoblue.com/events/tickets/123"
+    }
+  }
+]
+```
+
+### Alerts
+
+Campus alerts/notices. Typically stored in `service_data` for display in the dashboard.
+
+```json
+"alerts": [
+  {
+    "id": "alert-456",
+    "title": "Severe Weather Warning",
+    "severity": "high",
+    "issuedAt": "2025-10-12T03:00:00Z",
+    "expiresAt": "2025-10-13T03:00:00Z",
+    "body": "Tornado warning in Washtenaw County.",
+    "source": {
+      "type": "api",
+      "url": "https://alerts.umich.edu/api/alerts/456"
+    },
+    "actions": [
+      {
+        "label": "View full alert",
+        "url": "https://alerts.umich.edu"
+      }
+    ]
+  }
+]
+```
+
+### Metadata
+
+General campus metadata updates (branding, contact info, configuration flags). Stored in `service_data` with plugin-specific handlers. Keep metadata narrowly scoped so it does not overlap with structured modules below.
+
+```json
+"metadata": {
+  "campusInfo": {
+    "displayName": "University of Michigan",
+    "shortName": "U-M",
+    "primaryColor": "#00274C",
+    "secondaryColor": "#FFCB05"
+  },
+  "links": [
+    { "label": "Registrar", "url": "https://ro.umich.edu" }
+  ]
+}
+```
+
+### Crime Alerts
+
+Used for campus police or municipal safety alerts that should surface in safety dashboards.
+
+```json
+"crimeAlerts": [
+  {
+    "id": "dpss-2025-0212",
+    "title": "Burglary reported near South Quad",
+    "category": "burglary",
+    "severity": "medium",
+    "occurredAt": "2025-02-12T02:30:00-05:00",
+    "reportedAt": "2025-02-12T03:45:00-05:00",
+    "location": {
+      "name": "South Quad Residence Hall",
+      "address": "600 E Madison St, Ann Arbor, MI 48109"
+    },
+    "summary": "Resident reported forced entry to dorm room. No injuries.",
+    "source": {
+      "type": "rss",
+      "url": "https://www.dpss.umich.edu/content/crime-safety-data/daily-crime-fire-log/"
+    }
+  }
+]
+```
+
+### Road Conditions
+
+City-level road closures, detours, or construction notices.
+
+```json
+"roadConditions": {
+  "updatedAt": "2025-02-09T14:00:00-05:00",
+  "closures": [
+    {
+      "id": "east-medical-center-bridge-phase-3",
+      "title": "East Medical Center Drive Bridge Rehabilitation",
+      "status": "closed",
+      "effective": "2025-02-08T09:00:00-05:00",
+      "expires": "2025-06-20T15:00:00-04:00",
+      "description": "Bridge from West Medical Center Drive to Fuller Road/Maiden Lane closed for phase 3 widening project.",
+      "impacts": ["vehicular"],
+      "source": {
+        "type": "web",
+        "url": "https://www.a2gov.org/engineering/traffic/road-and-lane-closures/"
+      }
+    }
+  ]
+}
+```
+
+### Transit
+
+Transit routes, alerts, and real-time arrivals.
+
+```json
+"transit": {
+  "feeds": [
+    {
+      "agencyId": "umich-ltp",
+      "alerts": [
+        {
+          "id": "ltp-2025-0211",
+          "title": "Bursley-Baits detour",
+          "severity": "medium",
+          "description": "Northwood route detouring via Plymouth Rd due to construction.",
+          "effective": "2025-02-11T07:00:00-05:00",
+          "expires": "2025-02-15T23:00:00-05:00",
+          "source": {
+            "type": "web",
+            "url": "https://ltp.umich.edu/transit-alerts/"
+          }
+        }
+      ],
+      "routes": [
+        {
+          "routeId": "comprehensive-blue",
+          "headsign": "Central Campus Transit Center",
+          "arrivals": [
+            {
+              "stopId": "cctc-northbound",
+              "etaMinutes": 4,
+              "predictedAt": "2025-02-12T09:05:00-05:00",
+              "vehicleId": "bus-481",
+              "source": {
+                "type": "gtfs-realtime",
+                "url": "https://realtime.ltp.umich.edu/gtfs"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+```
+
+### Dining
+
+Dining hall menus, hours, and occupancy (Waitz).
+
+```json
+"dining": [
+  {
+    "hallId": "south-quad",
+    "displayName": "South Quad Dining Hall",
+    "hours": [
+      { "day": "monday", "period": "breakfast", "open": "07:00", "close": "10:30" },
+      { "day": "monday", "period": "lunch", "open": "11:00", "close": "14:30" }
+    ],
+    "menu": [
+      {
+        "meal": "Lunch",
+        "items": [
+          { "name": "Grilled Chicken Sandwich", "dietary": ["gluten"] },
+          { "name": "Quinoa Bowl", "dietary": ["vegan", "gluten-free"] }
+        ]
+      }
+    ],
+    "occupancy": {
+      "source": "waitz",
+      "percent": 72,
+      "trend": "increasing",
+      "capturedAt": "2025-02-12T12:05:00-05:00",
+      "url": "https://waitz.io/umich"
+    }
+  }
+]
+```
+
+### Hours
+
+Building or service hours, including overrides.
+
+```json
+"hours": [
+  {
+    "entityId": "hatcher-library",
+    "entityType": "library",
+    "displayName": "Hatcher Graduate Library",
+    "schedule": [
+      { "day": "monday", "open": "08:00", "close": "24:00" },
+      { "day": "tuesday", "open": "08:00", "close": "24:00" }
+    ],
+    "exceptions": [
+      {
+        "date": "2025-02-16",
+        "open": "10:00",
+        "close": "18:00",
+        "reason": "Presidents' Day hours"
+      }
+    ],
+    "source": {
+      "type": "web",
+      "url": "https://www.lib.umich.edu/locations-and-hours/hours-view"
+    }
+  }
+]
+```
+
+### Academic Dates
+
+Registrar milestones such as add/drop deadlines.
+
+```json
+"academicDates": [
+  {
+    "id": "winter-2025-add-drop",
+    "term": "Winter 2025",
+    "category": "addDropDeadline",
+    "date": "2025-01-27",
+    "description": "Last day to drop without a W grade.",
+    "source": {
+      "type": "web",
+      "url": "https://ro.umich.edu/calendars"
+    }
+  }
+]
+```
+
+### Recreation
+
+Facility statuses and reservations.
+
+```json
+"recreation": [
+  {
+    "facilityId": "imsb",
+    "displayName": "Intramural Sports Building",
+    "status": "open",
+    "statusDetail": "Pool closed for maintenance until 3 pm.",
+    "updatedAt": "2025-02-12T10:00:00-05:00",
+    "hoursRef": "imsb-hours",
+    "source": {
+      "type": "web",
+      "url": "https://recsports.umich.edu/facility/imsb/"
+    }
+  }
+]
+```
+
+### Parking
+
+Real-time parking space availability snapshots.
+
+```json
+"parking": {
+  "capturedAt": "2025-02-12T08:30:00-05:00",
+  "structures": [
+    {
+      "structureId": "ann-street-structure",
+      "displayName": "Ann Street Parking Structure",
+      "available": 120,
+      "capacity": 250,
+      "occupancyPercent": 52,
+      "source": {
+        "type": "api",
+        "url": "https://ltp.umich.edu/parking/parking-space-availability/"
+      }
+    }
+  ]
+}
+```
+
+### Weather
+
+Weather alerts or current conditions sourced from Everbridge, NOAA, etc.
+
+```json
+"weather": {
+  "alerts": [
+    {
+      "id": "everbridge-weather-2025-0212",
+      "title": "Winter Weather Advisory",
+      "severity": "medium",
+      "issuedAt": "2025-02-12T05:00:00-05:00",
+      "expiresAt": "2025-02-13T05:00:00-05:00",
+      "description": "2-4 inches of snow expected. Roads may be slick.",
+      "source": {
+        "type": "api",
+        "url": "https://member.everbridge.net/rest/weather/page?orgId=454514914099298&pageNo=1&pageSize=25"
+      }
+    }
+  ]
+}
+```
+
+### News
+
+Structured news headlines for campus or city distribution.
+
+```json
+"news": [
+  {
+    "id": "annarbor-2025-0212-road-briefing",
+    "title": "Ann Arbor announces bridge closure detours",
+    "summary": "City shares detour routes during East Medical Center Bridge project.",
+    "publishedAt": "2025-02-11T18:00:00-05:00",
+    "category": "transportation",
+    "source": {
+      "type": "rss",
+      "url": "https://www.a2gov.org/news"
+    }
+  }
+]
+```
+
+### Resources
+
+Evergreen student resources, billing reminders, or services.
+
+```json
+"resources": [
+  {
+    "id": "student-billing-center",
+    "title": "Student Billing Center",
+    "category": "finance",
+    "url": "https://finance.umich.edu/finops/student/billing",
+    "supportsInline": true,
+    "description": "Pay tuition, room and board, and other university charges."
+  }
+]
+```
+
+## Case Study: University of Michigan (Campus + City)
+
+The example below shows a combined payload that a Michigan campus plugin could emit when city context data is bundled into the same execution.
+
+```json
+{
+  "pluginId": "umich-campus-context",
+  "pluginVersion": "1.3.0",
+  "runId": "2025-02-12T15:05:00Z",
+  "target": {
+    "type": "campus",
+    "campusId": "umich"
+  },
+  "generatedAt": "2025-02-12T15:05:00Z",
+  "instructions": {
+    "mode": "merge",
+    "expiresAt": "2025-02-12T19:05:00Z",
+    "upstreamContext": {
+      "source": "mixed",
+      "entity": "campus-city"
+    }
+  },
+  "executedTasks": [
+    {
+      "taskId": "events-maizepages",
+      "modules": ["events"],
+      "startedAt": "2025-02-12T15:02:10Z",
+      "completedAt": "2025-02-12T15:02:41Z",
+      "status": "success"
+    },
+    {
+      "taskId": "city-road-closures",
+      "modules": ["roadConditions", "news"],
+      "startedAt": "2025-02-12T15:03:05Z",
+      "completedAt": "2025-02-12T15:03:22Z",
+      "status": "success"
+    },
+    {
+      "taskId": "campus-transit-ltp",
+      "modules": ["transit", "parking"],
+      "startedAt": "2025-02-12T15:03:24Z",
+      "completedAt": "2025-02-12T15:04:30Z",
+      "status": "success"
+    },
+    {
+      "taskId": "recsports-waitz",
+      "modules": ["dining", "recreation", "hours"],
+      "startedAt": "2025-02-12T15:04:34Z",
+      "completedAt": "2025-02-12T15:04:55Z",
+      "status": "success"
+    },
+    {
+      "taskId": "everbridge-alerts",
+      "modules": ["weather", "alerts", "crimeAlerts"],
+      "startedAt": "2025-02-12T15:04:58Z",
+      "completedAt": "2025-02-12T15:05:05Z",
+      "status": "success"
+    }
+  ],
+  "payload": {
+    "events": [
+      {
+        "id": "maizepages-123456",
+        "title": "Recreational Sports Job Fair",
+        "description": "Meet hiring managers for student roles at Recreational Sports.",
+        "start": "2025-02-14T16:00:00-05:00",
+        "end": "2025-02-14T18:00:00-05:00",
+        "timezone": "America/Detroit",
+        "location": {
+          "name": "Intramural Sports Building",
+          "address": "606 E Hoover Ave, Ann Arbor, MI 48104"
+        },
+        "tags": ["career", "rec-sports"],
+        "source": {
+          "type": "rss",
+          "url": "https://maizepages.umich.edu/events"
+        }
+      }
+    ],
+    "roadConditions": {
+      "updatedAt": "2025-02-12T14:30:00-05:00",
+      "closures": [
+        {
+          "id": "east-medical-center-bridge-phase-3",
+          "title": "East Medical Center Drive Bridge Rehabilitation",
+          "status": "closed",
+          "effective": "2025-02-08T09:00:00-05:00",
+          "expires": "2025-06-20T15:00:00-04:00",
+          "description": "Phase 3 widening project closing bridge to vehicular traffic.",
+          "impacts": ["vehicular"],
+          "source": {
+            "type": "web",
+            "url": "https://www.a2gov.org/engineering/traffic/road-and-lane-closures/"
+          }
+        }
+      ]
+    },
+    "transit": {
+      "feeds": [
+        {
+          "agencyId": "umich-ltp",
+          "alerts": [
+            {
+              "id": "ltp-2025-0211",
+              "title": "Bursley-Baits detour",
+              "severity": "medium",
+              "description": "Northwood route detouring via Plymouth Rd due to construction.",
+              "effective": "2025-02-11T07:00:00-05:00",
+              "expires": "2025-02-15T23:00:00-05:00",
+              "source": {
+                "type": "web",
+                "url": "https://ltp.umich.edu/transit-alerts/"
+              }
+            }
+          ],
+          "routes": [
+            {
+              "routeId": "comprehensive-blue",
+              "headsign": "Central Campus Transit Center",
+              "arrivals": [
+                {
+                  "stopId": "cctc-northbound",
+                  "etaMinutes": 4,
+                  "predictedAt": "2025-02-12T15:04:30-05:00",
+                  "vehicleId": "bus-481",
+                  "source": {
+                    "type": "gtfs-realtime",
+                    "url": "https://realtime.ltp.umich.edu/gtfs"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "crimeAlerts": [
+      {
+        "id": "dpss-2025-0212",
+        "title": "Burglary reported near South Quad",
+        "category": "burglary",
+        "severity": "medium",
+        "occurredAt": "2025-02-12T02:30:00-05:00",
+        "reportedAt": "2025-02-12T03:45:00-05:00",
+        "location": {
+          "name": "South Quad Residence Hall",
+          "address": "600 E Madison St, Ann Arbor, MI 48109"
+        },
+        "summary": "Resident reported forced entry to dorm room. No injuries.",
+        "source": {
+          "type": "rss",
+          "url": "https://www.dpss.umich.edu/content/crime-safety-data/daily-crime-fire-log/"
+        }
+      }
+    ],
+    "dining": [
+      {
+        "hallId": "south-quad",
+        "displayName": "South Quad Dining Hall",
+        "hours": [
+          { "day": "monday", "period": "breakfast", "open": "07:00", "close": "10:30" },
+          { "day": "monday", "period": "lunch", "open": "11:00", "close": "14:30" }
+        ],
+        "menu": [
+          {
+            "meal": "Lunch",
+            "items": [
+              { "name": "Grilled Chicken Sandwich", "dietary": ["gluten"] },
+              { "name": "Quinoa Bowl", "dietary": ["vegan", "gluten-free"] }
+            ]
+          }
+        ],
+        "occupancy": {
+          "source": "waitz",
+          "percent": 72,
+          "trend": "increasing",
+          "capturedAt": "2025-02-12T15:00:00Z",
+          "url": "https://waitz.io/umich"
+        }
+      }
+    ],
+    "hours": [
+      {
+        "entityId": "hatcher-library",
+        "entityType": "library",
+        "displayName": "Hatcher Graduate Library",
+        "schedule": [
+          { "day": "monday", "open": "08:00", "close": "24:00" },
+          { "day": "tuesday", "open": "08:00", "close": "24:00" }
+        ],
+        "exceptions": [
+          {
+            "date": "2025-02-16",
+            "open": "10:00",
+            "close": "18:00",
+            "reason": "Presidents Day hours"
+          }
+        ],
+        "source": {
+          "type": "web",
+          "url": "https://www.lib.umich.edu/locations-and-hours/hours-view"
+        }
+      },
+      {
+        "entityId": "imsb-hours",
+        "entityType": "recreation",
+        "displayName": "Intramural Sports Building",
+        "schedule": [
+          { "day": "monday", "open": "06:00", "close": "24:00" }
+        ],
+        "source": {
+          "type": "web",
+          "url": "https://recsports.umich.edu/hours/"
+        }
+      }
+    ],
+    "academicDates": [
+      {
+        "id": "winter-2025-add-drop",
+        "term": "Winter 2025",
+        "category": "addDropDeadline",
+        "date": "2025-01-27",
+        "description": "Last day to drop without a W grade.",
+        "source": {
+          "type": "web",
+          "url": "https://ro.umich.edu/calendars"
+        }
+      }
+    ],
+    "recreation": [
+      {
+        "facilityId": "imsb",
+        "displayName": "Intramural Sports Building",
+        "status": "open",
+        "statusDetail": "Pool closed for maintenance until 3 pm.",
+        "updatedAt": "2025-02-12T10:00:00-05:00",
+        "hoursRef": "imsb-hours",
+        "source": {
+          "type": "web",
+          "url": "https://recsports.umich.edu/facility/imsb/"
+        }
+      }
+    ],
+    "parking": {
+      "capturedAt": "2025-02-12T13:55:00Z",
+      "structures": [
+        {
+          "structureId": "ann-street-structure",
+          "displayName": "Ann Street Parking Structure",
+          "available": 120,
+          "capacity": 250,
+          "occupancyPercent": 52,
+          "source": {
+            "type": "api",
+            "url": "https://ltp.umich.edu/parking/parking-space-availability/"
+          }
+        }
+      ]
+    },
+    "weather": {
+      "alerts": [
+        {
+          "id": "everbridge-weather-2025-0212",
+          "title": "Winter Weather Advisory",
+          "severity": "medium",
+          "issuedAt": "2025-02-12T05:00:00-05:00",
+          "expiresAt": "2025-02-13T05:00:00-05:00",
+          "description": "2-4 inches of snow expected. Roads may be slick.",
+          "source": {
+            "type": "api",
+            "url": "https://member.everbridge.net/rest/weather/page?orgId=454514914099298&pageNo=1&pageSize=25"
+          }
+        }
+      ]
+    },
+    "resources": [
+      {
+        "id": "student-billing-center",
+        "title": "Student Billing Center",
+        "category": "finance",
+        "url": "https://finance.umich.edu/finops/student/billing",
+        "supportsInline": true,
+        "description": "Pay tuition, room and board, and other university charges."
+      }
+    ]
+  }
+}
+```
+
+## Temporal Orchestration Notes
+
+- The Temporal sync workflow invokes every plugin on a predictable cadence (5–15 minute interval today). Plugins must be safe to run more frequently than necessary; all work should be idempotent with respect to upstream APIs.
+- Plugins decide which internal tasks to execute per run by consulting their local state/config. If no tasks are due, they may skip execution and return either an empty payload or cached data with expiring instructions.
+- `executedTasks` captures what actually ran, allowing ingestion to reason about partial runs (e.g., events succeeded while transit skipped).
+- Plugins never block on ingestion confirmation. Once a manifest is written, ingestion is responsible for pickup, validation, and replay. `runId` provides traceability between retries.
+- Avoid embedding scheduling logic in the manifest itself; cadence adjustments belong in plugin configuration so the Temporal handler can apply overrides at deploy time.
+
+## JSON Schema (Draft)
+
+```yaml
+$schema: "http://json-schema.org/draft-07/schema#"
+type: object
+required: [pluginId, pluginVersion, runId, target, generatedAt, payload]
+properties:
+  pluginId:
+    type: string
+  pluginVersion:
+    type: string
+  runId:
+    type: string
+  target:
+    type: object
+    required: [type]
+    properties:
+      type:
+        type: string
+        enum: ["campus", "city"]
+      campusId:
+        type: string
+      cityId:
+        type: string
+  generatedAt:
+    type: string
+    format: date-time
+  instructions:
+    type: object
+    properties:
+      mode:
+        type: string
+        enum: ["replace", "merge", "diff"]
+      expiresAt:
+        type: string
+        format: date-time
+      upstreamContext:
+        type: object
+  payload:
+    type: object
+    properties:
+      events:
+        type: array
+        items:
+          $ref: "#/$defs/event"
+      alerts:
+        type: array
+        items:
+          $ref: "#/$defs/alert"
+      crimeAlerts:
+        type: array
+        items:
+          $ref: "#/$defs/crimeAlert"
+      roadConditions:
+        $ref: "#/$defs/roadConditions"
+      transit:
+        $ref: "#/$defs/transit"
+      dining:
+        type: array
+        items:
+          $ref: "#/$defs/diningLocation"
+      hours:
+        type: array
+        items:
+          $ref: "#/$defs/hoursEntry"
+      academicDates:
+        type: array
+        items:
+          $ref: "#/$defs/academicDate"
+      recreation:
+        type: array
+        items:
+          $ref: "#/$defs/recreationFacility"
+      parking:
+        $ref: "#/$defs/parkingSnapshot"
+      weather:
+        $ref: "#/$defs/weather"
+      news:
+        type: array
+        items:
+          $ref: "#/$defs/newsItem"
+      resources:
+        type: array
+        items:
+          $ref: "#/$defs/resource"
+      metadata:
+        type: object
+  executedTasks:
+    type: array
+    items:
+      $ref: "#/$defs/taskRun"
+additionalProperties: false
+$defs:
+  timestamp:
+    type: string
+    format: date-time
+  source:
+    type: object
+    properties:
+      type:
+        type: string
+      url:
+        type: string
+        format: uri
+      id:
+        type: string
+      issuedAt:
+        $ref: "#/$defs/timestamp"
+    required: [type]
+    additionalProperties: true
+  location:
+    type: object
+    properties:
+      name:
+        type: string
+      address:
+        type: string
+      latitude:
+        type: number
+      longitude:
+        type: number
+    additionalProperties: false
+  event:
+    type: object
+    required: [id, title, start]
+    properties:
+      id:
+        type: string
+      title:
+        type: string
+      description:
+        type: string
+      start:
+        $ref: "#/$defs/timestamp"
+      end:
+        $ref: "#/$defs/timestamp"
+      timezone:
+        type: string
+      location:
+        $ref: "#/$defs/location"
+      tags:
+        type: array
+        items:
+          type: string
+      source:
+        $ref: "#/$defs/source"
+      metadata:
+        type: object
+    additionalProperties: true
+  alert:
+    type: object
+    required: [id, title, severity, issuedAt]
+    properties:
+      id:
+        type: string
+      title:
+        type: string
+      severity:
+        type: string
+        enum: ["low", "medium", "high", "critical"]
+      issuedAt:
+        $ref: "#/$defs/timestamp"
+      expiresAt:
+        $ref: "#/$defs/timestamp"
+      body:
+        type: string
+      actions:
+        type: array
+        items:
+          type: object
+          required: [label, url]
+          properties:
+            label:
+              type: string
+            url:
+              type: string
+              format: uri
+      source:
+        $ref: "#/$defs/source"
+    additionalProperties: true
+  taskRun:
+    type: object
+    required: [taskId, modules, status]
+    properties:
+      taskId:
+        type: string
+      modules:
+        type: array
+        items:
+          type: string
+      startedAt:
+        $ref: "#/$defs/timestamp"
+      completedAt:
+        $ref: "#/$defs/timestamp"
+      status:
+        type: string
+        enum: ["success", "skipped", "error"]
+      error:
+        type: object
+        properties:
+          message:
+            type: string
+          code:
+            type: string
+    additionalProperties: false
+  crimeAlert:
+    type: object
+    required: [id, title, category, severity, reportedAt]
+    properties:
+      id:
+        type: string
+      title:
+        type: string
+      category:
+        type: string
+      severity:
+        type: string
+        enum: ["low", "medium", "high", "critical"]
+      summary:
+        type: string
+      occurredAt:
+        $ref: "#/$defs/timestamp"
+      reportedAt:
+        $ref: "#/$defs/timestamp"
+      location:
+        $ref: "#/$defs/location"
+      source:
+        $ref: "#/$defs/source"
+    additionalProperties: true
+  roadConditions:
+    type: object
+    properties:
+      updatedAt:
+        $ref: "#/$defs/timestamp"
+      closures:
+        type: array
+        items:
+          $ref: "#/$defs/roadClosure"
+    additionalProperties: false
+  roadClosure:
+    type: object
+    required: [id, title, status, effective]
+    properties:
+      id:
+        type: string
+      title:
+        type: string
+      status:
+        type: string
+        enum: ["closed", "open", "partial", "detour"]
+      effective:
+        $ref: "#/$defs/timestamp"
+      expires:
+        $ref: "#/$defs/timestamp"
+      impacts:
+        type: array
+        items:
+          type: string
+      description:
+        type: string
+      source:
+        $ref: "#/$defs/source"
+    additionalProperties: true
+  transit:
+    type: object
+    properties:
+      feeds:
+        type: array
+        items:
+          $ref: "#/$defs/transitFeed"
+    additionalProperties: false
+  transitFeed:
+    type: object
+    required: [agencyId]
+    properties:
+      agencyId:
+        type: string
+      routes:
+        type: array
+        items:
+          $ref: "#/$defs/transitRoute"
+      alerts:
+        type: array
+        items:
+          $ref: "#/$defs/alert"
+      source:
+        $ref: "#/$defs/source"
+    additionalProperties: true
+  transitRoute:
+    type: object
+    required: [routeId]
+    properties:
+      routeId:
+        type: string
+      headsign:
+        type: string
+      arrivals:
+        type: array
+        items:
+          $ref: "#/$defs/transitArrival"
+      source:
+        $ref: "#/$defs/source"
+    additionalProperties: true
+  transitArrival:
+    type: object
+    required: [stopId, etaMinutes]
+    properties:
+      stopId:
+        type: string
+      etaMinutes:
+        type: number
+      predictedAt:
+        $ref: "#/$defs/timestamp"
+      vehicleId:
+        type: string
+      source:
+        $ref: "#/$defs/source"
+    additionalProperties: true
+  diningLocation:
+    type: object
+    required: [hallId, displayName]
+    properties:
+      hallId:
+        type: string
+      displayName:
+        type: string
+      hours:
+        type: array
+        items:
+          $ref: "#/$defs/diningHour"
+      menu:
+        type: array
+        items:
+          $ref: "#/$defs/diningMenu"
+      occupancy:
+        $ref: "#/$defs/occupancySnapshot"
+      source:
+        $ref: "#/$defs/source"
+    additionalProperties: true
+  diningHour:
+    type: object
+    required: [day, open, close]
+    properties:
+      day:
+        type: string
+      period:
+        type: string
+      open:
+        type: string
+        pattern: "^\\d{2}:\\d{2}$"
+      close:
+        type: string
+        pattern: "^\\d{2}:\\d{2}$"
+    additionalProperties: true
+  diningMenu:
+    type: object
+    required: [meal, items]
+    properties:
+      meal:
+        type: string
+      items:
+        type: array
+        items:
+          type: object
+          required: [name]
+          properties:
+            name:
+              type: string
+            dietary:
+              type: array
+              items:
+                type: string
+    additionalProperties: false
+  occupancySnapshot:
+    type: object
+    required: [percent, capturedAt]
+    properties:
+      source:
+        type: string
+      percent:
+        type: number
+        minimum: 0
+        maximum: 100
+      trend:
+        type: string
+        enum: ["increasing", "decreasing", "steady"]
+      capturedAt:
+        $ref: "#/$defs/timestamp"
+      url:
+        type: string
+        format: uri
+    additionalProperties: true
+  hoursEntry:
+    type: object
+    required: [entityId, displayName, schedule]
+    properties:
+      entityId:
+        type: string
+      entityType:
+        type: string
+      displayName:
+        type: string
+      schedule:
+        type: array
+        items:
+          $ref: "#/$defs/hoursScheduleItem"
+      exceptions:
+        type: array
+        items:
+          $ref: "#/$defs/hoursException"
+      source:
+        $ref: "#/$defs/source"
+    additionalProperties: true
+  hoursScheduleItem:
+    type: object
+    required: [day, open, close]
+    properties:
+      day:
+        type: string
+      open:
+        type: string
+        pattern: "^\\d{2}:\\d{2}$"
+      close:
+        type: string
+        pattern: "^\\d{2}:\\d{2}$"
+    additionalProperties: true
+  hoursException:
+    type: object
+    required: [date, open, close]
+    properties:
+      date:
+        type: string
+        format: date
+      open:
+        type: string
+        pattern: "^\\d{2}:\\d{2}$"
+      close:
+        type: string
+        pattern: "^\\d{2}:\\d{2}$"
+      reason:
+        type: string
+    additionalProperties: true
+  academicDate:
+    type: object
+    required: [id, term, category, date]
+    properties:
+      id:
+        type: string
+      term:
+        type: string
+      category:
+        type: string
+      date:
+        type: string
+        format: date
+      description:
+        type: string
+      source:
+        $ref: "#/$defs/source"
+    additionalProperties: true
+  recreationFacility:
+    type: object
+    required: [facilityId, displayName, status, updatedAt]
+    properties:
+      facilityId:
+        type: string
+      displayName:
+        type: string
+      status:
+        type: string
+        enum: ["open", "closed", "limited"]
+      statusDetail:
+        type: string
+      hoursRef:
+        type: string
+      updatedAt:
+        $ref: "#/$defs/timestamp"
+      source:
+        $ref: "#/$defs/source"
+    additionalProperties: true
+  parkingSnapshot:
+    type: object
+    properties:
+      capturedAt:
+        $ref: "#/$defs/timestamp"
+      structures:
+        type: array
+        items:
+          $ref: "#/$defs/parkingStructure"
+    additionalProperties: false
+  parkingStructure:
+    type: object
+    required: [structureId, displayName, available, capacity]
+    properties:
+      structureId:
+        type: string
+      displayName:
+        type: string
+      available:
+        type: number
+      capacity:
+        type: number
+      occupancyPercent:
+        type: number
+      source:
+        $ref: "#/$defs/source"
+    additionalProperties: true
+  weather:
+    type: object
+    properties:
+      alerts:
+        type: array
+        items:
+          $ref: "#/$defs/alert"
+      current:
+        type: object
+        properties:
+          summary:
+            type: string
+          temperatureC:
+            type: number
+          temperatureF:
+            type: number
+          humidityPercent:
+            type: number
+          capturedAt:
+            $ref: "#/$defs/timestamp"
+          source:
+            $ref: "#/$defs/source"
+        additionalProperties: true
+    additionalProperties: false
+  newsItem:
+    type: object
+    required: [id, title, publishedAt]
+    properties:
+      id:
+        type: string
+      title:
+        type: string
+      summary:
+        type: string
+      category:
+        type: string
+      publishedAt:
+        $ref: "#/$defs/timestamp"
+      source:
+        $ref: "#/$defs/source"
+    additionalProperties: true
+  resource:
+    type: object
+    required: [id, title, url]
+    properties:
+      id:
+        type: string
+      title:
+        type: string
+      category:
+        type: string
+      url:
+        type: string
+        format: uri
+      supportsInline:
+        type: boolean
+      description:
+        type: string
+      source:
+        $ref: "#/$defs/source"
+    additionalProperties: true
+```
+
+## TODO
+
+- [ ] Finalize schema enums (instructions, severity, etc.).
+- [ ] Document ingestion mapping (payload fields -> service_data methods).
+- [ ] Provide example JSON files per plugin type (events, alerts, metadata).
+- [ ] Publish CLI docs for local validation & ingestion.
+- [ ] Define ingestion audit record format.
+- [ ] Align with Temporal `campusProcessor` workflow invocation.

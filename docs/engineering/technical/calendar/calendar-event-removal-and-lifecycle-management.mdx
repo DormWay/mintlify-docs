@@ -1,0 +1,185 @@
+---
+title: "Calendar Event Removal and Lifecycle Management"
+description: "The calendar normalization system now supports proper event removal handling through soft deletion and lifecycle tracking. This ensures that when events are..."
+---
+
+# Calendar Event Removal and Lifecycle Management
+
+## Overview
+
+The calendar normalization system now supports proper event removal handling through soft deletion and lifecycle tracking. This ensures that when events are removed from a source calendar (e.g., class cancelled, meeting deleted), they are properly marked as deleted in our system rather than permanently removed, maintaining audit trails and historical data.
+
+## Implementation Details
+
+### Database Schema Updates
+
+Added lifecycle tracking fields to both `time_blocks` and `student_time_blocks` tables:
+
+```sql
+-- New enum type
+CREATE TYPE time_block_lifecycle_status AS ENUM (
+    'active',      -- Currently valid event
+    'deleted',     -- Event was removed from source calendar
+    'superseded'   -- Event was replaced by a newer version
+);
+
+-- New columns
+ALTER TABLE time_blocks ADD COLUMN lifecycle_status time_block_lifecycle_status DEFAULT 'active';
+ALTER TABLE time_blocks ADD COLUMN deleted_at timestamp with time zone;
+ALTER TABLE time_blocks ADD COLUMN sync_token text;
+```
+
+### Sync Process
+
+The calendar sync process now:
+
+1. **Generates a unique sync token** for each sync operation
+2. **Stores all incoming events** with `lifecycle_status = 'active'`
+3. **Marks missing events as deleted** - Events that existed in previous sync but not in current sync
+4. **Restores events** if they reappear in a future sync
+
+### Key Features
+
+#### Soft Deletion
+- Events are never hard-deleted from the database
+- Marked with `lifecycle_status = 'deleted'` and `deleted_at` timestamp
+- Preserves audit trail and allows for historical analysis
+
+#### Sync Token Tracking
+- Each sync operation gets a unique token
+- Helps track which sync last touched each event
+- Enables efficient deletion detection
+
+#### Event Restoration
+- If a deleted event reappears in a future sync, it's automatically restored
+- Useful for temporary calendar changes or sync errors
+
+#### RLS Policies
+- Active events are shown by default to users
+- Deleted events visible for 30 days for audit purposes
+
+## Testing
+
+### Test Commands
+
+```bash
+# Test calendar normalization (deduplication, recurring events)
+npm run workflow test-calendar
+
+# Test event removal functionality
+npm run workflow test-event-removal
+
+# Test with specific calendar data
+npm run workflow process-syllabus <syllabusId>
+```
+
+### Test Scenarios
+
+The `test-event-removal` command tests:
+
+1. **Initial Sync** - Creates 3 test events
+2. **Event Removal** - Syncs with only 1 event, marking 2 as deleted
+3. **Event Restoration** - Syncs with 2 events, restoring 1 deleted event
+4. **Final State** - Verifies 2 active, 1 deleted event
+
+### Example Output
+
+```
+Event removal testing completed:
+Success: true
+Message: Event removal test successful: 3 total events, 1 deleted, 2 active
+
+Summary:
+- Total events: 3
+- Active events: 2
+- Deleted events: 1
+
+Operation details:
+1. Initial sync with 3 events
+   Result: { "success": true, "eventCount": 3 }
+
+2. Second sync with 1 event (2 removed)
+   Result: { "success": true, "eventCount": 1 }
+
+3. Query results after removal
+   Result: {
+     "totalEvents": 3,
+     "activeEvents": 1,
+     "deletedEvents": 2,
+     "deletedEventTitles": ["Event to Remove", "Another Event to Remove"]
+   }
+
+4. Third sync with event_2 restored
+   Result: { "success": true, "eventCount": 2 }
+
+5. Final state after restoration
+   Result: {
+     "totalEvents": 3,
+     "activeEvents": 2,
+     "deletedEvents": 1,
+     "activeEventTitles": ["Event to Keep", "Event to Remove"],
+     "deletedEventTitles": ["Another Event to Remove"]
+   }
+```
+
+## API Usage
+
+### Calendar Sync with Event Removal
+
+```typescript
+// Sync calendar data - automatically handles removals
+const result = await calendarActivities.normalizeAndStoreCalendarData(
+  'google',           // source
+  calendarData,       // raw calendar data
+  contextId,          // optional context ID
+  userId,             // optional user ID
+  {
+    clearExisting: false,      // Don't clear, use soft deletion
+    expandRecurring: true,     // Expand recurring events
+    deduplicateEvents: true    // Remove duplicates
+  }
+);
+```
+
+### Query Active Events Only
+
+```typescript
+// Default queries return only active events
+const activeEvents = await supabase.queryTimeBlocks({
+  contextId: 'some-context-id',
+  // lifecycle_status = 'active' is applied automatically
+});
+```
+
+### Query Including Deleted Events
+
+```typescript
+// Use raw SQL to include deleted events
+const { data } = await supabase.client
+  .from('time_blocks')
+  .select('*')
+  .eq('context_id', contextId)
+  .in('lifecycle_status', ['active', 'deleted']);
+```
+
+## Best Practices
+
+1. **Regular Syncs** - Run calendar syncs regularly to catch removals promptly
+2. **Audit Retention** - Configure how long to keep deleted events (default: 30 days visible)
+3. **Sync Frequency** - Balance between real-time updates and API rate limits
+4. **Error Handling** - Handle sync failures gracefully without losing deletion tracking
+
+## Migration Notes
+
+For existing deployments:
+
+1. Run the migration script: `add_event_lifecycle_tracking.sql`
+2. All existing events will have `lifecycle_status = 'active'` by default
+3. First sync after migration won't delete anything (no previous sync token)
+4. Subsequent syncs will properly track removals
+
+## Related Documentation
+
+- Calendar Normalization System
+- Time Block Cleanup
+- Testing Guide
