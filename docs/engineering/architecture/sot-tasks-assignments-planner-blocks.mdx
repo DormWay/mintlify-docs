@@ -21,9 +21,15 @@ title: "Tasks, Assignments, Planner Blocks"
 - DayPlan scheduling reads pending, unscheduled tasks and generates plan events without mutating task rows. (`services/engine/src/activities/dayplan.activities.ts`)
 
 ## Web Surface Alignment (Current vs Target)
-- Current: Web Tasks page is still heavy on academic intelligence and does not yet use the v2 task list as the primary data source.
-- Target: Web Tasks is the deadline authority powered by `/v2/students/me/tasks` with schedule/unschedule actions; composite is legacy-only.
+- Current: Web Tasks renders a unified list powered by `/v2/students/me/tasks` with deliverables as fallback coverage (no gaps).
+- Target: Web Tasks remains the canonical "all tasks" inbox with V2 authoritative status and schedule/unschedule actions; composite is legacy-only.
 - Plan: `services/dormway-lockedin/docs/LOCKEDIN_WEB_OS_CONSISTENCY_PLAN.md`.
+
+## Web Tasks Merge + Status Rules (LockedIn)
+- Dedup priority: V2 `metadata.canvasAssignmentId` (matches `Deliverable` canvas IDs) before fallback composite key (`courseContextId|courseCode + normalized title + due day`).
+- Row identity: when a V2 task matches, the row uses the V2 `task.id`; fallback deliverables are prefixed (`fallback:<deliverable.id>`).
+- Status mapping: V2 `completed`/`scheduled` is authoritative; scheduled inference from time blocks is only used for fallback deliverables. Urgency buckets (overdue/due-soon/later) are derived from `dueAt` and completion, independent of scheduled state.
+- Capacity bar: required hours are computed from the unified task rows due in the current week (personal tasks count only when due in-week); scheduled hours come from planner time blocks plus scheduled V2 tasks that do not yet surface as blocks (using estimated minutes).
 
 ## Key Flows (High-Level)
 - Create manual task -> `POST /api/mobile/tasks` or `POST /v2/students/me/tasks` inserts into `tasks` with `source='manual'`. (`services/api-router/src/routes/task-routes.ts`, `services/api-router/src/routes/v2/students.routes.ts`)
@@ -61,6 +67,8 @@ title: "Tasks, Assignments, Planner Blocks"
 - `infrastructure/database/migrations/20251003_create_assignment_completion.sql`
 - `infrastructure/docker/init-scripts/01-schema.sql`
 - `services/dormway-lockedin/src/app/dashboard/tasks/page.tsx`
+- `services/dormway-lockedin/src/hooks/home/useTasksV2.ts`
+- `services/dormway-lockedin/src/types/tasks-v2.ts`
 - `services/dormway-lockedin/src/hooks/useSemesterAggregate.ts`
 - `services/dormway-lockedin/docs/LOCKEDIN_WEB_OS_CONSISTENCY_PLAN.md`
 
@@ -71,7 +79,14 @@ title: "Tasks, Assignments, Planner Blocks"
 - If you change syllabus task IDs or completion semantics, update `student.entity.ts` and completion routes.
 - If you touch Task Bank composition, update `/mobile/planner/task-bank` and `TaskMetadata.originalId` handling.
 
+## Related Documentation
+- [Tasks Page Canonical Merge Notes](/docs/engineering/technical/tasks/tasks-page-canonical-merge-notes)
+- Plans/Tasks-Page-Canonicalization-Plan
+
 ## Recent Changes
+- 2025-12-30: Standardized task creation UI on `TaskCreateModal`; legacy `AddTaskModal` is deprecated.
+- 2025-12-29: Tasks page details + planning now expand inline (no drawers); planner uses a weekly grid with drag-to-select blocks, plus delete for manual tasks and inline filter panel controls.
+- 2025-12-28: Web Tasks now merges V2 tasks with deliverable fallback coverage and computes weekly required hours from the unified task list.
 - 2025-12-27: Gated semester aggregate fetch to the Forecast tab and aligned Tasks page framing with the beta IA.
 - 2025-12-27: Hid intelligence-only tabs behind dev mode to keep Tasks focused on core deadlines in beta.
 - 2025-12-27: Added web Tasks alignment target and linked OS consistency plan.

@@ -1,0 +1,103 @@
+---
+title: "Tasks Page Canonical Merge Notes"
+description: "Explain how the Tasks page merges V2 tasks with academic deliverables and how we derive status, urgency, and capacity. This doc is meant for future devs and..."
+---
+
+# Tasks Page Canonical Merge Notes
+
+## Purpose
+Explain how the Tasks page merges V2 tasks with academic deliverables and how we derive status, urgency, and capacity. This doc is meant for future devs and AI agents working on Tasks.
+
+---
+
+## Data Sources (in order of authority)
+1. **Tasks V2** (`/v2/students/me/tasks`) is authoritative for task identity + progress status.
+2. **Deliverables** (Canvas + syllabus) fill coverage gaps so no assignment is missed.
+3. **Courses** provide context (name, professor, policies).
+
+---
+
+## Merge + Dedup Rules
+
+### Matching priority
+1. **Strong key**: `task.metadata.canvasAssignmentId` matches Canvas deliverables (`deliverable.id` prefix `canvas-<id>`).
+2. **Fallback key**: `courseId|courseCode + normalized title + local due day`.
+
+### Row identity
+- If a V2 task exists, the row uses `task.id` as the stable identity.
+- Fallback deliverables use `fallback:<deliverable.id>` so rows stay stable as V2 coverage grows.
+
+### Local day key
+- We use a local `YYYY-MM-DD` key (not UTC) to avoid timezone drift.
+
+---
+
+## Status vs Urgency
+
+### Progress status (V2 authoritative)
+- `completed`: V2 task status is `completed`.
+- `scheduled`: V2 task status is `scheduled`.
+- `open`: everything else.
+
+Fallback deliverables use completion + planner blocks:
+- `completed` if `assignment_completion` is true.
+- `scheduled` if a planner block exists this week with `metadata.assignmentId`.
+
+### Urgency buckets (independent of scheduling)
+- **Overdue**: `dueAt < now` and not completed.
+- **Due Soon**: `dueAt` within 0-7 days and not completed.
+- **Later / Backlog**: `dueAt` beyond 7 days or no due date.
+
+> Scheduled items still show in the correct urgency bucket. Scheduling never hides overdue work.
+
+---
+
+## Resilience (Beta Readiness)
+- Course + deliverable fetch uses `preferAurora=1` first, then retries without Aurora on 5xx responses.
+- Tasks page renders with V2 tasks even if academic data fails; a warning banner prompts retry.
+
+---
+
+## Capacity Bar Rules
+- **Required (this week)**: sum of estimated minutes for all rows due this week and not completed.
+- **Scheduled (this week)**: planner time blocks + V2 scheduled tasks that do not yet surface as blocks.
+- **Needs**: `max(required - scheduled, 0)`.
+
+Personal tasks only contribute to Required when they have a due date in the current week.
+
+---
+
+## Interaction Model (Beta)
+- Task rows expand inline for details (no side drawer).
+- Plan toggles an inline planner with a weekly time grid; users drag to select a time block.
+- The planner grid auto-scrolls to the current time when the week contains today.
+- Planner suggestions: prefers AI dayplan slots that match the task; falls back to the earliest open slot within 8am-10pm.
+- Planner grid excludes "free time" filler events from the calendar range feed.
+- Delete is supported for V2 manual/personal tasks only; deliverables are not deletable in-app.
+- Filters + sort controls live in the top panel and expand inline (no left rail).
+- "New task" CTA opens `TaskCreateModal` (Tasks V2); `AddTaskModal` is deprecated.
+
+---
+
+## Edge Cases
+- **Timezone drift**: use local day keys for fallback matching.
+- **V2 scheduled tasks without blocks**: count estimated minutes in Scheduled until block sync is confirmed.
+- **Deleted tasks**: filter out `task.status === 'deleted'` early.
+
+---
+
+## QA Checklist
+- No duplicate rows when V2 + deliverables overlap.
+- Scheduled tasks still show when overdue.
+- Personal tasks due this week appear in Due Soon and affect Required hours.
+- Search matches title and course code.
+- Deleted tasks never render.
+- Inline expand reveals details and planning without opening a drawer.
+
+---
+
+## Key Files
+- `services/dormway-lockedin/src/app/dashboard/tasks/page.tsx`
+- `services/dormway-lockedin/src/hooks/home/useTasksV2.ts`
+- `services/dormway-lockedin/src/hooks/useAcademicData.ts`
+- `services/dormway-lockedin/src/components/ui/academic/CapacityBar.tsx`
