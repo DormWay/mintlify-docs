@@ -1,5 +1,6 @@
 ---
 title: "Auth & Identity"
+description: "sequenceDiagram participant Auth0 as Auth0 Action participant API as API Router participant DB as Neon DB participant SW as StudentWatcher"
 ---
 
 # SoT - Auth & Identity
@@ -25,10 +26,71 @@ title: "Auth & Identity"
 - App auth uses `x-app-signature` + `x-app-timestamp` HMAC; invalid or missing signatures keep `req.appAuth.isVerified = false`.
 
 ## Key Flows (High-Level)
-- Auth0 signup provisioning: `POST /users/create` (system-auth) creates or updates the account, links pre-existing data, and starts StudentWatcher.
-- Clerk webhook provisioning: `clerk-routes` creates account + student context and starts StudentWatcher; failures do not block signup.
-- PLG magic link resend: `POST /api/v2/auth/resend-magic-link` -> Clerk sign-in token -> Customer.io transactional email.
-- Request auth: gateway auth runs first, then core auth sets `req.user` for downstream role checks.
+
+### Auth0 Signup Provisioning
+
+```mermaid
+sequenceDiagram
+    participant Auth0 as Auth0 Action
+    participant API as API Router
+    participant DB as Neon DB
+    participant SW as StudentWatcher
+
+    Auth0->>API: POST /users/create (system-auth)
+    API->>DB: Create/update account
+    API->>DB: Link pre-existing data
+    API->>SW: Start StudentWatcher workflow
+    SW-->>API: Workflow started
+    API-->>Auth0: Success response
+```
+
+### Clerk Webhook Provisioning
+
+```mermaid
+sequenceDiagram
+    participant Clerk as Clerk Webhook
+    participant API as clerk-routes
+    participant DB as Neon DB
+    participant SW as StudentWatcher
+
+    Clerk->>API: Webhook event
+    API->>DB: Create account + student context
+    API->>SW: Start StudentWatcher
+    Note over API,SW: Failures logged but do not block signup
+    API-->>Clerk: 200 OK
+```
+
+### PLG Magic Link Resend
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant API as API Router
+    participant Clerk as Clerk
+    participant CIO as Customer.io
+
+    User->>API: POST /api/v2/auth/resend-magic-link
+    API->>Clerk: Generate sign-in token
+    Clerk-->>API: Token
+    API->>CIO: Send transactional email
+    CIO-->>User: Magic link email
+```
+
+### Request Auth Flow
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Gateway as Gateway Auth
+    participant Core as Core Auth
+    participant Handler as Route Handler
+
+    Client->>Gateway: Incoming request
+    Gateway->>Core: Validate credentials
+    Core->>Core: Set req.user
+    Core->>Handler: Authenticated request
+    Handler->>Handler: Role checks
+```
 
 ## Data Models / IDs / Terminology
 - Backend user ID: UUID used as `req.user.id` and emitted as `https://dormway.app/user_id` in Auth0 claims.

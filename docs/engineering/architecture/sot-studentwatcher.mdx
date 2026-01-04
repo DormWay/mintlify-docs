@@ -1,5 +1,6 @@
 ---
 title: "StudentWatcher"
+description: "sequenceDiagram participant SP as studentProcessor.workflow participant SA as startStudentWatcher participant TZ as Timezone Resolver participant SW as stude..."
 ---
 
 # SoT - StudentWatcher
@@ -17,16 +18,67 @@ title: "StudentWatcher"
 ## Invariants & Contracts
 - Workflow type is `studentWatcherWorkflow` (used in Temporal queries and start calls).
 - Canonical workflow ID is `student-watcher-${userId}` when started by engine activities and onboarding flows.
-- Supported signals: `daily_plan`, `context_update`, `generate_plan`, `preferences_update`, `trigger_calendar_sync`, `trigger_canvas_sync`, `send_evening_briefing`, `generate_feed_cards`.
+- Supported signals: `daily_plan`, `context_update`, `generate_plan`, `preferences_update`, `trigger_calendar_sync`, `trigger_canvas_sync`, `send_evening_briefing`, `generate_feed_cards`, `test_push_notification`, `send_push_notification`, `trigger_dayplan_push`.
 - Workflow loop runs every 5 minutes (288 checks/day); `continueAsNew` triggers at midnight in the user’s timezone.
 - Daily plan generation runs at 5 AM user time when the plan date changes; evening briefing runs at configured hour (default 20:00).
 - Auto-sync cadence: calendar + Canvas sync are evaluated hourly and fire when last sync is ≥ 6 hours old.
+- Auto-sync plan regeneration is throttled to once every 30 minutes (per `AUTO_SYNC_REGEN_INTERVAL_MS`).
 
 ## Key Flows (High-Level)
-- Start on onboarding: `studentProcessor.workflow` calls `startStudentWatcher`, which resolves timezone and starts `studentWatcherWorkflow`.
-- Start on Clerk signup: `clerk-routes` attempts `startWorkflow('studentWatcherWorkflow')` with default timezone; failures are logged but do not block signup.
-- Admin-driven signals: `dayplan-admin-actions` uses `generate_plan` for regeneration/email; `preferences-routes` signals `preferences_update`.
-- Runtime loop: handles `context_update` signals, regenerates plans on calendar/syllabus/enrollment changes, runs schedule/Canvas auto-syncs, and saves state to `student_watcher_state`.
+
+### Start on Onboarding
+
+```mermaid
+sequenceDiagram
+    participant SP as studentProcessor.workflow
+    participant SA as startStudentWatcher
+    participant TZ as Timezone Resolver
+    participant SW as studentWatcherWorkflow
+
+    SP->>SA: Call startStudentWatcher
+    SA->>TZ: Resolve timezone
+    TZ-->>SA: Timezone
+    SA->>SW: Start workflow
+    SW-->>SA: Workflow started
+```
+
+### Start on Clerk Signup
+
+```mermaid
+flowchart LR
+    A[clerk-routes] --> B["startWorkflow(studentWatcherWorkflow)"]
+    B --> C{Success?}
+    C -->|Yes| D[Workflow running]
+    C -->|No| E[Log failure, continue signup]
+```
+
+### Admin-Driven Signals
+
+```mermaid
+flowchart TD
+    A[dayplan-admin-actions] --> B["Signal: generate_plan"]
+    B --> C[Regeneration/email]
+
+    D[preferences-routes] --> E["Signal: preferences_update"]
+    E --> F[Update preferences]
+```
+
+### Runtime Loop
+
+```mermaid
+flowchart TD
+    A[StudentWatcher Loop] --> B{Signal received?}
+    B -->|context_update| C[Handle context update]
+    B -->|calendar change| D[Regenerate plans]
+    B -->|syllabus update| D
+    B -->|enrollment change| D
+
+    A --> E{Auto-sync due?}
+    E -->|Schedule| F[Run schedule sync]
+    E -->|Canvas| G[Run Canvas sync]
+
+    A --> H[Save state to student_watcher_state]
+```
 
 ## Known Discrepancies / Risks
 - Workflow ID mismatch: `preferences-routes` uses `studentWatcher-${userId}` while canonical IDs use `student-watcher-${userId}`; signals from this route may miss the active workflow. (`services/api-router/src/routes/admin/preferences-routes.ts`)

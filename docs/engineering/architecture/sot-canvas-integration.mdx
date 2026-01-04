@@ -5,7 +5,7 @@ description: "The DormWay Canvas integration is a sophisticated, multi-layered s
 
 # Canvas Integration State of Things (SoT)
 
-> **Last Updated**: 2025-12-27
+> **Last Updated**: 2026-01-03
 > **Status**: Active
 > **Owner**: Platform Team
 
@@ -20,19 +20,19 @@ The DormWay Canvas integration is a sophisticated, multi-layered system supporti
 ### Authentication Methods
 
 #### PAT (Personal Access Token)
-- **File**: `services/engine/src/activities/canvas.activities.ts` (lines 210-224)
+- **File**: `services/engine/src/activities/canvas.activities.ts`
 - **Implementation**: Direct `Authorization: Bearer ${token}` headers
 - **Storage**: Encrypted in `canvas_accounts.access_token` (AES-256-GCM)
 - **Key characteristic**: No `refresh_token` field in `canvas_accounts` table
-- **Detection logic** (line 1861-1923): Checks for absence of `refresh_token` field
+- **Detection logic**: `checkCanvasConnectionType` checks for absence of `refresh_token`
 
 #### OAuth2 Flow
-- **File**: `services/api-router/src/routes/canvas-routes.ts` (lines 55-215)
+- **File**: `services/api-router/src/routes/canvas-routes.ts`
 - **Authorization**: `GET /canvas/oauth/authorize` → redirect to Canvas OAuth page
 - **Callback**: `GET /canvas/oauth/callback` → exchange code for tokens
 - **Token storage**: Both `access_token` AND `refresh_token` stored encrypted
-- **Token refresh**: Automatic 401 handling with retry (lines 40-82 in canvasClient.ts)
-- **Refresh implementation**: Uses `refreshAccessToken()` with exponential backoff
+- **Token refresh**: Refresh token is stored, but the Temporal sync path does not auto-refresh today.
+- **Refresh implementation**: Legacy `services/canvas-sync/src/utils/canvasClient.ts` includes `refreshAccessToken()`; not wired into engine sync.
 
 ```mermaid
 sequenceDiagram
@@ -59,23 +59,23 @@ sequenceDiagram
 - **File**: `services/engine/src/activities/canvasICS.activities.ts`
 - **URL Storage**: Plain HTTP/HTTPS URLs in `service_credentials.credentials` JSON
 - **LMS Types Supported**: Canvas, Moodle, Blackboard, Google Classroom, Brightspace, Schoology
-- **Connection type detection** (line 1861-1923): ICS marked when `canvas_instance_id` starts with `'ics-'`
+- **Connection type detection**: ICS marked when `canvas_instance_id` starts with `'ics-'` or `service_credentials` has `ics_lms`
 
 ### API Endpoints Called
 
-| Endpoint | File Location | Notes |
-|----------|---------------|-------|
-| `GET /api/v1/courses` | line 287-328 | Active enrollments, includes term/students/enrollments |
-| `GET /courses/{id}/assignments` | line 680-704 | Includes score_statistics |
-| `GET /courses/{id}/assignments/{id}/submissions/self` | line 710-744 | Submission details |
-| `GET /calendar_events` | line 1537-1615 | Class meetings (type='event') |
-| `GET /courses/{id}/discussion_topics` | line 1449-1473 | Announcements only |
-| `GET /courses/{id}/users` | line 1478-1502 | Classmates |
-| `GET /users/self/activity_stream/summary` | line 1971-2077 | Canary check |
+| Endpoint | Notes |
+|----------|-------|
+| `GET /api/v1/courses` | Active enrollments, includes term/students/enrollments |
+| `GET /courses/{id}/assignments` | Includes score_statistics |
+| `GET /courses/{id}/assignments/{id}/submissions/self` | Submission details |
+| `GET /calendar_events` | Class meetings (type='event') |
+| `GET /courses/{id}/discussion_topics` | Announcements only |
+| `GET /courses/{id}/users` | Classmates |
+| `GET /users/self/activity_stream/summary` | Canary check |
 
 ### Rate Limiting & Error Handling
 
-**Temporal Retry Policy** (line 42-49 in workflows):
+**Temporal Retry Policy** (canvas sync workflows):
 ```typescript
 {
   initialInterval: '10 seconds',
@@ -90,14 +90,13 @@ sequenceDiagram
 - Default: 100 items per page
 - Runtime resolution: `getCanvasPageSize()` function
 
-**Error Response Handling**:
+**Error Response Handling** (engine sync):
 
 | Status | Description | Action | File Location |
 |--------|-------------|--------|---------------|
-| 429 | Rate Limited | Exponential backoff with Temporal retry policy | line 223-250 |
-| 404 | Not Found | Return null, skip resource gracefully | line 737-743 |
-| 401 | Unauthorized | Attempt token refresh (OAuth2 only) | canvasClient.ts:40-82 |
-| 403 | Forbidden | Token refresh or fail if PAT | canvasClient.ts:40-82 |
+| 429 | Rate Limited | Temporal retry policy handles retries | canvasSync.workflow.ts (proxy retry config) |
+| 404 | Not Found | Submission fetch returns null and continues | canvas.activities.ts (`fetchCanvasSubmission`) |
+| 401/403 | Unauthorized/Forbidden | No auto-refresh in engine; workflow fails and requires reconnect | canvas.activities.ts |
 
 ### Data Transformation
 
@@ -471,6 +470,14 @@ The Canvas integration represents a **sophisticated, cost-optimized system** tha
 - Blackboard ICS parser: Not implemented (uses generic fallback)
 - Google Classroom ICS parser: Not implemented (uses generic fallback)
 - Brightspace/Schoology: Use generic parser
+
+---
+
+## 10. Roadmap Alignment
+
+- Consolidate Canvas + Google status checks into `GET /v2/students/me/integrations/status` per the v2 standardization roadmap.
+- Keep existing OAuth/PAT/ICS flows unchanged; this endpoint only surfaces connection state for clients.
+- Tracking: `obsidian-vault/DormWay/Engineering/Technical/API/V2-Standardization-Roadmap (Current).md`.
 
 ---
 

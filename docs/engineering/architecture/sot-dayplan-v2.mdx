@@ -32,6 +32,7 @@ description: "1. [DayPlan V2 Interface](#dayplan-v2-interface) 2. [Generation Fl
 12. [API Endpoints](#api-endpoints)
 13. [Key Files](#key-files)
 14. [Sharp Edges & Technical Debt](#sharp-edges--technical-debt)
+15. [Future Enhancements (DayPlan V3)](#future-enhancements-dayplan-v3)
 
 ---
 
@@ -698,6 +699,13 @@ flowchart LR
     B8 --> B1
 ```
 
+### Preferences & Email Gating
+
+- DayPlan email uses `CUSTOMER_IO_DAYPLAN_EMAIL_ID` with fallback `dayplan_morning`.
+- Morning/evening briefings use `CUSTOMER_IO_MORNING_BRIEFING_V2_ID` / `CUSTOMER_IO_EVENING_BRIEFING_V2_ID` with fallbacks `dayplan_v2` / `evening_dayplan`.
+- `preferences.dayplan.email_on_light_days === false` skips the DayPlan email on light days.
+- DayPlan preferences (`mode`, `show_suggestions`, `show_coming_up`, `show_wellness`) are passed into prompt/payload generation to shape output.
+
 ### Action Types (LLM-Generated)
 
 | Type | When Scheduled | Example Message |
@@ -991,6 +999,12 @@ services/api-router/src/routes/dayplan-routes.ts
 └── GET /dayplan/today/summary (lines 211-283)
 ```
 
+### Settings Surface
+
+```
+obsidian-vault/DormWay/Engineering/Architecture/LockedIn Settings & Preferences Spec (Web).md
+```
+
 ---
 
 ## Sharp Edges & Technical Debt
@@ -1217,6 +1231,124 @@ Search for `logger.warn` in dayplan code reveals ~40 warning conditions that are
 
 ---
 
+## Future Enhancements (DayPlan V3)
+
+**Linear Issue:** [DORM-847](https://linear.app/dormwayllc/issue/DORM-847/dayplan-v3-enhanced-proactive-intelligence)
+**Priority:** Low - V2 covers core functionality; these are polish/enhancement items
+
+### Overview
+
+DayPlan V3 focuses on **enhanced proactive intelligence** - moving beyond reactive daily planning to anticipatory guidance that helps students before they realize they need it.
+
+### Planned Enhancements
+
+#### 1. Smart Digest Timing
+
+**Gap:** Currently, DayPlan generates at 5 AM regardless of what the student is doing.
+
+**Enhancement:**
+- Detect when student is in class, exam, or activity before sending digests
+- Dynamically adjust morning/evening briefing times to avoid interruptions
+- Use schedule awareness to find optimal notification windows
+
+**Technical Approach:**
+- Extend `checkScheduledActions` to consult `hardCommitments` before delivery
+- Add "delivery window" concept to action scheduling
+
+#### 2. Weekly Planning View
+
+**Gap:** DayPlan is strictly single-day focused; no multi-day awareness.
+
+**Enhancement:**
+- Generate weekly digest of upcoming deadlines, exams, and heavy workload days
+- Send Sunday evening or Monday morning: "This week: 2 exams, 5 assignments due, busiest day is Thursday"
+- Identify optimal days for each task based on schedule density
+
+**Technical Approach:**
+- New weekly summary generation in `studentWatcher` workflow
+- Weekly digest email via Customer.io
+- New API endpoint: `GET /dayplan/weekly-summary`
+
+#### 3. Cross-Day Conflict Awareness
+
+**Gap:** Conflicts are detected within a single day only.
+
+**Enhancement:**
+- Detect when assignments cluster on specific days
+- Alert: "You have 4 things due Thursday but Wednesday is light - consider working ahead"
+- Multi-day task distribution suggestions: "This 6-hour project could be split: 2h Tuesday, 2h Wednesday, 2h Thursday"
+
+**Technical Approach:**
+- Extend conflict detection to 7-day window
+- Add `weeklyConflicts` field to DayPlan or create separate weekly artifact
+
+#### 4. External Calendar Smart Sync
+
+**Gap:** External calendar events are imported but not intelligently analyzed.
+
+**Enhancement:**
+- Understand recurring patterns in Google/Outlook calendars
+- Detect when personal commitments conflict with academic deadlines
+- Proactive suggestions: "Your dentist appointment is the same day as your Chemistry midterm - consider rescheduling"
+
+**Technical Approach:**
+- Enhanced calendar analysis in `DayPlanDataService`
+- Pattern detection for recurring external events
+- Cross-reference external events with `dueToday` and `nearFuture`
+
+### Additional V3 Features (from DORM-847)
+
+#### Schedule Gap Detection
+
+- Detect free time blocks during the day
+- Proactive Ace message: "You have 2 hours free before your next class - want to work on your CS homework?"
+- Suggest specific tasks that fit the available time
+
+#### Proactive Ace Chat Messages
+
+- Instead of just push notifications, send contextual messages in Ace chat
+- "I noticed you have a paper due Friday and haven't started - want to schedule time?"
+- Conversational nudges vs. one-way notifications
+
+#### Unscheduled High-Priority Task Alerts
+
+- Monitor task bank for urgent/high priority items without scheduled time
+- "You have 3 high-priority tasks not scheduled this week"
+
+#### Personalized Productivity Patterns
+
+- Learn when student is most productive (not just generic time-of-day rules)
+- "You typically complete more work in morning sessions - scheduling your hardest task at 9 AM"
+
+### Technical Considerations
+
+| Enhancement | Workflow Impact | Data Storage | API Changes |
+|-------------|-----------------|--------------|-------------|
+| Smart digest timing | Extend `checkScheduledActions` | None | None |
+| Weekly planning | New weekly signal in studentWatcher | `service_data` method: `weekly_summary` | `GET /dayplan/weekly-summary` |
+| Cross-day conflicts | Extend context evaluation | `weeklyConflicts` in DayPlan | V3 fields in existing endpoints |
+| Calendar smart sync | Enhanced `DayPlanDataService` | Analytics table for patterns | None |
+| Gap detection | Add to context evaluation | None | Include in Ace context |
+| Ace chat integration | New Ably channel messages | Conversation history | Ace API integration |
+| Productivity patterns | New learning activity | Student metadata or analytics table | Preference endpoint updates |
+
+### Implementation Priority
+
+1. **Weekly Planning Summary** - Highest user value, relatively isolated implementation
+2. **Schedule Gap Detection** - Builds on existing DayPlan data
+3. **Cross-Day Conflict Awareness** - Natural extension of current conflict system
+4. **Smart Digest Timing** - Quality-of-life improvement
+5. **External Calendar Smart Sync** - Requires more sophisticated analysis
+6. **Proactive Ace Messages** - Depends on Ace chat maturity
+7. **Productivity Patterns** - Requires data collection period
+
+### Related Issues
+
+- [DORM-349](https://linear.app/dormwayllc/issue/DORM-349/phase-5-proactive-notifications-and-reminders) - Proactive Notifications (parent)
+- [DORM-348](https://linear.app/dormwayllc/issue/DORM-348/phase-4-smart-scheduling-recommendations) - Smart Scheduling (parent)
+
+---
+
 ## Related Documents
 
 - [Feed Cards](/docs/engineering/architecture/sot-feed-cards) - Feed cards generated from DayPlan
@@ -1225,5 +1357,5 @@ Search for `logger.warn` in dayplan code reveals ~40 warning conditions that are
 
 ---
 
-**Last Updated**: 2025-12-27
+**Last Updated**: 2026-01-03
 **Document Type**: State of Things (SoT)

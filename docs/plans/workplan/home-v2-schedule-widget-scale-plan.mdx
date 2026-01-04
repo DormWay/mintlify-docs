@@ -1,0 +1,188 @@
+---
+title: "Home V2 Schedule Widget Scale Plan"
+description: "flowchart TD A[Home V2 Load] --> B[/v2/widgets/batch] B --> C[ScheduleWidgetV2 render] C --> D[User creates/edits event] D --> E[Planner block mutation] E --..."
+---
+
+# Home V2 Schedule Widget - Scale & Speed Plan
+
+> Align the Home V2 schedule widget with the batch-first contract, reduce load-time requests, and keep event visibility fast and correct at 20M users across 6,200 universities.
+
+---
+
+## Summary
+
+### Objective
+- Make the schedule widget read-only on page load (batch-only), with mutations invoked only on user action.
+- Remove redundant client filtering that can hide events or slow rendering.
+- Keep the UI fast, predictable, and consistent with batch-first Home V2.
+
+### Scope
+- In scope: Home V2 schedule widget data flow, filtering/ordering, invalidation strategy, mutation path alignment.
+- Out of scope: new widget types, backend schedule timeline changes, UI redesign beyond light polish.
+
+### Linear Issues
+- TBD (link once created).
+
+---
+
+## Current State
+
+### What Exists Today
+- Schedule widget renders from `/v2/widgets/batch` via `ScheduleWidgetV2`.
+- `ScheduleWidgetV2` still calls `useScheduleEvents()` on mount, which fetches DayPlan + time blocks.
+- Client filters “today” using browser time, even though backend already returns “today” by timezone.
+- Post-mutation, widget refetches both batch and dayplan/time blocks.
+
+### Pain Points
+- Redundant network calls on Home V2 load (slower time-to-content, higher backend load).
+- Duplicate “today” logic risks hiding valid events in non-local timezones.
+- Extra refetch paths make the batch-first contract less reliable.
+
+### Relevant Code Locations
+| Component | Path |
+|-----------|------|
+| Schedule widget | `.repos/dormway-platform/services/dormway-lockedin/src/app/dashboard/home-v2/widgets/schedule-v2/ScheduleWidgetV2.tsx` |
+| Schedule events hook | `.repos/dormway-platform/services/dormway-lockedin/src/hooks/useScheduleEvents.ts` |
+| Batch query | `.repos/dormway-platform/services/dormway-lockedin/src/hooks/home/useWidgetBatchV2.ts` |
+| Batch envelope + timeline | `.repos/dormway-platform/services/api-router/src/routes/v2/widgets.routes.ts` |
+| Timeline builder | `.repos/dormway-platform/services/api-router/src/services/schedule-timeline.ts` |
+
+---
+
+## Target State
+
+### Architecture
+- **Read path:** schedule widget renders only from batch content (single fetch per Home V2 load).
+- **Write path:** create/edit/delete uses planner block mutations and then invalidates `widget-batch-v2` only.
+- **Event filtering:** no client “today” truncation; use backend-supplied date/timezone or render as-is.
+
+```mermaid
+flowchart TD
+  A[Home V2 Load] --> B[/v2/widgets/batch]
+  B --> C[ScheduleWidgetV2 render]
+  C --> D[User creates/edits event]
+  D --> E[Planner block mutation]
+  E --> F[Invalidate widget-batch-v2]
+  F --> B
+```
+
+### Key Changes
+1. Decouple `useScheduleEvents()` queries from widget render (mutation-only on demand).
+2. Remove or replace client “today” filtering with backend date/timezone.
+3. Simplify refetch logic to batch invalidation only.
+
+---
+
+## Implementation Phases
+
+### Phase 1: Batch-First Read Path
+**Goal**: Remove non-essential reads during Home V2 load.
+
+**Tasks**:
+- [x] Extract mutation-only hook or add a “skip read” mode to `useScheduleEvents`.
+- [x] Update `ScheduleWidgetV2` to avoid `useScheduleEvents` queries on initial render.
+- [x] Ensure timeline renders purely from batch content (with legacy fallback only when batch is missing).
+
+**Deliverables**:
+- Home V2 schedule loads with a single batch fetch.
+- No `/dayplan` or `/time-blocks` fetch until user interacts.
+
+**Definition of Done**:
+- [x] Schedule widget renders from batch only on load.
+- [ ] Event mutations still work end-to-end.
+- [ ] Network traces confirm removal of duplicate reads.
+
+---
+
+### Phase 2: Correctness + Ordering
+**Goal**: Ensure event visibility is correct and fast to parse.
+
+**Tasks**:
+- [x] Remove local “today” filtering or base it on schedule content date/timezone.
+- [x] Sort events by `start` time (primary), not only `minutesUntil`.
+- [x] Confirm all-day events still appear as pills.
+
+**Deliverables**:
+- No missed events around timezone boundaries.
+- Event list reflects chronological order.
+
+**Definition of Done**:
+- [ ] Events on day boundaries render correctly for non-local timezones.
+- [ ] Event ordering matches backend timeline sort.
+
+---
+
+### Phase 3: Optional UX Polish
+**Goal**: Reduce friction for manual edits without expanding scope.
+
+**Tasks**:
+- [x] Add event type selector in `EventFormSheet` (time block vs calendar event).
+- [x] Replace "Free Time" filter by metadata/type check instead of title text.
+- [x] Make all-day pills clickable (open detail view).
+
+**Deliverables**:
+- Faster, clearer event creation flows.
+- No accidental hiding of real events.
+
+**Definition of Done**:
+- [ ] UX polish improvements gated behind small PRs.
+- [ ] No regressions in default Home V2 load.
+
+---
+
+## Testing Plan
+
+### Manual QA
+- [ ] Home V2 load triggers only `/v2/widgets/batch` for schedule data.
+- [ ] Create/edit/delete event updates schedule after batch invalidation.
+- [ ] Timezone edge: events near midnight render on the correct day.
+- [ ] All-day events remain visible as pills.
+
+### Performance Checks
+- [ ] Measure Home V2 first paint with and without schedule edits.
+- [ ] Confirm reduced network requests per load.
+
+---
+
+## Rollout Plan
+
+### Staging
+1. Ship Phase 1 and verify network trace and schedule display.
+2. Ship Phase 2 and validate timezone behavior against non-local accounts.
+3. Ship Phase 3 polish only if no regressions.
+
+### Production
+1. Release as a standard deploy (no new flags).
+2. Monitor batch latency and widget render timings.
+3. Roll back by reverting the schedule widget changes if needed.
+
+---
+
+## Risks & Dependencies
+
+### Risks
+| Risk | Impact | Mitigation |
+|------|--------|------------|
+| Batch data missing or stale | Medium | Keep legacy fallback and batch invalidation on edits |
+| Timezone mismatch in client filtering | Medium | Trust backend date/timezone, avoid local filtering |
+| Regression in event editing | Medium | Preserve mutation hooks and add QA checklist |
+
+### Dependencies
+- Backend schedule timeline remains canonical (`buildScheduleTimeline`).
+- Batch endpoint stability and invalidation semantics.
+
+---
+
+## Open Questions
+
+- Should the schedule widget hide past events by default, or keep a “past” section?
+- Do we want to expose a “Show full day” toggle if timeline bounds exclude early/late events?
+
+---
+
+## Related Documentation
+
+- [Home & Widgets](/docs/engineering/architecture/sot-home-widgets)
+- [Dashboard v2 & Widget Strategy (Current)](/docs/engineering/architecture/dashboard-v2-widget-strategy-current)
+- Engineering/Architecture/Home V2 Batch-First Widgets (Long-Term Spec)
+- [LockedIn-Schedule-UX-Guidelines](/docs/product/design/lockedin-schedule-ux-guidelines)

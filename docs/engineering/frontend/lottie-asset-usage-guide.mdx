@@ -1,0 +1,124 @@
+---
+title: "Lottie Asset Usage Guide"
+description: "This guide makes it easy for engineers and AI agents to pick the right animation format and know where each asset lives."
+---
+
+# Lottie Asset Usage Guide (Web + iOS)
+
+## Why this exists
+This guide makes it easy for engineers and AI agents to pick the right animation format and know where each asset lives.
+
+## Asset Packs & Locations
+- **iOS JSON icons** → `public/animations/ios/*.json`
+  - Theme-friendly (SVG via `lottie-react`).
+  - Use for core UI icons that must adapt to light/dark/glass.
+- **dotLottie pack** → `public/animations/lottie/*.lottie`
+  - Canvas rendered via `@lottiefiles/dotlottie-react`.
+  - Not reliably themeable; best for decorative motion.
+- **Edu pack (JSON)** → `public/animations/edu/*.json`
+  - Larger illustration-style assets.
+  - Use for onboarding, empty states, or study emphasis.
+- **Lottie library (JSON collections)** → `public/animations/library/<pack>/*.json`
+  - Large icon packs, unreviewed by default.
+  - Use for exploration or one-off needs; mark recommended before shipping.
+  - Filter by pack in `/dev/animations` for fast browsing.
+
+## Web Usage (AnimatedIcon)
+Preferred entry point is `AnimatedIcon`.
+
+```tsx
+import { AnimatedIcon } from '@/components/system/AnimatedIcon';
+import { LOTTIE_ANIMATIONS } from '@/resources/lottieAnimations';
+import { animations } from '@/resources/animations';
+
+// Themeable UI icon (iOS JSON)
+<AnimatedIcon iosAnimation="Calendar.json" size={24} loop={false} />
+
+// Decorative dotLottie (web-only)
+<AnimatedIcon dotLottie={LOTTIE_ANIMATIONS.loading} size={48} loop />
+
+// Edu pack illustration (JSON)
+<AnimatedIcon animationData={animations.eduBackpack} size={64} loop />
+
+// Lottie library (JSON path)
+<AnimatedIcon jsonPath="/animations/library/essential-91/Arrow-Right.json" size={48} loop={false} />
+```
+
+## Cross-Platform Matching
+Animations with the same normalized name usually exist in both iOS JSON and dotLottie packs.
+- **Match badges** in `/dev/animations` show `iOS + Web`, `iOS only`, or `Web only`.
+- Use **iOS JSON** when you need theme support; use **dotLottie** only when theming is not critical.
+
+## Dev Preview
+- **Path:** `/dev/animations`
+- Filters by **Source**, **Availability**, and **Quality** to quickly find usable assets.
+- Recommended animations are tagged; unreviewed items should be treated as experimental.
+- Use **DormWay Standard** for cross-platform-safe picks (recommended + shared + outline-only).
+- **Capture mode** switches to a dense icon grid, keeps labels on, hides badges, and preloads the library for screenshot-ready overviews.
+- Badges can be toggled off to keep the grid icon-first while names stay visible; hover reveals details.
+- Labels always show the exact asset filename (with extension) so agents can reference the precise file.
+- **Style filter** defaults to `Outline only` to enforce the DormWay outline system; use `Filled` or `Stroke mismatch` only for audits.
+- Style audit data is generated in `src/resources/lottieStyleAudit.ts`.
+- **DormWay Standard pack whitelist**: `essential-91`, `essential-icons-1`, `essential-vol-2-3`, `essential-ui-73`, `minimo-online-shopping`.
+
+## Visual Normalization Pipeline (Spec)
+Use this when mixing Lottie packs so nav/iconography stays visually consistent without hand-tuning.
+
+### Outputs
+- `src/resources/lottieVisualMetrics.json` (raw measurements)
+- `src/resources/lottieNormalization.json` (per-icon scale + translate)
+- Optional overrides: `src/resources/lottieNormalizationOverrides.json`
+- Optional report: `src/resources/lottieMetricsReport.json`
+- Optional TS wrappers that import the JSON files for typing.
+
+### Measurement Environment
+- Render via `lottie-web` **canvas** renderer with `devicePixelRatio = 1`.
+- Fixed canvas size = animation `w`/`h`, transparent background, no CSS scaling.
+- Deterministic frames (recommended): sample 0%, 25%, 50%, 75%, 100% and take a union bbox.
+- Pin a specific `lottie-web` version so metrics stay stable.
+
+### Pixel Scan Rules
+- Use `alpha >= 8` threshold when scanning pixels to avoid anti-alias haze.
+- If no pixels found, fallback bbox = full canvas and log a warning in the report.
+- Record `fileHash` + `fileMtimeMs` per icon to detect stale metrics.
+
+### Normalization Math
+- `baseContainer = 24`, `targetBox = 18` (tune with design).
+- `baseScale = baseContainer / max(sourceWidth, sourceHeight)`
+- `bboxSize = max(bboxUnion.w * baseScale, bboxUnion.h * baseScale)`
+- `scale = targetBox / bboxSize`
+- `offset = { x: (baseContainer - sourceWidth * baseScale) / 2, y: (baseContainer - sourceHeight * baseScale) / 2 }`
+- `center = { x: (bboxUnion.x + bboxUnion.w/2) * baseScale + offset.x, y: (bboxUnion.y + bboxUnion.h/2) * baseScale + offset.y }`
+- `translate = { x: baseContainer/2 - center.x * scale, y: baseContainer/2 - center.y * scale }`
+- Provide helpers to scale `scale` + `translate` for other icon sizes.
+
+### UI Integration (AnimatedIcon)
+- Add `normalizeKey` (workspace-relative path) to opt in.
+- Apply wrapper transform with `transform-origin: 0 0` and `translate + scale`.
+- Start with nav/sidebar icons, then expand.
+
+### Stroke Ratio Guidance
+- Use `lottieStyleAudit.ts` to **gate selection** (avoid mixing wildly different stroke weights).
+- Do **not** try to normalize stroke weight via transforms.
+
+### Decisions to Lock
+- Frame sampling count (3 vs 5+).
+- Target box size (18/24 default).
+- Opt-in vs global normalization.
+- `.lottie` support now or later (recommended: defer).
+
+## Adding New Animations
+1. Drop the asset into the correct pack folder in `public/animations/`.
+2. Update manifests/registries:
+   - `src/resources/iosAnimationManifest.ts` (iOS JSON list)
+   - `src/resources/lottieAnimations.ts` (dotLottie registry)
+   - `src/resources/animations.ts` (JSON registry, including Edu pack)
+3. Add a short usage note + quality tag in `src/app/dev/animations/page.tsx` (`ANIMATION_GUIDE`).
+4. Regenerate the style audit so outline-only filters stay accurate:
+   - `python3 scripts/build-lottie-style-audit.py`
+5. For library packs, regenerate `src/resources/lottieLibraryManifest.ts` after adding/removing files:
+   - `python3 scripts/build-lottie-library-manifest.py`
+
+## Known Constraint
+`dotLottie` theming is not reliable in the current stack. See:
+[Lottie Theming Investigation - dotLottie v0.54.1 Incompatibility](/docs/engineering/frontend/lottie-theming-investigation-dotlottie-v0541-incompatibility)

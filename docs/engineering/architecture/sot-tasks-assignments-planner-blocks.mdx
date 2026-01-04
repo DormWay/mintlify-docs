@@ -1,5 +1,6 @@
 ---
 title: "Tasks, Assignments, Planner Blocks"
+description: "sequenceDiagram participant Client participant API as API Router participant DB as PostgreSQL"
 ---
 
 # SoT - Tasks, Assignments, Planner Blocks
@@ -25,6 +26,12 @@ title: "Tasks, Assignments, Planner Blocks"
 - Target: Web Tasks remains the canonical "all tasks" inbox with V2 authoritative status and schedule/unschedule actions; composite is legacy-only.
 - Plan: `services/dormway-lockedin/docs/LOCKEDIN_WEB_OS_CONSISTENCY_PLAN.md`.
 
+## Roadmap (Current)
+- Add `GET /v2/students/me/academic-summary` to replace `/api/proxy/academic/*`, `/api/proxy/canvas/assignments`, and `/api/proxy/student/courses` fan-out.
+- Move deliverables, completion, and weekly matrix into the summary payload with a stable `meta.partialFailures` field.
+- Keep `/v2/students/me/tasks` as the authoritative task list; summary provides context only.
+- Roadmap: [V2-Standardization-Roadmap (Current)](/docs/engineering/technical/api/v2-standardization-roadmap-current)
+
 ## Web Tasks Merge + Status Rules (LockedIn)
 - Dedup priority: V2 `metadata.canvasAssignmentId` (matches `Deliverable` canvas IDs) before fallback composite key (`courseContextId|courseCode + normalized title + due day`).
 - Row identity: when a V2 task matches, the row uses the V2 `task.id`; fallback deliverables are prefixed (`fallback:<deliverable.id>`).
@@ -32,14 +39,131 @@ title: "Tasks, Assignments, Planner Blocks"
 - Capacity bar: required hours are computed from the unified task rows due in the current week (personal tasks count only when due in-week); scheduled hours come from planner time blocks plus scheduled V2 tasks that do not yet surface as blocks (using estimated minutes).
 
 ## Key Flows (High-Level)
-- Create manual task -> `POST /api/mobile/tasks` or `POST /v2/students/me/tasks` inserts into `tasks` with `source='manual'`. (`services/api-router/src/routes/task-routes.ts`, `services/api-router/src/routes/v2/students.routes.ts`)
-- Create assignment-backed task (generic content) -> `genericContent.activities` inserts `tasks` with `source='assignment'` and seeds `assignment_completion`. (`services/engine/src/activities/genericContent.activities.ts`)
-- Fetch tasks -> `GET /v2/students/me/tasks` calls `student.getTasks` to merge persistent tasks and syllabus-derived tasks. (`services/api-router/src/routes/v2/students.routes.ts`, `services/shared/dormway-core/src/entities/student/student.entity.ts`)
-- Task bank -> `GET /api/mobile/planner/task-bank` merges DayPlan study events, Canvas assignments due in 7 days, quick captures, and persistent tasks; dedupes using `metadata.originalId`. (`services/api-router/src/routes/mobile-routes.ts`, `services/api-router/src/types/tasks.ts`)
-- Schedule task -> `POST /api/mobile/tasks/:taskId/schedule` creates a planner block in `student_time_blocks` and updates task status to `scheduled`. (`services/api-router/src/routes/task-routes.ts`)
-- Unschedule task -> `POST /api/mobile/tasks/:taskId/unschedule` deletes the associated `student_time_blocks` row and resets task status. (`services/api-router/src/routes/task-routes.ts`)
-- Manual planner blocks -> `POST/GET/PATCH/DELETE /api/mobile/planner/blocks` manages `student_time_blocks` rows with `source='manual_planner'`. (`services/api-router/src/routes/mobile-routes.ts`)
-- DueSoon + Tasks widgets -> dashboard transformer builds dueSoon assignments and merges with pending tasks to form the tasks widget payload. (`services/api-router/src/services/dashboard-composite-transformer.ts`)
+
+### Create Manual Task
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant API as API Router
+    participant DB as PostgreSQL
+
+    alt Mobile endpoint
+        Client->>API: POST /api/mobile/tasks
+    else V2 endpoint
+        Client->>API: POST /v2/students/me/tasks
+    end
+    API->>DB: INSERT tasks (source='manual')
+    DB-->>Client: Task created
+```
+
+### Create Assignment-Backed Task
+
+```mermaid
+sequenceDiagram
+    participant Engine as genericContent.activities
+    participant DB as PostgreSQL
+
+    Engine->>DB: INSERT tasks (source='assignment')
+    Engine->>DB: INSERT assignment_completion
+    DB-->>Engine: Records created
+```
+
+### Fetch Tasks
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant API as /v2/students/me/tasks
+    participant Entity as student.getTasks
+    participant DB as PostgreSQL
+
+    Client->>API: GET tasks
+    API->>Entity: getTasks()
+    Entity->>DB: Query persistent tasks
+    Entity->>DB: Query syllabus tasks
+    Entity->>Entity: Merge lists
+    Entity-->>Client: Unified task list
+```
+
+### Task Bank
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant API as /api/mobile/planner/task-bank
+    participant DB as PostgreSQL
+
+    Client->>API: GET task-bank
+    par Gather sources
+        API->>DB: Query DayPlan study events
+        API->>DB: Query Canvas assignments (7 days)
+        API->>DB: Query quick captures
+        API->>DB: Query persistent tasks
+    end
+    API->>API: Merge all sources
+    API->>API: Dedupe via metadata.originalId
+    API-->>Client: Task bank
+```
+
+### Schedule Task
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant API as /api/mobile/tasks/:taskId/schedule
+    participant DB as PostgreSQL
+
+    Client->>API: POST schedule
+    API->>DB: INSERT student_time_blocks (planner block)
+    API->>DB: UPDATE tasks SET status='scheduled'
+    DB-->>Client: Scheduled
+```
+
+### Unschedule Task
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant API as /api/mobile/tasks/:taskId/unschedule
+    participant DB as PostgreSQL
+
+    Client->>API: POST unschedule
+    API->>DB: DELETE student_time_blocks row
+    API->>DB: UPDATE tasks SET status='pending'
+    DB-->>Client: Unscheduled
+```
+
+### Manual Planner Blocks
+
+```mermaid
+flowchart TD
+    A["/api/mobile/planner/blocks"] --> B{Method?}
+    B -->|POST| C[Create student_time_blocks]
+    B -->|GET| D[Query student_time_blocks]
+    B -->|PATCH| E[Update student_time_blocks]
+    B -->|DELETE| F[Soft-delete via lifecycle_status]
+
+    C --> G["source='manual_planner'"]
+    E --> G
+```
+
+### DueSoon + Tasks Widgets
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Transformer as Dashboard Transformer
+    participant DB as PostgreSQL
+
+    Client->>Transformer: Request widgets
+    par Build widget data
+        Transformer->>DB: Query dueSoon assignments
+        Transformer->>DB: Query pending tasks
+    end
+    Transformer->>Transformer: Merge into widget payload
+    Transformer-->>Client: Tasks widget
+```
 
 ## Data Models / IDs / Terminology
 - `tasks` table: `id` UUID, `status`, `priority`, `course_code`, `due_date`, `scheduled_block_id`, `assignment_id`, and JSON `metadata`. (`infrastructure/database/migrations/20251009_add_tasks_table.sql`, `services/api-router/src/types/tasks.ts`)

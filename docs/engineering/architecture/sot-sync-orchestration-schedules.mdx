@@ -1,5 +1,6 @@
 ---
 title: "Sync Orchestration & Schedules"
+description: "flowchart TD A[Engine boot] --> B{SYNC_SCHEDULES_ENABLED?} B -->|Yes| C[ensureSyncSchedules] B -->|Yes| D[ensureCleanupSchedules] B -->|Yes| E[ensurePluginRu..."
 ---
 
 # SoT - Sync Orchestration & Schedules
@@ -25,11 +26,81 @@ title: "Sync Orchestration & Schedules"
 - Schedule import writes `schedule_import` events into `time_blocks`; schedule reconciliation populates student-facing blocks via `scheduleProcessor`.
 
 ## Key Flows (High-Level)
-- Engine boot -> ensure schedules (`ensureSyncSchedules`, `ensureCleanupSchedules`, `ensurePluginRunnerSchedules`) when enabled.
-- Scheduled sync -> Temporal schedule starts `runScheduledSyncWorkflow` -> API router `/cron/sync/orchestrate` -> `sync-orchestrator-service` selects candidates and starts `processSingleCity`/`processSingleCampus` workflows.
-- Manual sync -> `/api/admin/sync/orchestrate` uses the same orchestrator pipeline and can trigger overlay fold workflows.
-- Schedule import -> `scheduleImport.workflow` normalizes OCR/ICS data and stores context `time_blocks`.
-- Schedule removal -> `scheduleRemoval.workflow` marks dropped courses and deletes related `student_time_blocks` and `time_blocks`.
+
+### Engine Boot Schedule Provisioning
+
+```mermaid
+flowchart TD
+    A[Engine boot] --> B{SYNC_SCHEDULES_ENABLED?}
+    B -->|Yes| C[ensureSyncSchedules]
+    B -->|Yes| D[ensureCleanupSchedules]
+    B -->|Yes| E[ensurePluginRunnerSchedules]
+    B -->|No| F[Skip schedule provisioning]
+```
+
+### Scheduled Sync Flow
+
+```mermaid
+sequenceDiagram
+    participant Temporal
+    participant Workflow as runScheduledSyncWorkflow
+    participant Router as API Router
+    participant Orch as sync-orchestrator-service
+
+    Temporal->>Workflow: Schedule triggers
+    Workflow->>Router: /cron/sync/orchestrate
+    Router->>Orch: Orchestrate sync
+    Orch->>Orch: Select candidates
+    par Start workflows
+        Orch->>Temporal: processSingleCity workflows
+        Orch->>Temporal: processSingleCampus workflows
+    end
+```
+
+### Manual Sync Flow
+
+```mermaid
+sequenceDiagram
+    participant Admin
+    participant Router as /api/admin/sync/orchestrate
+    participant Orch as sync-orchestrator-service
+    participant Temporal
+
+    Admin->>Router: POST orchestrate
+    Router->>Orch: Run pipeline
+    Orch->>Orch: Select candidates
+    par Start workflows
+        Orch->>Temporal: Start city/campus workflows
+        Orch->>Temporal: Trigger overlay fold workflows
+    end
+```
+
+### Schedule Import
+
+```mermaid
+sequenceDiagram
+    participant Workflow as scheduleImport.workflow
+    participant Normalizer
+    participant DB as PostgreSQL
+
+    Workflow->>Normalizer: Process OCR/ICS data
+    Normalizer-->>Workflow: Normalized schedule
+    Workflow->>DB: Store time_blocks
+```
+
+### Schedule Removal
+
+```mermaid
+sequenceDiagram
+    participant Workflow as scheduleRemoval.workflow
+    participant DB as PostgreSQL
+
+    Workflow->>DB: Mark dropped courses
+    par Delete blocks
+        Workflow->>DB: DELETE student_time_blocks
+        Workflow->>DB: DELETE time_blocks
+    end
+```
 
 ## Data Models / IDs / Terminology
 - Sync modes: `auto`, `cities_only`, `campuses_only`, `campuses_missing_term_data`, `all`.

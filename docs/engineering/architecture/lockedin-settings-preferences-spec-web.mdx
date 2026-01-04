@@ -1,0 +1,384 @@
+---
+title: "LockedIn Settings & Preferences Spec (Web)"
+description: "Define the complete settings experience for the LockedIn web app, including the full list of preferences that can be changed, how they map to persisted prefe..."
+---
+
+# LockedIn Settings & Preferences Spec (Web)
+
+## Purpose
+Define the complete settings experience for the LockedIn web app, including the full list of preferences that can be changed, how they map to persisted preference keys, and the UX principles for college students. This doc is the implementation contract for the web Settings page.
+
+## Goals
+- Surface all existing preference capabilities in one clear, modern Settings experience.
+- Align web preferences with the canonical server schema and avoid silent schema drift.
+- Make changes feel fast and safe for students (clear feedback, predictable defaults).
+- Support cross-device sync and compatibility with existing mobile schema.
+
+## Non-goals
+- Designing a new authentication system (Account settings remain Clerk-driven).
+- Rewriting preference storage to a new database shape.
+- iOS or Zuplo UI changes (this spec is for web, with schema alignment notes).
+
+## Related Plans
+- `obsidian-vault/DormWay/Plans/LockedIn-Settings-UX-Remediation-Plan.md`
+
+## Student-Centered UX Principles
+- Default to clarity over complexity: few presets, then advanced controls.
+- Use language students expect: "Quiet hours", "Briefings", "Focus mode".
+- Provide immediate feedback (auto-save with confirmations or consistent Save).
+- Avoid "settings hell": group by outcomes (Notifications, DayPlan, Calendar).
+- Show impact: previews for AI tone, appearance, and briefings.
+
+---
+
+## Information Architecture (Settings Home)
+
+### Global Structure
+Settings should be a left-rail or stacked section list (mobile) with deep-linkable sections.
+
+**Primary Sections**
+1. Account
+2. Connections
+3. Notifications & Focus
+4. DayPlan & Briefings
+5. Calendar & Schedule
+6. Appearance
+7. AI & Ace
+8. Privacy & Data
+9. Widgets & Personalization
+10. Support
+
+**Search + Quick Modes**
+- Settings search (typeahead) for fast access.
+- Quick modes (e.g., Chill / Balanced / Locked-In) that apply a set of preferences.
+
+---
+
+## Canonical Preferences Schema (Web v1)
+
+Preferences live under `/api/v2/students/me/preferences` and are stored in the
+`user_preferences` key-value table. This schema is the web contract; additional
+keys are allowed but must be documented here.
+
+```json
+{
+  "appearance": {
+    "theme": "system|light|dark|glass",
+    "accentColor": "default|blue|emerald|purple|rose|amber",
+    "fontSize": "small|medium|large",
+    "reduceMotion": false,
+    "highContrast": false,
+    "sidebarCollapsed": false
+  },
+  "notifications": {
+    "channels": { "push": true, "sms": false, "email": false, "in_app": true },
+    "quietHours": { "enabled": true, "start": "22:00", "end": "07:00" },
+    "dailyCap": 3,
+    "briefings": { "enabled": true, "morning": "08:00", "evening": "20:00" },
+    "systemAnnouncements": false,
+    "dayPlanEmails": true,
+    "types": {
+      "assignments": true,
+      "classes": true,
+      "deadlines": true,
+      "events": true,
+      "weather": false,
+      "wellness": false
+    }
+  },
+  "dayplan": {
+    "mode": "minimal|focused|coach",
+    "show_due_today": true,
+    "show_classes": true,
+    "show_suggestions": true,
+    "show_wellness": false,
+    "show_coming_up": true,
+    "email_on_light_days": true
+  },
+  "calendar": {
+    "displayTimezone": "auto|America/New_York|America/Chicago|...",
+    "showCampusTimezone": false,
+    "timeFormat": "12h|24h",
+    "weekStart": 0,
+    "defaultView": "timeline|day|week|month",
+    "workHours": { "start": "08:00", "end": "18:00" }
+  },
+  "ai": {
+    "enabled": true,
+    "greenMode": false,
+    "features": {
+      "aceChat": true,
+      "nextActionWidget": true,
+      "studySuggestions": true,
+      "smartOrganize": true
+    }
+  },
+  "aiCommunication": {
+    "communicationTone": "friendly|motivating|calm|direct|professional|casual|humorous",
+    "personalityStyle": "friend|mentor|coach|assistant|balanced",
+    "helpfulnessLevel": "minimal|standard|high",
+    "jargonLevel": "low|standard|high",
+    "guardrails": true
+  },
+  "privacy": {
+    "allowAnalytics": true,
+    "locationTracking": false,
+    "profileVisibility": "private|campus|public",
+    "shareSchedule": false
+  },
+  "academic": {
+    "studyTimePerCredit": 2,
+    "breakReminderFrequency": 50,
+    "autoParseSyllabus": true
+  },
+  "location": {
+    "homeCampusId": null,
+    "commuteMode": "walk|bike|bus|car|mixed"
+  },
+  "general": {
+    "widgetPreferences": {
+      "home": { "hiddenWidgetIds": [], "userWidgets": [] }
+    },
+    "insightPreferences": {
+      "attendanceAlerts": true,
+      "gradeInsights": false,
+      "studySuggestions": true,
+      "workloadForecasting": true,
+      "professorStyleInsights": false,
+      "behavioralPatterns": false,
+      "autoLayoutEnabled": false,
+      "layoutSuggestionsEnabled": true
+    }
+  },
+  "courseColors": {
+    "COMM 101": "blue",
+    "ENTR 490": "amber"
+  }
+}
+```
+
+Notes:
+- `courseColors` is top-level today; keep until migration is complete.
+- The `ai` block follows the Navigation Migration plan and gates Ace + Green Mode.
+- `general.widgetPreferences` is already used by Home V2.
+
+---
+
+## Settings Inventory (What Appears in Settings)
+
+### 1) Account
+**Surface**
+- Profile info, email, password, MFA, connected identities (Clerk).
+**Source**
+- Clerk `UserProfile` (not stored in preferences).
+
+### 2) Connections
+**Surface**
+- Google Calendar, Canvas LMS, Schedule Upload, Syllabus Manager.
+- Status (Connected/Not), last sync, permissions, disconnect, re-sync.
+**Source**
+- Connection status endpoints (Canvas + Google).
+
+**Target API**
+- Consolidate status reads into `GET /v2/students/me/integrations/status` (Canvas + Google) per the v2 roadmap.
+
+### 3) Notifications & Focus
+**Controls**
+- Quick mode presets (Chill / Balanced / Locked-In).
+- Quiet hours on/off + start/end.
+- Daily nudge cap.
+- Channel toggles (Push, SMS, Email, In-app).
+- System announcements (email).
+**Preference Keys**
+- `notifications.quietHours.*`
+- `notifications.dailyCap`
+- `notifications.channels.*`
+- `notifications.systemAnnouncements`
+- `appBehavior.schoolMode` (legacy, see mapping)
+**Default**
+- Quiet hours: 10:00 PM - 7:00 AM (enabled)
+- Daily cap: 3
+- Channels: push on, sms off, email off
+
+### 4) DayPlan & Briefings
+**Controls**
+- Briefings on/off.
+- Morning + evening briefing times.
+- Detail mode: minimal / focused / coach.
+- Show suggestions / coming up / wellness.
+- Email on light days.
+**Preference Keys**
+- `notifications.briefings.*`
+- `dayplan.*`
+**Default**
+- Briefings enabled, morning 8:00 AM, evening 8:00 PM.
+- DayPlan mode focused, wellness off, light-day emails on.
+
+### 5) Calendar & Schedule
+**Controls**
+- Display timezone (Campus default or override).
+- Show campus timezone labels.
+- Time format (12h/24h).
+- Week start (Sun/Mon).
+- Default view (timeline/day/week/month).
+- Work hours (start/end).
+**Preference Keys**
+- `calendar.displayTimezone`
+- `calendar.showCampusTimezone`
+- `calendar.timeFormat`
+- `calendar.weekStart`
+- `calendar.defaultView`
+- `calendar.workHours.*`
+
+### 6) Appearance
+**Controls**
+- Theme (System, Light, Dark, Glass).
+- Accent color.
+- Font size.
+- Reduce motion.
+- High contrast.
+- Sidebar collapsed (optional toggle for desktop).
+**Preference Keys**
+- `appearance.*` (canonical)
+- `appBehavior.*` (legacy, see mapping)
+
+### 7) AI & Ace
+**Controls**
+- AI enabled toggle (Ace visible when on).
+- Green Mode toggle.
+- AI feature toggles (Ace chat, study suggestions, smart organize).
+- Tone/personality/helpfulness preview.
+**Preference Keys**
+- `ai.enabled`
+- `ai.greenMode`
+- `ai.features.*`
+- `aiCommunication.*`
+
+### 8) Privacy & Data
+**Controls**
+- Analytics opt-in/out.
+- Location tracking.
+- Profile visibility.
+- Share schedule with others.
+- Data export + delete (if available).
+**Preference Keys**
+- `privacy.*`
+
+### 9) Widgets & Personalization
+**Controls**
+- Link to "Customize Home" (opens Home edit mode).
+- Layout learning toggles (auto layout, layout suggestions).
+- Insight preferences (attendance alerts, workload forecasting, etc).
+**Preference Keys**
+- `general.widgetPreferences.*`
+- `general.insightPreferences.*`
+
+### 10) Support
+**Controls**
+- Feedback box (submit feedback).
+- Help resources and roadmap.
+- Contact email.
+
+---
+
+## Legacy Compatibility Mapping
+
+Until all consumers are updated, the UI must read/write both canonical and
+legacy keys. Use this mapping during migration:
+
+| Legacy Key | Canonical Key | Notes |
+| --- | --- | --- |
+| `appBehavior.theme` | `appearance.theme` | ThemeContext currently reads legacy. |
+| `appBehavior.fontSize` | `appearance.fontSize` | Keep both until ThemeContext is updated. |
+| `appBehavior.accentColor` | `appearance.accentColor` | Keep both until theme DOM is aligned. |
+| `appBehavior.sidebarCollapsed` | `appearance.sidebarCollapsed` | Sync both. |
+| `appBehavior.schoolMode` | `notifications.mode` | Keep legacy field as source of truth for now. |
+| `notifications.briefings.*` | same | Already used by web + engine. |
+| `notifications.quietHours.*` | same | Used by SchoolMode gating. |
+| `notifications.channels.*` | same | Used by SchoolMode gating. |
+| `calendar.displayTimezone` | same | Used by TimezoneContext. |
+| `calendar.showCampusTimezone` | same | Used by schedule labels. |
+| `courseColors` | same | Used by CourseColorPicker. |
+| `aiCommunication.*` | same | Used by existing web persona UI. |
+
+Migration rule:
+1) Read both `appearance.*` and `appBehavior.*`, with `appearance` taking priority if present.
+2) On save, write both for theme + accent + font size until ThemeContext is updated.
+3) Once ThemeContext and SchoolMode read canonical keys, remove legacy writes.
+
+---
+
+## API + Data Contract
+
+**Endpoint**
+- `GET /api/v2/students/me/preferences`
+- `PUT /api/v2/students/me/preferences` (full replace)
+- `PATCH /api/v2/students/me/preferences` (deep merge)
+
+**Web guidance**
+- Use PATCH for auto-save or section-specific saves.
+- Use PUT only when saving a full settings snapshot.
+
+**Storage**
+- `user_preferences` key-value table (`key` = category, `value` = JSON).
+- Keys are flexible but must be documented here.
+
+---
+
+## Implementation Notes (Web)
+
+**Current web settings code**
+- Settings page: `services/dormway-lockedin/src/app/dashboard/settings/page.tsx`
+- Preferences tab: `services/dormway-lockedin/src/components/settings/PreferencesContent.tsx`
+- Legacy preferences page: `services/dormway-lockedin/src/app/dashboard/preferences/page.tsx`
+
+**Key consumers**
+- Theme: `services/dormway-lockedin/src/contexts/ThemeContext.tsx`
+- School mode + nudges: `services/dormway-lockedin/src/lib/useSchoolMode.ts`
+- Timezone: `services/dormway-lockedin/src/contexts/TimezoneContext.tsx`
+- Widget prefs: `services/dormway-lockedin/src/hooks/home/useWidgetPreferences.ts`
+- Course colors: `services/dormway-lockedin/src/hooks/useCourseColors.ts`
+
+**Save strategy**
+- Prefer auto-save with inline toasts for consistency.
+- If using manual Save, apply it uniformly across all sections.
+
+---
+
+## Phased Implementation Plan
+
+**Phase 1: Surface Everything**
+- Move legacy settings sections into `/dashboard/settings` (AI, notifications, privacy, appearance, time, course colors, dayplan).
+- Ensure Settings is the single source of UI.
+- Add quick mode presets (Chill / Balanced / Locked-In).
+
+**Phase 2: Schema Alignment**
+- Introduce canonical `appearance.*` and sync with legacy `appBehavior.*`.
+- Add `ai.*` keys for enable/green mode with feature toggles.
+- Expand `calendar.*` options (format/week start/work hours).
+
+**Phase 3: Personalization**
+- Add insight toggles (`general.insightPreferences.*`).
+- Link widget layout controls and reflect stored prefs.
+
+**Phase 4: Privacy & Data**
+- Add export/delete controls when APIs exist.
+
+---
+
+## QA Checklist
+- All settings sections load for demo + real users without errors.
+- Changing any setting persists and survives refresh and cross-device login.
+- Notifications honor quiet hours, caps, and channel toggles.
+- DayPlan briefings reflect detail mode and toggles.
+- Calendar label and timezone formatting update immediately.
+- Theme, accent, and font size apply across the app.
+- AI tone preview updates immediately and persists.
+- No duplicated settings across `/dashboard/preferences` and `/dashboard/settings`.
+
+---
+
+## Open Questions
+- Should quick mode presets write directly to `notifications` + `dayplan`, or use a dedicated `appBehavior.schoolMode` with derived mapping?
+- Where should AI enablement be enforced in the frontend nav (Ace vs Help)?
+- Do we want separate "Email" vs "In-app" toggles for briefings?

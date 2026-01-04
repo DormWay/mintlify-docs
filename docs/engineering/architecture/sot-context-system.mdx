@@ -1,5 +1,6 @@
 ---
 title: "Context System"
+description: "sequenceDiagram participant Router as API Router participant Service as ContextGraphService participant Cache as Redis participant DB as PostgreSQL"
 ---
 
 # SoT - Context System
@@ -27,10 +28,64 @@ title: "Context System"
 - `organizationId` is deprecated in `createDependency` because `context_dependencies` has no `organization_id` column.
 
 ## Key Flows (High-Level)
-- API router `getContextGraphService(session)` -> session-bound clone -> context traversal with RLS + cache.
-- Admin routes call `getAdminContextGraphService()` to bypass RLS using the admin pool.
-- Onboarding v2: email domain -> `campus_configs` match -> create or update student context with `parent_id = campus_id`.
-- Context history: `getContextHistory(userId)` reads `service_data` rows where `method = 'context_prediction_response'` ordered by `fetched_at`.
+
+### API Router Context Access
+
+```mermaid
+sequenceDiagram
+    participant Router as API Router
+    participant Service as ContextGraphService
+    participant Cache as Redis
+    participant DB as PostgreSQL
+
+    Router->>Service: getContextGraphService(session)
+    Service->>Service: Create session-bound clone
+    Service->>Cache: Check cache
+    Service->>DB: SET LOCAL RLS vars
+    Service->>DB: Execute traversal
+    DB-->>Router: Context data
+```
+
+### Admin Context Access
+
+```mermaid
+sequenceDiagram
+    participant Admin as Admin Routes
+    participant Service as getAdminContextGraphService
+    participant Pool as Admin Pool
+    participant DB as PostgreSQL
+
+    Admin->>Service: Get admin service
+    Service->>Pool: Get connection (DATABASE_URL_ADMIN)
+    Note over DB: RLS bypassed
+    Pool->>DB: Execute context query
+    DB-->>Admin: Context data
+```
+
+### Onboarding v2 Context Creation
+
+```mermaid
+flowchart TD
+    A[Email domain] --> B[Match campus_configs]
+    B --> C{Campus found?}
+    C -->|Yes| D[Create/update student context]
+    D --> E["Set parent_id = campus_id"]
+    C -->|No| F[Error or default handling]
+```
+
+### Context History Retrieval
+
+```mermaid
+sequenceDiagram
+    participant Caller
+    participant Fn as getContextHistory
+    participant DB as service_data
+
+    Caller->>Fn: getContextHistory(userId)
+    Fn->>DB: SELECT WHERE method='context_prediction_response'
+    Fn->>DB: ORDER BY fetched_at DESC
+    DB-->>Caller: History records
+```
 
 ## Data Models / IDs / Terminology
 - `ContextNode`: `id`, `parent_id`, `type`, `metadata`, `user_id`, `is_active`, `created_at`, `updated_at`.

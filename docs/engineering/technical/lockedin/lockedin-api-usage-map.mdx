@@ -1,0 +1,366 @@
+---
+title: "LockedIn API Usage Map"
+description: "This doc enumerates **LockedIn web pages** and the **API endpoints used by those pages and their data components**. It includes direct fetches inside `page.t..."
+---
+
+# LockedIn Web App — API Usage Map (Current)
+
+## Scope
+This doc enumerates **LockedIn web pages** and the **API endpoints used by those pages and their data components**. It includes direct fetches inside `page.tsx` files and indirect calls via hooks/components.
+
+This is a static code review; no runtime tracing is included.
+
+Related roadmap: [V2-Standardization-Roadmap (Current)](/docs/engineering/technical/api/v2-standardization-roadmap-current)
+
+## Endpoint Types (Legend)
+- **v2**: `/api/v2/*` (via proxy or direct)
+- **proxy (legacy)**: `/api/proxy/*` routes that forward to api-router or older BFFs
+- **notes**: `/notes/*` endpoints (non-v2)
+- **docs**: `/api/braingains/*`, `/api/search/*` (RAG + documents)
+
+## Global Providers / Cross-Cutting Components
+These run on most routes and affect API traffic globally.
+
+| Component / Hook | Endpoints | Notes / Change Candidates |
+| --- | --- | --- |
+| `UserContext` (`contexts/UserContext.tsx`) | GET `/api/v2/students/me` | Keep v2; consider caching + ETag if profile is stable. |
+| `RealtimeProvider` (`components/RealtimeProvider.tsx`) | GET `/api/ably-token?raw=1`, GET `/api/proxy/api/v2/students/me/campus` | Uses campus to subscribe to broadcast channels; keep v2 for channel discovery. |
+| `AmplitudeProvider` (`components/AmplitudeProvider.tsx`) | GET `/api/v2/students/me/campus`, GET `/api/v2/campuses/:id/lms` | v2 is correct; ensure campus/lms caching. |
+| `QueryClientProvider` | N/A | Central caching; ensure all pages prefer React Query where possible. |
+| `WebVitals`, Sentry | N/A | Observability only. |
+
+## Dashboard Core Pages
+
+| Route | Page file | Primary data components | Endpoints in use | What should change |
+| --- | --- | --- | --- | --- |
+| `/dashboard/home-v2` | `src/app/dashboard/home-v2/page.tsx` | `useLayoutService`, `useLayoutTracking`, `useWidgetPreferences`, `useHomeWidgetTypes`, `useWidgetBatchV2`, `SetupWidget` | **v2** `/v2/layouts`, `/v2/layouts/events`, `/v2/students/me/preferences`, `/v2/widgets/home-types`, `/v2/widgets/batch`, `/v2/students/me/setup-status`, `/v2/students/me/term-calendar` | Keep v2; consider adding `home-types` + `prefs` to batch payload to reduce calls. |
+| `/dashboard/home` | `src/app/dashboard/home/page.tsx` | Redirect to Home V2 | N/A | Keep redirect; remove legacy only when safe. |
+| `/dashboard/tasks` | `src/app/dashboard/tasks/page.tsx` | `useTasksV2`, `useAcademicData`, `useScheduleRange`, `useDayPlanV2`, `useCanvasRealtime`, `useTimeBlocks` | **v2** `/v2/students/me/tasks*`, `/v2/students/me/calendar/events`, `/v2/students/me/dayplan`, `/v2/students/me/time-blocks`; **proxy** `/api/session`, `/api/proxy/student/courses`, `/api/proxy/canvas/assignments`, `/api/proxy/academic/*` (deliverables/matrix) | Move academic pipeline to v2 endpoints (courses, deliverables, completion) or batch; reduce `/api/session` calls by reusing auth context. |
+| `/dashboard/schedule` | `src/app/dashboard/schedule/page.tsx` | `useScheduleRange`, `useSemesterAggregate`, `useSyllabusCourses`, `usePendingIngestions`, calendar integration modules | **v2** `/v2/students/me/calendar/events`; **proxy legacy** `/api/proxy/mobile/calendar/*`, `/api/proxy/mobile/campus/current-term`, `/api/proxy/mobile/app-conf`, `/api/proxy/student/courses`, `/api/syllabus/processed/*`, `/api/syllabus/web-experience/*` | Continue migrating to v2 timeline + time blocks; reduce legacy mobile calendar endpoints and syllabus web-experience calls. |
+| `/dashboard/documents` | `src/app/dashboard/documents/page.tsx` | `useDocumentsOverview`, `useDocumentsList`, `useRecentNotes`, `useCourses` | **docs** `/api/braingains/documents/my-files`, `/api/braingains/documents`, `/api/search/documents/*`, `/notes/recent`; **v2** `/v2/students/me/courses` | Consolidate docs endpoints; consider v2 wrapper for notes + docs in a single call. |
+| `/dashboard/courses` | `src/app/dashboard/courses/page.tsx` | `useTerms`, `useCourseLifecycle`, `CanvasIntegration` | **v2** `/v2/students/me/term-calendar`; **proxy legacy** `/api/student/courses`, `/api/courses/dropped`, `/api/proxy/canvas/*` | Prefer v2 `/v2/students/me/courses` and `/v2/courses/:id/*` instead of `/api/student/courses` where possible. |
+| `/dashboard/courses/[contextId]` | `src/app/dashboard/courses/[contextId]/page.tsx` | course detail fetch | **v2** `/v2/courses/:id` | OK; consider enriching with v2 `/v2/courses/:id/*` endpoints. |
+| `/dashboard/settings` | `src/app/dashboard/settings/page.tsx` | `getPreferences`, `patchPreferences`, Clerk profile | **v2** `/v2/students/me/preferences` | v2 is correct; ensure consistent caching + optimistic updates. |
+| `/dashboard/integrations` | `src/app/dashboard/integrations/page.tsx` | Canvas + Calendar status | **proxy legacy** `/api/proxy/canvas/status`, `/api/proxy/v1/mobile/calendar/google/status` | Replace with `/v2/students/me/integrations/status` per roadmap. |
+| `/dashboard/integrations/google` | `src/app/dashboard/integrations/google/page.tsx` | Google calendar connect | **proxy legacy** (via components) | Align to v2 if available; keep proxy for now. |
+| `/dashboard/syllabus` | `src/app/dashboard/syllabus/page.tsx` | `SyllabusViewer` | **legacy** `/api/syllabus/*` | Candidate to migrate to v2 `/v2/syllabi/*`. |
+| `/dashboard/canvas` | `src/app/dashboard/canvas/page.tsx` | `CanvasIntegration` | **proxy legacy** `/api/proxy/canvas/*` | Keep for now; long-term replace with v2 Canvas endpoints. |
+
+## Dashboard Secondary Pages
+
+| Route | Page file | Primary components | Endpoints in use | What should change |
+| --- | --- | --- | --- | --- |
+| `/dashboard/notes-hub` | `src/app/dashboard/notes-hub/page.tsx` | `NotesList`, `MdxNoteEditor`, `notes-sync`, `class-detection` | **notes** `/notes/*`, **proxy** `/api/proxy/student/courses` | Consider v2 notes endpoints or a notes BFF; reduce dependency on legacy course proxy. |
+| `/dashboard/notes` | `src/app/dashboard/notes/page.tsx` | Redirect | N/A | Keep redirect. |
+| `/dashboard/inbox` | `src/app/dashboard/inbox/page.tsx` | `InboxPageClient` | **v2** `/v2/students/me/calendar/events`; **proxy legacy** `/api/proxy/mobile/syllabus/receipts` | Keep v2 timeline; replace legacy receipts endpoint when v2 syllabi receipts ship. |
+| `/dashboard/ace` | `src/app/dashboard/ace/page.tsx` | ACE overview | **docs** `/api/search/documents?limit=50`, `/api/braingains/chat?limit=5`, **v2** `/v2/students/me/feed?limit=1` | Align docs endpoints with Documents page; keep feed for last activity. |
+| `/dashboard/ace/chat` | `src/app/dashboard/ace/chat/page.tsx` | Chat components | **docs** (via components) | Align with ACE overview endpoints. |
+| `/dashboard/ace/documents` | `src/app/dashboard/ace/documents/page.tsx` | Docs components | **docs** (via components) | Consolidate with Documents page hooks. |
+| `/dashboard/ace/write` | `src/app/dashboard/ace/write/page.tsx` | Editor components | **notes/docs** (via components) | Consider shared doc/notes API wrapper. |
+| `/dashboard/feedback` | `src/app/dashboard/feedback/page.tsx` | Feedback UI | N/A | No API calls in page. |
+| `/dashboard/user-profile` | `src/app/dashboard/user-profile/page.tsx` | Clerk | N/A | Auth handled by Clerk. |
+| `/dashboard/academic` | `src/app/dashboard/academic/page.tsx` | Academic components | **proxy legacy** (via components) | Align to v2 academic endpoints if/when available. |
+| `/dashboard/vault` | `src/app/dashboard/vault/page.tsx` | Integrations hub | N/A | Mostly navigation. |
+
+## Auth, Onboarding, Integrations
+
+| Route | Page file | Endpoints in use | What should change |
+| --- | --- | --- | --- |
+| `/` | `src/app/page.tsx` | `/api/session` | Consider central auth cache; reduce redundant calls. |
+| `/magic-link` | `src/app/magic-link/page.tsx` | `/api/auth/resend-magic-link`, `/api/v2/students/me/campus`, `/api/v2/students/me/courses` | v2 is correct; ensure consistent error handling. |
+| `/onboarding` | `src/app/onboarding/page.tsx` | `/api/v2/students/me`, `/api/v2/students/me/campus`, `/api/v2/students/me/courses`, `/api/v2/syllabi`, `/api/proxy/mobile/onboarding/complete` | Replace legacy onboarding completion endpoint if a v2 equivalent exists. |
+| `/calendar-callback` | `src/app/calendar-callback/page.tsx` | (component-driven) | Ensure it uses v2 status endpoints if available. |
+| `/dashboard/vault/integrations/google` | `src/app/dashboard/vault/integrations/google/page.tsx` | (component-driven) | Same as `/dashboard/integrations/google`. |
+
+## Public / Marketing Pages
+
+| Route | Page file | Endpoints in use | Notes |
+| --- | --- | --- | --- |
+| `/colleges` | `src/app/colleges/page.tsx` | `/api/colleges` | Public data; fine as public endpoint. |
+| `/colleges/all-states` | `src/app/colleges/all-states/page.tsx` | `/api/colleges` | Same as above. |
+| `/colleges/[slug]` | `src/app/colleges/[slug]/page.tsx` | Server fetch `${apiBase}/colleges/:slug` | Public SSR; keep separate from auth proxy. |
+| `/colleges/state/[state]` | `src/app/colleges/state/[state]/page.tsx` | (via shared colleges API) | Ensure caching. |
+| `/blog`, `/about`, `/careers`, `/privacy`, `/terms`, `/roadmap`, `/feedback` | `src/app/*/page.tsx` | None | Content-only pages. |
+
+## Debug / Dev / Demo Pages
+
+| Route | Page file | Endpoints in use | Notes |
+| --- | --- | --- | --- |
+| `/dashboard/debug` | `src/app/dashboard/debug/page.tsx` | `/api/proxy/health`, `/api/session` | Dev-only. |
+| `/dashboard/debug/realtime` | `src/app/dashboard/debug/realtime/page.tsx` | `/api/ably-token`, `/api/proxy/test/mobile/profile` | Dev-only. |
+| `/dashboard/debug/session-refresh` | `src/app/dashboard/debug/session-refresh/page.tsx` | `/api/session` | Dev-only. |
+| `/dashboard/debug/onboarding` | `src/app/dashboard/debug/onboarding/page.tsx` | `/api/session`, `/api/onboarding/debug/status`, `/api/proxy/mobile/campus/typeahead-secure`, `/api/proxy/api/campus/:id/housing` | Dev-only. |
+| `/demo` | `src/app/demo/page.tsx` | `/api/auth/demo-login` | Demo-only. |
+
+## Hook / Component Endpoint Map (Key Data Modules)
+This list is used across multiple pages; prefer reusing these rather than adding direct fetches.
+
+| Hook / Component | Endpoints | Notes |
+| --- | --- | --- |
+| `useWidgetBatchV2` | `/v2/widgets/batch` | Home V2 core batch. |
+| `useHomeWidgetTypes` | `/v2/widgets/home-types` | Home V2 strict mode. |
+| `useWidgetPreferences` | `/v2/students/me/preferences` | Widget prefs + hidden widgets. |
+| `useLayoutService` | `/v2/layouts` (alias) | Layout persistence via v2 alias. |
+| `useLayoutTracking` | `/v2/layouts/events` (alias) | Layout change telemetry. |
+| `useTasksV2` + planner | `/v2/students/me/tasks*` | Task CRUD + schedule/unschedule. |
+| `useScheduleRange` | `/v2/students/me/calendar/events` | Primary schedule timeline for web. |
+| `useDayPlanV2` | `/v2/students/me/dayplan`, `/v2/students/me/time-blocks` | DayPlan + time blocks. |
+| `useAcademicData` | `/api/session`, `/api/proxy/student/courses`, `/api/proxy/canvas/assignments`, `/api/proxy/academic/*` | Candidate for v2 consolidation. |
+| `CanvasIntegration` | `/api/proxy/canvas/*` | Legacy proxy; v2 replacement planned in roadmap. |
+| `notes-sync` | `/notes/sync`, `/notes/:id`, `/notes/recent` | Non-v2 notes API. |
+| `Documents hooks` | `/api/braingains/*`, `/api/search/documents/*` | Align with docs/notes strategy. |
+
+## Component API Usage (Extended - Change Notes)
+Focused list of high-impact components that call APIs directly.
+
+| Component | Endpoints in use | What should change |
+| --- | --- | --- |
+| `components/SyllabusCoursesView.tsx` | `/api/proxy/student/courses`, `/api/proxy/semester/aggregate`, `/api/syllabus/*`, `/api/braingains/documents/update-term/*` | Move to v2 `/v2/syllabi/*` + v2 courses; consolidate term and syllabus data. |
+| `components/courses/hooks/useCourseLifecycle.ts` | `/api/student/courses`, `/api/courses/add|drop|swap|reenroll` | Replace with v2 enrollment lifecycle endpoints (if/when defined). |
+| `hooks/useTimeBlocks.ts` | `/api/mobile/planner/blocks*`, `/api/proxy/mobile/calendar/events` | Migrate to `/v2/students/me/time-blocks*` + `/v2/students/me/calendar/events`. |
+| `contexts/TimezoneContext.tsx` | `/api/proxy/mobile/preferences` | Replace with `/v2/students/me/preferences`. |
+| `components/canvas/CanvasIntegration.tsx` | `/api/proxy/canvas/*` | Keep until v2 Canvas endpoints exist; plan v2 wrapper. |
+| `lib/academic/data.ts` | `/api/proxy/student/courses`, `/api/proxy/canvas/assignments`, `/api/proxy/academic/*` | Consolidate into v2 academic endpoints or a batch. |
+| `components/syllabus/SyllabusViewer.tsx` | `/api/syllabus/*` | Move to `/v2/syllabi/*` when stable. |
+| `components/dashboard/inbox/InboxPageClient.tsx` | `/api/proxy/mobile/calendar/events`, `/api/proxy/mobile/syllabus/receipts` | Replace with v2 schedule + syllabus receipts or a single inbox endpoint. |
+| `components/CommandPalette.tsx` | `/api/proxy/search/documents` | Use the same docs hooks as `/dashboard/documents` to dedupe. |
+| `components/RealtimeProvider.tsx` | `/api/proxy/dashboard/activity` | Replace with `/v2/students/me/feed` or a v2 activity endpoint. |
+| `lib/ace.ts` | `/api/ace/*`, `/api/proxy/search/*`, `/api/search/chat` | Unify ACE docs/chat API with Documents + Notes strategy. |
+| `lib/schoolDetection.ts` | `/api/schools/*`, `/v2/campuses/detect-by-domain` | Prefer v2 campuses endpoints to reduce parallel systems. |
+
+## Appendix: Full Component Endpoint Index (Static Scan)
+- `components/AmplitudeProvider.tsx`
+  - `/api/v2/campuses/${campusId}/lms`
+  - `/api/v2/students/me/campus`
+- `components/CampusGlobe.tsx`
+  - `/api/campus/locations`
+- `components/CommandPalette.tsx`
+  - `/api/proxy/search/documents?limit=40`
+- `components/DashboardSidebar.tsx`
+  - `/api/session`
+- `components/HomepageBlogSections.tsx`
+  - `/api/blog/homepage`
+- `components/IntercomProvider.tsx`
+  - `/api/intercom-token`
+- `components/ProcessTermModal.tsx`
+  - `/api/proxy/semester/process`
+- `components/RealtimeDebugPanel.tsx`
+  - `/api/ably-token`
+  - `/api/ably-token?raw=1`
+  - `/api/proxy/test/mobile/profile`
+- `components/RealtimeProvider.tsx`
+  - `/api/ably-token?raw=1`
+  - `/api/proxy/dashboard/activity?limit=1`
+  - `/api/session`
+- `components/SyllabusCoursesView.tsx`
+  - `/api/braingains/documents/update-term/${selectedCourseId}`
+  - `/api/proxy/braingains/documents`
+  - `/api/proxy/mobile/campus/current-term`
+  - `/api/proxy/semester/aggregate?${params.toString()}`
+  - `/api/proxy/student/courses`
+  - `/api/proxy/student/courses${qs}`
+  - `/api/session`
+  - `/api/syllabus/archive`
+  - `/api/syllabus/assign-term`
+  - `/api/syllabus/mark-completed`
+  - `/api/syllabus/mark-dropped`
+  - `/api/syllabus/processed/${selectedCourseId}`
+  - `/api/syllabus/unarchive`
+  - `/api/syllabus/web-experience/by-context/${selectedCourseId}`
+- `components/SyllabusPreviewCard.tsx`
+  - `/api/syllabus/${token}`
+- `components/SyllabusTermView.tsx`
+  - `/api/session`
+- `components/WaitlistModal.tsx`
+  - `/api/waitlist/join`
+- `components/canvas/CanvasIntegration.tsx`
+  - `/api/proxy/canvas/connect-ics`
+  - `/api/proxy/canvas/connect/manual`
+  - `/api/proxy/canvas/courses`
+  - `/api/proxy/canvas/disconnect`
+  - `/api/proxy/canvas/stats`
+  - `/api/proxy/canvas/status`
+  - `/api/proxy/canvas/sync`
+  - `/api/proxy/canvas/upcoming`
+- `components/canvas/CanvasSyncTriggers.tsx`
+  - `/api/proxy/canvas/status`
+  - `/api/proxy/canvas/sync`
+- `components/courses/IntelligenceContent.tsx`
+  - `/api/session`
+- `components/courses/hooks/useCourseHistory.ts`
+  - `/api/courses/history?${params.toString()}`
+- `components/courses/hooks/useCourseLifecycle.ts`
+  - `/api/courses/add`
+  - `/api/courses/drop`
+  - `/api/courses/dropped`
+  - `/api/courses/reenroll`
+  - `/api/courses/swap`
+  - `/api/student/courses`
+- `components/courses/hooks/useCourseSearch.ts`
+  - `/api/student/courses/search?${params.toString()}`
+- `components/courses/hooks/useTerms.ts`
+  - `/api/proxy/api/v2/students/me/term-calendar`
+- `components/courses/modals/SyllabusModal.tsx`
+  - `/api/proxy/upload/syllabus`
+- `components/dashboard/CanvasGradesWidget.tsx`
+  - `/api/proxy/canvas/assignments`
+  - `/api/proxy/canvas/status`
+- `components/dashboard/CanvasUpcomingWidget.tsx`
+  - `/api/proxy/canvas/status`
+  - `/api/proxy/canvas/upcoming`
+- `components/dashboard/SetupWidget.tsx`
+  - `/api/proxy/api/v2/students/me/term-calendar`
+  - `/api/proxy/upload/syllabus`
+  - `/api/proxy/v2/students/me/setup-status`
+- `components/dashboard/UpdateCourseModal.tsx`
+  - `/api/braingains/documents/update-term`
+  - `/api/braingains/documents/update-term/${contextId}`
+- `components/dashboard/inbox/InboxPageClient.tsx`
+  - `/api/proxy/mobile/calendar/events?${eventParams.toString()}`
+  - `/api/proxy/mobile/syllabus/receipts?${receiptParams.toString()}`
+- `components/home/DragDropContext.tsx`
+  - `/api/v2/students/me/tasks`
+  - `/api/v2/students/me/tasks/${taskId}`
+  - `/api/v2/students/me/tasks/${taskId}/schedule`
+  - `/api/v2/students/me/tasks?status=pending`
+- `components/home/columns/Column2TaskBank.tsx`
+  - `/api/proxy/dayplan/latest`
+- `components/integrations/ScheduleUploadIntegration.tsx`
+  - `/api/schedule/upload`
+- `components/integrations/SyllabusManagerIntegration.tsx`
+  - `/api/syllabus/upload`
+- `components/onboarding/steps/CampusStep.tsx`
+  - `/api/proxy/api/campus/${encodeURIComponent(formData.campus)}/metadata`
+  - `/api/proxy/mobile/campus/typeahead?q=${encodeURIComponent(query)}&limit=15`
+  - `/api/proxy/mobile/detect-campus`
+- `components/onboarding/steps/HousingStep.tsx`
+  - `/api/proxy/api/campus/${encodeURIComponent(formData.campus)}/housing?limit=500`
+- `components/quick-start/QuickStartModal.tsx`
+  - `/api/proxy/v2/students/me/terms`
+- `components/settings/ConnectionsContent.tsx`
+  - `/api/proxy/canvas/status`
+  - `/api/proxy/v1/mobile/calendar/google/status`
+- `components/syllabus/SyllabusViewer.tsx`
+  - `/api/syllabus/${token}`
+  - `/api/syllabus/upload`
+- `components/ui/academic/AcademicInspector.tsx`
+  - `/api/canvas/lti/sessionless-launch`
+- `components/ui/provenance-panel.tsx`
+  - `/api/provenance/${claimId}`
+  - `/api/provenance/${claimId}/rescan`
+- `contexts/AblyContext.tsx`
+  - `/api/ably-token?raw=1`
+- `contexts/TimezoneContext.tsx`
+  - `/api/proxy/mobile/preferences`
+- `contexts/UserContext.tsx`
+  - `/api/v2/students/me`
+- `hooks/home/useHomeWidgetTypes.ts`
+  - `/api/v2/widgets/home-types${queryString ? `
+- `hooks/home/useQuickCapture.ts`
+  - `/api/v2/students/me/tasks/quick-capture`
+- `hooks/home/useTasksV2.ts`
+  - `/api/v2/students/me/tasks`
+- `hooks/home/useWidgetBatchV2.ts`
+  - `/api/v2/widgets/batch?types=${typesParam}`
+- `hooks/queries/useDocumentsList.ts`
+  - `/api/braingains/documents/my-files?${params.toString()}`
+  - `/api/braingains/documents?limit=100&page=1`
+- `hooks/queries/useDocumentsOverview.ts`
+  - `/api/braingains/documents/my-files?${params.toString()}`
+  - `/api/braingains/documents?limit=${limit}&page=1`
+- `hooks/useAcademicData.ts`
+  - `/api/session`
+- `hooks/useAuthenticatedFileUpload.ts`
+  - `/api/proxy/upload/content`
+- `hooks/useCampusCurrentTerm.ts`
+  - `/api/proxy/mobile/campus/current-term`
+- `hooks/useCampusSelection.ts`
+  - `/api/proxy/mobile/campus/typeahead-secure?q=${encodeURIComponent(campusSearchTerm.trim())}&limit=8`
+  - `/api/proxy/mobile/onboarding/complete`
+- `hooks/useCanvasRealtime.ts`
+  - `/api/ably-token?raw=1`
+- `hooks/useContextPrediction.ts`
+  - `/api/proxy/dashboard/activity?limit=50`
+- `hooks/useDayPlanV2.ts`
+  - `/api/v2/students/me/dayplan`
+  - `/api/v2/students/me/time-blocks?date=${today}`
+- `hooks/useInlineFileUpload.ts`
+  - `/api/upload`
+- `hooks/useInsightTracking.ts`
+  - `/api/v1/insights/batch`
+- `hooks/useLayoutTracking.ts`
+  - `/api/v2/layouts/events`
+- `hooks/useMultiFileUpload.ts`
+  - `/api/proxy/upload/content`
+- `hooks/usePendingIngestions.ts`
+  - `/api/proxy/mobile/content/${ingestionId}/confirm`
+  - `/api/proxy/mobile/content/${ingestionId}/dismiss`
+  - `/api/proxy/mobile/content/pending?${params.toString()}`
+- `hooks/useScheduleRange.ts`
+  - `/api/v2/students/me/calendar/events?${params}`
+- `hooks/useSemesterAggregate.ts`
+  - `/api/proxy/mobile/campus/current-term`
+  - `/api/proxy/semester/aggregate?${params.toString()}`
+  - `/api/proxy/semester/predictions?term=${encodeURIComponent(termName)}&year=${yr}`
+- `hooks/useSyllabusCourses.ts`
+  - `/api/proxy/student/courses${qs}`
+- `hooks/useTimeBlocks.ts`
+  - `/api/mobile/planner/blocks`
+  - `/api/mobile/planner/blocks/${id}`
+  - `/api/proxy/mobile/calendar/events?${params.toString()}`
+  - `/api/proxy/mobile/planner/blocks`
+- `lib/academic/completion.ts`
+  - `/api/proxy/academic/assignments/${assignmentId}/complete`
+  - `/api/proxy/academic/assignments/bulk-complete`
+  - `/api/proxy/academic/assignments/completion-status?ids=${assignmentIds.join(`
+- `lib/academic/data.ts`
+  - `/api/proxy`
+  - `/api/proxy/canvas/assignments`
+- `lib/ace.ts`
+  - `/api/ably-token?raw=1`
+  - `/api/ace/chat/start`
+  - `/api/auth/access-token`
+  - `/api/proxy${basePath}`
+  - `/api/proxy/search/chat`
+  - `/api/proxy/search/documents/source?${params.toString()}`
+  - `/api/proxy/search/documents/summary?${params.toString()}`
+  - `/api/proxy/search/documents/text?${params.toString()}`
+  - `/api/proxy/search/documents/text?url=${encoded}`
+  - `/api/search/chat`
+- `lib/dashboard/layout-service.ts`
+  - `/api/proxy/api/v2/layouts`
+- `lib/ensureAccessToken.ts`
+  - `/api/auth/access-token`
+  - `/api/auth/access-token?refresh=true`
+- `lib/planner/api.ts`
+  - `/api/v2/students/me/tasks/${taskId}`
+  - `/api/v2/students/me/tasks/${taskId}/unschedule`
+- `lib/preferences.ts`
+  - `/api/v2/students/me/preferences`
+- `lib/schoolDetection.ts`
+  - `/api/schools/detect`
+  - `/api/schools/search?q=${encodeURIComponent(query.trim())}&limit=${encodeURIComponent(String(limit))}`
+  - `/api/schools/spotlight?limit=${encodeURIComponent(String(limit))}`
+  - `/v2/campuses/detect-by-domain?domain=${encodeURIComponent(domain)}`
+- `lib/smart-scheduling.ts`
+  - `/api/v2/students/me/tasks`
+  - `/api/v2/students/me/tasks/${taskId}/schedule`
+  - `/api/v2/students/me/tasks?status=pending`
+- `lib/useCourseAssignments.ts`
+  - `/api/syllabus/processed/${courseContextId}`
+- `lib/useCourses.ts`
+  - `/api/proxy/student/courses`
+- `lib/utils.ts`
+  - `/api/proxy${normalized}`
+
+## Change Candidates (Prioritized)
+1) **Consolidate academic data**: replace `/api/proxy/*` academic fan-out with v2 endpoints or a single batch endpoint.
+2) **Reduce legacy mobile calendar usage**: migrate schedule + inbox to `/v2/students/me/calendar/events` + `/v2/students/me/time-blocks`.
+3) **Unify notes + docs APIs**: define a v2 notes/documents boundary and reduce `/notes/*` + `/api/search/*` sprawl.
+4) **Integrations status**: move `/api/proxy/canvas/status` and `/api/proxy/v1/mobile/calendar/google/status` into a v2 integrations status endpoint.
+
+## Related Docs
+- [V2 API Inventory](/docs/engineering/technical/api/v2-api-inventory)
+- [V2 Endpoint Documentation Coverage](/docs/engineering/technical/api/v2-endpoint-documentation-coverage)
+- [Home & Widgets](/docs/engineering/architecture/sot-home-widgets)
+- [Calendar, Time Blocks, Timezones](/docs/engineering/architecture/sot-calendar-time-blocks-timezones)

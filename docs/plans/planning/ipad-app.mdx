@@ -1,0 +1,1174 @@
+---
+title: "IPad App"
+description: "1. [Executive Summary](#1-executive-summary) 2. [Product Vision](#2-product-vision) 3. [User Personas & Jobs to Be Done](#3-user-personas--jobs-to-be-done) 4..."
+---
+
+# DormWay iPad — Product Requirements Document
+
+**Version:** 1.2  
+**Last Updated:** December 24, 2025  
+**Author:** Product Team  
+**Status:** Approved
+
+---
+
+## Table of Contents
+
+1. [Executive Summary](#1-executive-summary)
+2. [Product Vision](#2-product-vision)
+3. [User Personas & Jobs to Be Done](#3-user-personas--jobs-to-be-done)
+4. [Feature Overview](#4-feature-overview)
+5. [Screen Architecture](#5-screen-architecture)
+6. [Data Models](#6-data-models)
+7. [API Specification](#7-api-specification)
+8. [Feed Integration](#8-feed-integration)
+9. [Real-Time Architecture](#9-real-time-architecture)
+10. [Technical Requirements](#10-technical-requirements)
+11. [Privacy & Security](#11-privacy--security)
+12. [Design System](#12-design-system)
+13. [Implementation Phases](#13-implementation-phases)
+14. [Success Metrics](#14-success-metrics)
+15. [Design Decisions](#15-design-decisions)
+
+---
+
+## 1. Executive Summary
+
+### Product Statement
+
+DormWay iPad is a context-aware lecture companion that transforms how students take notes in class. Unlike generic note-taking apps, DormWay knows what class you're in, what material matters most for your grade, and what your classmates think is important—all without you lifting a finger.
+
+### Core Value Proposition
+
+**"The note-taking app that already knows what class you're in."**
+
+- **Context Without Friction:** Auto-opens to correct course based on schedule + location
+- **Collaborative Intelligence:** Real-time pins, shared notes, class engagement signals
+- **Notes That Feed Your Brain:** Ace indexes everything for semantic search
+- **Syllabus-Aware Learning:** Surfaces grade weights, deadlines, related materials
+
+### Competitive Moat
+
+| Competitor | What They Have | What They Lack |
+|------------|---------------|----------------|
+| Notability | Great Apple Pencil support | No academic context |
+| GoodNotes | Beautiful handwriting | No collaboration |
+| Notion | Flexible databases | Not built for lectures |
+| OneNote | Free, integrated | No syllabus intelligence |
+| **DormWay** | All of the above | Purpose-built for classroom |
+
+---
+
+## 2. Product Vision
+
+### The Problem
+
+Students spend 15+ hours per week in lectures but use generic tools that treat every class the same. They don't know which material matters most, can't easily find what they need later, and miss valuable signals from classmates.
+
+### The Solution
+
+An iPad app that:
+
+1. **Automatically knows context** — Opens to ASTRO 104 at 4pm because that's where you are
+2. **Shows what matters** — "This topic is 15% of your final exam"
+3. **Captures everything** — Handwriting + typed notes + audio, all synced
+4. **Connects you to class** — See what 12 classmates just flagged as important
+5. **Makes notes findable** — "Hey Ace, what did we cover about black holes?"
+
+### Why iPad First
+
+- **Hardware fit:** Apple Pencil is the best digital stylus
+- **Context:** iPad stays open during lecture (phone in pocket)
+- **Screen real estate:** Room for notes + context sidebar
+- **Market:** 40% of college students have iPad access
+
+---
+
+## 3. User Personas & Jobs to Be Done
+
+### Primary Persona: The Engaged Student
+
+**Riley, Junior, Film & Digital Media Major**
+
+- Takes 4-5 classes per semester
+- Uses iPad Pro with Apple Pencil daily
+- Struggles to organize notes across courses
+- Misses class occasionally (overslept, sick)
+- Studies in groups, shares notes with friends
+
+### Jobs to Be Done
+
+| Job | Current Solution | DormWay Solution |
+|-----|-----------------|------------------|
+| Take notes in class | Notability, paper | Lecture View with context |
+| Know what to focus on | Guess, ask friends | Grade weight visualization |
+| Find old notes | Scroll through files | Ace semantic search |
+| Catch up on missed class | Beg classmates | Class notes feed |
+| Study for exams | Re-read everything | Hot moments + Ace |
+
+### User Flows
+
+**Flow 1: Arriving at Class**
+```
+Schedule detects class time → Location confirms building →
+Auto-opens Lecture View for ASTRO 104 →
+Shows "Lecture 24 • Stellar Evolution • 20% of grade" →
+Tap Start to begin recording
+```
+
+**Flow 2: During Lecture**
+```
+Professor says "This will be on the exam" →
+Student taps ⭐ Pin button →
+Pin syncs to classmates in real-time →
+Others see "Riley pinned a moment" →
+Tap to jump to that timestamp
+```
+
+**Flow 3: After Class**
+```
+Notes auto-save to cloud →
+Indexed into Ace →
+"Hey Ace, what did we cover about main sequence stars?" →
+Returns notes from L24, classmate highlights, syllabus section
+```
+
+---
+
+## 4. Feature Overview
+
+### Core Features
+
+| Feature | Priority | Phase |
+|---------|----------|-------|
+| Note-taking canvas (Pencil + keyboard) | P0 | 1 |
+| Audio recording with timestamp sync | P0 | 2 |
+| Context sidebar (grade weight, deadlines) | P0 | 1 |
+| Pins (personal + shared) | P1 | 3 |
+| Real-time class feed | P1 | 3 |
+| Ace search | P1 | 4 |
+| Note sharing | P2 | 3 |
+| Collaborative editing | P2 | 5 |
+
+### Feature Details
+
+#### 4.1 Note-Taking Canvas
+
+**Description:** PencilKit-based canvas with hybrid handwriting/typing support.
+
+**Requirements:**
+- [ ] PencilKit integration with full tool palette
+- [ ] Keyboard text entry with inline support
+- [ ] Image/attachment insertion
+- [ ] Shape recognition (optional)
+- [ ] Infinite vertical scroll
+- [ ] Ruled paper aesthetic
+
+**Technical Notes:**
+- Use PKCanvasView for stroke capture
+- Store strokes as Data blob, render natively
+- Each stroke tagged with `timestamp` for audio sync
+
+#### 4.2 Audio Recording
+
+**Description:** Record lecture audio, sync to notes for playback.
+
+**Requirements:**
+- [ ] One-tap recording start/stop
+- [ ] Recording indicator in nav bar
+- [ ] Strokes/text tagged with timestamp
+- [ ] Playback scrubber syncs to note position
+- [ ] Tap note element → seek to timestamp
+- [ ] Background recording (within app)
+
+**Technical Notes:**
+- AVAudioRecorder with m4a format
+- Store locally, upload to S3 on wifi
+- Transcript via Whisper API (post-lecture)
+
+#### 4.3 Context Sidebar
+
+**Description:** Right-side panel showing academic intelligence.
+
+**Requirements:**
+- [ ] Three tabs: Context, Feed, Materials
+- [ ] Collapsible to icon-only mode
+- [ ] Context tab shows: Grade weight ring, deadline pressure, related material
+- [ ] Feed tab shows: Real-time pins, presence, shared notes
+- [ ] Materials tab shows: Slides, readings from Canvas
+
+**Technical Notes:**
+- 340px default width, 60px collapsed
+- Pull from `/v2/feed/lecture-context` API
+- WebSocket subscription for real-time updates
+
+#### 4.4 Pins
+
+**Description:** Mark important moments, share with classmates.
+
+**Requirements:**
+- [ ] Tap ⭐ to create pin at current position
+- [ ] Pin captures: timestamp, page, note excerpt
+- [ ] Optional text annotation
+- [ ] Visibility: Private (default), Class, Public
+- [ ] Real-time sync to classmates
+- [ ] Aggregate into "hot moments"
+
+**Technical Notes:**
+- POST `/v2/lectures/:id/pins`
+- WebSocket broadcast to class subscribers
+- Aggregate >5 pins in 60s → hot moment card
+
+#### 4.5 Ace Search
+
+**Description:** AI-powered semantic search across all academic content.
+
+**Requirements:**
+- [ ] Search your notes, classmate pins, syllabus
+- [ ] Returns snippets with highlighted terms
+- [ ] Timestamp links to jump to position
+- [ ] Shows grade context for syllabus results
+- [ ] In-lecture queries: "What did professor say about X?"
+
+**Technical Notes:**
+- Index notes via `/v2/courses/:id/ace/index-lecture`
+- Query via `/v2/courses/:id/ace/search`
+- Use Vectara for vector search
+- Claude for query understanding + summarization
+
+---
+
+## 5. Screen Architecture
+
+### Information Architecture
+
+```
+DormWay iPad
+├── Dashboard
+│   ├── Up Next Card
+│   ├── Class Activity Section
+│   └── Today's Classes Grid
+│
+├── Course View
+│   ├── Your Notes (grid)
+│   ├── Class Notes (shared)
+│   ├── Materials
+│   └── Course Feed Sidebar
+│
+├── Lecture View
+│   ├── Note Canvas
+│   ├── Context Sidebar
+│   │   ├── Context Tab
+│   │   ├── Feed Tab
+│   │   └── Materials Tab
+│   └── Toolbar
+│
+├── Full Activity View
+│   ├── Filter Chips
+│   └── Activity Grid
+│
+└── Ace Search
+    ├── Search Bar
+    └── Results List
+```
+
+### Screen Specifications
+
+#### Screen 1: Dashboard
+
+**Purpose:** Launch screen, entry point to all experiences.
+
+**Components:**
+- Greeting header with date
+- Up Next card (context-aware, one-tap to lecture)
+- Class Activity section (4 cards max)
+- Today's Classes grid (3 columns)
+- App sidebar with navigation + course list
+
+**Data Requirements:**
+- `GET /v2/students/me/schedule` (today's classes)
+- `GET /v2/feed/class-activity` (aggregated feed)
+- `GET /v2/students/me/context` (current state)
+
+#### Screen 2: Lecture View
+
+**Purpose:** Primary note-taking experience.
+
+**Layout:** Split view with note canvas (flex) + context sidebar (340px)
+
+**Components:**
+- Nav bar with back, title, recording indicator
+- Note canvas (PencilKit + text)
+- Context sidebar (3 tabs)
+- Bottom toolbar (tools, pin, record, Ace)
+
+**Data Requirements:**
+- `GET /v2/courses/:courseId/lectures/:lectureId`
+- `GET /v2/feed/lecture-context`
+- WebSocket `/v2/lectures/:lectureId/live`
+
+#### Screen 3: Context Intelligence Panel
+
+**Purpose:** Expanded sidebar with full visualizations.
+
+**Components:**
+- Topic Weight Ring (% of grade)
+- Deadline Pressure Bars (days until, grade weight)
+- Class Engagement Heatmap (pins by time)
+- Course Progress Strip (32 segments)
+
+**Data Requirements:**
+- `GET /v2/courses/:courseId/processed-syllabus`
+- `GET /v2/lectures/:lectureId/pins/summary`
+- `GET /v2/students/me/notes/coverage`
+
+#### Screen 4: Course View
+
+**Purpose:** All notes and activity for one course.
+
+**Layout:** Split view with notes grid (2/3) + feed sidebar (1/3)
+
+**Components:**
+- Content tabs (Your Notes, Class Notes, Materials)
+- Notes grid (3 columns, thumbnails)
+- Course feed sidebar (grouped by lecture)
+- Online indicator
+
+**Data Requirements:**
+- `GET /v2/courses/:courseId/lectures` (with notes)
+- `GET /v2/courses/:courseId/shared-notes`
+- `GET /v2/courses/:courseId/feed`
+
+#### Screen 5: Full Activity View
+
+**Purpose:** Cross-course activity feed.
+
+**Components:**
+- Filter chips (All, Hot Moments, Shared Notes, Gaps)
+- Activity grid (3 columns)
+- Course filter in nav
+
+**Data Requirements:**
+- `GET /v2/feed/class-activity?includeAll=true`
+
+#### Screen 6: Ace Search
+
+**Purpose:** AI-powered search interface.
+
+**Components:**
+- Search bar with suggestions
+- Result count
+- Results list (notes, class highlights, syllabus)
+- Jump-to-timestamp links
+
+**Data Requirements:**
+- `GET /v2/courses/:courseId/ace/search?q=...`
+
+---
+
+## 6. Data Models
+
+### Lecture
+
+```typescript
+interface Lecture {
+  id: string;
+  courseId: string;
+  studentId: string;
+  scheduledEventId?: string;
+  lectureNumber: number;
+  topic?: string;
+  
+  // Timing
+  startedAt: Date;
+  endedAt?: Date;
+  duration?: number; // seconds
+  
+  // Content
+  pages: LecturePage[];
+  pins: Pin[];
+  
+  // Recording
+  recording?: {
+    audioUrl: string;
+    duration: number;
+    transcript?: TranscriptSegment[];
+  };
+  
+  // Sharing
+  visibility: 'private' | 'class' | 'public';
+  sharedAt?: Date;
+  
+  // Sync
+  syncStatus: 'synced' | 'pending' | 'conflict';
+  version: number;
+  
+  createdAt: Date;
+  updatedAt: Date;
+}
+```
+
+### LecturePage
+
+```typescript
+interface LecturePage {
+  id: string;
+  pageNumber: number;
+  elements: NoteElement[];
+  
+  // Audio sync
+  timeRange?: {
+    start: number; // seconds
+    end: number;
+  };
+}
+```
+
+### NoteElement
+
+```typescript
+interface NoteElement {
+  id: string;
+  type: 'stroke' | 'text' | 'image' | 'shape' | 'attachment';
+  bounds: { x: number; y: number; width: number; height: number };
+  
+  // Type-specific
+  strokeData?: Data; // PencilKit PKDrawing
+  textContent?: string;
+  imageUrl?: string;
+  shapeType?: 'rectangle' | 'circle' | 'line' | 'arrow';
+  attachmentRef?: string;
+  
+  // Audio sync
+  timestamp?: number; // seconds into recording
+  
+  createdAt: Date;
+  modifiedAt: Date;
+}
+```
+
+### Pin
+
+```typescript
+interface Pin {
+  id: string;
+  lectureId: string;
+  userId: string;
+  userName: string;
+  
+  // Position
+  timestamp: number; // seconds into lecture
+  pageId?: string;
+  elementId?: string;
+  
+  // Content
+  note?: string;
+  
+  // Visibility
+  visibility: 'private' | 'class';
+  
+  createdAt: Date;
+}
+```
+
+### TranscriptSegment
+
+```typescript
+interface TranscriptSegment {
+  start: number;
+  end: number;
+  text: string;
+  confidence: number;
+  speakerLabel?: string;
+}
+```
+
+---
+
+## 7. API Specification
+
+### Lecture APIs
+
+```
+# List lectures for a course
+GET /v2/courses/:courseId/lectures
+Query: ?limit=20&offset=0&hasNotes=true
+
+# Get single lecture
+GET /v2/lectures/:lectureId
+Response: Lecture with pages, pins, recording metadata
+
+# Create new lecture
+POST /v2/courses/:courseId/lectures
+Body: { lectureNumber, topic?, scheduledEventId? }
+
+# Update lecture
+PATCH /v2/lectures/:lectureId
+Body: { topic?, endedAt?, visibility? }
+
+# Delete lecture
+DELETE /v2/lectures/:lectureId
+```
+
+### Page APIs
+
+```
+# Get pages for lecture
+GET /v2/lectures/:lectureId/pages
+
+# Batch update elements (sync)
+POST /v2/lectures/:lectureId/elements/batch
+Body: {
+  operations: [
+    { op: 'create', element: NoteElement },
+    { op: 'update', elementId, changes: Partial<NoteElement> },
+    { op: 'delete', elementId }
+  ],
+  baseVersion: number
+}
+Response: { newVersion, conflicts?: [] }
+```
+
+### Pin APIs
+
+```
+# List pins for lecture
+GET /v2/lectures/:lectureId/pins
+Query: ?visibility=class
+
+# Create pin
+POST /v2/lectures/:lectureId/pins
+Body: { timestamp, pageId?, note?, visibility }
+
+# Delete pin
+DELETE /v2/lectures/:lectureId/pins/:pinId
+
+# Get pin summary (for heatmap)
+GET /v2/lectures/:lectureId/pins/summary
+Response: {
+  totalPins: number,
+  uniquePinners: number,
+  buckets: [{ start, end, count, isPeak?, excerpt? }],
+  peaks: [{ timestamp, count, excerpt }]
+}
+```
+
+### Recording APIs
+
+```
+# Upload recording
+POST /v2/lectures/:lectureId/recording/upload
+Body: multipart/form-data with audio file
+Response: { audioUrl, duration }
+
+# Get recording
+GET /v2/lectures/:lectureId/recording
+Response: { audioUrl, duration, transcript? }
+
+# Request transcription
+POST /v2/lectures/:lectureId/recording/transcribe
+Response: { jobId, status: 'pending' }
+```
+
+### Sharing APIs
+
+```
+# Share lecture notes
+POST /v2/lectures/:lectureId/share
+Body: { visibility: 'class' | 'public' }
+
+# Unshare
+DELETE /v2/lectures/:lectureId/share
+
+# Get shared notes for course
+GET /v2/courses/:courseId/shared-notes
+Response: [{ lectureId, sharer, pageCount, sharedAt }]
+```
+
+### Ace APIs
+
+```
+# Index lecture for search
+POST /v2/courses/:courseId/ace/index-lecture
+Body: {
+  lectureId: string,
+  content: {
+    text: string,
+    pins: string[],
+    transcript?: string
+  },
+  metadata: {
+    lectureNumber: number,
+    topic: string,
+    date: string,
+    syllabusSections: string[],
+    relatedAssignments: string[]
+  }
+}
+
+# Search
+GET /v2/courses/:courseId/ace/search
+Query: ?q=main+sequence+stars&limit=10
+Response: {
+  results: [{
+    type: 'lecture_note' | 'shared_note' | 'class_pin' | 'syllabus',
+    sourceId: string,
+    snippet: string,
+    timestamp?: number,
+    relevance: number,
+    metadata: {}
+  }]
+}
+```
+
+---
+
+## 8. Feed Integration
+
+### Existing Feed Cards → iPad Mapping
+
+| Card Type | Dashboard | Course View | Lecture View |
+|-----------|-----------|-------------|--------------|
+| `travel_mode` | Show | Hide | Hide |
+| `day_conditions` | Show | Hide | Hide |
+| `week_load` | Show | Course slice | Badge |
+| `synergy` | Show | Show | If relevant |
+| `campus_news` | Show | Hide | Hide |
+
+### New Lecture-Context Cards
+
+#### lecture_weight
+
+```json
+{
+  "type": "lecture_weight",
+  "label": "GRADE IMPACT",
+  "title": "15% of Final Exam",
+  "metadata": {
+    "gradeComponents": [
+      { "name": "Final Exam", "weight": 0.15 },
+      { "name": "Homework 8", "weight": 0.05 }
+    ],
+    "totalWeight": 0.20,
+    "urgencyLevel": "high"
+  }
+}
+```
+
+**Trigger:** Always during lecture. Priority +20 if weight >15%.
+
+#### deadline_pressure
+
+```json
+{
+  "type": "deadline_pressure",
+  "label": "UPCOMING",
+  "title": "Midterm 2 in 3 days",
+  "metadata": {
+    "assessmentName": "Midterm 2",
+    "daysUntil": 3,
+    "gradeWeight": 0.20,
+    "coversLectures": [22, 23, 24]
+  }
+}
+```
+
+**Trigger:** Assessment <7 days covering this topic. Priority +30 if <3 days.
+
+#### class_activity
+
+```json
+{
+  "type": "class_activity",
+  "label": "12 PINS",
+  "title": "Red giants vs supergiants",
+  "metadata": {
+    "pinCount": 12,
+    "peakTimestamp": 1935,
+    "topPinners": [{ "userId", "name", "initials" }]
+  }
+}
+```
+
+**Trigger:** >5 pins in 60s window. Real-time via WebSocket.
+
+#### related_material
+
+```json
+{
+  "type": "related_material",
+  "label": "READING",
+  "title": "Chapter 12: Stellar Evolution",
+  "metadata": {
+    "materialType": "reading",
+    "pageRange": "234-267",
+    "isRequired": true
+  }
+}
+```
+
+**Trigger:** Syllabus maps reading to lecture.
+
+#### synergy_active
+
+```json
+{
+  "type": "synergy_active",
+  "label": "CONNECTION",
+  "title": "Connects to FTVM 368",
+  "metadata": {
+    "relatedCourseId": "ftvm-368",
+    "connectionStrength": 0.85,
+    "currentTopic": "Narrative structure",
+    "relatedTopic": "Documentary storytelling"
+  }
+}
+```
+
+**Trigger:** AI detects topic overlap, confidence >0.8.
+
+#### shared_notes_available
+
+```json
+{
+  "type": "shared_notes_available",
+  "label": "SHARED",
+  "title": "Alex shared notes",
+  "metadata": {
+    "sharerId": "alex-uuid",
+    "sharerName": "Alex R.",
+    "pageCount": 5,
+    "hasImages": true
+  }
+}
+```
+
+**Trigger:** Classmate shares notes for this course.
+
+#### attendance_streak
+
+```json
+{
+  "type": "attendance_streak",
+  "label": "STREAK",
+  "title": "8 lectures in a row",
+  "metadata": {
+    "currentStreak": 8,
+    "totalLectures": 24,
+    "coveragePercent": 0.92
+  }
+}
+```
+
+**Trigger:** End of lecture if streak continues.
+
+### Feed API
+
+```
+GET /v2/feed/lecture-context?courseId={}&lectureId={}
+
+Response: {
+  cards: [FeedCard],
+  meta: {
+    totalAvailable: number,
+    context: {
+      courseId, lectureId, lectureNumber, topic,
+      isLive: boolean,
+      classSize: number,
+      activeStudents: number
+    }
+  }
+}
+```
+
+---
+
+## 9. Real-Time Architecture
+
+### WebSocket Connection
+
+```
+WS /v2/lectures/:lectureId/live
+
+# Authentication via query param
+?token=jwt_token
+```
+
+### Client → Server Events
+
+```typescript
+// Create pin
+{ type: 'pin_create', data: { timestamp, pageId?, note?, visibility } }
+
+// Update presence
+{ type: 'presence_update', data: { isRecording, isSharing } }
+
+// Typing indicator (future)
+{ type: 'typing', data: { pageId } }
+```
+
+### Server → Client Events
+
+```typescript
+// Pin added
+{ type: 'pin_added', data: Pin }
+
+// Pin removed
+{ type: 'pin_removed', data: { pinId } }
+
+// User joined
+{ type: 'user_joined', data: { userId, userName, joinedAt } }
+
+// User left
+{ type: 'user_left', data: { userId } }
+
+// Notes shared
+{ type: 'notes_shared', data: { userId, userName, lectureId } }
+
+// Hot moment detected
+{ type: 'hot_moment', data: { timestamp, pinCount, excerpt } }
+```
+
+### Class Presence
+
+```typescript
+interface ClassPresence {
+  activeUsers: [{
+    userId: string;
+    userName: string;
+    joinedAt: Date;
+    isRecording: boolean;
+    isSharing: boolean;
+  }];
+  totalPins: number;
+  sharedNotes: number;
+}
+```
+
+### Sync Strategy
+
+1. **Local-first:** All edits saved to Core Data immediately
+2. **Optimistic updates:** UI reflects changes before server confirmation
+3. **Conflict resolution:** Last-write-wins with version vectors
+4. **Offline queue:** Pending operations synced on reconnect
+
+---
+
+## 10. Technical Requirements
+
+### Platform
+
+- **Target:** iPadOS 17.0+
+- **Devices:** iPad Pro (12.9", 11"), iPad Air, iPad 10th gen
+- **Orientations:** Landscape primary, portrait supported
+
+### Frameworks
+
+| Framework | Purpose |
+|-----------|---------|
+| SwiftUI | Primary UI framework |
+| PencilKit | Handwriting/drawing |
+| AVFoundation | Audio recording/playback |
+| Core Data | Local persistence |
+| Combine | Reactive data flow |
+| Network | WebSocket connections |
+
+### Dependencies
+
+```swift
+// Package.swift
+dependencies: [
+  .package(url: "https://github.com/auth0/Auth0.swift", from: "2.0.0"),
+  .package(url: "https://github.com/Alamofire/Alamofire", from: "5.0.0"),
+  .package(url: "https://github.com/daltoniam/Starscream", from: "4.0.0"),
+]
+```
+
+### Storage
+
+| Data | Storage | Size Estimate |
+|------|---------|---------------|
+| Note strokes | Core Data + S3 | ~500KB/lecture |
+| Audio recordings | Local + S3 | ~30MB/hour |
+| Transcripts | Core Data | ~50KB/hour |
+| Images/attachments | Local + S3 | Variable |
+
+### Offline Support
+
+- All notes available offline
+- Queue edits for sync
+- Audio playback offline (if downloaded)
+- Search offline notes locally
+
+---
+
+## 11. Privacy & Security
+
+### Data Classification
+
+| Data | Sensitivity | Encryption |
+|------|-------------|------------|
+| Notes content | High | At-rest + transit |
+| Audio recordings | High | At-rest + transit |
+| Pins (private) | High | At-rest + transit |
+| Pins (class) | Medium | Transit |
+| Presence data | Low | Transit |
+
+### Sharing Permissions
+
+- **Private (default):** Only creator can view
+- **Class:** All enrolled students can view
+- **Public:** Anyone with link can view
+
+### Recording Consent
+
+- Recording requires on-screen indicator
+- Other students see "Someone is recording" (not who)
+- Transcripts are private by default
+- Student must explicitly opt-in to share transcript
+
+### Compliance
+
+- FERPA compliant (educational records)
+- No data sold to third parties
+- Student controls data deletion
+- On-device processing where possible
+
+---
+
+## 12. Design System
+
+### Typography
+
+| Style | Font | Size | Weight |
+|-------|------|------|--------|
+| Large Title | SF Pro Display | 34pt | Bold |
+| Title 1 | SF Pro Display | 28pt | Bold |
+| Title 2 | SF Pro Display | 22pt | Semibold |
+| Title 3 | SF Pro Display | 20pt | Semibold |
+| Headline | SF Pro Text | 17pt | Semibold |
+| Body | SF Pro Text | 17pt | Regular |
+| Callout | SF Pro Text | 16pt | Regular |
+| Subhead | SF Pro Text | 15pt | Regular |
+| Footnote | SF Pro Text | 13pt | Regular |
+| Caption | SF Pro Text | 12pt | Regular |
+
+### Colors
+
+| Token | Light | Dark | Usage |
+|-------|-------|------|-------|
+| Primary | #BF5AF2 | #BF5AF2 | Accent, CTAs |
+| Secondary | #64D2FF | #64D2FF | Links, info |
+| Success | #30D158 | #30D158 | Positive states |
+| Warning | #FF9F0A | #FF9F0A | Caution, pins |
+| Error | #FF453A | #FF453A | Destructive, urgent |
+| Background | #FFFFFF | #000000 | Primary bg |
+| Surface | #F2F2F7 | #1C1C1E | Cards, sheets |
+
+### SF Symbols (No Emojis)
+
+| Concept | Symbol |
+|---------|--------|
+| Pin | star.fill |
+| Recording | mic.fill |
+| Class | person.2.fill |
+| Notes | doc.text.fill |
+| Search | magnifyingglass |
+| Calendar | calendar |
+| Clock | clock.fill |
+| Book | book.closed.fill |
+| Link | link.circle.fill |
+
+### Glassmorphism
+
+```swift
+// Card background
+.background(.ultraThinMaterial)
+.background(Color.white.opacity(0.04))
+.overlay(
+    RoundedRectangle(cornerRadius: 16)
+        .stroke(Color.white.opacity(0.08), lineWidth: 1)
+)
+```
+
+---
+
+## 13. Implementation Phases
+
+### Phase 1: Core Note-Taking (4 weeks)
+
+**Goal:** Ship basic lecture notes without collaboration.
+
+**Deliverables:**
+- [ ] Dashboard with today's classes
+- [ ] Lecture View with PencilKit canvas
+- [ ] Basic context sidebar (grade weight only)
+- [ ] Local storage + cloud sync
+- [ ] Manual lecture creation
+
+**APIs Required:**
+- `GET /v2/students/me/schedule`
+- `GET /v2/courses/:courseId/processed-syllabus`
+- `POST /v2/courses/:courseId/lectures`
+- `POST /v2/lectures/:lectureId/elements/batch`
+
+### Phase 2: Audio Recording (3 weeks)
+
+**Goal:** Record lectures with timestamp sync.
+
+**Deliverables:**
+- [ ] Audio recording with indicator
+- [ ] Stroke-to-timestamp mapping
+- [ ] Playback with note highlighting
+- [ ] Post-lecture transcription
+
+**APIs Required:**
+- `POST /v2/lectures/:lectureId/recording/upload`
+- `POST /v2/lectures/:lectureId/recording/transcribe`
+
+### Phase 3: Collaboration (4 weeks)
+
+**Goal:** Pins, sharing, real-time feed.
+
+**Deliverables:**
+- [ ] Pins (private + class)
+- [ ] Share notes with class
+- [ ] Class feed (real-time via WebSocket)
+- [ ] Presence indicator
+
+**APIs Required:**
+- `POST /v2/lectures/:lectureId/pins`
+- `POST /v2/lectures/:lectureId/share`
+- `WS /v2/lectures/:lectureId/live`
+
+### Phase 4: Intelligence (4 weeks)
+
+**Goal:** Ace search and context cards.
+
+**Deliverables:**
+- [ ] Ace indexing and search
+- [ ] In-lecture Ace queries
+- [ ] Full context card suite
+- [ ] Hot moment detection
+
+**APIs Required:**
+- `POST /v2/courses/:courseId/ace/index-lecture`
+- `GET /v2/courses/:courseId/ace/search`
+- `GET /v2/feed/lecture-context`
+
+### Phase 5: Advanced Collaboration (Future)
+
+**Goal:** Figma-style real-time co-editing.
+
+**Deliverables:**
+- [ ] Live cursors
+- [ ] Collaborative note editing
+- [ ] Study group features
+- [ ] Professor integration
+
+---
+
+## 14. Success Metrics
+
+### Primary Metrics
+
+| Metric | Target | Measurement |
+|--------|--------|-------------|
+| DAU/MAU | >60% | Analytics |
+| Notes per student/week | >5 | API events |
+| Lecture completion rate | >80% | Notes with endedAt |
+| 30-day retention | >70% | Cohort analysis |
+
+### Secondary Metrics
+
+| Metric | Target | Measurement |
+|--------|--------|-------------|
+| Pins per lecture | >3 | API events |
+| Sharing rate | >20% | Notes with visibility='class' |
+| Ace queries/week | >10 | API events |
+| Hot moments flagged | >1 per lecture | Pin aggregation |
+| Audio recording usage | >50% | Recording uploads |
+
+### Quality Metrics
+
+| Metric | Target | Measurement |
+|--------|--------|-------------|
+| Sync success rate | >99% | Error tracking |
+| App crash rate | <0.1% | Crashlytics |
+| Search relevance | >4.0/5 | User feedback |
+| Time to first note | <10s | Session tracking |
+
+---
+
+## 15. Design Decisions
+
+### Product
+
+| Question | Decision |
+|----------|----------|
+| Recording consent | No professor consent required. On-screen indicator sufficient. |
+| Storage limits | No limits at launch. Evaluate need post-launch. No tiered plans. |
+| Cross-platform | Yes — notes viewable read-only on iPhone and web. |
+| Import/Export | Yes — support Notability/GoodNotes import and PDF export. |
+| Professor features | No — not building professor-facing features yet. |
+
+### Business
+
+| Question | Decision |
+|----------|----------|
+| Monetization | Part of base DormWay. Not a premium feature or separate app. |
+| Canvas integration | Yes — auto-pull lecture slides if Canvas API access available. |
+| Institution licensing | Not yet. Student-outward approach first. |
+
+### Technical
+
+| Question | Decision |
+|----------|----------|
+| Real-time editing | CRDT for collaborative notes. |
+| Audio storage | S3 bucket on Railway. |
+| Transcript accuracy | Whisper is sufficient. |
+| Offline sync conflicts | Not relevant until collaborative editing (Phase 5). |
+
+### Additional Decisions
+
+| Question | Decision |
+|----------|----------|
+| Handwriting recognition | Yes — enable via Apple's on-device ML. Good for App Store featuring. |
+| Study groups | Defer — warrants separate product spec. |
+| Notification strategy | Mirror iPhone app behavior. |
+
+---
+
+## Appendix A: Wireframe Reference
+
+See companion file: `dormway-ipad-wireframes-complete.html`
+
+**Screens included:**
+1. Dashboard
+2. Lecture View
+3. Context Intelligence Panel
+4. Course View
+5. Full Activity View
+6. Ace Search
+
+---
+
+## Appendix B: API Schema Reference
+
+See companion file: `dormway-ipad-feed-spec.md`
+
+**Includes:**
+- Complete API endpoint documentation
+- Request/response schemas
+- WebSocket event specifications
+- Feed card type definitions
+
+---
+
+## Revision History
+
+| Version | Date | Author | Changes |
+|---------|------|--------|---------|
+| 1.0 | 2025-12-24 | Product Team | Initial draft |
+| 1.1 | 2025-12-24 | Product Team | Resolved open questions, status approved |
+| 1.2 | 2025-12-24 | Product Team | All questions resolved |

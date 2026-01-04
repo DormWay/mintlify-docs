@@ -1,5 +1,6 @@
 ---
 title: "Calendar, Time Blocks, Timezones"
+description: "sequenceDiagram participant Workflow as scheduleImport.workflow participant Parser participant Norm as normalizeAndStoreCalendarData participant DB as time_b..."
 ---
 
 # SoT - Calendar, Time Blocks, Timezones
@@ -23,18 +24,86 @@ title: "Calendar, Time Blocks, Timezones"
 - `time_blocks` enforces exactly one owner: either `user_id` or `context_id` (check constraint in table DDL).
 - `time_blocks` deduplicates by `source_type + source_id + (user_id or context_id)` (unique index).
 - Calendar storage validates timezone strings and normalizes to UTC (`normalizeToProperUTC`); floating times without timezone are warned and treated as server-local.
+- ICS all-day detection: `normalizeICSData` sets `all_day` via date-only ICS markers (`datetype: date`, `VALUE=DATE`), and Canvas assignment normalization preserves `assignment.all_day` to avoid timezone shifts.
 - `student_time_blocks` is a view alias to `v_student_calendar_events` in Neon migrations; API reads from `student_time_blocks` and filters by active lifecycle.
+- API reads:
+  - `GET /calendar/events` queries `student_time_blocks` for the authenticated user.
+  - `GET /v2/students/me/calendar/events` is the web schedule canonical endpoint (v2 range wrapper over calendar events).
+  - `POST /v2/students/me/time-blocks` creates manual time blocks for web tasks/schedule.
+  - `DELETE /v2/students/me/time-blocks/:id` soft-deletes manual time blocks.
+  - `GET /v2/students/me/preferences` provides calendar timezone display preferences.
+  - `GET /calendar/master` joins student enrollments to `time_blocks` for course schedules.
+
+## Roadmap (Current)
+- Add v2 equivalents for course schedules and personal blocks (`/v2/students/me/calendar/master`, `/v2/students/me/calendar/personal-blocks`) so web schedule can fully drop legacy mobile calendar routes.
 - Storage routing rules:
   - `schedule_import` and `ics_lms` with both `userId` + `contextId` write to `time_blocks` (context-level).
   - `ics_lms` is additionally mirrored to `student_time_blocks` for now; `schedule_import` is not.
   - User-only sources write to `student_time_blocks`; context-only sources write to `time_blocks`.
 
 ## Key Flows (High-Level)
-- Schedule import: `scheduleImport.workflow` parses a schedule, then calls `normalizeAndStoreCalendarData` with campus timezone and `source='schedule_import'` to write context time blocks; reconciliation to student-facing blocks happens via schedule processing.
-- Schedule reconciliation: `scheduleProcessor` pulls Google/LMS/mobile/syllabus/enrolled course events, normalizes, consolidates, and stores them, then publishes an Ably dashboard update.
-- API reads:
-  - `GET /calendar/events` queries `student_time_blocks` for the authenticated user.
-  - `GET /calendar/master` joins student enrollments to `time_blocks` for course schedules.
+
+### Schedule Import
+
+```mermaid
+sequenceDiagram
+    participant Workflow as scheduleImport.workflow
+    participant Parser
+    participant Norm as normalizeAndStoreCalendarData
+    participant DB as time_blocks
+    participant Proc as scheduleProcessor
+
+    Workflow->>Parser: Parse schedule
+    Parser->>Norm: Normalize data
+    Norm->>Norm: Apply campus timezone
+    Norm->>DB: Write (source=schedule_import)
+    Workflow->>Proc: Trigger reconciliation
+    Proc->>DB: Populate student-facing blocks
+```
+
+### Schedule Reconciliation
+
+```mermaid
+sequenceDiagram
+    participant Proc as scheduleProcessor
+    participant Sources
+    participant Norm as Normalizer
+    participant DB as student_time_blocks
+    participant Ably
+
+    par Pull all sources
+        Proc->>Sources: Pull Google events
+        Proc->>Sources: Pull LMS events
+        Proc->>Sources: Pull mobile events
+        Proc->>Sources: Pull syllabus events
+        Proc->>Sources: Pull enrolled course events
+    end
+    Sources->>Norm: All events
+    Norm->>Norm: Normalize + consolidate
+    Norm->>DB: Store to student_time_blocks
+    Proc->>Ably: Publish dashboard update
+```
+
+### API Calendar Reads
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant API
+    participant STB as student_time_blocks
+    participant TB as time_blocks
+
+    Note over Client,STB: User Events
+    Client->>API: GET /calendar/events
+    API->>STB: Query by authenticated user
+    STB-->>Client: User events
+
+    Note over Client,TB: Course Schedules
+    Client->>API: GET /calendar/master
+    API->>API: Join student enrollments
+    API->>TB: Query time_blocks
+    TB-->>Client: Course schedules
+```
 
 ## Data Models / IDs / Terminology
 - Normalized calendar event: `NormalizedCalendarEvent` (source_id, source_type, event_type, start/end ISO, timezone metadata).
@@ -56,6 +125,7 @@ title: "Calendar, Time Blocks, Timezones"
 - `services/dormway-lockedin/src/hooks/useCampusCurrentTerm.ts`
 - `services/dormway-lockedin/src/app/dashboard/schedule/page.tsx`
 - `services/dormway-lockedin/docs/LOCKEDIN_WEB_OS_CONSISTENCY_PLAN.md`
+- `obsidian-vault/DormWay/Engineering/Architecture/LockedIn Settings & Preferences Spec (Web).md`
 
 ## Update Checklist
 - Adding a new calendar source: update `CalendarSourceType`, `normalizeCalendarData`, and storage mapping in `calendar.activities.ts`.
@@ -64,8 +134,12 @@ title: "Calendar, Time Blocks, Timezones"
 - Changing calendar API filters: update `mobile-routes.ts` queries and any downstream consumers.
 
 ## Recent Changes
+- 2026-01-03: LockedIn schedule/inbox/timezone clients standardized on v2 calendar events, time-blocks, and preferences endpoints.
+- 2026-01-02: Documented `/v2/students/me/calendar/events` as the web canonical timeline endpoint.
+- 2026-01-01: Linked settings/preferences spec for timezone and schedule settings.
 - 2025-12-28: Added v2 range calendar events endpoint for Schedule and removed composite dependency in LockedIn mainline.
 - 2025-12-27: Added a lightweight campus term hook to hydrate timezone without loading the full semester aggregate.
 - 2025-12-27: Schedule page beta framing now routes quick suggestions into Quick Add instead of placeholder toasts.
+- 2025-12-27: Canvas ICS all-day events now honor `all_day` to keep timezone normalization correct.
 - 2025-12-27: Added web Schedule alignment target and linked OS consistency plan.
 - 2025-12-22: Populated and verified against current engine, migrations, and API routes.

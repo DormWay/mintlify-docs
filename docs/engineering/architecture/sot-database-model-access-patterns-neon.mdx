@@ -1,5 +1,6 @@
 ---
 title: "Database Model & Access Patterns (Neon)"
+description: "sequenceDiagram participant Router as API Router participant Pool as getAuroraPool participant Client as aurora-client participant DB as PostgreSQL"
 ---
 
 # SoT - Database Model & Access Patterns (Neon)
@@ -27,12 +28,102 @@ title: "Database Model & Access Patterns (Neon)"
 - Dashboard MV access is gated by `DASHBOARD_USE_MV`; when enabled it queries `mv_recent_assignments`, `mv_recent_schedule`, and `mv_dayplan_blocks`, otherwise falls back to `service_data`.
 
 ## Key Flows (High-Level)
-- api-router DB access -> `getAuroraPool()` -> `aurora-client` `queryWithSession()` sets RLS session variables -> query.
-- Admin routes -> `getAdminPool()` -> admin connection uses `DATABASE_URL_ADMIN` (RLS bypass).
-- Engine DB access -> `DatabaseServiceFactory` -> `AuroraService` -> core adapter pool.
-- Legacy Supabase interfaces -> `SupabaseAdapter` -> `DatabaseServiceFactory` -> same pool.
-- Dashboard MV queries -> try materialized views -> fallback to `service_data`.
-- Migrations -> `run-migrations.sh` -> `migration_history` -> apply SQL from `infrastructure/database/migrations`.
+
+### API Router DB Access
+
+```mermaid
+sequenceDiagram
+    participant Router as API Router
+    participant Pool as getAuroraPool
+    participant Client as aurora-client
+    participant DB as PostgreSQL
+
+    Router->>Pool: Get connection
+    Pool->>Client: queryWithSession()
+    Client->>DB: SET LOCAL app.current_user_id
+    Client->>DB: SET LOCAL app.current_role
+    Client->>DB: Execute query
+    DB-->>Router: Result
+```
+
+### Admin DB Access
+
+```mermaid
+sequenceDiagram
+    participant Admin as Admin Routes
+    participant Pool as getAdminPool
+    participant DB as PostgreSQL (Admin)
+
+    Admin->>Pool: Get admin connection
+    Pool->>DB: Connect via DATABASE_URL_ADMIN
+    Note over DB: RLS bypassed
+    Admin->>DB: Execute query
+    DB-->>Admin: Result
+```
+
+### Engine DB Access
+
+```mermaid
+sequenceDiagram
+    participant Engine
+    participant Factory as DatabaseServiceFactory
+    participant Aurora as AuroraService
+    participant Pool as Core Adapter Pool
+    participant DB as PostgreSQL
+
+    Engine->>Factory: Get database service
+    Factory->>Aurora: Create AuroraService
+    Aurora->>Pool: Get connection
+    Pool->>DB: Execute query
+    DB-->>Engine: Result
+```
+
+### Legacy Supabase Interfaces
+
+```mermaid
+sequenceDiagram
+    participant Caller as Legacy Supabase Call
+    participant Adapter as SupabaseAdapter
+    participant Factory as DatabaseServiceFactory
+    participant Pool as Shared Pool
+    participant DB as PostgreSQL
+
+    Caller->>Adapter: Call legacy method
+    Adapter->>Factory: Get database service
+    Factory->>Pool: Reuse shared pool
+    Pool->>DB: Execute query
+    DB-->>Caller: Result
+```
+
+### Dashboard Materialized View Queries
+
+```mermaid
+flowchart TD
+    A[Dashboard MV query] --> B{MV available?}
+    B -->|Yes| C[Query materialized views]
+    B -->|No| D[Fallback to service_data]
+    C --> E[Return result]
+    D --> E
+```
+
+### Database Migrations
+
+```mermaid
+sequenceDiagram
+    participant Script as run-migrations.sh
+    participant DB as PostgreSQL
+    participant FS as Filesystem
+
+    Script->>DB: Check migration_history
+    DB-->>Script: Applied migrations list
+    Script->>FS: Read infrastructure/database/migrations/
+    FS-->>Script: Pending SQL files
+    loop Each pending migration
+        Script->>DB: Apply SQL migration
+        Script->>DB: Update migration_history
+    end
+    DB-->>Script: Migration complete
+```
 
 ## Data Models / IDs / Terminology
 - `contexts` and `context_dependencies`: canonical context graph tables referenced by api-router and engine.

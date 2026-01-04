@@ -24,10 +24,20 @@ description: "This table defines the Home V2 widget contract and should drive bo
 - Plan: `services/dormway-lockedin/docs/DASHBOARD_V2_OPTION_A_PLAN.md` (phase-gated plan + DoD).
 - Plan: `services/dormway-lockedin/docs/LOCKEDIN_WEB_OS_CONSISTENCY_PLAN.md` (web IA + OS consistency rollout).
 - Plan: `services/dormway-lockedin/docs/DASHBOARD_V2_COMPOSITE_REMOVAL_PLAN.md` (composite sunset sequencing).
+- Plan: `obsidian-vault/DormWay/Plans/Workplan/Home-V2-Schedule-Widget-Scale-Plan.md` (schedule widget speed + batch-first alignment).
+
+## Roadmap (Current)
+- Keep Home V2 batch-first and remove any residual legacy activity dependencies; rely on `/v2/students/me/feed` metadata for context cards.
+- Consider folding `home-types` + widget preferences into the batch payload to reduce cold-start calls.
+- Roadmap: [V2-Standardization-Roadmap (Current)](/docs/engineering/technical/api/v2-standardization-roadmap-current)
 
 ## Invariants & Contracts
 - The Widget Contract Table below is the single source of truth for Home V2 widget types, aliases, instance policy, ownership, and eligibility.
 - Home V2 renders from `/v2/widgets/batch` via `WidgetDataProvider`; per-widget endpoints are not used by Home V2.
+- Today widget derives `nextEvent` from the schedule timeline when available and falls back to `/v2/widgets/today` only if the schedule payload is missing; weather display prefers the weather widget payload when present.
+- Schedule widget reads from batch only on Home V2 load; dayplan/time-block reads are disabled by default and not part of the widget refresh path.
+- Schedule widget renders the batch timeline as-is (no client-side "today" truncation) and keeps ordering aligned to event start times.
+- Schedule timeline suppresses DayPlan events that have a matching time block override (`metadata.originalEventId` and variants).
 - Widgets using `useWidgetDataHybrid` prefer V2 context when present; otherwise they fall back to V1 props (or `forceV1`/`forceV2`).
 - Widget envelopes include `id`, `type`, `gridHints`, `content`, `generatedAt`; API uses canonical `widget:${type}` IDs.
 - Frontend canonicalizes non-custom IDs to `widget:${normalizedType}`; custom IDs (`user-*`, `debug-*`, `widget:user:*`, `widget:debug:*`) are preserved.
@@ -63,11 +73,83 @@ Sources:
 - `services/api-router/src/routes/v2/widgets.routes.ts`
 
 ## Key Flows (High-Level)
-- Home V2 boot: fetch `/v2/widgets/home-types` -> fetch `/v2/widgets/batch` -> map envelopes to API widgets (canonical IDs, grid hints) -> merge with user/debug widgets -> initialize layout (server -> legacy localStorage -> defaults).
-- Layout initialization uses server layout if at least half of widgets match; otherwise falls back to legacy or default placement seeded by grid hints/registry sizes.
-- Edit/save: changes are local; on Save, persist 12-column `GridSpec` layout + widget preferences in parallel (optimistic locking on layout).
-- Realtime invalidation: Ably events -> `window` `realtime:event` -> `useRealtimeInvalidation` invalidates `widget-batch-v2` -> React Query refetch.
-- HeadsUp dismissal: `POST /feed/dismiss` with optimistic UI removal, then invalidate `widget-batch-v2` to sync.
+
+### Home V2 Boot Sequence
+
+```mermaid
+flowchart TD
+    A["Fetch /v2/widgets/home-types"] --> B["Fetch /v2/widgets/batch"]
+    B --> C[Map envelopes to API widgets]
+    C --> D[Apply canonical IDs + grid hints]
+    D --> E[Merge with user/debug widgets]
+    E --> F{Server layout exists?}
+    F -->|Yes, >50% match| G[Use server layout]
+    F -->|No| H[Legacy localStorage?]
+    H -->|Yes| I[Use legacy layout]
+    H -->|No| J[Use default placement]
+```
+
+### Layout Initialization
+
+```mermaid
+flowchart TD
+    A[Check server layout] --> B{>50% widgets match?}
+    B -->|Yes| C[Use server layout]
+    B -->|No| D[Check legacy localStorage]
+    D --> E{Found?}
+    E -->|Yes| F[Use legacy layout]
+    E -->|No| G[Default placement from grid hints/registry]
+```
+
+### Edit/Save Flow
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant UI as Home V2
+    participant API as Layout API
+    participant Prefs as Preferences API
+
+    User->>UI: Edit changes locally
+    User->>UI: Click Save
+    par Persist changes
+        UI->>API: Save 12-column GridSpec layout
+        Note over API: Optimistic locking
+        UI->>Prefs: Save widget preferences
+    end
+    API-->>User: Saved
+```
+
+### Realtime Invalidation
+
+```mermaid
+sequenceDiagram
+    participant Ably
+    participant Window
+    participant Hook as useRealtimeInvalidation
+    participant RQ as React Query
+
+    Ably->>Window: Emit realtime:event
+    Window->>Hook: Dispatch event
+    Hook->>RQ: Invalidate widget-batch-v2
+    RQ->>RQ: Trigger refetch
+```
+
+### HeadsUp Dismissal
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant UI
+    participant API as /feed/dismiss
+    participant RQ as React Query
+
+    User->>UI: Dismiss card
+    UI->>UI: Optimistic removal
+    UI->>API: POST dismiss
+    UI->>RQ: Invalidate widget-batch-v2
+    API-->>UI: Confirmed
+```
 
 ## Data Models / IDs / Terminology
 - WidgetEnvelope: `{ id, type, gridHints, content, generatedAt }` returned by `/v2/widgets/batch`.
@@ -96,6 +178,7 @@ Sources:
 - `obsidian-vault/DormWay/Engineering/Architecture/Home V2 Batch-First Widgets (Long-Term Spec).md`
 - `obsidian-vault/DormWay/Product/Features/Dashboard/Student Life Surfaces - Widgets and HeadsUp Spec (Draft).md`
 - `obsidian-vault/DormWay/Product/Design/LockedIn-Schedule-UX-Guidelines.md`
+- `obsidian-vault/DormWay/Engineering/Architecture/LockedIn Settings & Preferences Spec (Web).md`
 - `services/dormway-lockedin/docs/LOCKEDIN_WEB_OS_CONSISTENCY_PLAN.md`
 - `services/dormway-lockedin/docs/DASHBOARD_V2_COMPOSITE_REMOVAL_PLAN.md`
 
@@ -108,6 +191,12 @@ Sources:
 - Changing HeadsUp rules: update `headsup-builder.ts`, `headsup-types.ts`, and `useHeadsUpDismiss.ts` integration.
 
 ## Recent Changes
+- 2026-01-02: Disabled schedule widget dayplan/time-block reads on Home V2 load; mutations refresh via batch.
+- 2026-01-02: Removed client-side "today" filtering and aligned schedule ordering to timeline start times.
+- 2026-01-02: Added schedule low-signal filtering via metadata/type, all-day pill details, and event type selection in the schedule form.
+- 2026-01-02: Added Home V2 schedule widget scale + speed plan.
+- 2026-01-01: Linked settings/preferences spec for widget personalization controls.
+- 2025-12-31: Adopted curated library packs (essential-91 + essential-icons-1) for sidebar icons and refreshed the Lottie library index/preview labels.
 - 2025-12-29: Linked schedule UX guidelines for widget UI and schedule surface rules.
 - 2025-12-27: Aligned Home V2 page framing with the Today header for beta navigation consistency.
 - 2025-12-26: Added v2 mobile schedule slice, v2 layouts alias, and core-widget fallback warnings for V1 visibility.

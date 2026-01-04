@@ -1,5 +1,6 @@
 ---
 title: "Notifications (Customer.io)"
+description: "sequenceDiagram participant Gen as DayPlan Generation participant SW as StudentWatcher participant Push as notificationActivities participant CIO as Customer..."
 ---
 
 # SoT - Notifications (Customer.io)
@@ -24,7 +25,7 @@ title: "Notifications (Customer.io)"
 - `trackCustomerIOServerEvent` accepts event types: `user_registered`, `onboarding_completed`, `first_syllabus_uploaded`, `dashboard_generated`, `context_predicted`, `context_prediction_background`, `weekly_summary_generated`, `braingains_completed`, `schedule_synced`, `milestone_achieved`.
 - Batch customer.io trait/event updates process 10 records at a time with a 100ms delay between batches.
 - Notification template routing:
-  - Real-time push (`notification.activities.ts`): maps `content.data.type` to template IDs like `realtime_*_push` with fallback to `realtime_generic_push`.
+  - Real-time push (`notification.activities.ts`): currently always uses `realtime_generic_push` (no per-type mapping yet).
   - Scheduled briefings (`notificationDeliveryActivities.ts`): template IDs come from env (`CUSTOMERIO_*_PUSH_TEMPLATE_ID`, `CUSTOMERIO_*_EMAIL_TEMPLATE_ID`); missing IDs throw.
   - DayPlan email uses `CUSTOMER_IO_DAYPLAN_EMAIL_ID` or default `dayplan_morning`.
   - Syllabus email uses transactional ID `syllabus-processed`; syllabus failure email uses `generic_email` or metadata override.
@@ -35,17 +36,108 @@ title: "Notifications (Customer.io)"
   - DayPlan emails skip light days when `dayplan.email_on_light_days === false`.
   - StudentWatcher action notifications respect quiet hours and per-type flags (`classReminders`, `assignmentDeadlines`).
   - Notification delivery filters channels based on `engine_user_notification_preferences` and quiet hours; push implies in-app.
+- Settings UI writes notification preferences per `LockedIn Settings & Preferences Spec (Web)` and must preserve existing keys.
 - Silent push routing uses `USE_CUSTOMER_IO_PUSH` to select Customer.io vs API router.
 
 ## Key Flows (High-Level)
-- DayPlan generation -> StudentWatcher -> `notificationActivities.sendPushNotification()` -> Customer.io push; optional email via `dayplan.activities.ts`.
-- Scheduled reminders -> `notification-scheduler.activities.ts` -> `visible-push.activities.ts` -> Customer.io push templates.
-- DayPlan action reminders -> StudentWatcher -> preference gating -> Customer.io push.
-- Briefings/check-ins -> `notificationDeliveryActivities.deliverNotification()` -> channel gating -> Customer.io push/email.
-- Canvas updates -> `canvas.activities.ts` -> Ably + Customer.io push.
-- Syllabus processing: success -> `customerio-email.activities.ts` (`syllabus-processed`), failure -> `syllabusProcessor.workflow.ts` generic transactional email.
-- Magic links: api-router `/v2/auth/resend-magic-link` -> Track API send; engine `clerkAuth.activities.ts` -> generic transactional email.
-- Hybrid push (api-router): silent pushes via APNS; visible pushes via Customer.io.
+
+### DayPlan Push Notification
+
+```mermaid
+sequenceDiagram
+    participant Gen as DayPlan Generation
+    participant SW as StudentWatcher
+    participant Push as notificationActivities
+    participant CIO as Customer.io
+    participant Email as dayplan.activities
+
+    Gen->>SW: DayPlan ready
+    SW->>Push: sendPushNotification()
+    Push->>CIO: Push notification
+    SW->>Email: Send email (optional)
+```
+
+### Scheduled Reminders
+
+```mermaid
+sequenceDiagram
+    participant Sched as notification-scheduler
+    participant Push as visible-push.activities
+    participant CIO as Customer.io
+
+    Sched->>Push: Schedule reminder
+    Push->>CIO: Send push template
+    CIO-->>Push: Delivered
+```
+
+### DayPlan Action Reminders
+
+```mermaid
+flowchart LR
+    A[StudentWatcher] --> B{Preference gating}
+    B -->|Allowed| C[Customer.io push]
+    B -->|Blocked| D[Skip notification]
+```
+
+### Briefings/Check-ins
+
+```mermaid
+flowchart TD
+    A[notificationDeliveryActivities.deliverNotification] --> B{Channel gating}
+    B -->|Push| C[Customer.io push]
+    B -->|Email| D[Customer.io email]
+    B -->|Both| C
+    B -->|Both| D
+```
+
+### Canvas Updates
+
+```mermaid
+sequenceDiagram
+    participant Canvas as canvas.activities
+    participant Ably
+    participant CIO as Customer.io
+
+    Canvas->>Ably: Realtime update
+    Canvas->>CIO: Push notification
+```
+
+### Syllabus Processing Notifications
+
+```mermaid
+flowchart TD
+    A[Syllabus processing] --> B{Success?}
+    B -->|Yes| C[customerio-email.activities.ts]
+    C --> D["Template: syllabus-processed"]
+    B -->|No| E[syllabusProcessor.workflow.ts]
+    E --> F[Generic transactional email]
+```
+
+### Magic Link Flows
+
+```mermaid
+sequenceDiagram
+    participant Router as API Router
+    participant Track as Track API
+    participant Engine
+    participant CIO as Customer.io
+
+    Note over Router,Track: Resend flow
+    Router->>Track: /v2/auth/resend-magic-link
+    Track->>CIO: plg_magic_link_resend
+
+    Note over Engine,CIO: Initial flow
+    Engine->>CIO: Generic transactional email
+```
+
+### Hybrid Push (API Router)
+
+```mermaid
+flowchart LR
+    A[Hybrid push service] --> B{Push type?}
+    B -->|Silent| C[APNS direct]
+    B -->|Visible| D[Customer.io]
+```
 
 ## Data Models / IDs / Terminology
 - Customer.io traits (`CustomerIOUserTraits`) and event properties (`CustomerIOEventProperties`) are the Track API payloads.
@@ -73,6 +165,7 @@ title: "Notifications (Customer.io)"
 - `services/api-router/src/routes/v2/auth.routes.ts` (magic link resend)
 - `services/api-router/src/services/hybrid-push-service.ts` (Customer.io for visible pushes)
 - `services/engine/src/activities/canvas.activities.ts` (Canvas push alerts)
+- `obsidian-vault/DormWay/Engineering/Architecture/LockedIn Settings & Preferences Spec (Web).md`
 
 ## Update Checklist
 - Adding a new notification type: update `notification.activities.ts` template mapping and add Customer.io template ID.
@@ -87,4 +180,5 @@ title: "Notifications (Customer.io)"
 - `sendDirectPushNotification` in `services/engine/src/activities/student.activities.ts` returns early with push disabled; any code paths relying on it will not send.
 
 ## Recent Changes
+- 2026-01-01: Linked settings/preferences spec for notification controls and gating keys.
 - 2025-12-22: Populated with Customer.io adapter contracts, template routing, and preference gating.

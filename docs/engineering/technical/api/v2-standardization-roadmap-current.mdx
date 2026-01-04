@@ -1,0 +1,149 @@
+---
+title: "V2 Standardization Roadmap (Current)"
+---
+
+# V2 Standardization Roadmap (Current)
+
+## Goals
+- Standardize all student-facing data on API v2 (resource-oriented REST, consistent envelopes).
+- Reduce client fan-out and stabilize data consistency across Home, Tasks, Schedule, Courses, and Settings.
+- Keep legacy routes only as shims while telemetry confirms safe removal.
+- Make mobile, web, and widgets consume the same canonical contracts.
+
+## Design Principles
+- **Single source of truth** per domain (no mixed legacy + v2 reads on the same surface).
+- **Batch when possible** (academic summary, widget batch, integrations status).
+- **Consistent envelopes** (`success`, `data`, `items`, `meta`), stable IDs, ISO dates.
+- **Explicit cache behavior**: user-scoped endpoints are `no-store` unless explicitly cached with ETags.
+
+## Contract Conventions (Required)
+- List responses return `{ success: true, data: { items, count, meta } }`.
+- Entity responses return `{ success: true, data: entity }`.
+- Range queries use `start`/`end` with ISO-8601 datetimes.
+- All timestamps are ISO-8601 UTC strings.
+- Errors return `{ success: false, error, details? }`.
+
+## Phase Plan (Ordered)
+
+### Phase 0: Schedule Timeline Consolidation
+**Reasoning:** Schedule is the most visible daily surface; move it fully to v2 to cut legacy reliance.
+
+**Planned endpoints**
+- GET `/v2/students/me/calendar/events` (canonical timeline, already live)
+- GET `/v2/students/me/calendar/master` (course schedule)
+- GET `/v2/students/me/calendar/personal-blocks` (user-only blocks if needed)
+- GET `/v2/students/me/app-config` (or embed in `/v2/students/me`)
+
+**Client migrations**
+- Schedule page: replace `mobile/calendar/*` and `mobile/app-conf` usage.
+- Class detail modal: read from v2 timeline + course assignments only.
+
+**Risk / mitigations**
+- Risk: legacy schedule master shape mismatch. Mitigation: add parity mapping and temporary dual reads behind a flag.
+
+---
+
+### Phase 1: Academic Summary v2 (Biggest perf win)
+**Reasoning:** Tasks page is the highest fan-out; summary endpoint cuts calls and enforces consistency.
+
+**Planned endpoint**
+- GET `/v2/students/me/academic-summary`
+  - `courses`, `deliverables`, `completion`, `weeklyMatrix`, `meta`
+
+**Client migrations**
+- `useAcademicData` swaps to summary.
+- `lib/academic/data.ts` becomes pure shape helpers (no fetching).
+
+**Risk / mitigations**
+- Risk: partial data regressions. Mitigation: include `meta.partialFailures` and keep fallbacks until parity confirmed.
+
+---
+
+### Phase 2: Course Lifecycle v2
+**Reasoning:** Courses are core identity for tasks, schedule, docs, and settings.
+
+**Planned endpoints**
+- GET `/v2/students/me/courses` (extend with lifecycle fields)
+- POST `/v2/students/me/courses` (add)
+- PATCH `/v2/students/me/courses/:courseId` (drop or re-enroll)
+- POST `/v2/students/me/courses/swap`
+- GET `/v2/students/me/courses/dropped`
+
+**Client migrations**
+- Courses page + lifecycle hooks move off `/api/student/courses` and `/api/courses/*`.
+- Syllabus course lookups use v2 courses + optional `includeArchived` query.
+
+---
+
+### Phase 3: Integrations Status v2
+**Reasoning:** Settings + onboarding need a single integrations contract.
+
+**Planned endpoint**
+- GET `/v2/students/me/integrations/status`
+  - `canvas`, `googleCalendar`, `lastSyncAt`, `health`
+
+**Client migrations**
+- Settings Connections, onboarding checks, and integrations cards use this endpoint.
+
+---
+
+### Phase 4: Notes + Docs Unification
+**Reasoning:** Notes and documents should share v2 contracts to enable cross-surface features.
+
+**Planned endpoints**
+- GET `/v2/notes`
+- GET `/v2/notes/:id`
+- GET `/v2/notes/recent`
+- POST `/v2/notes/sync`
+- (Optional) `/v2/library/overview` batch for notes + docs
+
+**Client migrations**
+- Notes hub, recent notes hooks, and docs overview use v2 wrappers.
+
+---
+
+### Phase 5: Background Content + Telemetry Cleanup
+**Reasoning:** Reduce legacy mobile routes in background hooks for ingestion and telemetry.
+
+**Planned endpoints**
+- GET `/v2/students/me/ingestions`
+- POST `/v2/students/me/ingestions/:id/confirm`
+- POST `/v2/students/me/ingestions/:id/dismiss`
+- POST `/v2/telemetry/events` (optional, if telemetry is unified)
+
+**Client migrations**
+- `usePendingIngestions` moves off `/api/proxy/mobile/content/*`.
+- Legacy background telemetry is shimmed or moved to v2.
+
+## Legacy-to-V2 Mapping (High Priority)
+| Legacy path | Target v2 endpoint |
+| --- | --- |
+| `/api/proxy/mobile/calendar/events` | `/v2/students/me/calendar/events` |
+| `/api/proxy/mobile/calendar/master` | `/v2/students/me/calendar/master` |
+| `/api/proxy/mobile/calendar/personal-blocks` | `/v2/students/me/calendar/personal-blocks` |
+| `/api/proxy/student/courses` | `/v2/students/me/courses` |
+| `/api/student/courses/search` | `/v2/courses/search` |
+| `/api/proxy/canvas/status` + `/api/proxy/v1/mobile/calendar/google/status` | `/v2/students/me/integrations/status` |
+| `/api/proxy/academic/*` | `/v2/students/me/academic-summary` |
+| `/notes/*` | `/v2/notes/*` |
+
+## Deprecation & Telemetry
+- Keep legacy routes as shims for at least one release after v2 parity.
+- Add usage logging in `/api/proxy/*` to measure remaining legacy traffic.
+- Remove legacy routes only when usage is near-zero for two consecutive releases.
+
+## Verification & Success Criteria
+- 1-call page loads for Tasks (academic summary) and Home V2 (widget batch).
+- Schedule page uses only v2 calendar/time-block endpoints (no legacy mobile calendar).
+- Settings page uses one integrations status endpoint.
+- Docs/Notes surface uses v2 endpoints or a single library batch endpoint.
+
+## Required Docs Updates
+- `obsidian-vault/DormWay/Engineering/Technical/API/V2-API-Inventory.md`
+- `obsidian-vault/DormWay/Engineering/Technical/LockedIn/LockedIn-API-Usage-Map.md`
+- `obsidian-vault/DormWay/Engineering/Architecture/SoT - Calendar, Time Blocks, Timezones.md`
+- `obsidian-vault/DormWay/Engineering/Architecture/SoT - Tasks, Assignments, Planner Blocks.md`
+- `obsidian-vault/DormWay/Engineering/Architecture/SoT - Home & Widgets.md`
+- `obsidian-vault/DormWay/Engineering/Architecture/LockedIn Settings & Preferences Spec (Web).md`
+- `obsidian-vault/DormWay/Engineering/Architecture/SoT - Canvas Integration.md`
+- `obsidian-vault/DormWay/Engineering/Architecture/SoT - Library (Docs & Notes).md`

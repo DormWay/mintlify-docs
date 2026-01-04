@@ -1,0 +1,282 @@
+---
+title: "V2 API Inventory"
+description: "Canonical inventory of the v2 API endpoints as defined in `api-router` plus the layout alias. This is the reference for long-term scalability, documentation..."
+---
+
+# V2 API Inventory (Code-Derived)
+
+## Purpose
+Canonical inventory of the v2 API endpoints as defined in `api-router` plus the layout alias. This is the reference for long-term scalability, documentation coverage, and deprecation planning.
+
+Roadmap: [V2-Standardization-Roadmap (Current)](/docs/engineering/technical/api/v2-standardization-roadmap-current)
+
+## Base Paths
+- API Router serves under `/api/v2/*` (internal service base).
+- Web + iOS typically call via the gateway proxy: `/api/proxy/api/v2/*` (Zuplo → api-router).
+- The raw endpoint list below is expressed as `/v2/*` for clarity.
+
+## Exposure Tiers (Policy)
+- **public**: intended for external or partner use.
+- **internal**: used by DormWay clients (web/iOS/admin), not public.
+- **planned**: documented but not implemented yet (avoid adding unless a client requires it).
+- **deprecated**: legacy endpoints kept for compatibility only.
+
+## Exposure Classification (Draft)
+Default stance for long-term scale: **internal unless explicitly declared public**. This prevents accidental public surface growth and keeps contracts stable.
+
+| Endpoint group | Default exposure | Rationale | Decision owner |
+| --- | --- | --- | --- |
+| `/v2/students/*` | internal | PII, user-specific, auth-required | Product + Platform |
+| `/v2/widgets/*` | internal | User-specific widgets and layout context | Product + Platform |
+| `/v2/layouts/*` | internal | User layouts + preferences | Product + Platform |
+| `/v2/courses/*` | internal | Tied to enrollment + LMS data | Product + Platform |
+| `/v2/syllabi/*` | internal | Derived from user enrollments | Product + Platform |
+| `/v2/terms/*` | internal | Student-specific term data | Product + Platform |
+| `/v2/freshness/*` | internal | Operational health metadata | Platform |
+| `/v2/mobile/*` | internal | Mobile-only helper routes | Platform |
+| `/v2/auth/*` | internal | Auth flows | Platform |
+| `/v2/campuses/*` | candidate public | Search/lookup can be public, but needs explicit approval | Product + Platform |
+| `/v2/cities/*` | candidate public | Search/lookup can be public, but needs explicit approval | Product + Platform |
+
+## LockedIn Web: Confirmed v2 Usage (Code-Referenced)
+These endpoints are referenced in the LockedIn web app and should be treated as **critical** for web stability.
+
+| Endpoint | Purpose | Evidence |
+| --- | --- | --- |
+| GET `/v2/widgets/home-types` | Resolve Home V2 widget types | `services/dormway-lockedin/src/hooks/home/useHomeWidgetTypes.ts` |
+| GET `/v2/widgets/batch` | Home V2 widget batch fetch | `services/dormway-lockedin/src/hooks/home/useWidgetBatchV2.ts` |
+| GET `/v2/layouts` + `PUT /v2/layouts/:id` | Layout persistence (via proxy) | `services/dormway-lockedin/src/lib/dashboard/layout-service.ts` |
+| POST `/v2/layouts/events` | Layout change tracking | `services/dormway-lockedin/src/hooks/useLayoutTracking.ts` |
+| GET `/v2/students/me/preferences` | Settings + widget prefs | `services/dormway-lockedin/src/lib/preferences.ts` |
+| PATCH `/v2/students/me/preferences` | Settings updates | `services/dormway-lockedin/src/lib/preferences.ts` |
+| GET `/v2/students/me/tasks` | Tasks list | `services/dormway-lockedin/src/hooks/home/useTasksV2.ts` |
+| POST `/v2/students/me/tasks` | Task create | `services/dormway-lockedin/src/hooks/home/useTasksV2.ts` |
+| PATCH `/v2/students/me/tasks/:taskId` | Task updates | `services/dormway-lockedin/src/hooks/home/useTasksV2.ts` |
+| POST `/v2/students/me/tasks/:taskId/schedule` | Task scheduling | `services/dormway-lockedin/src/lib/smart-scheduling.ts` |
+| POST `/v2/students/me/tasks/:taskId/unschedule` | Task unscheduling | `services/dormway-lockedin/src/lib/smart-scheduling.ts` |
+| POST `/v2/students/me/tasks/quick-capture` | Quick add | `services/dormway-lockedin/src/hooks/home/useQuickCapture.ts` |
+| GET `/v2/students/me/calendar/events` | Schedule timeline range | `services/dormway-lockedin/src/hooks/useScheduleRange.ts` |
+| GET `/v2/students/me/time-blocks` | Schedule time blocks | `services/dormway-lockedin/src/hooks/useDayPlanV2.ts` |
+| POST `/v2/students/me/time-blocks` | Add time block | `services/dormway-lockedin/src/hooks/useDayPlanV2.ts` |
+| GET `/v2/students/me/campus` | Campus metadata | `services/dormway-lockedin/src/components/AmplitudeProvider.tsx` |
+| GET `/v2/students/me/courses` | Courses list | `services/dormway-lockedin/src/app/onboarding/page.tsx` |
+| GET `/v2/students/me/term-calendar` | Term calendar | `services/dormway-lockedin/src/components/courses/hooks/useTerms.ts` |
+| GET `/v2/courses/:id` | Course detail | `services/dormway-lockedin/src/app/dashboard/courses/[contextId]/page.tsx` |
+| GET `/v2/syllabi` | Syllabus list | `services/dormway-lockedin/src/app/onboarding/page.tsx` |
+| GET `/v2/students/me` | Profile bootstrap | `services/dormway-lockedin/src/contexts/UserContext.tsx` |
+| GET `/v2/campuses/:id/lms` | LMS config | `services/dormway-lockedin/src/components/AmplitudeProvider.tsx` |
+| GET `/v2/campuses/detect-by-domain` | School detection | `services/dormway-lockedin/src/lib/schoolDetection.ts` |
+
+## Planned Additions (Roadmap)
+These are intended additions to reduce legacy fan-out. Do not treat as implemented until they appear in `services/api-router/src/routes/v2/*`.
+
+### /v2/students
+- GET `/v2/students/me/academic-summary`
+- GET `/v2/students/me/calendar/master`
+- GET `/v2/students/me/calendar/personal-blocks`
+- GET `/v2/students/me/integrations/status`
+- GET `/v2/students/me/ingestions`
+- POST `/v2/students/me/ingestions/:id/confirm`
+- POST `/v2/students/me/ingestions/:id/dismiss`
+- POST `/v2/students/me/courses`
+- PATCH `/v2/students/me/courses/:courseId`
+- POST `/v2/students/me/courses/swap`
+- GET `/v2/students/me/courses/dropped`
+- GET `/v2/students/me/app-config` (or embed in `/v2/students/me`)
+
+### /v2/notes
+- GET `/v2/notes`
+- GET `/v2/notes/:id`
+- GET `/v2/notes/recent`
+- POST `/v2/notes/sync`
+
+## V2 Endpoints (Code-Derived)
+This is the raw inventory from `services/api-router/src/routes/v2/*`. Every item below is implemented in code.
+
+### /v2/auth
+- POST `/v2/auth/resend-magic-link`
+
+### /v2/campuses
+- GET `/v2/campuses/typeahead`
+- GET `/v2/campuses/spotlight`
+- GET `/v2/campuses/:id/canvas-info`
+- GET `/v2/campuses/detect-by-domain`
+- GET `/v2/campuses`
+- GET `/v2/campuses/search`
+- GET `/v2/campuses/by-email/:email`
+- GET `/v2/campuses/by-domain`
+- GET `/v2/campuses/nearby`
+- GET `/v2/campuses/:id`
+- GET `/v2/campuses/:id/city`
+- GET `/v2/campuses/:id/courses`
+- GET `/v2/campuses/:id/students`
+- GET `/v2/campuses/:id/events`
+- GET `/v2/campuses/:id/news`
+- GET `/v2/campuses/:id/logistics`
+- GET `/v2/campuses/:id/parking`
+- GET `/v2/campuses/:id/bulletin`
+- GET `/v2/campuses/:id/info`
+- GET `/v2/campuses/:id/config`
+- GET `/v2/campuses/:id/current-term`
+- GET `/v2/campuses/:id/lms`
+
+### /v2/cities
+- GET `/v2/cities`
+- GET `/v2/cities/search`
+- GET `/v2/cities/nearest`
+- GET `/v2/cities/:id`
+- GET `/v2/cities/:id/campuses`
+- GET `/v2/cities/:id/weather`
+- GET `/v2/cities/:id/transit`
+- GET `/v2/cities/:id/forecast`
+- GET `/v2/cities/:id/news`
+- GET `/v2/cities/:id/context`
+
+### /v2/courses
+- GET `/v2/courses`
+- GET `/v2/courses/search`
+- GET `/v2/courses/by-canvas/:canvasId`
+- GET `/v2/courses/:id`
+- GET `/v2/courses/:id/syllabus`
+- GET `/v2/courses/:id/events`
+- GET `/v2/courses/:id/assignments`
+- GET `/v2/courses/:id/grading`
+- GET `/v2/courses/:id/critical-dates`
+- GET `/v2/courses/:id/insights`
+- GET `/v2/courses/:id/upcoming`
+- GET `/v2/courses/:id/workload`
+- GET `/v2/courses/:id/processed-syllabus`
+
+### /v2/freshness
+- GET `/v2/freshness`
+
+### /v2/mobile
+- GET `/v2/mobile/schedule/current`
+
+### /v2/students
+- GET `/v2/students/me`
+- PATCH `/v2/students/me/profile`
+- GET `/v2/students/me/courses`
+- GET `/v2/students/me/terms`
+- GET `/v2/students/me/current-term`
+- GET `/v2/students/me/campus`
+- GET `/v2/students/me/dayplan`
+- GET `/v2/students/me/intelligence`
+- GET `/v2/students/me/health`
+- GET `/v2/students/me/context`
+- GET `/v2/students/me/context/prediction`
+- GET `/v2/students/me/onboarding`
+- GET `/v2/students/me/bootstrap-content`
+- GET `/v2/students/me/setup-status`
+- GET `/v2/students/me/current-term/analysis`
+- GET `/v2/students/me/current-term/workload`
+- GET `/v2/students/me/current-term/conflicts`
+- GET `/v2/students/me/current-term/warnings`
+- GET `/v2/students/me/current-term/insights`
+- GET `/v2/students/me/current-term/summary`
+- GET `/v2/students/me/current-term/plan`
+- GET `/v2/students/me/current-term/trends`
+- GET `/v2/students/me/term-calendar`
+- GET `/v2/students/me/terms/:termId`
+- GET `/v2/students/me/terms/:termId/analysis`
+- GET `/v2/students/me/terms/:termId/workload`
+- GET `/v2/students/me/terms/:termId/conflicts`
+- GET `/v2/students/me/terms/:termId/warnings`
+- GET `/v2/students/me/terms/:termId/insights`
+- GET `/v2/students/me/terms/:termId/summary`
+- GET `/v2/students/me/terms/:termId/plan`
+- GET `/v2/students/me/terms/:termId/trends`
+- GET `/v2/students/me/tasks`
+- POST `/v2/students/me/tasks`
+- PATCH `/v2/students/me/tasks/:taskId`
+- POST `/v2/students/me/tasks/:taskId/schedule`
+- POST `/v2/students/me/tasks/:taskId/unschedule`
+- POST `/v2/students/me/tasks/quick-capture`
+- GET `/v2/students/me/attendance`
+- GET `/v2/students/me/deadlines`
+- GET `/v2/students/me/policy-highlights`
+- GET `/v2/students/me/study-metrics`
+- GET `/v2/students/me/next-action`
+- GET `/v2/students/me/calendar/events`
+- GET `/v2/students/me/time-blocks`
+- GET `/v2/students/me/time-blocks/sources`
+- POST `/v2/students/me/time-blocks`
+- PATCH `/v2/students/me/time-blocks/:id`
+- DELETE `/v2/students/me/time-blocks/:id`
+- GET `/v2/students/me/dashboard`
+- GET `/v2/students/me/dashboard/courses`
+- GET `/v2/students/me/preferences`
+- PUT `/v2/students/me/preferences`
+- PATCH `/v2/students/me/preferences`
+- GET `/v2/students/me/feed`
+- POST `/v2/students/me/feed/dismiss`
+- GET `/v2/students`
+- GET `/v2/students/search`
+- GET `/v2/students/me/freshness`
+- GET `/v2/students/:id/freshness`
+- POST `/v2/students/:userId/send-push`
+- GET `/v2/students/:userId/dayplan`
+- POST `/v2/students/:userId/dayplan/trigger-push`
+- GET `/v2/students/:id`
+
+### /v2/syllabi
+- GET `/v2/syllabi`
+- GET `/v2/syllabi/:id`
+- GET `/v2/syllabi/:id/assignments`
+- GET `/v2/syllabi/:id/schedule`
+- GET `/v2/syllabi/:id/policies`
+- POST `/v2/syllabi/upload`
+- POST `/v2/syllabi/:id/archive`
+- POST `/v2/syllabi/:id/unarchive`
+- PATCH `/v2/syllabi/:id/status`
+
+### /v2/terms
+- GET `/v2/terms/:studentId`
+- GET `/v2/terms/:studentId/current/analysis`
+- GET `/v2/terms/:studentId/current/workload`
+- GET `/v2/terms/:studentId/current/conflicts`
+- GET `/v2/terms/:studentId/current/warnings`
+- GET `/v2/terms/:studentId/current/insights`
+- GET `/v2/terms/:studentId/current/summary`
+- GET `/v2/terms/:studentId/current/plan`
+- GET `/v2/terms/:studentId/current/trends`
+- GET `/v2/terms/:studentId/:term/:year`
+- GET `/v2/terms/:studentId/:term/:year/courses`
+- POST `/v2/terms/process`
+- POST `/v2/terms/:studentId/process`
+
+### /v2/widgets
+- GET `/v2/widgets/dayplan`
+- GET `/v2/widgets/schedule`
+- GET `/v2/widgets/today`
+- GET `/v2/widgets/tasks`
+- GET `/v2/widgets/academic`
+- GET `/v2/widgets/courses`
+- GET `/v2/widgets/canvas`
+- GET `/v2/widgets/weather`
+- GET `/v2/widgets/deadlines`
+- GET `/v2/widgets/workload`
+- GET `/v2/widgets/syllabus`
+- GET `/v2/widgets/attendance`
+- GET `/v2/widgets/policy-highlights`
+- GET `/v2/widgets/action-cta`
+- GET `/v2/widgets/study`
+- GET `/v2/widgets/campus`
+- GET `/v2/widgets/home-types`
+- GET `/v2/widgets/batch`
+
+Note: `/v2/widgets/today` returns `schedule.nextEvent.isAllDay` to flag all-day events.
+
+## V2 Layouts Alias (Implemented Outside /v2 Routes)
+- `/v2/layouts` is an alias to the v1 layout routes.
+- Implemented in `services/api-router/src/routes/index.ts` via `router.use('/v2/layouts', layoutRoutes)`.
+- All layout endpoints under `/v1/layouts` are reachable under `/v2/layouts`.
+
+## Documentation Coverage
+For PDF vs code coverage, see:
+- [V2 Endpoint Documentation Coverage](/docs/engineering/technical/api/v2-endpoint-documentation-coverage)
+
+## Next Steps (Scaling-Ready)
+- Tag endpoints with exposure tier (`public`, `internal`, `planned`, `deprecated`) and enforce in Zuplo.
+- Add contract tests + OpenAPI generation from this inventory.
+- Lock in critical endpoints as SLO-backed (latency + error budgets).

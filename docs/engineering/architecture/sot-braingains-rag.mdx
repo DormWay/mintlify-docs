@@ -1,5 +1,6 @@
 ---
 title: "BrainGains & RAG"
+description: "sequenceDiagram participant Client participant API participant S3 participant Ragie participant Workflow as processDocument participant DB as braingains_docu..."
 ---
 
 # SoT - BrainGains & RAG
@@ -18,12 +19,89 @@ title: "BrainGains & RAG"
 - Syllabus sharing to classmates is explicit: `pushSyllabusToEnrolledStudents` indexes the syllabus into each enrolled student's Ragie partition via `context_dependencies` (`dependency_type='enrolled_in'`). (`services/engine/src/activities/ragie.activities.ts`)
 
 ## Key Flows (High-Level)
-- Upload non-syllabus document: API uploads to S3, indexes in Ragie, then starts `processDocument` workflow which creates `braingains_documents`, extracts text, links Ragie ids, updates status, and tracks usage. (`services/api-router/src/routes/braingains-routes.ts`, `services/engine/src/workflows/brainGainsProcessor.workflow.ts`)
-- Upload syllabus: API indexes in Ragie, then `processSyllabus` writes multiple BrainGains `service_data` records, stores raw and insight documents in Ragie, cleans up older insight records, and optionally pushes the syllabus to enrolled students. (`services/api-router/src/routes/braingains-routes.ts`, `services/engine/src/workflows/syllabusProcessor.workflow.ts`)
-- BrainGains chat: API creates `braingains_chats` and `braingains_chat_messages`, uses Ragie partitions for retrieval, and returns sources with the response. (`services/api-router/src/routes/braingains-chat-routes.ts`, `services/api-router/src/services/braingains-knowledge.ts`)
-- RAG query: `/api/braingains/query` uses Ragie adapter with filters (`document_type`, `content_type`, `insight_type`), while Ace LLM queries Ragie using scoped partitions and optionally re-writes the answer with Portkey. (`services/api-router/src/routes/braingains-routes.ts`, `services/api-router/src/services/ace-llm.ts`)
-- Term BrainGains analysis: semester activities call Portkey prompts and store `braingains_*` methods in `service_data`; term entity reads these methods for workload/conflict/insight access. (`services/engine/src/activities/semester.activities.ts`, `services/shared/dormway-core/src/entities/term/term.entity.ts`)
-- Syllabus cache: content hash lookup -> cache hit returns parsed analysis; cache miss leads to processing and later cache upsert + user link. (`services/engine/src/activities/braingains.activities.ts`, `services/shared/dormway-core/src/domains/syllabus-cache/syllabus-cache.service.ts`)
+
+### Upload Non-Syllabus Document
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant API
+    participant S3
+    participant Ragie
+    participant Workflow as processDocument
+    participant DB as braingains_documents
+
+    Client->>API: Upload document
+    API->>S3: Store file
+    API->>Ragie: Index document
+    API->>Workflow: Start processDocument
+    Workflow->>DB: Create document record
+    Workflow->>Workflow: Extract text
+    Workflow->>DB: Link Ragie IDs
+    Workflow->>DB: Update status → indexed
+    Workflow->>DB: Track usage
+```
+
+### Upload Syllabus
+
+```mermaid
+flowchart TD
+    A[API Upload] --> B[Index in Ragie]
+    B --> C[processSyllabus workflow]
+    C --> D[Write BrainGains service_data records]
+    D --> E[Store raw + insight docs in Ragie]
+    E --> F[Clean up older insights]
+    F --> G{Push to classmates?}
+    G -->|Yes| H[Push syllabus to enrolled students]
+    G -->|No| I[Complete]
+    H --> I
+```
+
+### BrainGains Chat
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant API as API Router
+    participant DB as Neon DB
+    participant Ragie as Ragie RAG
+
+    User->>API: Send chat message
+    API->>DB: Create braingains_chats
+    API->>DB: Create braingains_chat_messages
+    API->>Ragie: Query with partitions
+    Ragie-->>API: Results + sources
+    API-->>User: Response with sources
+```
+
+### RAG Query
+
+```mermaid
+flowchart LR
+    A["POST /api/braingains/query"] --> B[Ragie Adapter]
+    B --> C{Filters}
+    C --> D[document_type]
+    C --> E[content_type]
+    C --> F[insight_type]
+
+    G[Ace LLM] --> H[Ragie scoped partitions]
+    H --> I{Rewrite?}
+    I -->|Yes| J[Portkey rewrite]
+    I -->|No| K[Return answer]
+    J --> K
+```
+
+### Syllabus Cache Flow
+
+```mermaid
+flowchart TD
+    A[Content hash lookup] --> B{Cache hit?}
+    B -->|Yes| C[Return parsed analysis]
+    B -->|No| D[Process syllabus]
+    D --> E[Cache upsert]
+    E --> F[User link]
+    F --> G[Return analysis]
+```
 
 ## Data Models / IDs / Terminology
 - `braingains_documents` (table): stores BrainGains documents with `document_type`, `processing_status`, `content_url`, `extracted_text`, and legacy Ragie fields `vectara_corpus_key`/`vectara_document_id`. Migration adds `ragie_partition_key`/`ragie_document_id`. (`infrastructure/docker/init-scripts/01-schema.sql`, `migrations/2025-09-06_ragie_rename.sql`)

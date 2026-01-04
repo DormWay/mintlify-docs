@@ -1,0 +1,135 @@
+---
+title: "LockedIn Docs Viewer Notes Panel Spec"
+description: "Define the **core study surface** inside Docs (Library): open a document and take notes in the same view. This spec is the UI contract for the Docs Library v..."
+---
+
+# LockedIn Docs Viewer + Notes Panel Spec
+
+## Purpose
+Define the **core study surface** inside Docs (Library): open a document and take notes in the same view.
+This spec is the UI contract for the Docs Library v1 release.
+
+## Scope
+- Web only (LockedIn).
+- Applies to `/dashboard/documents` when a document is opened.
+- Notes panel is the same editor used in Notes Hub (no custom styling).
+
+## Data + Link Contract (v1)
+- Document identity: use a stable `documentId` (BrainGains document id).
+- Notes created from a doc must store:
+  - `noteType: reading`
+  - `linkedDocIds: [documentId]` (array, not a single field)
+  - `courseId`/`classId` if present on the document
+- Notes metadata payload must be extended beyond current `NoteMetadata` to include `noteType` and `linkedDocIds`.
+- Linked notes are defined as notes whose `linkedDocIds` contain the active `documentId`.
+
+## URL + Deep Link Rules (v1)
+- Docs list (no active doc): `/dashboard/documents`
+- Open doc in viewer: `/dashboard/documents?documentId={id}`
+- Open doc + preselect note: `/dashboard/documents?documentId={id}&noteId={id}`
+- Notes panel state:
+  - Desktop: open by default when `documentId` is present.
+  - Mobile: bottom sheet closed by default; open when `notes=open` is present.
+- Invalid `documentId` shows an inline error state with a "Back to documents" action.
+
+## Layout
+
+### Desktop (>= 1024px)
+```
+┌───────────────────────────────────────────────────────────────┐
+│ Docs / Course Filter / Search                                 │
+├───────────────────────────────────────────────────────────────┤
+│ Files rail (left, collapsible)      │ Notes Panel (right)     │
+│ Document Viewer (center)            │ - summary drawer        │
+│ - doc header                        │ - note list (linked)    │
+│ - PDF/doc content                   │ - editor (active note)  │
+│ - page controls                     │ - context banner        │
+└───────────────────────────────────────────────────────────────┘
+```
+
+### Mobile (<= 768px)
+- Viewer is full screen.
+- Notes panel is a bottom sheet:
+  - collapsed: "Notes" chip + count
+  - expanded: editor + linked notes list
+
+## Components
+
+### Document Header (top of viewer)
+- Title, document type, course chip, last opened.
+- Primary actions: Download, Open notes.
+- Secondary: Summary toggle (drawer), Delete (danger).
+
+### Viewer
+- PDF/doc rendering (start with PDF).
+- Page navigation with current page indicator.
+- Persist last scroll position per document.
+
+### Notes Panel
+- Linked notes list (doc-linked notes first via `linkedDocIds`).
+- Editor (same component as Notes Hub).
+- Context banner shows course + sync status.
+
+### Summary Drawer
+- Collapsible summary panel inside Study View.
+- Uses the same summary data fetched for the document preview.
+
+## Key Interactions
+
+### Open document
+- Selecting a doc opens the viewer.
+- Notes panel auto-loads linked notes (if any).
+- If no linked notes, show a CTA: "Create a reading note."
+
+### Create note from doc
+- Creates a note with:
+  - `noteType: reading`
+  - `linkedDocIds: [documentId]`
+  - `courseId`/`classId` from the document (if present)
+- Opens editor in notes panel.
+
+### Switch notes
+- Selecting a linked note loads it in the panel.
+- Notes list remains visible for quick switching.
+
+### Close viewer
+- Returning to list preserves last scroll position.
+
+## States
+
+### Loading
+- Viewer skeleton with stable header height.
+- Notes panel shows "Loading notes..."
+
+### Empty
+- No linked notes: show "Create a reading note."
+- No course tag: show "Add course tag" action.
+
+### Error
+- Viewer load failure: show retry + download fallback.
+- Notes sync failure: show banner with retry.
+
+## Accessibility
+- Keyboard: Tab order flows viewer -> notes panel.
+- Esc closes notes panel on mobile.
+- Focus ring visible on all actions.
+- Announce note save status for screen readers.
+
+## Analytics (minimum)
+- `doc_opened` (documentId, courseId, documentType, source)
+- `doc_viewer_error` (documentId, errorType)
+- `doc_downloaded` (documentId)
+- `doc_notes_panel_opened` / `doc_notes_panel_closed` (documentId, device)
+- `doc_note_created` (noteId, documentId, noteType)
+- `doc_note_linked` (noteId, documentId)
+
+## Acceptance Criteria
+- A student can open a doc and start a linked note in under 2 interactions.
+- Notes editor matches Notes Hub styling.
+- Linked note retains course context and doc link.
+- Scroll position restores on reopen.
+
+## Related Docs
+- [Docs Library v1 Spec (Current)](/docs/engineering/architecture/docs-library-v1-spec-current)
+- [Library (Docs & Notes)](/docs/engineering/architecture/sot-library-docs-notes)
+- [LockedIn-UX-Specification](/docs/product/design/lockedin-ux-specification)

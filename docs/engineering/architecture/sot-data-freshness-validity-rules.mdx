@@ -1,6 +1,6 @@
 ---
 title: "Data Freshness & Validity Rules"
-description: "Status: Implemented in `feat/global-freshness-api` branch (December 2025)."
+description: "flowchart TD A[Dashboard request] --> B[Redis cache lookup] B --> C{Cache hit?} C -->|Yes| D{ETag match?} D -->|Yes| E[Return 304] D -->|No| F[Return cached..."
 ---
 
 # SoT - Data Freshness & Validity Rules
@@ -35,13 +35,99 @@ description: "Status: Implemented in `feat/global-freshness-api` branch (Decembe
 - Stale reasons are: `never_synced` (null timestamp), `threshold_exceeded` (age > maxAge), `sync_failed` (last sync errored), `source_unavailable` (service down), or `null` (fresh).
 
 ## Key Flows (High-Level)
-- Dashboard request -> Redis cache lookup -> ETag/304 or cached response -> recompute with `getContextTTL` -> cache write and invalidate on change.
-- Campus processing -> staleness/missing city datasets -> `processSingleCity` executed synchronously for first-time data or in background for stale/missing data.
-- Mobile campus sync status -> `last_modified_at` -> stale flag returned to iOS client.
-- Campus enrichment selection -> `getStaleCampusIds` -> list of campus IDs with stale `service_data.updated_at`.
-- Weekly cleanup -> time blocks pruned by age/future horizon; duplicate and orphan cleanup reduces invalid records.
-- Syllabus processing -> hash + parser version -> cached analysis reused or re-parse when stale.
-- **Global Freshness API**: Request -> Redis cache check (key includes options suffix) -> if miss, parallel queries for each requested type -> compute staleness per type -> cache result -> return summary/detailed response.
+
+### Dashboard Request Flow
+
+```mermaid
+flowchart TD
+    A[Dashboard request] --> B[Redis cache lookup]
+    B --> C{Cache hit?}
+    C -->|Yes| D{ETag match?}
+    D -->|Yes| E[Return 304]
+    D -->|No| F[Return cached response]
+    C -->|No| G[Recompute with getContextTTL]
+    G --> H[Cache write]
+    H --> I[Invalidate on change]
+    I --> J[Return response]
+```
+
+### Campus Processing Staleness
+
+```mermaid
+flowchart TD
+    A[Campus processing] --> B{Staleness check}
+    B --> C{Missing city datasets?}
+    C -->|First-time| D[processSingleCity sync]
+    C -->|Stale/missing| E[processSingleCity background]
+    B --> F[Continue processing]
+```
+
+### Mobile Campus Sync Status
+
+```mermaid
+flowchart LR
+    A[Mobile request] --> B[Check last_modified_at]
+    B --> C{Stale?}
+    C -->|Yes| D[Return stale flag to iOS]
+    C -->|No| E[Return fresh status]
+```
+
+### Campus Enrichment Selection
+
+```mermaid
+sequenceDiagram
+    participant Caller
+    participant Fn as getStaleCampusIds
+    participant DB as PostgreSQL
+
+    Caller->>Fn: Get stale campuses
+    Fn->>DB: Query service_data.updated_at
+    DB-->>Fn: Records
+    Fn->>Fn: Filter stale records
+    Fn-->>Caller: Stale campus IDs
+```
+
+### Weekly Cleanup Flow
+
+```mermaid
+sequenceDiagram
+    participant Scheduler
+    participant Cleanup as Cleanup Job
+    participant DB as PostgreSQL
+
+    Scheduler->>Cleanup: Trigger weekly cleanup
+    par Cleanup tasks
+        Cleanup->>DB: Prune old time blocks (>90 days)
+        Cleanup->>DB: Prune future blocks (>365 days)
+        Cleanup->>DB: Remove duplicates
+        Cleanup->>DB: Remove orphans
+    end
+    DB-->>Cleanup: Records cleaned
+```
+
+### Syllabus Processing Cache
+
+```mermaid
+flowchart TD
+    A[Syllabus processing] --> B[Compute hash + parser version]
+    B --> C{Cache hit?}
+    C -->|Yes| D[Reuse cached analysis]
+    C -->|No/Stale| E[Re-parse syllabus]
+    E --> F[Cache new analysis]
+```
+
+### Global Freshness API
+
+```mermaid
+flowchart TD
+    A[Freshness API request] --> B[Redis cache check]
+    B --> C{Cache hit?}
+    C -->|Yes| D[Return cached result]
+    C -->|No| E[Parallel queries per type]
+    E --> F[Compute staleness per type]
+    F --> G[Cache result]
+    G --> H[Return summary/detailed response]
+```
 
 ## Data Models / IDs / Terminology
 - `contexts.next_sync_at`: authoritative staleness boundary for city sync freshness.
@@ -51,7 +137,7 @@ description: "Status: Implemented in `feat/global-freshness-api` branch (Decembe
 - `getContextTTL(context)` and `CONTEXT_CACHE_TTL[type]`: cache lifetimes used for dashboard and context-related caching.
 
 ## Global Freshness API (Implemented)
-Status: Implemented in `feat/global-freshness-api` branch (December 2025).
+Status: Implemented (mainline).
 
 ### Endpoint
 - `GET /v2/students/me/freshness` — User's data freshness (authenticated)
@@ -164,10 +250,11 @@ Response:
 - Changing freshness cache TTLs: update `FRESHNESS_CACHE_TTL` in `freshness.types.ts`.
 
 ## Recent Changes
+- 2026-01-01: Verified freshness endpoints + core service in mainline; updated status notes.
 - 2025-12-22: Populated with code-backed freshness contracts, cache TTLs, and cleanup rules.
-- 2025-12-25: Added proposed global freshness API contract (not implemented).
+- 2025-12-25: Added proposed global freshness API contract (later implemented).
 - 2025-12-25: Documented setup status endpoint as a related (non-freshness) signal.
-- 2025-12-25: **Implemented Global Freshness API** in `feat/global-freshness-api` branch:
+- 2025-12-25: **Implemented Global Freshness API** (now in mainline):
   - Created `FreshnessService` in `@dormway/core` with per-type freshness checks
   - Added `GET /v2/students/me/freshness` endpoint for user scope
   - Added `GET /v2/freshness` endpoint for admin scopes (campus/city/system)
