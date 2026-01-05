@@ -204,9 +204,86 @@ interface FeedCard {
 
   // Actions & Metadata
   actions?: CardAction[];
-  metadata?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;  // See "URL Access Pattern" below
 }
 ```
+
+### URL Access Pattern (DORM-817)
+
+Cards with external URLs store the URL in `metadata.url` for simpler access. This enables "tap anywhere to open link" functionality.
+
+**Card types with `metadata.url`:**
+- `campus_news` - News article URL
+- `local_news` - News article URL
+- `local_opportunity` - Job/internship URL
+- `events` - Event details URL
+- `deals` - Deal/offer URL
+
+**Backend (HeadsUp Builder):**
+```typescript
+// headsup-builder.ts - Checks metadata.url first, falls back to actions array
+const metadataUrl = card.metadata?.url as string | undefined;
+if (metadataUrl) {
+  primaryCta = { label: action?.label || 'Open', kind: 'url', value: metadataUrl };
+}
+```
+
+**iOS (FeedCard convenience accessor):**
+```swift
+// FeedModels.swift
+public var metadataUrl: URL? {
+    guard let urlString = metadata?["url"]?.stringValue,
+          let url = URL(string: urlString) else { return nil }
+    return url
+}
+
+// FeedCardView.swift - Tap gesture uses metadataUrl
+.onTapGesture {
+    if let url = card.metadataUrl {
+        UIApplication.shared.open(url)
+    } else if card.hasReveal {
+        isExpanded.toggle()
+    }
+}
+```
+
+**Web (HeadsUpWidget):**
+Already handled via `primaryCta.kind === 'url'` from HeadsUp builder transformation.
+
+---
+
+### Guidance Widget Transform (DORM-826)
+
+Campus processing crews generate `guidance` widgets with `key_insights[]` containing actionable recommendations. These are now transformed into FeedCards instead of being dropped.
+
+**Input format from crews:**
+```json
+{
+  "widget_type": "guidance",
+  "content": {
+    "key_insights": [
+      { "type": "opportunity", "message": "Join the free Pilates class", "action": "Participate on January 5" },
+      { "type": "warning", "message": "Parking is limited", "action": "Consider alternative transportation" }
+    ]
+  }
+}
+```
+
+**Transform mapping:**
+
+| `key_insights[].type` | Output Card Type | Notes |
+|-----------------------|------------------|-------|
+| `warning` | `CampusAlertData` | `severity: 'warning'`, message → title, action → description |
+| `opportunity` | `LocalOpportunityData` | message → title, action → valueProp/studentBenefit |
+| `optimization` | `LocalOpportunityData` | Same as opportunity |
+| `tip` | `LocalOpportunityData` | Same as opportunity |
+| `wellbeing` | `LocalOpportunityData` | Same as opportunity |
+
+**Card ID format:** `guidance-{alert|opportunity}-{widgetId}-{index}`
+
+**Files:**
+- `transforms.ts:610` - `transformGuidanceWidgets()` function
+- `generator.ts:4015,4043,4084` - Called for news, events, logistics widgets
 
 ---
 
@@ -1531,5 +1608,5 @@ conflictWarnings.push({
 
 ---
 
-**Last Updated**: 2025-12-27
+**Last Updated**: 2026-01-04
 **Document Type**: State of Things (SoT)

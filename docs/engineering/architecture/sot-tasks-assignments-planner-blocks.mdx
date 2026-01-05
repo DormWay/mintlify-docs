@@ -13,6 +13,7 @@ description: "sequenceDiagram participant Client participant API as API Router p
 - `tasks` is the canonical persistent task table with status in `pending|scheduled|completed|deleted` and `scheduled_block_id` FK to `student_time_blocks` (ON DELETE SET NULL). RLS restricts access to the owner. (`infrastructure/database/migrations/20251009_add_tasks_table.sql`)
 - `assignment_completion` is partitioned by `created_at` and stores `assignment_id` as text plus completion metadata; RLS is enforced on the parent table. (`infrastructure/database/migrations/20251003_create_assignment_completion.sql`, `infrastructure/database/migrations/20251202_rls_user_tables.sql`)
 - `/v2/students/me/tasks` is non-cacheable and merges persistent tasks with synthetic syllabus tasks from `service_data`. (`services/api-router/src/routes/v2/students.routes.ts`, `services/shared/dormway-core/src/entities/student/student.entity.ts`)
+- `/v2/students/me/task-bank` returns unified unscheduled work (DayPlan suggestions, Canvas, quick captures, persistent tasks) for Smart Schedule. (`services/api-router/src/routes/v2/students.routes.ts`)
 - Syllabus tasks use IDs `syllabus-{courseContextId}-{index}` and can only be marked `completed`; other updates are rejected. (`services/shared/dormway-core/src/entities/student/student.entity.ts`, `services/api-router/src/routes/v2/students.routes.ts`)
 - Assignments used in DayPlan are read from `student_time_blocks` where `type='assignment'` and `lifecycle_status='active'`. (`services/shared/dormway-core/src/domains/day-plan-data/day-plan-data.service.ts`)
 - Canvas assignments in dashboard views are derived from `student_time_blocks` joined to Canvas submissions, marking `isCompleted` when `submission_status` is `submitted` or `graded`. (`services/api-router/src/services/dashboard-aurora-service.ts`)
@@ -20,6 +21,7 @@ description: "sequenceDiagram participant Client participant API as API Router p
 - Scheduling a task creates a `student_time_blocks` row (`source='manual_planner'`, `type='other'`) and updates the task to `scheduled`; unscheduling deletes the block and resets the task to `pending`. (`services/api-router/src/routes/task-routes.ts`)
 - Manual planner blocks use `student_time_blocks` with `source='manual_planner'` and are soft-deleted via `lifecycle_status='deleted'`. (`services/api-router/src/routes/mobile-routes.ts`)
 - DayPlan scheduling reads pending, unscheduled tasks and generates plan events without mutating task rows. (`services/engine/src/activities/dayplan.activities.ts`)
+- Smart Schedule intent scheduling writes manual time blocks directly and does not create tasks unless the source is Task Bank. (`services/api-router/src/routes/v2/students.routes.ts`, `services/dormway-lockedin/src/app/dashboard/schedule/page.tsx`)
 
 ## Web Surface Alignment (Current vs Target)
 - Current: Web Tasks renders a unified list powered by `/v2/students/me/tasks` with deliverables as fallback coverage (no gaps).
@@ -91,7 +93,7 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     participant Client
-    participant API as /api/mobile/planner/task-bank
+    participant API as /api/mobile/planner/task-bank or /v2/students/me/task-bank
     participant DB as PostgreSQL
 
     Client->>API: GET task-bank
@@ -173,6 +175,7 @@ sequenceDiagram
 - `student_time_blocks`: schedule/assignment storage with `type` from `time_block_type` enum (no `planner_block` value). Planner blocks are stored as `type='other'` with `source='manual_planner'`. (`infrastructure/docker/init-scripts/01-schema.sql`, `services/api-router/src/routes/task-routes.ts`, `services/api-router/src/routes/mobile-routes.ts`)
 - Task metadata: `originalId` is used for Task Bank dedupe when ephemeral tasks are converted to persistent. (`services/api-router/src/types/tasks.ts`, `services/api-router/src/routes/mobile-routes.ts`)
 - Task Bank: unified unscheduled work list built from dayplan study events, Canvas assignments, quick captures, and persistent tasks. (`services/api-router/src/routes/mobile-routes.ts`)
+- Task Bank (V2): same merge logic returned at `/v2/students/me/task-bank` for web surfaces. (`services/api-router/src/routes/v2/students.routes.ts`)
 
 ## Key Files (Code + Docs)
 - `services/api-router/src/routes/task-routes.ts`
@@ -208,6 +211,8 @@ sequenceDiagram
 - Plans/Tasks-Page-Canonicalization-Plan
 
 ## Recent Changes
+- 2026-01-04: Documented Smart Schedule intent scheduling as manual time blocks distinct from task lifecycle.
+- 2026-01-04: Added `/v2/students/me/task-bank` as the web-facing Task Bank endpoint.
 - 2025-12-30: Standardized task creation UI on `TaskCreateModal`; legacy `AddTaskModal` is deprecated.
 - 2025-12-29: Tasks page details + planning now expand inline (no drawers); planner uses a weekly grid with drag-to-select blocks, plus delete for manual tasks and inline filter panel controls.
 - 2025-12-28: Web Tasks now merges V2 tasks with deliverable fallback coverage and computes weekly required hours from the unified task list.

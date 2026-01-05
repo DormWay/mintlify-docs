@@ -105,26 +105,28 @@ flowchart TD
     end
 ```
 
-### iPhone Tab Navigation
+### iPhone Tab Navigation (Navigation IA Refactor - January 2026)
 
 ```mermaid
 flowchart TB
     subgraph TabShellView
         direction TB
-        T[TabView<br/>selection: selectedTab] --> T1[Home Tab]
-        T --> T2[Schedule Tab]
-        T --> T3[Tasks Tab]
-        T --> T4[Term Tab]
-        T --> T5[Me Tab]
+        T[TabView<br/>selection: selectedTab] --> T1["Today (.today)"]
+        T --> T2["Tasks (.tasks)"]
+        T --> T3["Schedule (.schedule)"]
+        T --> T4["Courses (.courses)"]
+        T --> T5["Library (.library)"]
+
+        PB[Profile Button] --> SS[SettingsSheetView]
     end
 
     subgraph TabRegistry ["TabRegistry (Per-Tab Navigation)"]
         R[navigationPaths: Dictionary]
-        R --> P1["home: NavigationPath"]
-        R --> P2["schedule: NavigationPath"]
-        R --> P3["tasks: NavigationPath"]
-        R --> P4["term: NavigationPath"]
-        R --> P5["me: NavigationPath"]
+        R --> P1["today: NavigationPath"]
+        R --> P2["tasks: NavigationPath"]
+        R --> P3["schedule: NavigationPath"]
+        R --> P4["courses: NavigationPath"]
+        R --> P5["library: NavigationPath"]
     end
 
     T1 -.->|uses| P1
@@ -134,15 +136,20 @@ flowchart TB
     T5 -.->|uses| P5
 ```
 
-**iPhone Tab Structure:**
+**iPhone Tab Structure (Unified Navigation IA):**
 
-| Tab | View | Purpose |
-|-----|------|---------|
-| Home | `HomeTabRootView` | Contextual feed, showcase mode |
-| Schedule | `ScheduleTabRootView` | Calendar, week/month views |
-| Tasks | `TasksTabRootView` | To-do list, assignments |
-| Term | `TermTabRootView` | Course list, term info |
-| Me | `MeTabRootView` | Profile, settings |
+| Tab | AppTab | View | Purpose |
+|-----|--------|------|---------|
+| Today | `.today` | `TodayTabRootView` -> `HomeTabView` | Dashboard with unified widgets (UpNextCard, WidgetStackView) |
+| Tasks | `.tasks` | `TasksTabRootView` -> `TasksTabView` | Task management |
+| Schedule | `.schedule` | `ScheduleTabRootView` -> `ScheduleTabView` | Calendar, week/month views |
+| Courses | `.courses` | `CoursesTabRootView` -> `TermTabView` | Course list with UniversalCourseCard |
+| Library | `.library` | `LibraryTabRootView` -> `LibraryTabView` | Files/Notes with segmented picker |
+
+**Settings Access:**
+- Profile button (person.crop.circle icon) in top-right toolbar of each tab
+- Opens `SettingsSheetView` as a sheet presentation
+- Environment binding `showSettingsSheet` managed via `SettingsToolbarModifier`
 
 ### iPad Sidebar Navigation
 
@@ -480,6 +487,8 @@ flowchart LR
         TC -->|Upload| D6[Telemetry data]
     end
 ```
+
+**DORM-746/753 Fix (2026-01-04):** The `cityId` for channel subscriptions now comes from the backend `/v2/students/me` endpoint rather than hardcoded mappings. The backend derives `cityId` from the campus context hierarchy (campus → city via `parent_id`). iOS receives `cityId` in the `User` model and passes it to `RealtimeUpdatesService.startListening()`. This enables multi-campus support without iOS code changes when new campuses are added.
 
 ---
 
@@ -826,6 +835,7 @@ flowchart LR
         A3[File Drag & Drop]
         A4[Hover Effects]
         A5[Text-based Notes]
+        A6[Keyboard Shortcuts]
     end
 
     subgraph Disabled ["Disabled/Stubbed on Mac"]
@@ -837,11 +847,10 @@ flowchart LR
     end
 
     subgraph NotImplemented ["Not Implemented"]
-        N1[Keyboard Shortcuts]
-        N2[Menu Bar Customization]
-        N3[Multi-Window Support]
-        N4[Touch Bar]
-        N5[Right-Click Menus]
+        N1[Menu Bar Customization]
+        N2[Multi-Window Support]
+        N3[Touch Bar]
+        N4[Right-Click Menus]
     end
 ```
 
@@ -850,12 +859,14 @@ flowchart LR
 | Feature | Status | Implementation | File |
 |---------|--------|----------------|------|
 | **Title Bar Hiding** | Fully Implemented | Multi-layer aggressive hiding | `DormWayApp.swift` |
-| **Drag & Drop** | Fully Implemented | File upload via drop zone | `IPadFilesView.swift:107-1057` |
+| **Drag & Drop** | Fully Implemented | File upload via drop zone, security-scoped URL fallback | `IPadFilesView.swift`, `DocumentUploadService.swift` |
 | **Adaptive Lecture View** | Fully Implemented | Text-only (no PencilKit) | `AdaptiveLectureView.swift:18-25` |
 | **Live Activities** | Stub Only | No-op implementation | `LiveActivityService.swift:88-100` |
 | **Screen Time** | Not Available | Returns false with message | `ScreenTimeDataCollector.swift:91-103` |
 | **Hover Effects** | Available | `.hoverScale()`, `.hoverGlow()` | `View+MicroInteractions.swift:33-44` |
-| **Keyboard Shortcuts** | Not Implemented | - | - |
+| **Keyboard Shortcuts** | Fully Implemented | Cmd+1-6 nav, Cmd+, settings, Cmd+K Ace | `IPadNavigationShell.swift:33-58` |
+| **Sidebar Icons** | Fully Implemented | White icons when selected for visibility | `IPadSidebarView.swift` |
+| **Sheet Cancel Buttons** | Fully Implemented | X icon instead of truncated "Cancel" text | `AddEventSheet.swift`, `EditEventSheet.swift`, etc. |
 | **Menu Bar** | Not Implemented | - | - |
 | **Multi-Window** | Not Implemented | Single window only | - |
 | **Touch Bar** | Not Implemented | - | - |
@@ -948,21 +959,23 @@ classDiagram
 
 ### Key Architecture Decision: Mac Catalyst
 
-**Decision:** Minimal but functional Mac Catalyst support focused on core experience.
+**Decision:** Functional Mac Catalyst support with keyboard-first productivity features.
 
 **What's Implemented:**
 - Title bar hiding (polish)
-- Drag and drop file upload (productivity)
+- Drag and drop file upload with security-scoped URL fallback (productivity)
+- Keyboard shortcuts: Cmd+1-6 for navigation, Cmd+, for settings, Cmd+K for Ace (power users)
+- Proper sidebar icon contrast when selected (visual polish)
+- Sheet Cancel buttons use X icon to prevent text truncation (UI fix)
 - Graceful feature degradation (stability)
 
 **What's Not Implemented:**
-- Keyboard shortcuts (Cmd+key bindings)
-- Menu bar customization
+- Menu bar customization (Go menu, File menu, etc.)
 - Multi-window support
 - Touch Bar integration
 - Native right-click context menus
 
-**Rationale:** The app is optimized for iOS/iPad touch-first experience. Mac Catalyst support provides a functional desktop option without full Mac-native features.
+**Rationale:** The app is optimized for iOS/iPad touch-first experience. Mac Catalyst support provides a fully functional desktop option with keyboard shortcuts for power users, while deferring more complex Mac-native features like multi-window support.
 
 ---
 
@@ -974,8 +987,11 @@ This section outlines Mac-native features that should be considered for future i
 
 ```mermaid
 flowchart LR
-    subgraph P1 ["Priority 1: High Impact"]
+    subgraph Done ["✅ Implemented"]
         K[Keyboard Shortcuts]
+    end
+
+    subgraph P1 ["Priority 1: High Impact"]
         M[Menu Bar]
         RC[Right-Click Menus]
     end
@@ -1003,54 +1019,44 @@ flowchart LR
 
 ### Priority 1: High Impact Features
 
-#### Keyboard Shortcuts
+#### Keyboard Shortcuts ✅ IMPLEMENTED
 
 Essential for power users and accessibility. Students can navigate without leaving the keyboard.
 
-```mermaid
-flowchart TB
-    subgraph GlobalShortcuts ["Global Shortcuts (Cmd+key)"]
-        G1["Cmd+1-5: Switch tabs"]
-        G2["Cmd+N: New task"]
-        G3["Cmd+F: Search"]
-        G4["Cmd+,: Settings"]
-        G5["Cmd+R: Refresh"]
-    end
+**Implemented Shortcuts (as of 2026-01-04):**
 
-    subgraph NavigationShortcuts ["Navigation"]
-        N1["Cmd+[: Back"]
-        N2["Cmd+]: Forward"]
-        N3["Cmd+T: Today"]
-        N4["Cmd+Shift+C: Courses"]
-    end
+| Shortcut | Action | File |
+|----------|--------|------|
+| Cmd+1 | Dashboard | `IPadNavigationShell.swift` |
+| Cmd+2 | Term | `IPadNavigationShell.swift` |
+| Cmd+3 | Schedule | `IPadNavigationShell.swift` |
+| Cmd+4 | Tasks | `IPadNavigationShell.swift` |
+| Cmd+5 | Library Files | `IPadNavigationShell.swift` |
+| Cmd+6 | Library Notes | `IPadNavigationShell.swift` |
+| Cmd+, | Settings | `IPadNavigationShell.swift` |
+| Cmd+K | Ask Ace (AI) | `IPadNavigationShell.swift` |
 
-    subgraph TaskShortcuts ["Task Management"]
-        T1["Cmd+Enter: Complete task"]
-        T2["Cmd+D: Set due date"]
-        T3["Cmd+P: Set priority"]
-        T4["Cmd+Delete: Delete"]
-    end
-```
-
-**Implementation Approach:**
+**Implementation Pattern Used:**
 ```swift
-// Use SwiftUI keyboardShortcut modifier
-Button("New Task") { createTask() }
-    .keyboardShortcut("n", modifiers: .command)
-
-// Or UIKit responder chain for complex shortcuts
-override var keyCommands: [UIKeyCommand]? {
-    return [
-        UIKeyCommand(input: "1", modifierFlags: .command,
-                     action: #selector(switchToHome))
-    ]
-}
+// Hidden buttons with keyboard shortcuts in background
+.background(
+    Group {
+        Button("") { selectedItem = .dashboard }
+            .keyboardShortcut("1", modifiers: .command)
+        Button("") { selectedItem = .term }
+            .keyboardShortcut("2", modifiers: .command)
+        // ...
+    }
+    .hidden()
+)
 ```
 
-**Files to Modify:**
-- `App/DormWayApp.swift` - Global commands
-- `App/Shell/TabShellView.swift` - Tab switching
-- Individual view files for context-specific shortcuts
+**Future Shortcuts to Add:**
+- Cmd+N: New task
+- Cmd+F: Search
+- Cmd+R: Refresh
+- Cmd+[/]: Back/Forward navigation
+- Cmd+Enter: Complete task
 
 #### Menu Bar Customization
 
@@ -1495,10 +1501,19 @@ gantt
 
 | Date | Author | Changes |
 |------|--------|---------|
+| 2026-01-04 | Claude | **Navigation IA Refactor**: Unified 5-tab navigation (Today/Tasks/Schedule/Courses/Library), Settings as sheet via profile button |
+| 2026-01-04 | Claude | **Unified Widget System**: CollapsibleWidgetContainer, UpNextCard, WidgetStackView for iPhone/iPad |
+| 2026-01-04 | Claude | **UniversalCourseCard**: Dark glassmorphic styling with mesh gradients in DWDesign |
+| 2026-01-04 | Claude | **LibraryTabView**: New Library tab with Files/Notes segmented picker |
+| 2026-01-04 | Claude | DORM-746/753: cityId now from backend /me endpoint, removed hardcoded UMich mapping |
+| 2026-01-04 | Claude | Implemented Mac Catalyst keyboard shortcuts (Cmd+1-6, Cmd+,, Cmd+K) |
+| 2026-01-04 | Claude | Fixed sidebar icon visibility (white when selected for contrast) |
+| 2026-01-04 | Claude | Fixed sheet Cancel buttons (X icon instead of truncated text on Catalyst) |
+| 2026-01-04 | Claude | Fixed drag-drop upload (security-scoped URL fallback in DocumentUploadService) |
 | 2025-01-02 | Claude | Added Future Mac Catalyst Features roadmap with implementation guides |
 | 2025-01-02 | Claude | Added Mac Catalyst section with platform-specific diagrams |
 | 2025-01-02 | Claude | Initial comprehensive State of Things document |
 
 ---
 
-**Last Updated**: 2025-01-02
+**Last Updated**: 2026-01-04

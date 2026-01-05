@@ -164,6 +164,55 @@ Notes:
 
 ---
 
+## Preference Normalization & Compatibility
+
+### Why This Matters
+Smart Schedule and Schedule Rules depend on **quiet hours**, **working hours**, and **display timezone**. Mixed naming conventions (camelCase in web vs snake_case in core defaults) can cause settings to be ignored.
+
+### Canonical Contract (Schedule-Critical)
+Use one canonical shape for schedule-related preferences and accept legacy aliases for reads until cleanup is complete:
+
+```json
+{
+  "calendar": {
+    "displayTimezone": "auto|America/New_York|...",
+    "weekStart": 0,
+    "defaultView": "timeline|day|week|month",
+    "workHours": { "start": "08:00", "end": "18:00" }
+  },
+  "notifications": {
+    "quietHours": { "enabled": true, "start": "22:00", "end": "07:00" }
+  }
+}
+```
+
+### Accepted Aliases (Temporary)
+- `notifications.quiet_hours` → `notifications.quietHours`
+- `schedule.work_hours_start/end` → `calendar.workHours.start/end`
+- `appearance.time_format` → `calendar.timeFormat`
+- `schedule.first_day_of_week` → `calendar.weekStart`
+
+### Storage Guidance
+- Server must normalize into the canonical shape on write and return canonical shape on read.
+- UI should read/write only canonical keys once normalization lands.
+
+---
+
+## Smart Schedule Integration (Settings → Scheduling Behavior)
+
+Schedule behavior must respect these preferences:
+- `calendar.displayTimezone`: parse intent + render blocks in user’s display timezone.
+- `calendar.workHours`: default time window for auto placement.
+- `notifications.quietHours`: do not auto-place inside quiet hours unless explicitly requested.
+- `calendar.weekStart` + `calendar.defaultView`: set initial Schedule view state.
+- `calendar.timeFormat`: render schedule time labels; does not affect placement.
+
+### UX Implications
+- When a user changes working hours or quiet hours, future rule materializations use the new windows.
+- UI should show a brief toast when schedule preferences change and optionally offer “rebuild upcoming suggestions.”
+
+---
+
 ## Settings Inventory (What Appears in Settings)
 
 ### 1) Account

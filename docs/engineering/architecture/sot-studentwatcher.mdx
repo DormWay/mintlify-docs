@@ -63,6 +63,39 @@ flowchart TD
     E --> F[Update preferences]
 ```
 
+### City-Level Signals (DORM-806)
+
+When a city syncs (e.g., weather update), `signalCityStudentWatchersWorkflow` signals all students who should receive city updates:
+
+```mermaid
+sequenceDiagram
+    participant City as City Sync
+    participant SA as student.activities
+    participant DC as dormway-core
+    participant SW as StudentWatcher(s)
+
+    City->>SA: signalCityStudentWatchersWorkflow(cityId)
+    SA->>SA: Get home campus students (contexts query)
+    SA->>DC: getStudentsByCurrentCity(cityId)
+    DC-->>SA: Traveling students (GPS-based)
+    SA->>SA: Combine + dedupe student IDs
+    SA->>SW: Signal each running workflow
+```
+
+**Traveling Student Detection:**
+- `getStudentsByCurrentCity()` uses PostGIS spatial queries (`ST_DWithin`)
+- Finds students whose recent GPS location (24-hour window) is within 5km of any campus in the target city
+- Filters to "traveling" students: those whose **home campus is NOT** in the target city
+- Prevents duplicate signals by deduping with home campus students
+
+**Parameters:**
+- `maxAgeHours`: GPS recency window (default: 24 hours)
+- `radiusMeters`: Proximity threshold (default: 5000m)
+- `travelingOnly`: Exclude students whose home is already in target city (default: true)
+
+**Debug Endpoint:**
+`GET /api/admin/debug/traveling-students/:cityId` - Test traveling student detection
+
 ### Runtime Loop
 
 ```mermaid
@@ -90,13 +123,15 @@ flowchart TD
 
 ## Key Files (Code + Docs)
 - `services/engine/src/workflows/studentWatcher.simplified.workflow.ts` (signals, scheduling loop, auto-sync)
-- `services/engine/src/activities/student.activities.ts` (start workflow + timezone lookup)
+- `services/engine/src/activities/student.activities.ts` (start workflow + timezone lookup + city signal targeting)
 - `services/engine/src/activities/workflowState.activities.ts` (load/save workflow state)
 - `services/engine/src/types/dayplan.types.ts` (signal payload types)
 - `services/engine/src/workflows/studentProcessor.workflow.ts` (onboarding start + broadcast signals)
+- `services/shared/dormway-core/src/entities/student/student.factory.ts` (traveling student detection via GPS)
 - `services/api-router/src/routes/webhooks/clerk-routes.ts` (signup start)
 - `services/api-router/src/routes/admin/dayplan-admin-actions.ts` (manual regenerate/email signals)
 - `services/api-router/src/routes/admin/preferences-routes.ts` (preferences update signal)
+- `services/api-router/src/routes/admin-routes.ts` (debug endpoints including traveling students)
 
 ## Update Checklist
 - Changing workflow ID or task queue: update start points in `student.activities.ts`, `studentProcessor.workflow.ts`, and webhook/admin routes.
@@ -105,4 +140,5 @@ flowchart TD
 - Adding new context update types: update `ContextUpdateSignal` and handler logic.
 
 ## Recent Changes
+- 2026-01-04: DORM-806 - Added traveling student detection. `getStudentWatcherWorkflowIdsByCity` now includes students whose GPS location is near campuses in the target city (not just home campus students). Uses PostGIS spatial queries via `getStudentsByCurrentCity()` in dormway-core.
 - 2025-12-22: Populated and verified against current workflow + API entry points.

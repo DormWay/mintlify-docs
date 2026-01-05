@@ -1,0 +1,362 @@
+---
+title: "Data Deletion"
+description: "_Last updated: 2026-01-04_"
+---
+
+# Data Deletion Runbook
+
+_Last updated: 2026-01-04_
+
+This runbook documents procedures for handling user data deletion requests in compliance with privacy regulations (GDPR, CCPA, FERPA).
+
+## Overview
+
+DormWay stores user data across multiple systems. A complete data deletion request requires coordinated action across all data stores.
+
+### Data Location Map
+
+| System | Data Type | Owner | Deletion Method |
+|--------|-----------|-------|-----------------|
+| **Neon Postgres** | Core user data | Platform | SQL deletion cascade |
+| **Clerk** | Authentication data | Auth | Clerk API |
+| **Customer.io** | Messaging profiles | Marketing | Customer.io API |
+| **Amplitude** | Analytics events | Analytics | Amplitude GDPR API |
+| **Ragie** | Document embeddings | AI | Ragie API |
+| **S3** | Uploaded files | Platform | S3 delete objects |
+| **Temporal** | Workflow history | Platform | Auto-retention (90 days) |
+| **Sentry** | Error traces | Platform | Auto-retention (90 days) |
+
+---
+
+## User Data Inventory (Neon Database)
+
+### Primary Tables with User Data
+
+```sql
+-- accounts: Core user record
+SELECT id, email, first_name, last_name, phone, clerk_id, created_at
+FROM accounts WHERE id = '[USER_ID]';
+
+-- contexts: User's hierarchical data (student context, courses, etc.)
+SELECT id, type, name, external_id, user_id
+FROM contexts WHERE user_id = '[USER_ID]';
+
+-- service_data: Processed data (DayPlan, semester analysis, etc.)
+SELECT id, method, context_id, user_id, fetched_at
+FROM service_data WHERE user_id = '[USER_ID]';
+
+-- time_blocks: Calendar/schedule data
+SELECT id, title, source, user_id
+FROM time_blocks WHERE user_id = '[USER_ID]';
+
+-- assignments: Academic assignments
+SELECT id, title, user_id
+FROM assignments WHERE user_id = '[USER_ID]';
+
+-- tasks: User-created tasks
+SELECT id, title, user_id
+FROM tasks WHERE user_id = '[USER_ID]';
+
+-- braingains_documents: Uploaded documents
+SELECT id, file_name, user_id
+FROM braingains_documents WHERE user_id = '[USER_ID]';
+
+-- content_ingestions: Document processing records
+SELECT id, original_file_name, user_id
+FROM content_ingestions WHERE user_id = '[USER_ID]';
+
+-- user_preferences: Settings and preferences
+SELECT id, preference_key, user_id
+FROM user_preferences WHERE user_id = '[USER_ID]';
+
+-- notification_preferences: Notification settings
+SELECT id, user_id
+FROM notification_preferences WHERE user_id = '[USER_ID]';
+```
+
+---
+
+## Data Deletion Request Handling
+
+### Step 1: Receive and Validate Request
+
+**Request Sources:**
+- Email to privacy@dormway.com
+- In-app "Delete My Account" request
+- Legal/compliance request
+
+**Validation Checklist:**
+- [ ] Verify requestor identity (email match, ID verification)
+- [ ] Confirm account exists
+- [ ] Document request receipt (Linear ticket)
+- [ ] Acknowledge request within 24 hours
+
+### Step 2: Identify All User Data
+
+```bash
+# Connect to database
+cd /Users/ethankaplan/Development/dormway-beta-workspace/.repos/dormway-platform
+bash -c 'doppler run -- bash -c '\''psql "$DATABASE_URL_ADMIN"'\'''
+```
+
+```sql
+-- Get user ID from email
+SELECT id, email, clerk_id FROM accounts WHERE email = '[USER_EMAIL]';
+
+-- Count all related records
+SELECT
+  (SELECT COUNT(*) FROM contexts WHERE user_id = '[USER_ID]') as contexts,
+  (SELECT COUNT(*) FROM service_data WHERE user_id = '[USER_ID]') as service_data,
+  (SELECT COUNT(*) FROM time_blocks WHERE user_id = '[USER_ID]') as time_blocks,
+  (SELECT COUNT(*) FROM assignments WHERE user_id = '[USER_ID]') as assignments,
+  (SELECT COUNT(*) FROM tasks WHERE user_id = '[USER_ID]') as tasks,
+  (SELECT COUNT(*) FROM braingains_documents WHERE user_id = '[USER_ID]') as documents;
+```
+
+### Step 3: Delete from External Services
+
+#### 3.1 Delete from Clerk
+
+```bash
+# Using Clerk Backend API
+curl -X DELETE "https://api.clerk.com/v1/users/[CLERK_USER_ID]" \
+  -H "Authorization: Bearer $CLERK_SECRET_KEY"
+```
+
+Or via Clerk Dashboard:
+1. Navigate to: https://dashboard.clerk.com/apps/[app]/instances/[instance]/users
+2. Search for user
+3. Delete user
+
+#### 3.2 Delete from Customer.io
+
+```bash
+# Delete customer profile
+curl -X DELETE "https://track.customer.io/api/v1/customers/[USER_ID]" \
+  -u "$CUSTOMERIO_SITE_ID:$CUSTOMERIO_API_KEY"
+
+# Suppress for GDPR compliance (prevents re-creation)
+curl -X POST "https://track.customer.io/api/v1/customers/[USER_ID]/suppress" \
+  -u "$CUSTOMERIO_SITE_ID:$CUSTOMERIO_API_KEY"
+```
+
+#### 3.3 Delete from Amplitude
+
+```bash
+# Submit GDPR deletion request
+curl -X POST "https://amplitude.com/api/2/deletions/users" \
+  -H "Authorization: Api-Key $AMPLITUDE_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "user_ids": ["[USER_ID]"],
+    "requester": "privacy@dormway.com"
+  }'
+```
+
+Note: Amplitude deletion may take up to 30 days.
+
+#### 3.4 Delete from Ragie (Document Embeddings)
+
+```bash
+# Delete all documents for user
+# First, list user's documents
+curl -X GET "https://api.ragie.ai/documents?metadata.userId=[USER_ID]" \
+  -H "Authorization: Bearer $RAGIE_API_KEY"
+
+# Delete each document
+curl -X DELETE "https://api.ragie.ai/documents/[DOC_ID]" \
+  -H "Authorization: Bearer $RAGIE_API_KEY"
+```
+
+#### 3.5 Delete from S3
+
+```bash
+# List user's files
+aws s3 ls s3://dormway-syllabi-bucket/users/[USER_ID]/ --recursive
+aws s3 ls s3://dormway-braingains-bucket/users/[USER_ID]/ --recursive
+
+# Delete user's files
+aws s3 rm s3://dormway-syllabi-bucket/users/[USER_ID]/ --recursive
+aws s3 rm s3://dormway-braingains-bucket/users/[USER_ID]/ --recursive
+```
+
+### Step 4: Delete from Database
+
+```sql
+-- Run these in a transaction
+BEGIN;
+
+-- Delete in order (respecting foreign keys)
+
+-- 1. Delete service_data (no FKs pointing to it)
+DELETE FROM service_data WHERE user_id = '[USER_ID]';
+
+-- 2. Delete time_blocks
+DELETE FROM time_blocks WHERE user_id = '[USER_ID]';
+
+-- 3. Delete assignments and tasks
+DELETE FROM assignment_completions WHERE assignment_id IN (SELECT id FROM assignments WHERE user_id = '[USER_ID]');
+DELETE FROM assignments WHERE user_id = '[USER_ID]';
+DELETE FROM tasks WHERE user_id = '[USER_ID]';
+
+-- 4. Delete documents
+DELETE FROM braingains_documents WHERE user_id = '[USER_ID]';
+DELETE FROM content_ingestions WHERE user_id = '[USER_ID]';
+
+-- 5. Delete preferences
+DELETE FROM user_preferences WHERE user_id = '[USER_ID]';
+DELETE FROM notification_preferences WHERE user_id = '[USER_ID]';
+
+-- 6. Delete contexts (student context and any owned course contexts)
+DELETE FROM contexts WHERE user_id = '[USER_ID]';
+
+-- 7. Finally, delete account
+DELETE FROM accounts WHERE id = '[USER_ID]';
+
+COMMIT;
+```
+
+### Step 5: Verify Deletion
+
+```sql
+-- Verify all data deleted
+SELECT
+  (SELECT COUNT(*) FROM accounts WHERE id = '[USER_ID]') as accounts,
+  (SELECT COUNT(*) FROM contexts WHERE user_id = '[USER_ID]') as contexts,
+  (SELECT COUNT(*) FROM service_data WHERE user_id = '[USER_ID]') as service_data,
+  (SELECT COUNT(*) FROM time_blocks WHERE user_id = '[USER_ID]') as time_blocks;
+-- All should return 0
+```
+
+### Step 6: Document Completion
+
+- [ ] Update Linear ticket with deletion confirmation
+- [ ] Send confirmation email to user (template below)
+- [ ] Log in data deletion register
+
+**Confirmation Email Template:**
+```
+Subject: Your DormWay Account Has Been Deleted
+
+Dear [User Name],
+
+This email confirms that your DormWay account and all associated data
+have been permanently deleted from our systems.
+
+This includes:
+- Your account profile and preferences
+- Calendar and schedule data
+- Uploaded documents and syllabi
+- AI-generated insights and recommendations
+- Analytics data
+
+This action is irreversible. If you wish to use DormWay in the future,
+you will need to create a new account.
+
+If you have any questions, please contact privacy@dormway.com.
+
+Best regards,
+DormWay Privacy Team
+```
+
+---
+
+## Data Retention Policy
+
+| Data Type | Retention Period | After Deletion |
+|-----------|-----------------|----------------|
+| Active user data | While account active | Deleted on request |
+| Temporal workflow history | 90 days | Auto-purged |
+| Error logs (Sentry) | 90 days | Auto-purged |
+| Audit logs | 1 year | Retained for compliance |
+| Backup data | 30 days | Deleted from backups |
+| Analytics (Amplitude) | 2 years | GDPR deletion available |
+
+---
+
+## Automatic Data Cleanup
+
+### service_data Pruning
+
+Old service_data records are automatically pruned:
+
+```sql
+-- Pruning function (runs via cron)
+-- See: 20251009a_service_data_pruning_foundation.sql
+
+-- Keeps latest N versions per method, deletes older
+SELECT prune_old_service_data(
+  retention_days := 90,
+  keep_latest_n := 5
+);
+```
+
+### Temporal Workflow Retention
+
+Temporal Cloud retains workflow history for 90 days by default.
+
+---
+
+## Compliance Timeline
+
+| Regulation | Response Requirement | Completion Requirement |
+|------------|---------------------|----------------------|
+| GDPR | Acknowledge within 72 hours | Complete within 30 days |
+| CCPA | Acknowledge within 10 days | Complete within 45 days |
+| FERPA | Varies by institution | Follow institution policy |
+
+---
+
+## Emergency Data Purge
+
+For security incidents requiring immediate data removal:
+
+```bash
+# 1. Immediately disable user access
+# Delete from Clerk first (prevents login)
+
+# 2. Run expedited deletion
+# Follow steps 3-5 above without waiting periods
+
+# 3. Document emergency circumstances
+# Create incident ticket
+
+# 4. Notify security team
+# Post in #security-incidents
+```
+
+---
+
+## Partial Deletion (Account Anonymization)
+
+If user requests data anonymization instead of deletion:
+
+```sql
+BEGIN;
+
+-- Anonymize PII but retain analytics value
+UPDATE accounts SET
+  email = 'deleted-' || id || '@deleted.dormway.com',
+  first_name = 'Deleted',
+  last_name = 'User',
+  phone = NULL,
+  clerk_id = NULL
+WHERE id = '[USER_ID]';
+
+-- Keep aggregated data, remove identifying info
+UPDATE contexts SET
+  name = 'Anonymized',
+  external_id = NULL
+WHERE user_id = '[USER_ID]' AND type = 'student';
+
+COMMIT;
+```
+
+---
+
+## Related Documents
+
+- [Incident Handling](/docs/operations/runbooks/incident-handling)
+- [Security Architecture](/docs/engineering/architecture/security-architecture)
+- Engineering/Technical/Database/Context System Database Schema
+- [Pre-Launch Data Sanitization](/docs/operations/runbooks/pre-launch-data-sanitization)

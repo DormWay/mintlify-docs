@@ -20,6 +20,11 @@ description: "sequenceDiagram participant Workflow as scheduleImport.workflow pa
 - Target: Web Schedule uses a single v2 timeline source (calendar/time blocks) with composite legacy-only.
 - Plan: `services/dormway-lockedin/docs/LOCKEDIN_WEB_OS_CONSISTENCY_PLAN.md`.
 
+## Preference Alignment (Current vs Target)
+- Current: Web stores display timezone in `preferences.calendar.displayTimezone`; schedule rules read timezone from account metadata. Quiet hours + working hours exist in preferences, but naming is inconsistent (`quietHours` vs `quiet_hours`), and Schedule UI does not yet consume `schedule.*`.
+- Target: A canonical preference resolver normalizes aliases and exposes one schedule preference contract (working hours, quiet hours, display timezone, show weekends, first day of week) that Schedule UI + scheduling APIs both consume.
+- Plan: add preference mapping + enforcement in schedule-rule materialization and availability checks (see `Plans/Smart-Schedule-Intent-Plan.md`).
+
 ## Invariants & Contracts
 - `time_blocks` enforces exactly one owner: either `user_id` or `context_id` (check constraint in table DDL).
 - `time_blocks` deduplicates by `source_type + source_id + (user_id or context_id)` (unique index).
@@ -29,10 +34,13 @@ description: "sequenceDiagram participant Workflow as scheduleImport.workflow pa
 - API reads:
   - `GET /calendar/events` queries `student_time_blocks` for the authenticated user.
   - `GET /v2/students/me/calendar/events` is the web schedule canonical endpoint (v2 range wrapper over calendar events).
-  - `POST /v2/students/me/time-blocks` creates manual time blocks for web tasks/schedule.
-  - `DELETE /v2/students/me/time-blocks/:id` soft-deletes manual time blocks.
-  - `GET /v2/students/me/preferences` provides calendar timezone display preferences.
-  - `GET /calendar/master` joins student enrollments to `time_blocks` for course schedules.
+- `POST /v2/students/me/time-blocks` creates manual time blocks for web tasks/schedule.
+- `DELETE /v2/students/me/time-blocks/:id` soft-deletes manual time blocks.
+- `GET /v2/students/me/preferences` provides calendar timezone display preferences.
+- `GET /calendar/master` joins student enrollments to `time_blocks` for course schedules.
+- `POST /v2/students/me/schedule/intent` parses natural-language scheduling intent; it does not create blocks (UI must call time-blocks).
+- `schedule_rules` stores recurring habit definitions; `POST /v2/students/me/schedule-rules` creates rules and materializes `student_time_blocks` with `metadata.schedule_rule_id`. `PATCH /v2/students/me/schedule-rules/:id` updates rule status/fields; `POST /v2/students/me/schedule-rules/:id/materialize` extends blocks.
+- Schedule rules must honor canonical schedule preferences (working hours + quiet hours) unless the intent explicitly overrides them.
 
 ## Roadmap (Current)
 - Add v2 equivalents for course schedules and personal blocks (`/v2/students/me/calendar/master`, `/v2/students/me/calendar/personal-blocks`) so web schedule can fully drop legacy mobile calendar routes.
@@ -40,6 +48,8 @@ description: "sequenceDiagram participant Workflow as scheduleImport.workflow pa
   - `schedule_import` and `ics_lms` with both `userId` + `contextId` write to `time_blocks` (context-level).
   - `ics_lms` is additionally mirrored to `student_time_blocks` for now; `schedule_import` is not.
   - User-only sources write to `student_time_blocks`; context-only sources write to `time_blocks`.
+- Add canonical preference resolver and enforce preference-aware scheduling windows + availability (quiet hours, working hours, display timezone).
+- Decide calendar preference semantics: hidden calendars vs blocking for auto-scheduling.
 
 ## Key Flows (High-Level)
 
@@ -122,8 +132,12 @@ sequenceDiagram
 - `infrastructure/database/migrations/099_create_student_time_blocks_view.sql` (Neon alias view)
 - `infrastructure/database/migrations/20250820_fix_timezone_consistency.sql` (UTC timestamp guidance)
 - `services/api-router/src/routes/mobile-routes.ts` (calendar API queries)
+- `services/api-router/src/services/schedule-intent-classifier.ts` (smart schedule intent parsing)
+- `services/api-router/src/services/schedule-rule-scheduler.ts` (rule creation + materialization)
 - `services/dormway-lockedin/src/hooks/useCampusCurrentTerm.ts`
 - `services/dormway-lockedin/src/app/dashboard/schedule/page.tsx`
+- `services/dormway-lockedin/src/components/settings/PreferencesContent.tsx`
+- `services/dormway-lockedin/src/contexts/TimezoneContext.tsx`
 - `services/dormway-lockedin/docs/LOCKEDIN_WEB_OS_CONSISTENCY_PLAN.md`
 - `obsidian-vault/DormWay/Engineering/Architecture/LockedIn Settings & Preferences Spec (Web).md`
 
@@ -134,6 +148,10 @@ sequenceDiagram
 - Changing calendar API filters: update `mobile-routes.ts` queries and any downstream consumers.
 
 ## Recent Changes
+- 2026-01-05: Documented preference alignment gaps + preference-aware scheduling requirements for Smart Schedule.
+- 2026-01-04: Added schedule rules table + v2 schedule-rules endpoint to materialize recurring habits into `student_time_blocks`.
+- 2026-01-04: Google Calendar connect now triggers an immediate schedule reconciliation; web schedule relies on v2 calendar events for personal calendar coverage.
+- 2026-01-04: Documented smart schedule intent parsing as a stateless calendar/time-block helper endpoint.
 - 2026-01-03: LockedIn schedule/inbox/timezone clients standardized on v2 calendar events, time-blocks, and preferences endpoints.
 - 2026-01-02: Documented `/v2/students/me/calendar/events` as the web canonical timeline endpoint.
 - 2026-01-01: Linked settings/preferences spec for timezone and schedule settings.

@@ -10,9 +10,10 @@ description: "This table defines the Home V2 widget contract and should drive bo
 - V2 widget envelope contract + batch ETag rules from API v2.
 - Widget catalog (types, aliases, registry metadata) and default Home widget set.
 - HeadsUp widget pipeline (cached feed cards + dismissals) used on Home V2.
+- **iOS unified widget system** - CollapsibleWidgetContainer, UpNextCard, WidgetStackView for iPhone/iPad.
 
 ## Non-goals
-- iOS WidgetKit or mobile dashboards.
+- iOS WidgetKit home screen widgets (separate package: DWWidgetKit).
 - Legacy V1 composite dashboard contract except as a fallback data source.
 - Widget UI and visual design details; see [LockedIn-Schedule-UX-Guidelines](/docs/product/design/lockedin-schedule-ux-guidelines).
 - Feed scoring internals beyond the HeadsUp widget contract.
@@ -26,6 +27,10 @@ description: "This table defines the Home V2 widget contract and should drive bo
 - Plan: `services/dormway-lockedin/docs/DASHBOARD_V2_COMPOSITE_REMOVAL_PLAN.md` (composite sunset sequencing).
 - Plan: `obsidian-vault/DormWay/Plans/Workplan/Home-V2-Schedule-Widget-Scale-Plan.md` (schedule widget speed + batch-first alignment).
 
+### iOS Today Surface
+- Current: Feed-first Today uses `HomeTabView` + `FeedView` with `WidgetStackView` embedded; widget-only mode is deprecated.
+- Target: Maintain feed-first Today while expanding canonical widgets (UpNext + collapsible stack) and folding in HeadsUp when available.
+
 ## Roadmap (Current)
 - Keep Home V2 batch-first and remove any residual legacy activity dependencies; rely on `/v2/students/me/feed` metadata for context cards.
 - Consider folding `home-types` + widget preferences into the batch payload to reduce cold-start calls.
@@ -34,7 +39,9 @@ description: "This table defines the Home V2 widget contract and should drive bo
 ## Invariants & Contracts
 - The Widget Contract Table below is the single source of truth for Home V2 widget types, aliases, instance policy, ownership, and eligibility.
 - Home V2 renders from `/v2/widgets/batch` via `WidgetDataProvider`; per-widget endpoints are not used by Home V2.
-- Today widget derives `nextEvent` from the schedule timeline when available and falls back to `/v2/widgets/today` only if the schedule payload is missing; weather display prefers the weather widget payload when present.
+- Today widget prefers local time when user timezone preference is `auto` (browser/IP timezone fallback), while explicit timezone preferences remain honored.
+- Today widget resolves `nextEvent` from a 7-day schedule range (`/v2/students/me/calendar/events`) and falls back to the schedule timeline or `/v2/widgets/today` if the range is unavailable.
+- Today widget weather prefers local conditions via `/geo/ip-location` + `/v2/cities/nearest?include=weather,forecast`, then falls back to the weather widget payload or `/v2/widgets/today`.
 - Schedule widget reads from batch only on Home V2 load; dayplan/time-block reads are disabled by default and not part of the widget refresh path.
 - Schedule widget renders the batch timeline as-is (no client-side "today" truncation) and keeps ordering aligned to event start times.
 - Schedule timeline suppresses DayPlan events that have a matching time block override (`metadata.originalEventId` and variants).
@@ -151,6 +158,83 @@ sequenceDiagram
     API-->>UI: Confirmed
 ```
 
+## iOS Unified Widget System (January 2026)
+
+The iOS app implements a unified widget system matching the iPad Dashboard's glassmorphic design language.
+Today is feed-first on iOS; the widget stack is embedded within the Feed view rather than presented as a standalone surface.
+
+### Widget Architecture
+
+```mermaid
+flowchart TD
+    subgraph "Today Tab"
+        HTV[HomeTabView]
+        WSV[WidgetStackView]
+        UNC[UpNextCard]
+
+        HTV --> WSV
+        HTV --> UNC
+    end
+
+    subgraph "Collapsible Widgets"
+        CWC[CollapsibleWidgetContainer]
+        SCW[ScheduleCollapsibleWidget]
+        TCW[TasksCollapsibleWidget]
+        TRW[TermCollapsibleWidget]
+        CCW[CampusCollapsibleWidget]
+
+        WSV --> SCW
+        WSV --> TCW
+        WSV --> TRW
+        WSV --> CCW
+
+        SCW --> CWC
+        TCW --> CWC
+        TRW --> CWC
+        CCW --> CWC
+    end
+
+    subgraph "Data Layer"
+        HWS[HomeWidgetDataService]
+        HWD[HomeWidgetState]
+
+        WSV --> HWS
+        WSV --> HWD
+    end
+```
+
+### Key Components
+
+| Component | Purpose |
+|-----------|---------|
+| `CollapsibleWidgetContainer` | Reusable glassmorphic container with collapse/expand behavior |
+| `WidgetStackView` | Container for all 4 widgets + data loading orchestration |
+| `UpNextCard` | Current/next event display with quick actions (Start Notes, Record) |
+| `HomeWidgetState` | Widget expansion state management with auto-expand logic |
+
+### Design Features
+- **Glassmorphic styling**: `.ultraThinMaterial` background with gradient stroke borders
+- **Collapsible behavior**: Header tap expands/collapses with spring animation
+- **Glance content**: Collapsed state shows quick summary (next event, overdue count)
+- **Auto-expand**: Tasks widget auto-expands when overdue items exist
+- **iPad parity**: Matches iPad Dashboard GlassSection aesthetic
+
+### Widget Data Flow
+
+```mermaid
+sequenceDiagram
+    participant WSV as WidgetStackView
+    participant HWS as HomeWidgetDataService
+    participant API as API Router
+
+    WSV->>+HWS: fetchAllWidgetData()
+    HWS->>+API: GET /v2/widgets/home-bundle
+    API-->>-HWS: HomeWidgetBundle
+    HWS-->>-WSV: Mapped widget data
+    WSV->>WSV: Update scheduleData, tasksData, termData, campusData
+    WSV->>WSV: autoExpandIfNeeded()
+```
+
 ## Data Models / IDs / Terminology
 - WidgetEnvelope: `{ id, type, gridHints, content, generatedAt }` returned by `/v2/widgets/batch`.
 - WidgetTypeId: frontend union in `widgetV2Types.ts` (Home V2 uses `today`, `schedule`, `tasks`, `courses`, `headsup` by default).
@@ -159,6 +243,8 @@ sequenceDiagram
 - Widget preferences: `general.widgetPreferences[tab]` with `hiddenWidgetIds` and `userWidgets`.
 
 ## Key Files (Code + Docs)
+
+### Web (LockedIn)
 - `services/api-router/src/routes/v2/widgets.routes.ts` (WidgetEnvelope, grid hints, batch endpoint)
 - `services/api-router/src/services/headsup/headsup-builder.ts` (cached feed + dismissal filtering)
 - `services/api-router/src/services/headsup/headsup-types.ts` (HeadsUp types + limits)
@@ -175,6 +261,19 @@ sequenceDiagram
 - `services/dormway-lockedin/src/lib/dashboard/layout-service.ts` (layout API client + cache)
 - `services/dormway-lockedin/src/lib/dashboard/useLayoutService.ts` (layout persistence hook)
 - `services/dormway-lockedin/src/lib/preferences.ts` (widget prefs persistence)
+
+### iOS (DormWay) - Unified Widget System
+- `.repos/ios-clean/App/Views/Home/Widgets/CollapsibleWidgetContainer.swift` (glassmorphic container with collapse/expand)
+- `.repos/ios-clean/App/Views/Home/Widgets/WidgetStackView.swift` (container for 4 collapsible widgets + data loading)
+- `.repos/ios-clean/App/Views/Home/Widgets/UpNextCard.swift` (current/next event with quick actions)
+- `.repos/ios-clean/App/Views/Home/Widgets/ScheduleCollapsibleWidget.swift` (schedule widget)
+- `.repos/ios-clean/App/Views/Home/Widgets/TasksCollapsibleWidget.swift` (tasks widget)
+- `.repos/ios-clean/App/Views/Home/Widgets/TermCollapsibleWidget.swift` (term/courses widget)
+- `.repos/ios-clean/App/Views/Home/Widgets/CampusCollapsibleWidget.swift` (campus info widget)
+- `.repos/ios-clean/App/Views/Home/IPadHomeView.swift` (iPad home uses WidgetStackView)
+- `.repos/ios-clean/Packages/DWDesign/Sources/DWDesign/Components/Cards/UniversalCourseCard.swift` (glassmorphic course cards)
+
+### Documentation
 - `obsidian-vault/DormWay/Engineering/Architecture/Home V2 Batch-First Widgets (Long-Term Spec).md`
 - `obsidian-vault/DormWay/Product/Features/Dashboard/Student Life Surfaces - Widgets and HeadsUp Spec (Draft).md`
 - `obsidian-vault/DormWay/Product/Design/LockedIn-Schedule-UX-Guidelines.md`
@@ -191,6 +290,8 @@ sequenceDiagram
 - Changing HeadsUp rules: update `headsup-builder.ts`, `headsup-types.ts`, and `useHeadsUpDismiss.ts` integration.
 
 ## Recent Changes
+- 2026-01-05: Documented feed-first Today on iOS; deprecated widget-only mode while keeping UpNext + collapsible widget stack embedded in Feed.
+- 2026-01-04: **iOS Unified Widget System** - CollapsibleWidgetContainer with glassmorphic styling, UpNextCard for current/next event with quick actions, WidgetStackView as container for 4 collapsible widgets (Schedule, Tasks, Term, Campus).
 - 2026-01-02: Disabled schedule widget dayplan/time-block reads on Home V2 load; mutations refresh via batch.
 - 2026-01-02: Removed client-side "today" filtering and aligned schedule ordering to timeline start times.
 - 2026-01-02: Added schedule low-signal filtering via metadata/type, all-day pill details, and event type selection in the schedule form.

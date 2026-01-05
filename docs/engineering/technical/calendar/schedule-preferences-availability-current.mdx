@@ -1,0 +1,122 @@
+---
+title: "Schedule Preferences & Availability (Current)"
+description: "This document defines the canonical preference contract and availability rules that Smart Schedule must follow. It is the implementation guide for preference..."
+---
+
+# Schedule Preferences & Availability (Current)
+
+This document defines the canonical preference contract and availability rules that Smart Schedule must follow. It is the implementation guide for preference-aware scheduling, especially schedule rules and auto placement.
+
+## Scope
+- Preference normalization for schedule-critical settings.
+- Availability rules for auto placement and rule materialization.
+- Required behaviors for Schedule UI and scheduling APIs.
+
+## Non-goals
+- Full external calendar write-back.
+- UI layout details for the Schedule page.
+- DayPlan content logic (see SoT - DayPlan V2).
+
+---
+
+## Current Behavior (Observed)
+- Schedule rules read timezone from `accounts.metadata.timezone` (not from user preference).
+- Web Settings store:
+  - `notifications.quietHours` (camelCase)
+  - `calendar.displayTimezone` and `calendar.workHours`
+- Core defaults use snake_case in `UserPreferences` (`quiet_hours`, `work_hours_start/end`, `appearance.time_format`).
+- Schedule UI does not consistently read `schedule.*` preferences (work hours, show weekends).
+- Calendar preference table (`user_calendar_preferences`) exists for per-calendar visibility, but availability checks do not consistently respect it.
+
+---
+
+## Canonical Preference Contract (Schedule-Critical)
+
+Canonical shape returned by `/v2/students/me/preferences` for scheduling:
+
+```json
+{
+  "calendar": {
+    "displayTimezone": "auto|America/New_York|...",
+    "weekStart": 0,
+    "defaultView": "timeline|day|week|month",
+    "workHours": { "start": "08:00", "end": "18:00" },
+    "timeFormat": "12h|24h"
+  },
+  "notifications": {
+    "quietHours": { "enabled": true, "start": "22:00", "end": "07:00" }
+  }
+}
+```
+
+## Accepted Aliases (Temporary)
+These are accepted during migration and normalized on write:
+- `notifications.quiet_hours` -> `notifications.quietHours`
+- `schedule.work_hours_start/end` -> `calendar.workHours.start/end`
+- `appearance.time_format` -> `calendar.timeFormat`
+- `schedule.first_day_of_week` -> `calendar.weekStart`
+
+---
+
+## Availability Rules (Auto Placement)
+
+### Blocking vs Non-blocking
+- All events in `student_time_blocks` are blocking by default.
+- Non-blocking when:
+  - `metadata.is_free_time === true`, or
+  - `type` is `free` (or equivalent in metadata).
+- Schedule rule materialization should skip blocked slots and record the skip reason.
+
+### Quiet Hours
+- If `notifications.quietHours.enabled === true`, auto placement must avoid quiet hours.
+- User intent may override quiet hours only if the request explicitly targets that range.
+
+### Working Hours
+- `calendar.workHours` defines the default placement window.
+- Intent-defined time window or start time overrides working hours for that rule only.
+
+### Timezone
+- Intent parsing and rule creation use the **display timezone** for user-facing semantics.
+- All stored blocks remain in UTC.
+
+---
+
+## Required Behaviors
+
+### Scheduling APIs
+- `POST /v2/students/me/schedule-rules`:
+  - Normalize preferences first.
+  - Default to work hours + quiet hours as constraints.
+  - Store `rule.timezone` as the resolved display timezone.
+- `POST /v2/students/me/schedule-rules/:id/materialize`:
+  - Respect quiet hours and working hours unless rule explicitly overrides.
+  - Track skipped days with reason in the response.
+
+### Schedule UI
+- Initialize view using `calendar.defaultView` and `calendar.weekStart`.
+- Use `calendar.timeFormat` for time label rendering.
+- Show an indicator if user preferences are constraining placement.
+
+---
+
+## Open Decisions
+- Hidden calendars: do they still block auto scheduling by default?
+- When preferences change, should existing future blocks be reflowed or only new materializations?
+- Which settings should trigger automatic resync or re-materialize prompts?
+
+---
+
+## Key Files
+- `services/api-router/src/routes/v2/students.routes.ts` (schedule rules, preferences)
+- `services/api-router/src/services/schedule-rule-scheduler.ts` (placement logic)
+- `services/shared/dormway-core/src/domains/preferences/types.ts` (default preference schema)
+- `services/dormway-lockedin/src/components/settings/PreferencesContent.tsx` (web settings UI)
+- `services/dormway-lockedin/src/contexts/TimezoneContext.tsx` (display timezone resolution)
+- `services/engine/src/activities/calendar.activities.ts` (event normalization + reads)
+
+---
+
+## Related Docs
+- [Calendar, Time Blocks, Timezones](/docs/engineering/architecture/sot-calendar-time-blocks-timezones)
+- [LockedIn Settings & Preferences Spec (Web)](/docs/engineering/architecture/lockedin-settings-preferences-spec-web)
+- Smart-Schedule-Intent-Plan

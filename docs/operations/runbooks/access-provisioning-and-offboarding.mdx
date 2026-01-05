@@ -1,0 +1,322 @@
+---
+title: "Access Provisioning and Offboarding"
+description: "_Last updated: 2026-01-04_"
+---
+
+# Access Provisioning & Offboarding Runbook
+
+_Last updated: 2026-01-04_
+
+This runbook documents the procedures for granting and revoking access to DormWay systems for team members.
+
+## Overview
+
+DormWay uses multiple systems that require coordinated access management:
+
+| System | Purpose | Access Method | Admin Location |
+|--------|---------|---------------|----------------|
+| **Doppler** | Secrets management | Email invite | https://dashboard.doppler.com |
+| **GitHub** | Source control & CI/CD | GitHub org invite | https://github.com/orgs/DormWayLLC |
+| **Neon** | PostgreSQL database | Team invite | https://console.neon.tech |
+| **Temporal Cloud** | Workflow orchestration | Namespace access | https://cloud.temporal.io |
+| **Clerk** | Authentication dashboard | Team invite | https://dashboard.clerk.com |
+| **AWS Console** | Infrastructure | IAM user creation | https://console.aws.amazon.com |
+| **Linear** | Project management | Workspace invite | https://linear.app |
+| **Slack** | Team communication | Workspace invite | Workspace admin |
+| **Customer.io** | Messaging platform | Team invite | https://fly.customer.io |
+| **Sentry** | Error monitoring | Team invite | https://sentry.io |
+| **Dash0** | Observability | Team invite | https://dash0.com |
+
+## Access Provisioning (New Team Member)
+
+### Pre-Provisioning Checklist
+
+- [ ] Employment/contractor agreement signed
+- [ ] Background check complete (if required)
+- [ ] Manager approval documented
+- [ ] Role and access level determined
+- [ ] Start date confirmed
+
+### Step 1: Core Development Access
+
+#### 1.1 GitHub Organization
+
+```bash
+# Invite via GitHub web UI or CLI
+# Navigate to: https://github.com/orgs/DormWayLLC/people
+# Click "Invite member" and enter email
+
+# Assign to appropriate teams:
+# - dormway-engineering (code access)
+# - dormway-readonly (limited access)
+```
+
+**Teams & Permissions:**
+| Team | Repository Access | Notes |
+|------|------------------|-------|
+| dormway-engineering | Write | Full dev team |
+| dormway-admin | Admin | Tech leads only |
+| dormway-readonly | Read | Contractors, PMs |
+
+#### 1.2 Doppler Secrets Access
+
+```bash
+# Invite via Doppler dashboard
+# Navigate to: https://dashboard.doppler.com/workplace/[workspace]/access
+
+# Assign appropriate project access:
+# - dormway project
+# - Config access: dev_[username] for personal dev branch
+```
+
+**Doppler Roles:**
+| Role | Access Level | Use Case |
+|------|-------------|----------|
+| Owner | Full | Founders only |
+| Admin | Manage + secrets | Tech leads |
+| Collaborator | Read secrets | Engineers |
+| Viewer | Read-only | PMs, contractors |
+
+**Create personal dev config:**
+```bash
+# Create a dev config for the new user
+doppler configs create dev_[username] --project dormway
+```
+
+#### 1.3 Neon Database Access
+
+```bash
+# Invite via Neon Console
+# Navigate to: https://console.neon.tech/app/projects/[project-id]/settings/sharing
+
+# Add team member with appropriate role:
+# - Admin: Full access (leads only)
+# - Developer: Branch creation, query access
+# - Viewer: Read-only access
+```
+
+### Step 2: Infrastructure Access (If Required)
+
+#### 2.1 AWS IAM User (Infrastructure Team Only)
+
+```bash
+# Create IAM user (AWS Console or CLI)
+aws iam create-user --user-name firstname.lastname
+
+# Add to appropriate group
+aws iam add-user-to-group --user-name firstname.lastname --group-name DormWayDevelopers
+
+# Enable MFA (REQUIRED)
+# User must set up MFA on first login
+```
+
+**AWS Groups:**
+| Group | Permissions | Use Case |
+|-------|------------|----------|
+| DormWayDevelopers | ECS, ECR, CloudWatch read | General dev |
+| DormWayDeployment | ECS deploy, ECR push | CI/CD, senior devs |
+| DormWayAdmin | Full access | Platform team only |
+
+#### 2.2 Temporal Cloud Access
+
+```bash
+# Invite via Temporal Cloud Console
+# Navigate to: https://cloud.temporal.io/namespaces/dormway/settings
+
+# Add user with appropriate role:
+# - Admin: Namespace management
+# - Developer: Workflow visibility + signals
+# - Read-only: Visibility only
+```
+
+### Step 3: Communication & Project Tools
+
+#### 3.1 Slack Workspace
+- Invite to DormWay workspace
+- Add to channels: #engineering, #deployments, #alerts
+
+#### 3.2 Linear Workspace
+- Invite to DormWay workspace
+- Assign to appropriate team
+
+#### 3.3 Additional Tools (as needed)
+- Customer.io (marketing/product)
+- Clerk Dashboard (auth team)
+- Sentry (all engineers)
+- Dash0 (platform team)
+
+### Step 4: Local Development Setup
+
+Provide new team member with:
+1. [Team Member Setup Guide](/docs/operations/meta/team-member-setup-riley)
+2. Access to dormway-platform repository
+3. Doppler CLI setup instructions
+
+```bash
+# New team member runs:
+doppler login
+doppler setup  # Select: dormway, Config: dev_[username]
+```
+
+### Step 5: Documentation & Verification
+
+- [ ] Record access grants in access log (Linear ticket or spreadsheet)
+- [ ] Verify team member can access all required systems
+- [ ] Schedule 1-week access review to confirm appropriate levels
+
+---
+
+## Access Offboarding (Departing Team Member)
+
+### Immediate Actions (Within 1 Hour of Notification)
+
+**Priority 1 - Critical Security:**
+
+#### 1.1 Revoke Doppler Access
+```bash
+# Remove from Doppler immediately
+# Navigate to: https://dashboard.doppler.com/workplace/[workspace]/access
+# Remove user from all projects
+
+# Delete personal dev config
+doppler configs delete dev_[username] --project dormway --yes
+```
+
+#### 1.2 Revoke GitHub Access
+```bash
+# Remove from organization
+# Navigate to: https://github.com/orgs/DormWayLLC/people
+# Find user → Remove from organization
+
+# Remove any personal access tokens they created
+# Check: Settings → Developer settings → Personal access tokens
+```
+
+#### 1.3 Revoke AWS Access (If Applicable)
+```bash
+# Disable IAM user immediately
+aws iam delete-login-profile --user-name firstname.lastname
+
+# Deactivate access keys
+aws iam list-access-keys --user-name firstname.lastname
+aws iam update-access-key --user-name firstname.lastname --access-key-id AKIA... --status Inactive
+
+# Remove from groups
+aws iam remove-user-from-group --user-name firstname.lastname --group-name DormWayDevelopers
+```
+
+### Secondary Actions (Within 24 Hours)
+
+#### 2.1 Revoke Database Access
+```bash
+# Remove from Neon project
+# Navigate to: https://console.neon.tech/app/projects/[project-id]/settings/sharing
+# Remove user
+```
+
+#### 2.2 Revoke Temporal Cloud Access
+```bash
+# Remove from namespace
+# Navigate to: https://cloud.temporal.io/namespaces/dormway/settings
+# Remove user
+```
+
+#### 2.3 Revoke Communication Access
+- [ ] Remove from Slack workspace
+- [ ] Remove from Linear workspace
+- [ ] Remove from any shared Google Drive folders
+
+#### 2.4 Revoke Monitoring/Observability Access
+- [ ] Remove from Sentry organization
+- [ ] Remove from Dash0 team
+- [ ] Remove from Customer.io (if applicable)
+- [ ] Remove from Clerk Dashboard (if applicable)
+
+### Post-Offboarding Actions (Within 1 Week)
+
+#### 3.1 Rotate Shared Secrets (If Applicable)
+
+If the departing team member had access to production secrets:
+
+```bash
+# Trigger secret rotation for affected services
+# See: [Secrets Rotation](/docs/operations/runbooks/secrets-rotation)
+
+# Priority secrets to rotate:
+# - Database connection strings (if they had direct access)
+# - API keys for external services
+# - Any shared credentials
+```
+
+#### 3.2 Audit Trail Review
+- [ ] Review Doppler audit logs for any unusual access
+- [ ] Review GitHub audit logs
+- [ ] Check for any unauthorized code commits
+
+#### 3.3 Complete AWS User Deletion
+```bash
+# After verifying no active sessions
+aws iam delete-user --user-name firstname.lastname
+```
+
+### Verification Checklist
+
+| System | Revoked | Verified By | Date |
+|--------|---------|-------------|------|
+| Doppler | [ ] | | |
+| GitHub | [ ] | | |
+| Neon | [ ] | | |
+| AWS (if applicable) | [ ] | | |
+| Temporal Cloud | [ ] | | |
+| Slack | [ ] | | |
+| Linear | [ ] | | |
+| Sentry | [ ] | | |
+| Dash0 | [ ] | | |
+| Customer.io | [ ] | | |
+| Clerk Dashboard | [ ] | | |
+
+---
+
+## Access Review Schedule
+
+| Review Type | Frequency | Reviewer | Documentation |
+|-------------|-----------|----------|---------------|
+| Quarterly access audit | Every 3 months | Engineering Lead | Linear ticket |
+| Annual access recertification | Yearly | CTO | Formal review |
+| Privilege escalation review | Per change | Manager + Security | Approval ticket |
+
+### Quarterly Audit Procedure
+
+1. Export user lists from all systems
+2. Compare against current employee roster
+3. Identify and remove stale accounts
+4. Document findings in Linear
+
+---
+
+## Emergency Access Revocation
+
+For suspected security incidents:
+
+```bash
+# 1. Immediately disable all access
+# Run offboarding steps 1.1-1.3 without waiting
+
+# 2. Notify security team
+# Post in #security-incidents Slack channel
+
+# 3. Preserve audit logs
+# Export logs before any cleanup
+
+# 4. Follow incident response procedure
+# See: [Incident Handling](/docs/operations/runbooks/incident-handling)
+```
+
+---
+
+## Related Documents
+
+- [Secrets Rotation](/docs/operations/runbooks/secrets-rotation)
+- [Incident Handling](/docs/operations/runbooks/incident-handling)
+- [Security Architecture](/docs/engineering/architecture/security-architecture)
+- [Third-Party Tools & Services Inventory](/docs/engineering/architecture/third-party-tools-services-inventory)
