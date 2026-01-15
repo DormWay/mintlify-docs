@@ -1,528 +1,358 @@
 ---
 title: "Growth Scoreboard"
-description: "Real-time weekly growth metrics: signups, WFAU, and Day 7 retention by source"
+description: "Track weekly metrics, WFAU performance, and retention by acquisition source"
 icon: "chart-simple"
 ---
 
-## Overview
+# Growth Scoreboard
 
-The **Growth Scoreboard** is DormWay's pre-computed analytics dashboard tracking key growth metrics on a weekly basis. It aggregates data from multiple sources (ambassadors, campus outreach, Labs, organic) to provide a unified view of growth performance.
+The **Growth Scoreboard** is your weekly metrics dashboard showing user acquisition, retention, and performance by source. Both Alex and Lauren review this every **Friday** to track progress toward WFAU goals and identify high-performing channels.
 
-<CardGroup cols={3}>
-  <Card title="Signups" icon="user-plus">
-    New account creations per week
-  </Card>
-  <Card title="WFAU" icon="star">
-    Weekly First-time Active Users (completed onboarding + first action)
-  </Card>
-  <Card title="Day 7 Return" icon="rotate-right">
-    Users who returned 7 days after signup
-  </Card>
-</CardGroup>
+<Tip>
+  **WFAU (Weekly First-Action Users)** is your North Star metric - students who completed onboarding (uploaded schedule or connected Canvas) in the past 7 days.
+</Tip>
 
 ---
 
-## Database Schema
+## Accessing the Scoreboard
 
-### `growth_scoreboard` Table
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `id` | UUID | Primary key |
-| `week_start` | DATE | Monday of the week (ISO week start) |
-| `source` | TEXT | Traffic source (see below) |
-| `campus_id` | UUID | Optional: Campus-level breakdown |
-| `reach` | INTEGER | Total reach (impressions, views, etc.) |
-| `clicks` | INTEGER | Total clicks on campaign links |
-| `signups` | INTEGER | New accounts created |
-| `wfau` | INTEGER | Weekly First-time Active Users |
-| `day_7_return` | INTEGER | Users who returned on day 7 |
-| `day_7_return_pct` | NUMERIC(5,2) | `(day_7_return / wfau) * 100` |
-| `platform_split` | JSONB | `{ "ios": 50, "web": 30, "android": 20 }` |
-| `metadata` | JSONB | Additional context (campaign IDs, channel breakdowns) |
-| `created_at` | TIMESTAMPTZ | Record creation time |
-| `updated_at` | TIMESTAMPTZ | Last update time |
-
-<Info>
-  **Unique Constraint**: One row per `(week_start, source, campus_id)` combination. Null `campus_id` means aggregate across all campuses.
-</Info>
+<Steps>
+  <Step title="Go to Admin Dashboard">
+    Navigate to `https://admin.dormway.app` and sign in
+  </Step>
+  <Step title="Open Growth Section">
+    Click **Growth** in the sidebar, then **Scoreboard**
+  </Step>
+  <Step title="View Weekly Metrics">
+    The default view shows the current week's performance
+  </Step>
+</Steps>
 
 ---
 
-## Traffic Sources
+## Understanding the Metrics
 
-<Tabs>
-  <Tab title="ambassadors">
-    **Ambassador Program**
-
-    Signups referred via ambassador referral codes.
-
-    **Tracked via**: `accounts.referral_code_used` field
-
-    **Example**: Student shares referral link on Instagram, friend signs up
-  </Tab>
-
-  <Tab title="campus_outreach">
-    **Campus Outreach CRM**
-
-    Signups from specific campus campaigns tracked in `campus_outreach` table.
-
-    **Tracked via**: UTM parameters in campaign links, `campus_outreach.actual_signups`
-
-    **Example**: UMich Spring '26 campaign drives 50 signups
-  </Tab>
-
-  <Tab title="labs">
-    **Labs Program**
-
-    Signups from Labs member activities (QA testers inviting friends, etc.).
-
-    **Tracked via**: Special Labs referral codes or campaign links
-
-    **Example**: Labs member shares app with study group
-  </Tab>
-
-  <Tab title="organic">
-    **Organic Growth**
-
-    Word-of-mouth, search, direct app downloads with no attribution.
-
-    **Tracked via**: Default if no referral code or UTM
-
-    **Example**: Student finds app in App Store search
-  </Tab>
-
-  <Tab title="paid">
-    **Paid Advertising**
-
-    Meta/Google/TikTok ads (future).
-
-    **Tracked via**: UTM parameters in ad links
-
-    **Example**: Instagram Story ad drives app downloads
-  </Tab>
-
-  <Tab title="social">
-    **Social Media**
-
-    Organic social posts (not paid ads).
-
-    **Tracked via**: UTM parameters in social links
-
-    **Example**: Viral TikTok about DormWay features
-  </Tab>
-
-  <Tab title="lifecycle">
-    **Lifecycle Campaigns**
-
-    Re-engagement emails, push notifications to inactive users.
-
-    **Tracked via**: UTM parameters in email/push deep links
-
-    **Example**: "Come back and plan your week" email
-  </Tab>
-
-  <Tab title="other">
-    **Other Sources**
-
-    Partnerships, integrations, or uncategorized channels.
-  </Tab>
-</Tabs>
-
----
-
-## Key Metrics Explained
-
-### Signups
-
-**Definition**: New accounts created during the week.
-
-**Calculation**:
-```sql
-SELECT COUNT(*)
-FROM accounts
-WHERE created_at >= '2026-01-13' -- Monday
-  AND created_at < '2026-01-20'   -- Next Monday
-  AND referral_code_used LIKE 'ambassador_%'; -- Example: ambassador source
-```
-
-**Target**: Varies by growth stage. Early stage: 50-100/week. Scale stage: 500+/week.
-
----
-
-### WFAU (Weekly First-time Active Users)
-
-**Definition**: Users who completed onboarding AND performed at least one meaningful action (uploaded syllabus, viewed schedule, synced calendar) within their first week.
-
-**Calculation**:
-```sql
--- Users who became "active" for the first time this week
-SELECT COUNT(DISTINCT a.id)
-FROM accounts a
-WHERE a.created_at >= '2026-01-13'
-  AND EXISTS (
-    -- Check for meaningful activity (customize per product definition)
-    SELECT 1 FROM service_data sd
-    WHERE sd.user_id = a.id
-      AND sd.fetched_at <= a.created_at + INTERVAL '7 days'
-      AND sd.method IN ('dayplan', 'processed_syllabus_crew', 'calendar_events')
-  );
-```
-
-**Target**: 70-90% of signups should become WFAU. If < 50%, onboarding is broken.
-
----
-
-### Day 7 Return Rate
-
-**Definition**: Percentage of WFAU who returned to the app on Day 7 after signup.
-
-**Why Day 7?**: Strong predictor of long-term retention. Users who return on D7 are 5x more likely to be retained at D30.
-
-**Calculation**:
-```sql
--- Users who logged in on their 7th day
-WITH day_7_cohort AS (
-  SELECT a.id, a.created_at::date as signup_date
-  FROM accounts a
-  WHERE a.created_at >= '2026-01-06' -- 7 days before week_start
-    AND a.created_at < '2026-01-13'  -- Week prior to current week
-)
-SELECT
-  COUNT(DISTINCT dc.id) FILTER (WHERE ul.timestamp::date = dc.signup_date + INTERVAL '7 days') as day_7_returns,
-  COUNT(DISTINCT dc.id) as total_wfau,
-  (COUNT(DISTINCT dc.id) FILTER (WHERE ul.timestamp::date = dc.signup_date + INTERVAL '7 days')::float /
-   COUNT(DISTINCT dc.id)) * 100 as day_7_return_pct
-FROM day_7_cohort dc
-LEFT JOIN user_locations ul ON ul.user_id = dc.id
-  AND ul.timestamp::date = dc.signup_date + INTERVAL '7 days';
-```
-
-**Target**: 40-60% is strong. < 30% indicates product-market fit issues.
-
----
-
-## Scoreboard Calculation
-
-### Automated Weekly Calculation
-
-<Info>
-  **Planned Feature**: Cron job to auto-calculate scoreboard metrics every Monday at 2am UTC.
-</Info>
-
-**Process**:
-1. **Identify cohort**: All signups from previous week (Monday-Sunday)
-2. **Calculate WFAU**: Users who performed meaningful action within 7 days of signup
-3. **Calculate Day 7 return**: Wait 7 days, then check login activity
-4. **Aggregate by source**: Group by `referral_code_used`, UTM parameters, or campaign IDs
-5. **Insert/Update**: Upsert into `growth_scoreboard` table
-
-**Example Pseudocode**:
-```typescript
-async function calculateWeeklyScoreboard() {
-  const lastWeekStart = getLastMonday(); // '2026-01-13'
-  const sources = ['ambassadors', 'campus_outreach', 'labs', 'organic'];
-
-  for (const source of sources) {
-    const signups = await getSignupsBySource(source, lastWeekStart);
-    const wfau = await calculateWFAU(signups);
-    const day7Returns = await calculateDay7Returns(signups); // May need to wait 7 days
-
-    await upsertScoreboard({
-      week_start: lastWeekStart,
-      source,
-      campus_id: null, // Aggregate across all campuses
-      signups: signups.length,
-      wfau: wfau.length,
-      day_7_return: day7Returns.length,
-      day_7_return_pct: (day7Returns.length / wfau.length) * 100
-    });
-  }
-}
-```
-
----
-
-## Admin Dashboard Views
-
-### Weekly Overview
-
-<Info>
-  **Coming Soon**: Interactive dashboard with charts. See [GROWTH_OPS_ANALYTICS_PLAN.md](https://github.com/DormWay/dormway-platform/blob/main/GROWTH_OPS_ANALYTICS_PLAN.md).
-</Info>
-
-**Table View**:
-| Week Start | Source | Signups | WFAU | Day 7 Return | D7 Return % |
-|------------|--------|---------|------|--------------|-------------|
-| 2026-01-13 | ambassadors | 87 | 73 | 44 | 60.3% |
-| 2026-01-13 | campus_outreach | 52 | 49 | 28 | 57.1% |
-| 2026-01-13 | labs | 12 | 11 | 7 | 63.6% |
-| 2026-01-13 | organic | 34 | 28 | 12 | 42.9% |
-| **TOTAL** | | **185** | **161** | **91** | **56.5%** |
-
-### Trend Charts
-
-**Signups Over Time (by Source)**:
-```
-     ┌─────────────────────────────────┐
- 100 │         ╭─╮                     │ ambassadors
-  80 │      ╭──╯ ╰╮                    │
-  60 │   ╭──╯     ╰─╮                  │ campus_outreach
-  40 │╭──╯          ╰─╮     ╭─╮       │
-  20 ││                ╰─╮ ╭─╯ ╰╮      │ organic
-   0 │╰                  ╰─╯    ╰─     │
-     └─────────────────────────────────┘
-      W1   W2   W3   W4   W5   W6   W7
-```
-
-**Day 7 Return Rate (Trend)**:
-```
-     ┌─────────────────────────────────┐
- 70% │          ╭──╮                   │ Target: 50%
- 60% │       ╭──╯  ╰──╮                │
- 50% │  ╭────╯        ╰───╮            │
- 40% │──╯                 ╰──╮         │
- 30% │                       ╰──       │
-     └─────────────────────────────────┘
-      W1   W2   W3   W4   W5   W6   W7
-```
-
----
-
-## Campus-Level Breakdown
-
-### Per-Campus Metrics
-
-**Query**:
-```sql
-SELECT
-  c.name as campus_name,
-  gs.source,
-  gs.signups,
-  gs.wfau,
-  gs.day_7_return,
-  gs.day_7_return_pct
-FROM growth_scoreboard gs
-JOIN contexts c ON c.id = gs.campus_id
-WHERE gs.week_start = '2026-01-13'
-  AND gs.campus_id IS NOT NULL
-ORDER BY gs.signups DESC;
-```
-
-**Example Output**:
-| Campus | Source | Signups | WFAU | D7 Return | D7 % |
-|--------|--------|---------|------|-----------|------|
-| University of Michigan | campus_outreach | 42 | 39 | 24 | 61.5% |
-| UC Berkeley | ambassadors | 35 | 31 | 19 | 61.3% |
-| NYU | organic | 18 | 16 | 8 | 50.0% |
-
-**Use Case**: Compare effectiveness of same campaign type across different campuses.
-
----
-
-## Platform Split Analytics
-
-### iOS vs Web vs Android
-
-The `platform_split` JSONB field tracks signup distribution:
-
-```json
-{
-  "ios": 92,        // 50%
-  "web": 74,        // 40%
-  "android": 19     // 10%
-}
-```
-
-**Query**:
-```sql
-SELECT
-  source,
-  SUM((platform_split->>'ios')::int) as ios_signups,
-  SUM((platform_split->>'web')::int) as web_signups,
-  SUM((platform_split->>'android')::int) as android_signups
-FROM growth_scoreboard
-WHERE week_start >= CURRENT_DATE - INTERVAL '4 weeks'
-GROUP BY source;
-```
-
-**Insights**:
-- **iOS dominance**: If iOS > 60%, prioritize iOS features and stability
-- **Web growth**: Rising web signups may indicate need for web app improvements
-- **Android opportunity**: If Android < 5%, consider if worth maintaining
-
----
-
-## Source Performance Analysis
-
-### ROI by Source
-
-<Warning>
-  **Budget Tracking**: For paid sources, add cost data to `metadata.budget` to calculate cost-per-signup.
-</Warning>
-
-```sql
-SELECT
-  source,
-  SUM(signups) as total_signups,
-  SUM(wfau) as total_wfau,
-  AVG(day_7_return_pct) as avg_d7_return,
-  SUM((metadata->>'budget')::numeric) as total_budget,
-  SUM((metadata->>'budget')::numeric) / NULLIF(SUM(signups), 0) as cost_per_signup
-FROM growth_scoreboard
-WHERE week_start >= CURRENT_DATE - INTERVAL '8 weeks'
-GROUP BY source
-ORDER BY total_wfau DESC;
-```
-
-**Example Output**:
-| Source | Signups | WFAU | Avg D7 % | Budget | Cost/Signup |
-|--------|---------|------|----------|--------|-------------|
-| ambassadors | 348 | 294 | 59.2% | $520 | $1.49 |
-| campus_outreach | 208 | 196 | 56.8% | $350 | $1.68 |
-| organic | 136 | 112 | 44.1% | $0 | $0 |
-| paid | 89 | 67 | 38.5% | $890 | $10.00 |
-
-**Decision**: Ambassadors have best ROI. Paid ads underperforming - optimize or pause.
-
----
-
-## API Endpoints
-
-### Get Current Week Scoreboard
-
-```bash
-curl http://localhost:3001/api/admin/growth/scoreboard/current-week \
-  -H "X-User-Role: admin"
-```
-
-**Response**:
-```json
-{
-  "week_start": "2026-01-13",
-  "total_signups": 185,
-  "total_wfau": 161,
-  "total_day_7_return": 91,
-  "overall_d7_return_pct": 56.5,
-  "by_source": [
-    {
-      "source": "ambassadors",
-      "signups": 87,
-      "wfau": 73,
-      "day_7_return": 44,
-      "day_7_return_pct": 60.3
-    }
-  ]
-}
-```
-
-### Get Historical Trend
-
-```bash
-curl "http://localhost:3001/api/admin/growth/scoreboard/trends?weeks=8" \
-  -H "X-User-Role: admin"
-```
-
-**Response**:
-```json
-{
-  "weeks": [
-    {
-      "week_start": "2026-01-13",
-      "signups": 185,
-      "wfau": 161,
-      "day_7_return_pct": 56.5
-    },
-    {
-      "week_start": "2026-01-06",
-      "signups": 142,
-      "wfau": 128,
-      "day_7_return_pct": 51.2
-    }
-  ]
-}
-```
-
----
-
-## Best Practices
+### Key Metrics Explained
 
 <AccordionGroup>
-  <Accordion title="Review Weekly, Act on Trends" icon="calendar">
-    Check scoreboard every Monday. Don't react to single-week fluctuations - look at 4-week trends.
+  <Accordion title="WFAU (Weekly First-Action Users)" icon="users">
+    **What it is:** Number of students who completed onboarding this week
+
+    **What counts as "first action":**
+    - Uploaded their schedule (manual or via screenshot)
+    - Connected Canvas account
+    - Connected Google Calendar
+
+    **Why it matters:** This is your primary growth metric - it shows how many new students actually started using DormWay (not just signed up).
+
+    **Goal:** Track week-over-week growth and identify which sources drive the most first-action users.
   </Accordion>
 
-  <Accordion title="Segment by Source AND Campus" icon="filter">
-    Aggregate metrics hide insights. Drill down to find what's working where.
+  <Accordion title="Day 7 Return Rate (%)" icon="rotate">
+    **What it is:** Percentage of users who return to the app within 7 days of first action
+
+    **Why it matters:** Shows retention quality - a high Day 7 return means users find value and stick around.
+
+    **Good benchmark:**
+    - 40%+ = Excellent (users are highly engaged)
+    - 25-40% = Good (typical for early-stage apps)
+    - <25% = Needs improvement (users aren't finding value)
+
+    **How to improve it:** Lauren optimizes lifecycle emails (welcome series, nudges) to bring users back.
   </Accordion>
 
-  <Accordion title="Focus on WFAU, Not Just Signups" icon="bullseye">
-    Signups are vanity metric. WFAU = users who got value. Optimize onboarding to maximize WFAU%.
+  <Accordion title="Metrics by Source" icon="filter">
+    **What it shows:** WFAU and Day 7 return broken down by acquisition channel
+
+    **Common sources:**
+    - `ambassador_referral` - Students referred by campus ambassadors
+    - `campus_outreach` - Direct outreach campaigns
+    - `organic` - Word of mouth, social media
+    - `paid` - Paid advertising (if running)
+
+    **Why it matters:** Identifies which channels bring the highest quality users (not just the most users).
+
+    **Example:** If `ambassador_referral` has 50 WFAU with 45% Day 7 return, but `organic` has 100 WFAU with 20% Day 7 return, ambassadors are bringing higher quality users even though organic has more volume.
   </Accordion>
 
-  <Accordion title="Improve Day 7 Return Rate" icon="chart-line">
-    D7 return predicts long-term retention. Tactics:
-    - Send D3/D5 push notifications
-    - In-app reminders for upcoming deadlines
-    - Weekly digest emails
-  </Accordion>
+  <Accordion title="Metrics by Campus" icon="building-columns">
+    **What it shows:** Performance broken down by university
 
-  <Accordion title="Celebrate Wins, Diagnose Drops" icon="party-horn">
-    Share big wins with team (e.g., "Best week ever: 250 signups!"). When metrics drop, investigate immediately.
+    **Why it matters:**
+    - Alex uses this to identify which campuses need more ambassador coverage
+    - Shows which campuses have the best engagement (use as case studies for new campuses)
+    - Helps prioritize where to focus outreach efforts
+
+    **Example:** If UMass Amherst has 80 WFAU but UMBC only has 5, Alex might recruit more ambassadors at UMBC or try different outreach tactics.
   </Accordion>
 </AccordionGroup>
 
 ---
 
-## Future Enhancements
+## Weekly Scoreboard Workflow
+
+### Friday Review (Both Alex and Lauren)
+
+Every Friday, update the team's master scoreboard with the week's performance:
+
+<Steps>
+  <Step title="Open Current Week View">
+    The scoreboard defaults to the current week (Monday-Sunday)
+  </Step>
+
+  <Step title="Review Total WFAU">
+    - Check total WFAU for the week
+    - Compare to previous week and growth goals
+    - Note if you hit, exceeded, or missed the target
+  </Step>
+
+  <Step title="Check Day 7 Return Rate">
+    - Look at overall retention percentage
+    - Compare to previous weeks - is it improving or declining?
+    - Note any significant changes (e.g., 35% → 42% jump means something worked well)
+  </Step>
+
+  <Step title="Analyze by Source">
+    - See which acquisition channels drove the most WFAU
+    - Check Day 7 return for each source to assess quality
+    - Identify best performing sources to double down on
+  </Step>
+
+  <Step title="Analyze by Campus">
+    - Review which campuses had the most new users
+    - Check if any campuses are underperforming
+    - Note campuses with high engagement (potential case studies)
+  </Step>
+
+  <Step title="Export Key Numbers">
+    Copy metrics to the team's shared scoreboard (Google Sheet or Notion):
+    - Total WFAU this week
+    - Day 7 return %
+    - Top 3 sources by volume
+    - Top 3 campuses by WFAU
+    - Week-over-week growth %
+  </Step>
+</Steps>
 
 <Info>
-  These features are planned but not yet implemented. See [GROWTH_OPS_ANALYTICS_PLAN.md](https://github.com/DormWay/dormway-platform/blob/main/GROWTH_OPS_ANALYTICS_PLAN.md).
+  **Metrics update overnight** - If you check the scoreboard on Friday morning and the numbers look low, they might not be fully updated yet. Check again Friday afternoon or Saturday morning for accurate weekly totals.
 </Info>
-
-- **Automated Alerts**: Slack notifications when metrics exceed targets or drop below thresholds
-- **Cohort Analysis**: Track D30, D60, D90 retention for each weekly cohort
-- **Funnel Visualization**: See drop-off from reach → click → signup → WFAU → D7 return
-- **A/B Test Integration**: Compare scoreboard metrics for users in different experiments
-- **Export to CSV**: Download weekly reports for board meetings / investor updates
 
 ---
 
-## SQL Reference
+## How Alex Uses the Scoreboard
 
-**Insert weekly aggregate**:
-```sql
-INSERT INTO growth_scoreboard (
-  week_start, source, signups, wfau, day_7_return, day_7_return_pct
-) VALUES (
-  '2026-01-13',
-  'ambassadors',
-  87,
-  73,
-  44,
-  60.3
-);
-```
+### 1. Identify Ambassador Performance
 
-**Upsert (update if exists)**:
-```sql
-INSERT INTO growth_scoreboard (
-  week_start, source, campus_id, signups, wfau
-) VALUES (
-  '2026-01-13', 'organic', NULL, 34, 28
-)
-ON CONFLICT (week_start, source, campus_id)
-DO UPDATE SET
-  signups = EXCLUDED.signups,
-  wfau = EXCLUDED.wfau,
-  updated_at = NOW();
-```
+**Goal:** See which ambassadors are driving the most referrals
 
-**Query 8-week trend**:
-```sql
-SELECT week_start, source, signups, wfau, day_7_return_pct
-FROM growth_scoreboard
-WHERE week_start >= CURRENT_DATE - INTERVAL '8 weeks'
-  AND campus_id IS NULL -- Aggregate only
-ORDER BY week_start DESC, source;
-```
+**Steps:**
+1. Filter by source: `ambassador_referral`
+2. Break down by campus to see which ambassadors are most active
+3. Note ambassadors who haven't had any referrals recently (may need re-engagement)
+4. Use this data to calculate monthly payouts ($5 per successful referral)
+
+**Action items:**
+- Thank and recognize top-performing ambassadors
+- Reach out to inactive ambassadors to re-engage them
+- Share success stories with new ambassadors as examples
+
+---
+
+### 2. Find Campus Coverage Gaps
+
+**Goal:** Identify campuses that need more outreach or ambassadors
+
+**Steps:**
+1. Look at "Metrics by Campus" section
+2. Sort by WFAU (ascending) to see campuses with lowest activity
+3. Cross-reference with campus size - large campuses with low WFAU are gaps
+4. Check if you have active ambassadors at those campuses
+
+**Action items:**
+- Prioritize ambassador recruitment at low-activity campuses
+- Create targeted outreach campaigns for underperforming campuses
+- Consider different tactics (partnerships, clubs, events) if ambassadors aren't working
+
+---
+
+### 3. Evaluate Campaign Effectiveness
+
+**Goal:** Measure ROI of campus outreach campaigns
+
+**Steps:**
+1. Note WFAU from `campus_outreach` source this week
+2. Compare to previous weeks to see if recent campaigns are working
+3. Look at Day 7 return for outreach users vs. other sources
+4. Cross-reference with campaigns you launched recently
+
+**Example:** If you launched a UMass Instagram campaign 2 weeks ago and UMass WFAU jumped from 10 → 35 this week, that campaign is working.
+
+**Action items:**
+- Double down on successful campaign tactics
+- Replicate winning campaigns at other campuses
+- Stop or adjust campaigns that aren't driving WFAU
+
+---
+
+## How Lauren Uses the Scoreboard
+
+### 1. Monitor Lifecycle Email Impact
+
+**Goal:** See if lifecycle emails are improving Day 7 return rate
+
+**Steps:**
+1. Check overall Day 7 return % this week
+2. Compare to previous 4 weeks - is there an upward trend?
+3. Note if you launched new email campaigns recently
+4. Look for correlation between email changes and retention improvements
+
+**Example:** If you launched a new "Day 3 nudge" email and Day 7 return improved from 32% → 38%, that email is working.
+
+**Action items:**
+- Keep successful email campaigns running
+- Test variations of winning emails (subject lines, timing, content)
+- Pause or revise emails that don't improve retention
+
+---
+
+### 2. Identify Labs Task Impact on WFAU
+
+**Goal:** See if syllabus gathering and QA work correlates with user growth
+
+**Steps:**
+1. Track WFAU trends over time
+2. Note weeks with high syllabus delivery from Labs members
+3. Look for correlation between syllabus coverage and WFAU at specific campuses
+
+**Example:** If Labs gathered 20 UConn syllabi last week and UConn WFAU increased this week, that syllabus coverage may have helped.
+
+**Action items:**
+- Prioritize syllabus gathering at campuses with upcoming registration periods
+- Focus Labs tasks on high-potential campuses (large schools with low WFAU)
+
+---
+
+### 3. Track Overall Platform Health
+
+**Goal:** Ensure retention stays healthy as you scale WFAU
+
+**Steps:**
+1. Monitor both WFAU (volume) and Day 7 return (quality) each week
+2. Watch for concerning patterns (e.g., WFAU growing but Day 7 return dropping)
+3. Flag issues to Riley/Ethan if retention declines significantly
+
+**Warning signs:**
+- Day 7 return drops below 25%
+- Large WFAU increase but Day 7 return stays flat or drops
+- Specific sources have very low Day 7 return (<15%)
+
+**Action items:**
+- Investigate why retention is dropping (onboarding issues? Missing features?)
+- Work with Riley/Ethan to improve product experience for low-retention sources
+
+---
+
+## Interpreting Trends
+
+### Good Trends (Keep Doing What You're Doing)
+
+✅ **WFAU increasing week-over-week** - Growth is working
+✅ **Day 7 return stable or improving** - Users find value and stick around
+✅ **Multiple sources contributing to WFAU** - Diversified growth (not reliant on one channel)
+✅ **Campus coverage expanding** - More universities adopting DormWay
+
+### Warning Signs (Investigate and Adjust)
+
+⚠️ **WFAU flat or declining for 3+ weeks** - Growth stalled, need new tactics
+⚠️ **Day 7 return dropping** - Users not finding value, product or onboarding issue
+⚠️ **Single source dominating WFAU** - Risk if that channel dries up
+⚠️ **Ambassador referrals declining** - Ambassadors may be losing motivation or running out of reach
+
+### Action Items Based on Trends
+
+| Trend | What It Means | What to Do |
+|-------|---------------|------------|
+| WFAU up, Day 7 return up | **Healthy growth** - scaling well | Keep current tactics, expand to new campuses |
+| WFAU up, Day 7 return down | **Leaky bucket** - bringing in users but losing them | Lauren: Focus on lifecycle emails and onboarding improvements |
+| WFAU flat, Day 7 return stable | **Growth plateau** - need new channels | Alex: Launch new outreach campaigns, recruit more ambassadors |
+| WFAU down, Day 7 return down | **Crisis mode** - both acquisition and retention failing | Escalate to Riley/Ethan, review product and marketing strategy |
+
+---
+
+## Tips for Effective Analysis
+
+<CardGroup cols={2}>
+  <Card title="Compare Week-Over-Week" icon="chart-line">
+    Don't just look at this week's numbers - compare to previous 4-6 weeks to spot trends. One bad week isn't a crisis, but 3-4 weeks of decline is a pattern.
+  </Card>
+
+  <Card title="Look at Source Quality, Not Just Volume" icon="star">
+    A source with 20 WFAU and 50% Day 7 return is better than one with 100 WFAU and 15% Day 7 return. High retention = sustainable growth.
+  </Card>
+
+  <Card title="Account for Seasonality" icon="calendar">
+    Expect WFAU to spike at semester start (Aug/Sept, Jan/Feb) and drop during breaks. Compare to the same week last year, not just last week.
+  </Card>
+
+  <Card title="Celebrate Wins" icon="party-horn">
+    When you hit a WFAU record or see a big Day 7 return improvement, share it with the team! Recognize what worked so you can replicate it.
+  </Card>
+</CardGroup>
+
+---
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Numbers Look Wrong or Incomplete" icon="triangle-exclamation">
+    **Issue:** Scoreboard shows 0 WFAU or very low numbers
+
+    **Likely causes:**
+    - Metrics haven't updated yet (they update overnight)
+    - You're looking at the wrong week (check date range)
+    - Data pipeline issue (rare)
+
+    **Solution:**
+    - Wait until Friday afternoon or Saturday morning for full week data
+    - Double-check you're viewing the current week
+    - If still wrong, message Riley/Ethan
+  </Accordion>
+
+  <Accordion title="Can't Filter by Specific Ambassador" icon="filter">
+    **Issue:** Want to see one ambassador's performance, not all ambassador referrals
+
+    **Current limitation:** Scoreboard shows source-level data (all ambassadors combined)
+
+    **Workaround:**
+    - Use Campus Outreach CRM to see individual ambassador performance
+    - Track referrals manually in your own spreadsheet
+    - Request this feature from Riley/Ethan if you need it regularly
+  </Accordion>
+
+  <Accordion title="Day 7 Return Rate Seems Too High/Low" icon="question">
+    **Issue:** Retention percentage doesn't match your intuition
+
+    **Explanation:** Day 7 return is measured from first action date, not signup date. If a user signed up Monday but didn't upload their schedule until Friday, the 7-day window starts Friday.
+
+    **This is normal:** Early users tend to have higher Day 7 return because they're more motivated (they bothered to complete onboarding). As WFAU grows, average Day 7 return may decrease slightly.
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Related Documentation
+
+<CardGroup cols={2}>
+  <Card title="Campus Outreach CRM" icon="megaphone" href="/docs/growth-ops/outreach">
+    Track specific campaigns and ambassador performance in more detail
+  </Card>
+
+  <Card title="Labs Dashboard" icon="users-gear" href="/docs/growth-ops/labs">
+    See how Labs tasks contribute to campus coverage and WFAU
+  </Card>
+
+  <Card title="Platform Overview" icon="rocket" href="/docs/growth-ops/overview">
+    Return to main Growth Ops Platform guide
+  </Card>
+</CardGroup>

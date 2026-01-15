@@ -1,472 +1,493 @@
 ---
-title: "Labs Program"
-description: "Manage student contributors: task assignment, deliverable tracking, and payouts"
+title: "Labs Dashboard"
+description: "Manage Labs members, assign tasks, review deliverables, and track performance"
 icon: "users-gear"
 ---
 
-## Overview
+# Labs Dashboard
 
-The **DormWay Labs Program** enables students to contribute to product development through structured tasks like bug hunting, syllabus gathering, QA testing, and user interviews. The system tracks task assignments, deliverables, completion status, and payouts.
-
-<CardGroup cols={2}>
-  <Card title="Labs Members" icon="id-card">
-    Student contributors enrolled in the Labs program with active/inactive status tracking
-  </Card>
-  <Card title="Labs Tasks" icon="list-check">
-    Assigned work items with deliverables, deadlines, and payout amounts
-  </Card>
-  <Card title="Deliverable Tracking" icon="file-arrow-up">
-    Upload links for completed work (Google Drive, Notion, etc.)
-  </Card>
-  <Card title="Payout Management" icon="dollar-sign">
-    Track task payouts in cents, mark as paid when processed
-  </Card>
-</CardGroup>
-
----
-
-## Database Schema
-
-### `growth_labs_members` Table
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `id` | UUID | Primary key |
-| `account_id` | UUID | Links to `accounts` table |
-| `role` | TEXT | `qa_tester`, `content_creator`, `researcher`, `developer` |
-| `status` | TEXT | `active`, `inactive`, `probation`, `alumni` |
-| `hourly_rate_cents` | INTEGER | Standard hourly rate (e.g., 1500 = $15/hour) |
-| `total_earnings_cents` | INTEGER | Cumulative earnings (updated on task completion) |
-| `bio` | TEXT | Member bio/skills |
-| `portfolio_url` | TEXT | Optional portfolio link |
-| `onboarded_at` | TIMESTAMPTZ | When member joined Labs |
-| `offboarded_at` | TIMESTAMPTZ | When member left Labs (if applicable) |
-| `metadata` | JSONB | Additional info (skills, interests, availability) |
-| `created_at` | TIMESTAMPTZ | Record creation time |
-| `updated_at` | TIMESTAMPTZ | Last update time |
-
-### `growth_labs_tasks` Table
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `id` | UUID | Primary key |
-| `labs_member_id` | UUID | Assigned Labs member |
-| `task_type` | TEXT | Task category (see below) |
-| `title` | TEXT | Task title |
-| `description` | TEXT | Detailed instructions |
-| `status` | TEXT | Workflow status (see below) |
-| `assigned_by` | UUID | Admin who created task |
-| `payout_cents` | INTEGER | Task payment amount (e.g., 2500 = $25) |
-| `deliverable_url` | TEXT | Link to completed work |
-| `deliverable_submitted_at` | TIMESTAMPTZ | When member submitted work |
-| `completed_at` | TIMESTAMPTZ | When admin marked complete |
-| `paid_at` | TIMESTAMPTZ | When payout was processed |
-| `week_start` | DATE | Week assignment (for weekly reporting) |
-| `notes` | TEXT | Admin notes (internal) |
-| `metadata` | JSONB | Additional context |
-| `created_at` | TIMESTAMPTZ | Task creation time |
-| `updated_at` | TIMESTAMPTZ | Last update time |
-
----
-
-## Task Types
-
-<Tabs>
-  <Tab title="bug_report">
-    **Bug Hunting**
-
-    Find and document bugs in iOS/web app. Often linked to `growth_bug_reports` table.
-
-    **Typical Payout**: $5-$15 per bug (severity-based)
-
-    **Deliverable**: Bug report with screenshots and reproduction steps
-  </Tab>
-
-  <Tab title="syllabus_gathering">
-    **Syllabus Collection**
-
-    Gather course syllabi from specific campuses or departments.
-
-    **Typical Payout**: $2-$5 per syllabus
-
-    **Deliverable**: Google Drive folder with PDFs, CSV with metadata (course name, professor, term)
-  </Tab>
-
-  <Tab title="qa_testing">
-    **Quality Assurance**
-
-    Test new features before release. Follow test scripts and report issues.
-
-    **Typical Payout**: $20-$50 per session (hourly)
-
-    **Deliverable**: Test results spreadsheet, recorded bugs
-  </Tab>
-
-  <Tab title="user_interview">
-    **User Research**
-
-    Conduct interviews with students about app features and pain points.
-
-    **Typical Payout**: $25-$40 per interview (30-60 minutes)
-
-    **Deliverable**: Interview notes, key findings summary
-  </Tab>
-
-  <Tab title="content_creation">
-    **Content Creation**
-
-    Write blog posts, create social media content, or produce video tutorials.
-
-    **Typical Payout**: $30-$100 per piece (varies by complexity)
-
-    **Deliverable**: Published content link or draft for review
-  </Tab>
-
-  <Tab title="other">
-    **Custom Tasks**
-
-    Ad-hoc tasks like data entry, research, or special projects.
-
-    **Typical Payout**: Varies
-
-    **Deliverable**: Per task requirements
-  </Tab>
-</Tabs>
-
----
-
-## Task Workflow
-
-```mermaid
-graph LR
-    A[assigned] --> B[in_progress]
-    B --> C[submitted]
-    C --> D[completed]
-    D --> E[paid]
-    A --> F[cancelled]
-    B --> F
-```
-
-<Steps>
-  <Step title="Assigned">
-    Admin creates task and assigns to Labs member. Member receives notification.
-  </Step>
-
-  <Step title="In Progress">
-    Member marks task as `in_progress` when they start working.
-  </Step>
-
-  <Step title="Submitted">
-    Member uploads deliverable URL and marks task `submitted`.
-  </Step>
-
-  <Step title="Completed">
-    Admin reviews deliverable and marks task `completed`. Updates `completed_at` timestamp.
-  </Step>
-
-  <Step title="Paid">
-    After payment is processed (Venmo, Zelle, etc.), admin marks task `paid` with `paid_at` timestamp.
-  </Step>
-
-  <Step title="Cancelled (Optional)">
-    Admin can cancel task if no longer needed or member unable to complete.
-  </Step>
-</Steps>
-
----
-
-## Admin Workflows
-
-### 1. Enroll New Labs Member
-
-<CodeGroup>
-
-```bash cURL
-curl -X POST http://localhost:3001/api/admin/growth/labs/members \
-  -H "Content-Type: application/json" \
-  -H "X-User-Role: admin" \
-  -d '{
-    "account_id": "student-uuid",
-    "role": "qa_tester",
-    "status": "active",
-    "hourly_rate_cents": 1500,
-    "bio": "CS major, interested in mobile testing"
-  }'
-```
-
-```sql SQL
-INSERT INTO growth_labs_members (
-  account_id, role, status, hourly_rate_cents, bio, onboarded_at
-) VALUES (
-  'student-uuid',
-  'qa_tester',
-  'active',
-  1500,
-  'CS major, interested in mobile testing',
-  NOW()
-);
-```
-
-</CodeGroup>
-
-### 2. Create and Assign Task
-
-<CodeGroup>
-
-```bash cURL
-curl -X POST http://localhost:3001/api/admin/growth/labs/tasks \
-  -H "Content-Type: application/json" \
-  -H "X-User-Role: admin" \
-  -d '{
-    "labs_member_id": "member-uuid",
-    "task_type": "syllabus_gathering",
-    "title": "Gather 10 STEM syllabi from UMich",
-    "description": "Focus on Engineering and Computer Science courses for Winter 2026",
-    "payout_cents": 3000,
-    "week_start": "2026-01-13",
-    "assigned_by": "admin-uuid"
-  }'
-```
-
-```sql SQL
-INSERT INTO growth_labs_tasks (
-  labs_member_id, task_type, title, description,
-  payout_cents, week_start, assigned_by, status
-) VALUES (
-  'member-uuid',
-  'syllabus_gathering',
-  'Gather 10 STEM syllabi from UMich',
-  'Focus on Engineering and Computer Science courses for Winter 2026',
-  3000,
-  '2026-01-13',
-  'admin-uuid',
-  'assigned'
-);
-```
-
-</CodeGroup>
-
-### 3. Review and Approve Deliverable
-
-<Steps>
-  <Step title="Check Submitted Tasks">
-    Navigate to **Growth → Labs Dashboard**. Filter by `status: submitted`.
-  </Step>
-
-  <Step title="Review Deliverable">
-    Click deliverable URL to review work quality. Check against task requirements.
-  </Step>
-
-  <Step title="Mark Complete or Request Revisions">
-    If acceptable: Update status to `completed` and set `completed_at`.
-
-    If needs work: Add notes and keep status as `submitted` (or move back to `in_progress`).
-  </Step>
-
-  <Step title="Process Payment">
-    After sending payment (Venmo/Zelle), update status to `paid` and set `paid_at`.
-  </Step>
-</Steps>
+The **Labs Dashboard** is where Lauren manages the DormWay Labs program - W2 employees ($20/hr) who help with QA testing, syllabus gathering, and other growth tasks. This tool tracks task assignments, deliverables, and member performance.
 
 <Tip>
-  **Batch Payments**: Use weekly payment runs. Filter tasks by `status: completed AND paid_at IS NULL` to see pending payouts.
+  **For Lauren:** This is your primary workspace for managing Labs members and coordinating their work. Payroll is handled separately in Gusto - this dashboard is for task management and performance tracking only.
 </Tip>
 
 ---
 
-## Labs Member Dashboard (Student View)
-
-### View Assigned Tasks
-
-```bash
-# Labs member sees their own tasks
-curl http://localhost:3001/api/mobile/labs/my-tasks \
-  -H "X-User-Id: student-uuid"
-```
-
-**Response**:
-```json
-{
-  "tasks": [
-    {
-      "id": "task-uuid",
-      "title": "Gather 10 STEM syllabi from UMich",
-      "description": "Focus on Engineering and CS...",
-      "status": "assigned",
-      "payout_cents": 3000,
-      "payout_display": "$30.00",
-      "due_date": "2026-01-20",
-      "created_at": "2026-01-13T10:00:00Z"
-    }
-  ]
-}
-```
-
-### Submit Deliverable
-
-```bash
-curl -X PATCH http://localhost:3001/api/mobile/labs/tasks/{id} \
-  -H "Content-Type: application/json" \
-  -H "X-User-Id: student-uuid" \
-  -d '{
-    "status": "submitted",
-    "deliverable_url": "https://drive.google.com/folder/xyz",
-    "deliverable_submitted_at": "2026-01-20T14:30:00Z"
-  }'
-```
-
----
-
-## Analytics & Reporting
-
-### Weekly Performance Metrics
-
-<Info>
-  **Coming Soon**: Analytics dashboard with charts and leaderboards. See [GROWTH_OPS_ANALYTICS_PLAN.md](https://github.com/DormWay/dormway-platform/blob/main/GROWTH_OPS_ANALYTICS_PLAN.md).
-</Info>
-
-| Metric | Description | Query |
-|--------|-------------|-------|
-| **Tasks Completed** | Tasks marked complete this week | `COUNT(*) WHERE completed_at >= week_start` |
-| **Total Payouts** | Sum of completed task payouts | `SUM(payout_cents) WHERE status IN ('completed', 'paid')` |
-| **Avg Completion Time** | Hours from assignment to completion | `AVG(completed_at - created_at)` |
-| **Active Members** | Members with tasks this week | `COUNT(DISTINCT labs_member_id) WHERE week_start = current_week` |
-
-### Member Performance Leaderboard
-
-```sql
-SELECT
-  glm.id,
-  a.given_name || ' ' || a.family_name as name,
-  COUNT(glt.id) as tasks_completed,
-  SUM(glt.payout_cents) / 100.0 as total_earnings,
-  AVG(EXTRACT(EPOCH FROM (glt.completed_at - glt.created_at)) / 3600) as avg_hours_per_task
-FROM growth_labs_members glm
-LEFT JOIN accounts a ON a.id = glm.account_id
-LEFT JOIN growth_labs_tasks glt ON glt.labs_member_id = glm.id AND glt.status IN ('completed', 'paid')
-WHERE glm.status = 'active'
-GROUP BY glm.id, a.given_name, a.family_name
-ORDER BY tasks_completed DESC
-LIMIT 10;
-```
-
-**Example Output**:
-| Rank | Name | Tasks Completed | Total Earnings | Avg Hours/Task |
-|------|------|-----------------|----------------|----------------|
-| 🥇 | Sarah Chen | 45 | $675.00 | 2.3 |
-| 🥈 | Miguel Rodriguez | 38 | $570.00 | 2.8 |
-| 🥉 | Emily Park | 32 | $480.00 | 2.1 |
-
----
-
-## Payout Management
-
-### Payment Workflow
+## Accessing the Labs Dashboard
 
 <Steps>
-  <Step title="Weekly Payout Report">
-    Generate report of all completed tasks awaiting payment.
-
-    ```sql
-    SELECT
-      glm.id as member_id,
-      a.given_name || ' ' || a.family_name as member_name,
-      a.email,
-      COUNT(glt.id) as tasks,
-      SUM(glt.payout_cents) / 100.0 as total_owed
-    FROM growth_labs_tasks glt
-    JOIN growth_labs_members glm ON glm.id = glt.labs_member_id
-    JOIN accounts a ON a.id = glm.account_id
-    WHERE glt.status = 'completed' AND glt.paid_at IS NULL
-    GROUP BY glm.id, a.given_name, a.family_name, a.email
-    ORDER BY total_owed DESC;
-    ```
+  <Step title="Go to Admin Dashboard">
+    Navigate to `https://admin.dormway.app` and sign in
   </Step>
-
-  <Step title="Process Payments">
-    Send payments via Venmo, Zelle, or PayPal. Record transaction IDs in metadata.
+  <Step title="Open Growth Section">
+    Click **Growth** in the sidebar, then **Labs Dashboard**
   </Step>
-
-  <Step title="Mark as Paid">
-    Update tasks to `paid` status with `paid_at` timestamp.
-
-    ```sql
-    UPDATE growth_labs_tasks
-    SET
-      status = 'paid',
-      paid_at = NOW(),
-      metadata = metadata || '{"payment_method": "venmo", "transaction_id": "xyz123"}'::jsonb
-    WHERE status = 'completed'
-      AND paid_at IS NULL
-      AND labs_member_id = 'member-uuid';
-    ```
-  </Step>
-
-  <Step title="Update Member Total Earnings">
-    Recalculate `total_earnings_cents` for each member.
-
-    ```sql
-    UPDATE growth_labs_members
-    SET total_earnings_cents = (
-      SELECT SUM(payout_cents)
-      FROM growth_labs_tasks
-      WHERE labs_member_id = growth_labs_members.id
-        AND status = 'paid'
-    )
-    WHERE id = 'member-uuid';
-    ```
+  <Step title="Choose Your View">
+    - **Members** tab: View all Labs employees (active, inactive)
+    - **Tasks** tab: See all assigned tasks and their status
+    - **Deliverables** tab: Review submitted work
   </Step>
 </Steps>
 
-### Payment Methods
+---
 
-| Method | Pros | Cons |
-|--------|------|------|
-| **Venmo** | Instant, no fees, student-friendly | $299/week limit |
-| **Zelle** | No fees, bank-to-bank | Not all banks supported |
-| **PayPal** | International support | 2.9% + $0.30 fee |
-| **Direct Deposit** | Most reliable | Requires bank info |
+## Lauren's Daily Workflows
+
+### 1. Onboard New Labs Member
+
+**Goal:** Add new W2 employee to Labs program (when Riley/Ethan hire someone)
+
+<Steps>
+  <Step title="Confirm Hiring">
+    Riley/Ethan will let you know when a new Labs member has been hired and added to Gusto payroll
+  </Step>
+
+  <Step title="Add Member to Dashboard">
+    In the **Members** tab, click **Add Member**:
+    - **Name**: Full name of the employee
+    - **Email**: Their DormWay email or personal email
+    - **Role**: Choose based on their focus (QA Tester, Content Creator, etc.)
+    - **Status**: Set to **"Active"**
+    - **Hourly Rate**: $20/hr (standard for all Labs members)
+    - **Bio** (optional): Skills, interests, major
+  </Step>
+
+  <Step title="Send Welcome Email">
+    Email them with:
+    - Welcome message and expectations
+    - Link to Labs member handbook (if available)
+    - First task to get them started (usually simple QA testing)
+    - Slack/Discord channel invite for Labs team
+  </Step>
+
+  <Step title="Assign First Task">
+    Create a simple onboarding task (e.g., "Test schedule upload flow on iOS") to get them familiar with the process
+  </Step>
+</Steps>
+
+<Info>
+  **Payroll Reminder:** Gusto handles all payroll (timesheets, paychecks, taxes). The Labs Dashboard is ONLY for task management and tracking completed work.
+</Info>
+
+---
+
+### 2. Create and Assign Tasks
+
+**Goal:** Assign 15-20 tasks per week to Labs members
+
+<Steps>
+  <Step title="Choose Task Type">
+    In the **Tasks** tab, click **Create Task** and select type:
+    - **Syllabus Gathering** - Collect course syllabi from specific campuses
+    - **QA Testing** - Test new features before release
+    - **Bug Hunting** - Find and document bugs in iOS/web app
+    - **User Interviews** - Conduct user research interviews
+    - **Other** - Custom tasks like data entry or research
+  </Step>
+
+  <Step title="Fill Task Details">
+    - **Title**: Clear, descriptive name (e.g., "Gather 10 STEM syllabi from UConn")
+    - **Description**: Detailed instructions with examples
+      - What specifically needs to be done
+      - Where to find the information
+      - How to format deliverables
+      - Quality standards expected
+    - **Assigned To**: Select Labs member from dropdown
+    - **Expected Hours**: Estimate how long it should take
+    - **Deadline**: When you need it completed by
+    - **Week**: Assign to current or next week for tracking
+  </Step>
+
+  <Step title="Set Expectations">
+    The clearer your instructions, the better the deliverable. Include:
+    - Examples of good vs. bad deliverables
+    - Links to resources they'll need
+    - Who to contact if they have questions
+    - Any special requirements or constraints
+  </Step>
+
+  <Step title="Save and Notify">
+    Save the task - the Labs member will see it in their task queue (if mobile view is built) or you can email them directly
+  </Step>
+</Steps>
+
+**Example Task:**
+```
+Title: Gather 15 Engineering Syllabi from UMass Amherst
+Type: Syllabus Gathering
+Assigned To: Sarah Chen
+Expected Hours: 3 hours
+Deadline: Friday, Jan 20
+
+Description:
+Collect 15 syllabi from UMass Amherst Engineering courses (any term).
+
+Where to find them:
+- UMass course catalog website
+- Professor websites (Google "UMass [course code] syllabus")
+- Student portals if you have access
+
+Deliverable format:
+- Upload PDFs to Google Drive folder (link: ...)
+- Create CSV with: Course Code, Course Name, Professor, Term, PDF Link
+- Example CSV row: "CS187, Data Structures, Prof. Smith, Fall 2025, drive.google.com/..."
+
+Quality standards:
+- Syllabi must be readable (not blurry scans)
+- Must include grading breakdown and course schedule
+- No duplicates
+
+If you have questions, DM me on Slack!
+```
+
+---
+
+### 3. Review Deliverables
+
+**Goal:** Quality check completed work and approve tasks (daily)
+
+<Steps>
+  <Step title="Check Submitted Tasks">
+    In the **Tasks** tab, filter by **Status: Submitted** to see tasks awaiting review
+  </Step>
+
+  <Step title="Open Deliverable">
+    Click the deliverable link (Google Drive, Notion, etc.) to review the work
+  </Step>
+
+  <Step title="Quality Check">
+    Verify the deliverable meets task requirements:
+    - **Syllabus tasks:** PDFs are readable, metadata is complete, no duplicates
+    - **QA tasks:** Test results are thorough, bugs are well-documented
+    - **Bug reports:** Reproduction steps are clear, screenshots included
+
+    Check against the quality standards you specified in the task description
+  </Step>
+
+  <Step title="Approve or Request Revisions">
+    If work is good:
+    - Mark task as **"Completed"**
+    - Add thank you note in comments
+    - Task hours count toward their Gusto timesheet
+
+    If work needs improvement:
+    - Add specific feedback in task notes (what's missing, what needs fixing)
+    - Change status to **"In Progress"** or keep as **"Submitted"**
+    - Set new deadline for revisions
+    - Notify member via Slack or email
+  </Step>
+
+  <Step title="Track in Gusto">
+    Labs members track their hours in Gusto separately. Completed tasks in the dashboard are just for your reference - they handle their own timesheets.
+  </Step>
+</Steps>
 
 <Warning>
-  **Tax Reporting**: Track total earnings per member. Issue 1099-MISC if member earns > $600/year.
+  **Don't approve low-quality work** - it sets a bad precedent. Give clear, constructive feedback and request revisions. Most members will improve quickly with good guidance.
 </Warning>
 
 ---
 
-## Best Practices
+### 4. Monitor Performance
+
+**Goal:** Track which Labs members are most productive and responsive
+
+<Steps>
+  <Step title="Check Task Completion Rates">
+    In the **Members** tab, view each member's stats:
+    - Tasks completed this week
+    - Tasks completed all-time
+    - Average completion time
+    - Tasks currently assigned
+  </Step>
+
+  <Step title="Identify Top Performers">
+    Look for members with:
+    - High completion rates (completing tasks on time)
+    - Low revision requests (getting it right the first time)
+    - Quick turnaround (finishing before deadline)
+
+    These are your go-to members for high-priority tasks
+  </Step>
+
+  <Step title="Flag Low Performers">
+    Watch for members with:
+    - Missed deadlines (tasks overdue for 3+ days)
+    - Frequent revision requests (quality issues)
+    - Low task volume (not taking on enough work)
+
+    Check in with them to understand blockers - maybe they need clearer instructions or have availability issues
+  </Step>
+
+  <Step title="Adjust Assignments">
+    - Give more complex/important tasks to top performers
+    - Give simpler tasks to new or struggling members
+    - Reduce assignment volume for members who are overwhelmed
+    - Consider offboarding members who consistently underperform
+  </Step>
+</Steps>
+
+**Performance Tiers:**
+| Tier | Characteristics | Assignment Strategy |
+|------|----------------|---------------------|
+| **Top Performer** | 90%+ on-time completion, high quality | Priority tasks, higher volume (5-8 tasks/week) |
+| **Solid Contributor** | 70-89% completion, occasional revisions | Standard tasks, medium volume (3-5 tasks/week) |
+| **Needs Improvement** | <70% completion, frequent revisions | Simple tasks, lower volume (1-2 tasks/week), coaching |
+| **At Risk** | Missed multiple deadlines, quality issues | Performance improvement plan, consider offboarding |
+
+---
+
+## Task Types and When to Use Them
 
 <AccordionGroup>
-  <Accordion title="Set Clear Expectations" icon="bullseye">
-    Include detailed task descriptions with examples, deadlines, and quality criteria.
+  <Accordion title="Syllabus Gathering" icon="file-pdf">
+    **When to use:** Need course data from specific campuses (usually before semester start)
+
+    **Typical assignment:**
+    - "Gather 10-20 syllabi from [Campus] [Department]"
+    - Expected time: 2-4 hours
+    - Deliverable: Google Drive folder + metadata CSV
+
+    **Best for:** Labs members who are detail-oriented, good at web research
   </Accordion>
 
-  <Accordion title="Use Weekly Batches" icon="calendar-week">
-    Assign tasks at the start of each week. Track progress mid-week. Complete payouts by Friday.
+  <Accordion title="QA Testing" icon="vial">
+    **When to use:** New feature about to launch, need to catch bugs before release
+
+    **Typical assignment:**
+    - "Test [Feature Name] on iOS/web, follow test script"
+    - Expected time: 1-3 hours
+    - Deliverable: Test results spreadsheet, bug reports
+
+    **Best for:** Labs members with strong attention to detail, good communication
   </Accordion>
 
-  <Accordion title="Provide Feedback" icon="comment">
-    Leave constructive notes on completed tasks. Help members improve quality.
+  <Accordion title="Bug Hunting" icon="bug">
+    **When to use:** Want to find and fix bugs proactively (not tied to specific feature)
+
+    **Typical assignment:**
+    - "Use the app normally for 2 hours, document any bugs you find"
+    - Expected time: 2 hours
+    - Deliverable: Bug reports with screenshots and reproduction steps
+
+    **Best for:** Power users of the app, critical thinkers
   </Accordion>
 
-  <Accordion title="Track Performance" icon="chart-line">
-    Monitor completion rates and quality. Move low performers to probation or inactive status.
-  </Accordion>
+  <Accordion title="User Interviews" icon="comments">
+    **When to use:** Need qualitative feedback on features or user experience
 
-  <Accordion title="Celebrate Top Contributors" icon="trophy">
-    Recognize high-performing members with bonuses, shoutouts, or advancement opportunities.
+    **Typical assignment:**
+    - "Interview 3 students about [Feature], use provided script"
+    - Expected time: 2-3 hours (including scheduling and notes)
+    - Deliverable: Interview notes, key findings summary
+
+    **Best for:** Labs members with good communication skills, empathy
   </Accordion>
 </AccordionGroup>
 
 ---
 
-## API Reference
+## Weekly Labs Routine
 
-See full API documentation: [Growth Ops API Reference](/docs/growth-ops/api#labs-program)
+### Monday: Plan the Week
 
-**Quick Links**:
-- `GET /api/admin/growth/labs/members` - List all Labs members
-- `POST /api/admin/growth/labs/members` - Enroll new member
-- `GET /api/admin/growth/labs/tasks` - List all tasks
-- `POST /api/admin/growth/labs/tasks` - Create new task
-- `PATCH /api/admin/growth/labs/tasks/:id` - Update task status
-- `GET /api/mobile/labs/my-tasks` - Student view of own tasks
+- Review Labs priorities with Riley/Ethan in weekly sync
+- Identify high-priority tasks for the week (e.g., syllabus gathering for campuses with upcoming registration)
+- Check availability of Labs members (exams, holidays, etc.)
+- Plan 15-20 tasks total to assign
+
+### Tuesday: Assign Tasks
+
+- Create all tasks for the week in the dashboard
+- Assign to appropriate Labs members based on skills and workload
+- Send summary email to Labs team with week's priorities
+- Set clear deadlines (most tasks due Thursday or Friday)
+
+### Wednesday-Thursday: Monitor Progress
+
+- Check task status mid-week
+- Follow up with members who haven't started assigned tasks
+- Answer questions and provide clarification as needed
+- Review and approve early submissions
+
+### Friday: Complete Reviews and Report
+
+- Review all submitted deliverables
+- Approve completed tasks or request revisions
+- Send feedback to each member on their week's work
+- Update Labs dashboard with week's metrics for Riley/Ethan:
+  - Tasks assigned: X
+  - Tasks completed: Y
+  - Top performers: [Names]
+  - Issues or blockers
+
+---
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Set Clear Expectations" icon="bullseye">
+    Spend extra time writing detailed task descriptions. Include examples, links, quality criteria. 10 minutes upfront saves hours of back-and-forth.
+  </Card>
+
+  <Card title="Batch Assign Tasks" icon="layer-group">
+    Assign all weekly tasks on Tuesday, not one-by-one throughout the week. Labs members can plan their time better when they see the full week ahead.
+  </Card>
+
+  <Card title="Give Constructive Feedback" icon="comments">
+    When requesting revisions, explain specifically what's wrong and how to fix it. "This is great! Could you also add X?" is better than "This needs work."
+  </Card>
+
+  <Card title="Recognize Good Work" icon="star">
+    Thank members for quality deliverables, call out top performers in team updates. Recognition motivates more than payment alone.
+  </Card>
+</CardGroup>
+
+---
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Member Missed Deadline" icon="clock">
+    **Issue:** Task is overdue by 2+ days, no communication from member
+
+    **Steps:**
+    1. DM them on Slack: "Hey [Name], checking in on [Task Name] - do you need any help or more time?"
+    2. If no response in 24 hours, reassign task to another member
+    3. Follow up 1-on-1 to understand what happened (sick? Exams? Didn't understand task?)
+    4. Adjust future assignments based on their bandwidth
+
+    **When to escalate:** If member misses 3+ deadlines without communication, discuss with Riley/Ethan about offboarding
+  </Accordion>
+
+  <Accordion title="Deliverable Quality is Poor" icon="thumbs-down">
+    **Issue:** Member submitted work but it doesn't meet standards
+
+    **First time:**
+    - Assume they didn't understand expectations
+    - Give detailed feedback on what's wrong
+    - Request revision with clear guidance
+    - Extend deadline if needed
+
+    **Second time (same member):**
+    - Check if your instructions were clear enough
+    - Schedule 1-on-1 call to explain expectations
+    - Consider assigning simpler tasks until quality improves
+
+    **Third time:**
+    - Performance improvement plan: "You need to hit X quality on next 3 tasks or we'll need to part ways"
+    - If no improvement, offboard and find replacement
+  </Accordion>
+
+  <Accordion title="Too Much Work, Not Enough Labs Members" icon="users-slash">
+    **Issue:** You have 30 tasks to assign but only capacity for 15
+
+    **Short-term:**
+    - Prioritize ruthlessly (what MUST get done vs. nice-to-have)
+    - Assign higher task volume to top performers
+    - Defer non-urgent tasks to next week
+
+    **Long-term:**
+    - Request budget from Riley/Ethan to hire more Labs members
+    - Train current members to work faster with better task descriptions
+    - Automate repetitive tasks (e.g., syllabus gathering scripts)
+  </Accordion>
+
+  <Accordion title="Member Wants More Hours" icon="clock-rotate-left">
+    **Issue:** Labs member asks for more tasks because they want more hours
+
+    **Response:**
+    - Check their current performance (are they completing assigned tasks well?)
+    - If top performer: Increase their weekly task volume
+    - If average/struggling: Keep volume the same until quality improves
+    - Be honest: "I want to give you more, but I need to see consistent quality on your current workload first"
+
+    **Note:** Coordinate with Riley/Ethan on Gusto hours budget - make sure there's budget for increased hours before assigning more tasks
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Coordinating with Alex
+
+Lauren and Alex collaborate on campus priorities:
+
+### Syllabus Gathering Strategy
+
+**How it works:**
+1. Alex identifies high-priority campuses (large schools with low WFAU, upcoming registration periods)
+2. Lauren assigns Labs members to gather syllabi from those campuses
+3. More syllabus coverage → better schedule recommendations → higher WFAU
+4. Track impact in Growth Scoreboard (does WFAU increase at campuses after syllabus push?)
+
+**Example:**
+- Alex sees in Scoreboard that UConn has only 10 WFAU/week but 15k students (big opportunity)
+- Alex tells Lauren: "UConn registration is in 2 weeks, can we prioritize UConn syllabi?"
+- Lauren assigns 3 Labs members to gather 50 UConn syllabi this week
+- Following week, Alex creates UConn outreach campaign
+- Result: UConn WFAU jumps from 10 → 40
+
+---
+
+### QA Testing Before Campaigns
+
+**How it works:**
+1. Alex plans major campus campaign for next week
+2. Lauren assigns Labs members to QA test the onboarding flow
+3. Labs members find and report bugs
+4. Bugs get fixed before campaign launches
+5. Campaign has higher conversion (fewer users hit bugs during sign-up)
+
+**Example:**
+- Alex: "Launching big UMass campaign Monday, expecting 100+ signups"
+- Lauren: "Let me have Labs members test the schedule upload flow this week to catch any bugs"
+- Labs member finds bug in iOS schedule screenshot parser
+- Bug gets fixed Friday
+- Campaign launches Monday with smooth onboarding → higher Day 7 return rate
+
+---
+
+## Member Offboarding
+
+When a Labs member needs to be offboarded (performance issues, graduation, etc.):
+
+<Steps>
+  <Step title="Coordinate with Riley/Ethan">
+    Discuss offboarding decision - get approval before taking action
+  </Step>
+
+  <Step title="Reassign Active Tasks">
+    Move any in-progress or assigned tasks to other Labs members
+  </Step>
+
+  <Step title="Update Member Status">
+    In the **Members** tab, change their status to **"Inactive"** or **"Alumni"**
+  </Step>
+
+  <Step title="Remove from Gusto">
+    Riley/Ethan handle Gusto offboarding (final paycheck, benefits termination, etc.)
+  </Step>
+
+  <Step title="Send Offboarding Email">
+    Thank them for their contributions, provide any necessary next steps (returning equipment, etc.)
+  </Step>
+</Steps>
+
+---
+
+## Related Documentation
+
+<CardGroup cols={2}>
+  <Card title="Growth Scoreboard" icon="chart-simple" href="/docs/growth-ops/scoreboard">
+    Track how Labs work impacts WFAU at specific campuses
+  </Card>
+
+  <Card title="Campus Outreach CRM" icon="megaphone" href="/docs/growth-ops/outreach">
+    Coordinate with Alex on campus priorities for syllabus gathering
+  </Card>
+
+  <Card title="Platform Overview" icon="rocket" href="/docs/growth-ops/overview">
+    Return to main Growth Ops Platform guide
+  </Card>
+</CardGroup>
