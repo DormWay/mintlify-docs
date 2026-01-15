@@ -35,6 +35,21 @@ The Home Feed is a **small ranked set of cards** (typically 1–5) returned by t
 
 The feed never returns empty: on failure or no data, it returns a **fallback** card (AcePrompt-style).
 
+### 1.1 Copy + scannability rules (current UX)
+
+- **Title = the thing.** Short noun/action; no framing.
+- **Subtitle = the context.** One line that answers "why now" or "what changed."
+- **No AI voice.** Avoid "I noticed", "It looks like", "Based on", "I can help".
+- **Length caps.** Titles <= 64 chars; subtitles <= 72 chars (truncate with "...").
+- **Details live in reveal.** Longer explanations belong in `revealContent`, not subtitles.
+- **Source-first cleanup.** City + AI cards strip AI-style lead-ins at generation time.
+
+Enforcement points:
+
+- Generator copy normalization: `.repos/dormway-platform/services/shared/dormway-core/src/domains/feed/generator.ts`
+- iOS scannability: `.repos/ios-clean/App/Views/Feed/FeedCardView.swift` (1-line subtitle)
+- iOS keyline context: `.repos/ios-clean/App/Views/Feed/FeedCardView.swift` (uses metadata: `courseName`, `courseCode`, `location`)
+
 ---
 
 ## 2) Data model (Redis + Postgres)
@@ -267,3 +282,5 @@ See [Sharp Edges Tracker (Current)](/docs/engineering/architecture/sharp-edges-t
 
 - ~~`feed` invalidation resource exists server-side but isn't handled by LockedIn's invalidation mapping~~: **Resolved** (SE-010/DORM-785) - LockedIn now properly handles `feed` invalidation signals.
 - iOS `refresh=true` behavior: This remains intentional for correctness (avoiding stale cards) and is not considered a sharp edge.
+- ~~OnBreak card shows duplicate text when expanded~~: **Resolved** (PR #711, 2026-01-05) - `revealContent` was initialized with the same message as `subtitle`, causing duplicate text display. Fixed: `revealContent` now only contains date info ("Classes Resume: X", "Break Ends: Y"), not the subtitle message.
+- ~~Multiple card types show duplicate text when expanded~~: **Resolved** (PR #712, 2026-01-05) - Comprehensive audit found 11 card types where `subtitle` text was repeated in `revealContent`. All fixed to follow the pattern: **revealContent must only contain NEW information not already in subtitle**. Cards fixed: LocalOpportunity, DayConditions, MorningBriefing, PortfolioOpportunity, SynergyHighImpact, EveningReview, WeatherChange, CommunityPulse, TrafficAlert, TransitionAlert.

@@ -380,3 +380,92 @@ Term selection consistency matters because other parts of the system filter enro
 - `context_dependencies.term_id/term_year` (DormWay Core term aggregation)
 
 See: [Term Management & Term Resolution Deep Dive (Current)](/docs/engineering/technical/engine/term-management-term-resolution-deep-dive-current)
+
+---
+
+## 9) Merge courses (admin operation) - DORM-874
+
+### 9.1 Problem statement
+
+When students upload syllabi AND import their schedule via ICS, the system can create duplicate courses:
+- ICS import creates courses with synthetic codes (e.g., `CS 201`, `LANG 101`)
+- Syllabus upload creates courses with extracted codes (e.g., `CMSC 14200`, `HUM 17100`)
+
+These often refer to the same course but aren't automatically linked, creating "orphan" courses (courses with syllabus data but no schedule data).
+
+### 9.2 What it does
+
+The course merge operation (admin-only) consolidates duplicate courses:
+
+1. **Add aliases**: Source course codes are added to target's `metadata.courseCodeAliases`
+2. **Move service data**: All `service_data` records (syllabi, braingains) transferred to target course
+3. **Migrate enrollments**: `context_dependencies` edges moved from source to target
+4. **Deactivate source**: Source course marked `is_active=false` with `metadata.deactivatedReason='merged_into_course'`
+
+### 9.3 API endpoints
+
+Code entry point: `.repos/dormway-platform/services/api-router/src/routes/admin/course-maintenance-routes.ts`
+
+**Orphan detection:**
+```
+GET /api/admin/courses/orphans
+```
+Returns courses with syllabus data but no schedule data (time blocks from ICS import).
+
+**Merge candidates (auto-suggest):**
+```
+GET /api/admin/courses/:courseId/merge-candidates
+```
+Finds potential targets based on same campus, similar name (trigram > 0.3), similar code.
+
+**Manual search:**
+```
+GET /api/admin/courses/:courseId/search-merge-targets?q=<query>
+```
+Search any course on same campus when auto-suggestions don't match.
+
+**Execute merge:**
+```
+POST /api/admin/courses/:targetCourseId/merge
+Body: {
+  sourceCourseId: string,
+  addAliases?: boolean,      // default: true
+  moveServiceData?: boolean, // default: true
+  deactivateSource?: boolean, // default: true
+  dryRun?: boolean           // preview mode
+}
+```
+
+### 9.4 What gets written (DB)
+
+```mermaid
+flowchart TD
+  A["POST /api/admin/courses/:targetId/merge"] --> B{"dryRun?"}
+  B -->|yes| C["Return preview\n(no DB changes)"]
+  B -->|no| D["Add source codes to\ntarget.metadata.courseCodeAliases"]
+  D --> E["UPDATE service_data\nSET context_id = targetId\nWHERE context_id = sourceId"]
+  E --> F["UPDATE context_dependencies\nSET child_context_id = targetId\nWHERE child_context_id = sourceId"]
+  F --> G["UPDATE contexts\nSET is_active = false,\nmetadata.deactivatedReason = 'merged_into_course'\nWHERE id = sourceId"]
+  G --> H["Return merge result\n(aliases added, data moved, enrollments migrated)"]
+```
+
+### 9.5 Admin UI
+
+- **OrphanCoursesTab**: Lists orphan courses with "Find Merge Target" button
+- **CourseMergeDialog**: Two-tab interface for Suggested matches and manual Search
+- Preview shows what will be transferred before confirmation
+
+Code:
+- `.repos/dormway-platform/services/dormway-admin/src/pages/courses/OrphanCoursesTab.tsx`
+- `.repos/dormway-platform/services/dormway-admin/src/pages/courses/CourseMergeDialog.tsx`
+
+### 9.6 Related: ICS parser course name fix
+
+The ICS parser prompt was updated to ensure synthetic course codes don't replace actual course names:
+
+```
+CRITICAL: course_name MUST ALWAYS be the full SUMMARY text from the ICS event,
+even when generating a synthetic course_code. NEVER use the synthetic code as the course_name.
+```
+
+Code: `.repos/dormway-platform/services/engine/src/prompts/icsScheduleParser.ts`

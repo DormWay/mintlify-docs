@@ -7,47 +7,100 @@ description: "PostgreSQL database documentation including schema design, RLS pat
 
 PostgreSQL database documentation including schema design, RLS patterns, and data architecture.
 
+**Database**: Neon PostgreSQL (`misty-queen-56829089`)
+**Tables**: ~118 | **Indexes**: ~676 | **Foreign Keys**: ~98
+**Migrations**: 139 files in `infrastructure/database/migrations/`
+
+---
+
+## For AI Agents - Start Here
+
+| Task | Document |
+|------|----------|
+| **Find a table** | [Database Table Index](/docs/engineering/technical/database/database-table-index) |
+| **Understand schema** | [Context System Database Schema](/docs/engineering/technical/database/context-system-database-schema) |
+| **Access patterns** | [Database Model & Access Patterns (Neon)](/docs/engineering/architecture/sot-database-model-access-patterns-neon) |
+| **Debug queries** | Use `DATABASE_URL_ADMIN` (bypasses RLS) |
+
+### Quick Debug Command
+
+```bash
+doppler run -- bash -c 'psql "$DATABASE_URL_ADMIN" -c "SELECT ..."'
+```
+
+### Common Mistakes to Avoid
+
+| Wrong | Correct |
+|-------|---------|
+| Query `onboarding` for user data | Use `accounts` |
+| Use `accounts.campus_id` | Join through `contexts` |
+| Query `service_data` without `fetched_at` | Include partition key |
+| Use `DATABASE_URL` for debugging | Use `DATABASE_URL_ADMIN` |
+
 ---
 
 ## Quick Navigation
 
-- Context System Database Schema - Core schema reference
-- RLS-Security-Performance-Audit - Security patterns
-- [Database Integration](/docs/engineering/technical/database/database-integration) - Integration guide
-
----
-
-## Schema Documentation
+### Schema Documentation
 
 | Document | Description |
 |----------|-------------|
-| Context System Database Schema | Core contexts table and hierarchy |
+| [Database Table Index](/docs/engineering/technical/database/database-table-index) | **Complete table inventory** (118+ tables) |
+| [Context System Database Schema](/docs/engineering/technical/database/context-system-database-schema) | Core contexts table and hierarchy |
 | [Database Integration](/docs/engineering/technical/database/database-integration) | Service integration patterns |
-| [Schema Comparison Report - 2025-08-28](/docs/engineering/technical/database/schema-comparison-report-2025-08-28) | Schema evolution history |
 
----
-
-## Security & Performance
+### Access & Security
 
 | Document | Description |
 |----------|-------------|
+| [Database Model & Access Patterns (Neon)](/docs/engineering/architecture/sot-database-model-access-patterns-neon) | Connection and RLS patterns |
 | RLS-Security-Performance-Audit | Row-Level Security audit |
 | [Database Cleanup - Unused Tables](/docs/engineering/technical/development-guides/database-cleanup-unused-tables) | Maintenance procedures |
 
+### Historical
+
+| Document | Description |
+|----------|-------------|
+| [Schema Comparison Report - 2025-08-28](/docs/engineering/technical/database/schema-comparison-report-2025-08-28) | Schema evolution history |
+| Supabase (Legacy) | Legacy Supabase references |
+
 ---
 
-## Key Tables
+## Key Tables Quick Reference
 
-### Core Tables
-- `contexts` - Hierarchical entity storage (cities, campuses, courses, students)
-- `service_data` - Time-series external data (partitioned by month)
-- `accounts` - User account records
-- `enrollments` - Course enrollment mappings
+### Identity & Users
+- `accounts` - **Source of truth for users** (NOT onboarding)
+- `contexts` - Hierarchical entities (students, campuses, courses)
+- `context_dependencies` - Many-to-many relationships (enrollments)
 
-### Key Patterns
-- **RLS** via `dormway_api` role
-- **Partitioning** on `service_data.fetched_at`
-- **PostGIS** for geospatial queries (`location` column)
+### Data Storage
+- `service_data` - Time-series data (**partitioned by month**)
+- `time_blocks` - Schedule blocks
+- `tasks` - User tasks
+
+### Configuration
+- `campus_configs` - Per-campus settings
+- `city_configs` - Per-city settings
+- `system_config` - Global settings
+
+### Canvas LMS
+- `canvas_accounts`, `canvas_courses`, `canvas_assignments`
+
+---
+
+## Key Patterns
+
+### RLS (Row-Level Security)
+- `DATABASE_URL` - Has RLS enforced
+- `DATABASE_URL_ADMIN` - Bypasses RLS for admin/debug
+
+### Partitioning
+- `service_data` partitioned by `fetched_at` (monthly)
+- Always include partition key in WHERE clause
+
+### PostGIS
+- `location` column (NOT `location_point`)
+- `accuracy_meters` (NOT `accuracy`)
 
 ---
 
@@ -56,8 +109,21 @@ PostgreSQL database documentation including schema design, RLS patterns, and dat
 - [Architecture](/docs/engineering/architecture/index) - System design
 - [API](/docs/engineering/technical/api/readme) - API layer
 - [Engine](/docs/engineering/technical/engine/readme) - Workflow data access
+- [SoT - Database Model](/docs/engineering/architecture/sot-database-model-access-patterns-neon) - Source of truth
 
 ---
 
-**Database**: Neon PostgreSQL
-**Connection**: Via Doppler secrets
+## Migration System
+
+Migrations tracked in `migration_history` table:
+
+```bash
+# Run migrations
+make db-migrate
+
+# Check status
+doppler run -- bash -c 'psql "$DATABASE_URL_ADMIN" -c "SELECT filename, executed_at FROM migration_history ORDER BY executed_at DESC LIMIT 10;"'
+```
+
+**Migration files**: `infrastructure/database/migrations/`
+**Latest**: `20260104_add_schedule_rules.sql`

@@ -1,22 +1,25 @@
 ---
 title: "Home & Widgets"
-description: "This table defines the Home V2 widget contract and should drive both API validation and the LockedIn registry."
+description: "Terminology note:"
 ---
 
 # SoT - Home & Widgets
+
+Terminology note:
+- Cue is the user-facing label for the Heads Up signal layer. Code and some docs still use `headsup`/HeadsUp identifiers. This doc uses Cue except when referencing identifiers or filenames.
 
 ## Scope
 - Home V2 widget system for the LockedIn web app (batch widgets, layout, widget prefs).
 - V2 widget envelope contract + batch ETag rules from API v2.
 - Widget catalog (types, aliases, registry metadata) and default Home widget set.
-- HeadsUp widget pipeline (cached feed cards + dismissals) used on Home V2.
+- Cue widget pipeline (cached feed cards + dismissals) used on Home V2.
 - **iOS unified widget system** - CollapsibleWidgetContainer, UpNextCard, WidgetStackView for iPhone/iPad.
 
 ## Non-goals
 - iOS WidgetKit home screen widgets (separate package: DWWidgetKit).
 - Legacy V1 composite dashboard contract except as a fallback data source.
 - Widget UI and visual design details; see [LockedIn-Schedule-UX-Guidelines](/docs/product/design/lockedin-schedule-ux-guidelines).
-- Feed scoring internals beyond the HeadsUp widget contract.
+- Feed scoring internals beyond the Cue widget contract.
 
 ## Current vs Target
 
@@ -28,8 +31,8 @@ description: "This table defines the Home V2 widget contract and should drive bo
 - Plan: `obsidian-vault/DormWay/Plans/Workplan/Home-V2-Schedule-Widget-Scale-Plan.md` (schedule widget speed + batch-first alignment).
 
 ### iOS Today Surface
-- Current: Feed-first Today uses `HomeTabView` + `FeedView` with `WidgetStackView` embedded; widget-only mode is deprecated.
-- Target: Maintain feed-first Today while expanding canonical widgets (UpNext + collapsible stack) and folding in HeadsUp when available.
+- Current: Today uses `TodayDashboardView` as the single surface (dashboard stack + Cue strip). `FeedView` and `WidgetStackView` are retired.
+- Target: Keep the dashboard-first Today and add Work Session entry points from Next Action and Schedule.
 
 ## Roadmap (Current)
 - Keep Home V2 batch-first and remove any residual legacy activity dependencies; rely on `/v2/students/me/feed` metadata for context cards.
@@ -61,7 +64,7 @@ description: "This table defines the Home V2 widget contract and should drive bo
 - Widget prefs persist under `general.widgetPreferences[tab]` via `/api/proxy/api/v2/students/me/preferences`; saved on exit edit mode.
 - Batch ETag excludes `generatedAt` and sorts keys; per-widget ETag is content-only; 304 on `If-None-Match` match.
 - `authorizedFetch` supports conditional ETag caching, but `useWidgetBatchV2` does not enable it; caching is React Query + invalidation.
-- HeadsUp uses cached feed batches + `feed_dismissals` filtering; `includeEmpty: true` yields empty content with a version tied to cache + dismissals.
+- Cue uses cached feed batches + `feed_dismissals` filtering; `includeEmpty: true` yields empty content with a version tied to cache + dismissals.
 
 ## Widget Contract Table (Source of Truth)
 
@@ -142,7 +145,7 @@ sequenceDiagram
     RQ->>RQ: Trigger refetch
 ```
 
-### HeadsUp Dismissal
+### Cue Dismissal
 
 ```mermaid
 sequenceDiagram
@@ -158,16 +161,16 @@ sequenceDiagram
     API-->>UI: Confirmed
 ```
 
-## iOS Unified Widget System (January 2026)
+## iOS Unified Widget System (January 2026, legacy)
 
 The iOS app implements a unified widget system matching the iPad Dashboard's glassmorphic design language.
-Today is feed-first on iOS; the widget stack is embedded within the Feed view rather than presented as a standalone surface.
+Note: the widget stack is not wired into the current Today surface and is treated as legacy UI.
 
 ### Widget Architecture
 
 ```mermaid
 flowchart TD
-    subgraph "Today Tab"
+    subgraph "Today Tab (Legacy)"
         HTV[HomeTabView]
         WSV[WidgetStackView]
         UNC[UpNextCard]
@@ -176,7 +179,7 @@ flowchart TD
         HTV --> UNC
     end
 
-    subgraph "Collapsible Widgets"
+    subgraph "Collapsible Widgets (Legacy)"
         CWC[CollapsibleWidgetContainer]
         SCW[ScheduleCollapsibleWidget]
         TCW[TasksCollapsibleWidget]
@@ -219,7 +222,7 @@ flowchart TD
 - **Auto-expand**: Tasks widget auto-expands when overdue items exist
 - **iPad parity**: Matches iPad Dashboard GlassSection aesthetic
 
-### Widget Data Flow
+### Widget Data Flow (Legacy)
 
 ```mermaid
 sequenceDiagram
@@ -237,7 +240,7 @@ sequenceDiagram
 
 ## Data Models / IDs / Terminology
 - WidgetEnvelope: `{ id, type, gridHints, content, generatedAt }` returned by `/v2/widgets/batch`.
-- WidgetTypeId: frontend union in `widgetV2Types.ts` (Home V2 uses `today`, `schedule`, `tasks`, `courses`, `headsup` by default).
+- WidgetTypeId: frontend union in `widgetV2Types.ts` (Home V2 uses `today`, `schedule`, `tasks`, `courses`, `headsup` (Cue) by default).
 - Canonical widget ID: `widget:${type}` for API widgets; `user-*`, `debug-*`, `widget:user:*`, `widget:debug:*` for custom widgets.
 - LayoutData: `{ gridSpec, widgets[] }` with `LayoutWidget` containing id/type/grid and `content.displayType`.
 - Widget preferences: `general.widgetPreferences[tab]` with `hiddenWidgetIds` and `userWidgets`.
@@ -247,7 +250,7 @@ sequenceDiagram
 ### Web (LockedIn)
 - `services/api-router/src/routes/v2/widgets.routes.ts` (WidgetEnvelope, grid hints, batch endpoint)
 - `services/api-router/src/services/headsup/headsup-builder.ts` (cached feed + dismissal filtering)
-- `services/api-router/src/services/headsup/headsup-types.ts` (HeadsUp types + limits)
+- `services/api-router/src/services/headsup/headsup-types.ts` (Cue types + limits; file name uses headsup)
 - `services/dormway-lockedin/src/hooks/home/widgetV2Types.ts` (envelope/content types, default widget list)
 - `services/dormway-lockedin/src/hooks/home/useWidgetBatchV2.ts` (batch query + cache keys)
 - `services/dormway-lockedin/src/contexts/WidgetDataContext.tsx` (batch data provider)
@@ -262,7 +265,7 @@ sequenceDiagram
 - `services/dormway-lockedin/src/lib/dashboard/useLayoutService.ts` (layout persistence hook)
 - `services/dormway-lockedin/src/lib/preferences.ts` (widget prefs persistence)
 
-### iOS (DormWay) - Unified Widget System
+### iOS (DormWay) - Unified Widget System (Legacy)
 - `.repos/ios-clean/App/Views/Home/Widgets/CollapsibleWidgetContainer.swift` (glassmorphic container with collapse/expand)
 - `.repos/ios-clean/App/Views/Home/Widgets/WidgetStackView.swift` (container for 4 collapsible widgets + data loading)
 - `.repos/ios-clean/App/Views/Home/Widgets/UpNextCard.swift` (current/next event with quick actions)
@@ -287,10 +290,10 @@ sequenceDiagram
 - Changing default Home set: update `DEFAULT_WIDGET_TYPES`, `HOME_DEFAULT_WIDGET_TYPES`, and registry defaults.
 - Changing layout persistence: update `layout-service.ts`, `useLayoutService.ts`, and `gridLayoutToLayoutData` conversion rules.
 - Changing widget prefs: update `useWidgetPreferences.ts` and any migration logic in `home-v2/page.tsx`.
-- Changing HeadsUp rules: update `headsup-builder.ts`, `headsup-types.ts`, and `useHeadsUpDismiss.ts` integration.
+- Changing Cue rules (system identifier: headsup): update `headsup-builder.ts`, `headsup-types.ts`, and `useHeadsUpDismiss.ts` integration.
 
 ## Recent Changes
-- 2026-01-05: Documented feed-first Today on iOS; deprecated widget-only mode while keeping UpNext + collapsible widget stack embedded in Feed.
+- 2026-01-13: Removed `FeedView`/`WidgetStackView` from the Today surface; Cue strip + dashboard stack are now the only Today UI. Added Work Session entry points.
 - 2026-01-04: **iOS Unified Widget System** - CollapsibleWidgetContainer with glassmorphic styling, UpNextCard for current/next event with quick actions, WidgetStackView as container for 4 collapsible widgets (Schedule, Tasks, Term, Campus).
 - 2026-01-02: Disabled schedule widget dayplan/time-block reads on Home V2 load; mutations refresh via batch.
 - 2026-01-02: Removed client-side "today" filtering and aligned schedule ordering to timeline start times.
@@ -303,7 +306,7 @@ sequenceDiagram
 - 2025-12-26: Added v2 mobile schedule slice, v2 layouts alias, and core-widget fallback warnings for V1 visibility.
 - 2025-12-26: Added Option A plan doc and clarified current vs target for composite deprecation.
 - 2025-12-27: Linked web OS consistency + composite removal plans for long-term rollout sequencing.
-- 2025-12-24: Expanded student life surfaces spec with OS hierarchy, beta gating, and HeadsUp governance.
+- 2025-12-24: Expanded student life surfaces spec with OS hierarchy, beta gating, and Cue governance (HeadsUp in spec name).
 - 2025-12-23: Moved Home V2 batch type resolution to `/v2/widgets/home-types` (server-resolved).
 - 2025-12-23: Enforced strict Home V2 layout validation (canonical IDs/types only; no alias normalization).
 - 2025-12-23: Added the Home V2 Widget Contract table as the single source of truth for widget types and policies.

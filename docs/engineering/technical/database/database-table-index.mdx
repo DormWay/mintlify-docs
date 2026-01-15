@@ -1,0 +1,291 @@
+---
+title: "Database Table Index"
+description: "Complete inventory of database tables for AI agents and developers. This document enables discovery of the 118+ tables in the DormWay Neon PostgreSQL database."
+---
+
+# Database Table Index
+
+Complete inventory of database tables for AI agents and developers. This document enables discovery of the 118+ tables in the DormWay Neon PostgreSQL database.
+
+**Database**: Neon PostgreSQL (`misty-queen-56829089`)
+**Total Tables**: ~118 (excluding partitions)
+**Total Indexes**: ~676
+**Total Foreign Keys**: ~98
+
+---
+
+## Quick Navigation
+
+- [[#Core Identity & User Management]]
+- [[#Context System (Hierarchical Entities)]]
+- [[#Schedule & Time Management]]
+- [[#Canvas LMS Integration]]
+- [[#Content & Documents]]
+- [[#Location & Spatial]]
+- [[#Configuration & Settings]]
+- [[#Workflow & Operations]]
+- [[#Analytics & Events]]
+- [[#Feature & Voting]]
+- [[#Partitioned Tables]]
+
+---
+
+## Core Identity & User Management
+
+| Table | Purpose | Key Columns | Notes |
+|-------|---------|-------------|-------|
+| `accounts` | User accounts (source of truth for users) | `id`, `email`, `clerk_user_id`, `role` | **Primary user table** - NOT onboarding |
+| `onboarding` | Temporary onboarding state | `user_id`, `step`, `data` | Transient - use `accounts` for user data |
+| `demo_accounts` | Demo/test account management | `id`, `email`, `demo_type` | For testing and demos |
+| `roles` | Role definitions | `id`, `name`, `permissions` | RBAC system |
+| `accounts_memberships` | Account-role mappings | `account_id`, `role_id` | Many-to-many |
+| `role_permissions` | Permission assignments | `role_id`, `permission` | Granular permissions |
+| `user_preferences` | User settings/preferences | `user_id`, `preference_key`, `value` | JSON values |
+
+### Critical: accounts vs onboarding
+
+```sql
+-- CORRECT: Get user data from accounts
+SELECT * FROM accounts WHERE id = $1;
+
+-- WRONG: Don't query onboarding for user data
+-- SELECT * FROM onboarding WHERE user_id = $1;  -- This is temporary state!
+```
+
+---
+
+## Context System (Hierarchical Entities)
+
+| Table | Purpose | Key Columns | Notes |
+|-------|---------|-------------|-------|
+| `contexts` | Hierarchical entity storage | `id`, `parent_id`, `type`, `name`, `user_id`, `metadata` | **Central to architecture** |
+| `context_dependencies` | Many-to-many relationships | `parent_context_id`, `child_context_id`, `dependency_type` | Course enrollments, prerequisites |
+
+### Context Types
+
+| Type Value | Entity | Parent Type |
+|------------|--------|-------------|
+| `city` | City | (root) |
+| `campus` | Campus | `city` |
+| `building` | Building | `campus` |
+| `course` | Course | `campus` |
+| `student` | Student enrollment | `campus` |
+
+### Common Queries
+
+```sql
+-- Get student's campus
+SELECT campus.* FROM contexts student
+JOIN contexts campus ON campus.id = student.parent_id
+WHERE student.user_id = $1 AND student.type = 'student' AND campus.type = 'campus';
+
+-- Get student's enrolled courses
+SELECT course.* FROM context_dependencies cd
+JOIN contexts course ON course.id = cd.child_context_id
+WHERE cd.parent_context_id = $student_context_id
+  AND cd.dependency_type = 'enrolled_in';
+```
+
+---
+
+## Schedule & Time Management
+
+| Table | Purpose | Key Columns | Notes |
+|-------|---------|-------------|-------|
+| `time_blocks` | Schedule blocks | `id`, `user_id`, `start_time`, `end_time`, `type` | Base schedule data |
+| `student_time_blocks` | Student schedule view | (view) | Aggregated view |
+| `schedule_rules` | Recurring schedule rules | `id`, `rule_type`, `pattern` | RRULE patterns |
+| `schedule_parsing_artifacts` | Parsed schedule metadata | `id`, `source`, `parsed_data` | From syllabus extraction |
+
+---
+
+## Canvas LMS Integration
+
+| Table | Purpose | Key Columns | Notes |
+|-------|---------|-------------|-------|
+| `canvas_accounts` | Canvas account links | `id`, `user_id`, `canvas_user_id`, `access_token` | OAuth tokens |
+| `canvas_courses` | Canvas course data | `id`, `canvas_course_id`, `name`, `context_id` | Linked to contexts |
+| `canvas_assignments` | Assignment data | `id`, `canvas_assignment_id`, `course_id`, `due_at` | From Canvas API |
+| `canvas_submissions` | Submission tracking | `id`, `assignment_id`, `user_id`, `score` | Grade data |
+| `canvas_quizzes` | Quiz data | `id`, `canvas_quiz_id`, `course_id` | Quiz metadata |
+| `canvas_discussions` | Discussion data | `id`, `canvas_discussion_id`, `course_id` | Forum data |
+| `canvas_student_analytics` | Performance analytics | `user_id`, `course_id`, `analytics_data` | Aggregated stats |
+| `canvas_live_events` | Webhook events | `id`, `event_type`, `payload` | Real-time updates |
+| `canvas_webhook_events` | Webhook log | `id`, `event_id`, `processed_at` | Processing log |
+| `canvas_term_map` | Term mappings | `canvas_term_id`, `context_id` | Term alignment |
+
+---
+
+## Content & Documents
+
+| Table | Purpose | Key Columns | Notes |
+|-------|---------|-------------|-------|
+| `syllabus_documents` | Uploaded syllabi | `id`, `user_id`, `course_id`, `s3_key` | File references |
+| `syllabus_analysis` | AI-processed insights | `id`, `document_id`, `analysis_data` | LLM extraction |
+| `syllabus_analysis_cache` | Deduplication cache | `content_hash`, `analysis_id` | Prevents re-processing |
+| `syllabus_user_links` | User-syllabus associations | `user_id`, `syllabus_id` | Many-to-many |
+| `notes` | User notes | `id`, `user_id`, `content`, `course_id` | MDX content |
+| `note_revisions` | Note version history | `id`, `note_id`, `content`, `created_at` | Revision tracking |
+| `content_ingestions` | Content processing jobs | `id`, `source`, `status`, `content_type` | Processing pipeline |
+| `content_type_configs` | Content handler configs | `type`, `handler`, `config` | Processing rules |
+
+---
+
+## Location & Spatial
+
+| Table | Purpose | Key Columns | Notes |
+|-------|---------|-------------|-------|
+| `locations` | PostGIS geometries | `id`, `context_id`, `location` (geography), `location_type` | Spatial data |
+| `user_locations` | User location history | `id`, `user_id`, `location`, `accuracy_meters`, `timestamp` | GPS tracking |
+| `context_location_mapping` | Context-location links | `context_id`, `location_id` | Many-to-many |
+
+### PostGIS Column Names
+
+```sql
+-- CORRECT column names
+SELECT location, accuracy_meters FROM user_locations;  -- NOT location_point, accuracy
+
+-- Spatial query example
+SELECT * FROM locations
+WHERE ST_DWithin(location, ST_MakePoint($lon, $lat)::geography, 1000);
+```
+
+---
+
+## Configuration & Settings
+
+| Table | Purpose | Key Columns | Notes |
+|-------|---------|-------------|-------|
+| `campus_configs` | Campus settings | `campus_id`, `feature_flags`, `sync_config` | Per-campus config |
+| `city_configs` | City settings | `city_id`, `feature_flags` | Per-city config |
+| `campus_registry` | Reference campus data | `id`, `name`, `domain`, `city`, `state` | 6,252 IPEDS campuses |
+| `system_config` | Global settings | `key`, `value`, `description` | System-wide |
+| `system_config_audit` | Config change log | `config_key`, `old_value`, `new_value`, `changed_by` | Audit trail |
+| `external_services` | Service definitions | `id`, `name`, `url`, `config` | API integrations |
+| `plugin_registry` | Plugin definitions | `id`, `name`, `handler`, `config` | Extensibility |
+
+---
+
+## Workflow & Operations
+
+| Table | Purpose | Key Columns | Notes |
+|-------|---------|-------------|-------|
+| `tasks` | Task tracking | `id`, `user_id`, `type`, `status`, `due_at` | User tasks |
+| `student_watcher_state` | Temporal workflow state | `student_id`, `state`, `last_run` | Per-student workflow |
+| `workflow_health_checks` | Workflow monitoring | `workflow_id`, `status`, `last_check` | Health tracking |
+| `workflow_maintenance_log` | Maintenance history | `id`, `action`, `result` | Ops log |
+| `maintenance_reports` | Maintenance summaries | `id`, `report_date`, `summary` | Daily reports |
+| `sync_operations` | Sync job tracking | `id`, `entity_type`, `status`, `started_at` | Sync jobs |
+| `api_logs` | API request logs | `id`, `endpoint`, `user_id`, `response_time` | Performance data |
+| `handler_execution_logs` | Handler execution | `id`, `handler`, `status`, `duration` | Processing logs |
+| `cleanup_review_queue` | Cleanup candidates | `id`, `table_name`, `record_id`, `reason` | Data cleanup |
+| `admin_impersonation_logs` | Admin audit | `admin_id`, `target_user_id`, `action` | Security audit |
+
+---
+
+## Analytics & Events
+
+| Table | Purpose | Key Columns | Notes |
+|-------|---------|-------------|-------|
+| `assignment_completion` | Assignment tracking | `id`, `user_id`, `assignment_id`, `completed_at` | **Partitioned** |
+| `context_prediction_history` | AI predictions | `id`, `context_id`, `prediction`, `confidence` | ML outputs |
+| `dayplan_deviations` | Schedule deviations | `id`, `user_id`, `expected`, `actual` | Behavioral data |
+| `insight_attributions` | Insight sourcing | `id`, `insight_id`, `source`, `weight` | Attribution |
+| `user_insight_preferences` | Insight settings | `user_id`, `insight_type`, `enabled` | Personalization |
+| `course_lifecycle_events` | Course events | `id`, `course_id`, `event_type`, `timestamp` | Course tracking |
+| `layout_change_events` | UI changes | `id`, `user_id`, `change_type`, `metadata` | UX tracking |
+| `feed_dismissals` | Feed item dismissals | `id`, `user_id`, `item_id`, `dismissed_at` | User actions |
+| `live_activity_tokens` | iOS Live Activity | `id`, `user_id`, `token`, `activity_type` | iOS tokens |
+
+---
+
+## Feature & Voting
+
+| Table | Purpose | Key Columns | Notes |
+|-------|---------|-------------|-------|
+| `feature_requests` | Feature requests | `id`, `title`, `description`, `status` | User requests |
+| `feature_request_votes` | Vote tracking | `user_id`, `feature_id`, `vote` | Voting |
+| `feature_request_comments` | Comments | `id`, `feature_id`, `user_id`, `content` | Discussion |
+| `roadmap_timeline_events` | Roadmap items | `id`, `title`, `target_date`, `status` | Public roadmap |
+| `roadmap_timeline_event_votes` | Roadmap votes | `user_id`, `event_id`, `vote` | Prioritization |
+| `roadmap_event_feature_requests` | Roadmap-feature links | `event_id`, `feature_id` | Relationships |
+| `timeline_event_votes` | Event voting | `user_id`, `event_id`, `vote` | Legacy |
+
+---
+
+## Merchant & Ambassador (Beta)
+
+| Table | Purpose | Key Columns | Notes |
+|-------|---------|-------------|-------|
+| `merchants` | Merchant accounts | `id`, `name`, `category`, `campus_id` | Local businesses |
+| `merchant_events_raw` | Raw event data | `id`, `merchant_id`, `event_type`, `data` | Event ingestion |
+| `merchant_hourly_stats` | Aggregated stats | `merchant_id`, `hour`, `metrics` | Analytics |
+| `ambassador_applications` | Ambassador signups | `id`, `user_id`, `status`, `applied_at` | Applications |
+| `referral_events` | Referral tracking | `id`, `referrer_id`, `referred_id`, `event` | Referrals |
+| `ambassador_commissions` | Commission tracking | `id`, `ambassador_id`, `amount`, `status` | Payouts |
+
+---
+
+## Video & Media
+
+| Table | Purpose | Key Columns | Notes |
+|-------|---------|-------------|-------|
+| `video_render_jobs` | Video processing | `id`, `user_id`, `status`, `output_url` | Async rendering |
+
+---
+
+## Partitioned Tables
+
+These tables are partitioned by time for performance:
+
+| Base Table | Partition Key | Partition Pattern | Notes |
+|------------|---------------|-------------------|-------|
+| `service_data` | `fetched_at` | Monthly (`service_data_2025_01`) | **Always filter by fetched_at** |
+| `assignment_completion` | `completed_at` | Monthly | Performance data |
+
+### Querying Partitioned Tables
+
+```sql
+-- CORRECT: Include partition key for efficient queries
+SELECT * FROM service_data
+WHERE fetched_at >= '2025-12-01' AND fetched_at < '2026-01-01'
+  AND user_id = $1;
+
+-- WRONG: Missing partition key causes full scan
+-- SELECT * FROM service_data WHERE user_id = $1;
+```
+
+---
+
+## Migration Tracking
+
+| Table | Purpose | Key Columns | Notes |
+|-------|---------|-------------|-------|
+| `migration_history` | Applied migrations | `filename`, `checksum`, `executed_at`, `success` | **Do not modify** |
+
+---
+
+## For AI Agents: Discovery Workflow
+
+1. **Start here**: Check this index for table existence
+2. **Verify schema**: Read migration files in `infrastructure/database/migrations/`
+3. **Check dormway-core**: Entity types in `services/shared/dormway-core/src/entities/`
+4. **Debug with admin**: `doppler run -- bash -c 'psql "$DATABASE_URL_ADMIN" -c "..."'`
+
+### Common Mistakes
+
+| Mistake | Correct Approach |
+|---------|------------------|
+| Query `onboarding` for user data | Use `accounts` table |
+| Use `accounts.campus_id` | Join through `contexts` |
+| Query `city_registry` | Use `contexts WHERE type = 'city'` |
+| Missing `fetched_at` filter on `service_data` | Always include partition key |
+| Use `DATABASE_URL` for debugging | Use `DATABASE_URL_ADMIN` (bypasses RLS) |
+
+---
+
+## Related Documents
+
+- [Context System Database Schema](/docs/engineering/technical/database/context-system-database-schema) - Detailed schema documentation
+- [Database Model & Access Patterns (Neon)](/docs/engineering/architecture/sot-database-model-access-patterns-neon) - Access patterns
+- RLS-Security-Performance-Audit - Security details

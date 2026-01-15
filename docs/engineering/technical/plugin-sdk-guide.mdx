@@ -1,0 +1,613 @@
+---
+title: "Plugin SDK Guide"
+description: "Guide to writing campus data collection plugins using the DormWay Campus SDK."
+---
+
+# Plugin SDK Guide
+
+Guide to writing campus data collection plugins using the DormWay Campus SDK.
+
+## Overview
+
+DormWay plugins are TypeScript modules that fetch, transform, and normalize campus-specific data. They run on configurable schedules and are executed by the `plugin-runner` service.
+
+```
+Campus Source  →  Plugin  →  Manifest  →  DormWay Platform
+(ICS/RSS/API)     (SDK)      (JSON)       (service_data)
+```
+
+## Getting Started
+
+### Prerequisites
+
+- Node.js 20.x
+- TypeScript
+- npm or yarn
+
+### Install the SDK
+
+```bash
+npm install @dormway/campus-sdk
+```
+
+Or clone the SDK repository:
+
+```bash
+git clone https://github.com/DormWay/dw-campus-sdk.git
+cd dw-campus-sdk
+npm install
+npm run build
+```
+
+## Plugin Structure
+
+Every plugin has two components:
+
+### 1. Manifest File (`manifest.json`)
+
+Declares plugin metadata, target campus, and task definitions:
+
+```json
+{
+  "pluginId": "dw.my-university",
+  "pluginVersion": "1.0.0",
+  "displayName": "My University Plugin",
+  "description": "Campus events and dining data",
+
+  "target": {
+    "type": "campus",
+    "campusId": "my-university"
+  },
+
+  "runtime": {
+    "language": "typescript",
+    "entrypoint": "dist/index.js",
+    "nodeVersion": "20.x"
+  },
+
+  "tasks": [
+    {
+      "taskId": "campus-events",
+      "description": "Fetch events from campus calendar",
+      "modules": ["events"],
+      "defaultCadence": "PT30M",
+      "timeout": "PT2M",
+      "enabled": true
+    }
+  ],
+
+  "requirements": {
+    "secrets": [],
+    "proxyScopes": ["calendar.university.edu"]
+  }
+}
+```
+
+### 2. Implementation File (`src/index.ts`)
+
+Contains task logic using SDK functions:
+
+```typescript
+import {
+  definePlugin,
+  runPlugin,
+  type PluginExecutionRequest,
+  type PluginExecutionResult
+} from "@dormway/campus-sdk";
+
+const plugin = definePlugin({
+  metadata: {
+    pluginId: "dw.my-university",
+    pluginVersion: "1.0.0",
+    target: { type: "campus", campusId: "my-university" },
+    description: "Campus events and dining data"
+  },
+  instructions: {
+    mode: "replace",
+    expiresAt: new Date(Date.now() + 30 * 60 * 1000).toISOString()
+  },
+  tasks: [
+    {
+      id: "campus-events",
+      execute: async ({ manifest, logger }) => {
+        logger.info("Fetching campus events");
+
+        // Your data fetching logic here
+        const events = await fetchCampusEvents();
+
+        manifest.setModule("events", events);
+      }
+    }
+  ]
+});
+
+export default plugin;
+
+export async function execute(
+  request: PluginExecutionRequest = {}
+): Promise<PluginExecutionResult> {
+  return runPlugin(plugin, request);
+}
+```
+
+## Core SDK API
+
+### `definePlugin(definition)`
+
+Creates a type-safe plugin definition:
+
+```typescript
+const plugin = definePlugin({
+  metadata: {
+    pluginId: "dw.example",
+    pluginVersion: "1.0.0",
+    target: { type: "campus", campusId: "example" },
+    description: "Example plugin",
+    author: "Your Name",
+    website: "https://example.com"
+  },
+  instructions: {
+    mode: "replace",      // "replace" | "merge" | "diff"
+    expiresAt: "..."      // Optional TTL
+  },
+  tasks: [/* task definitions */]
+});
+```
+
+### `runPlugin(plugin, request?)`
+
+Executes all tasks and returns the manifest:
+
+```typescript
+const result = await runPlugin(plugin, {
+  runId: "custom-id",           // Optional
+  options: { debug: true },     // Custom task options
+  generatedAt: new Date().toISOString()
+});
+
+console.log(result.manifest);       // Output manifest
+console.log(result.executedTasks);  // Task execution summary
+```
+
+### `ManifestBuilder`
+
+Build output data within tasks:
+
+```typescript
+execute: async ({ manifest }) => {
+  // Set module (replaces existing)
+  manifest.setModule("events", [...]);
+
+  // Append to module (merges)
+  manifest.appendToModule("events", [...]);
+
+  // Set processing instructions
+  manifest.setInstructions({
+    mode: "replace",
+    expiresAt: "2024-01-01T00:00:00Z"
+  });
+}
+```
+
+### Task Return Values
+
+Tasks can return module updates directly:
+
+```typescript
+{
+  id: "my-task",
+  execute: async (ctx) => {
+    // Option 1: Use manifest builder
+    ctx.manifest.setModule("events", data);
+
+    // Option 2: Return single update
+    return { module: "events", data, mode: "replace" };
+
+    // Option 3: Return multiple updates
+    return [
+      { module: "events", data: eventsData },
+      { module: "dining", data: diningData, mode: "merge" }
+    ];
+  }
+}
+```
+
+## Data Helpers
+
+### ICS Calendar Parsing
+
+Parse `.ics` calendar feeds:
+
+```typescript
+import { parseICS, filterEventsByDate } from "@dormway/campus-sdk";
+
+const response = await fetch("https://university.edu/calendar.ics");
+const icsText = await response.text();
+
+// Parse the calendar
+const calendar = parseICS(icsText);
+
+// Filter to date range
+const upcoming = filterEventsByDate(
+  calendar,
+  new Date().toISOString(),
+  new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()
+);
+
+// Transform to DormWay schema
+const events = upcoming.map(event => ({
+  id: event.uid,
+  title: event.title,
+  description: event.description,
+  location: event.location,
+  start: event.start?.iso,
+  end: event.end?.iso,
+  isAllDay: event.start?.isAllDay ?? false,
+  categories: event.categories
+}));
+```
+
+#### ICS Types
+
+```typescript
+interface IcsEvent {
+  uid?: string;
+  title?: string;
+  description?: string;
+  location?: string;
+  status?: string;
+  url?: string;
+  categories: string[];
+  start?: IcsDateValue;
+  end?: IcsDateValue;
+  raw: Record<string, string>;
+}
+
+interface IcsDateValue {
+  raw: string;        // Original ICS value
+  iso?: string;       // Parsed ISO timestamp
+  timezone?: string;  // TZID if present
+  isAllDay: boolean;  // DATE vs DATETIME
+}
+```
+
+### RSS/Atom Feed Parsing
+
+Parse RSS and Atom feeds:
+
+```typescript
+import { parseRSS } from "@dormway/campus-sdk";
+
+const response = await fetch("https://university.edu/news/feed.xml");
+const xml = await response.text();
+
+const feed = parseRSS(xml);
+
+const news = feed.items.map(item => ({
+  id: item.guid,
+  title: item.title,
+  description: item.description,
+  link: item.link,
+  pubDate: item.pubDate,
+  author: item.author,
+  categories: item.categories
+}));
+```
+
+#### RSS Types
+
+```typescript
+interface RssFeed {
+  title?: string;
+  link?: string;
+  description?: string;
+  language?: string;
+  copyright?: string;
+  updatedAt?: string;
+  items: RssItem[];
+}
+
+interface RssItem {
+  title?: string;
+  link?: string;
+  description?: string;
+  content?: string;      // content:encoded
+  pubDate?: string;
+  guid?: string;
+  author?: string;
+  categories: string[];
+  raw: string;           // Raw XML
+}
+```
+
+## Task Context
+
+Every task receives a context object:
+
+```typescript
+interface PluginTaskContext {
+  readonly manifest: ManifestBuilder;   // Build output data
+  readonly metadata: PluginMetadata;    // Plugin metadata
+  readonly logger: PluginLogger;        // Structured logging
+  readonly runId: string;               // Unique execution ID
+  readonly options: Record<string, unknown>;  // Custom options
+  readonly generatedAt: string;         // ISO timestamp
+}
+```
+
+### Logging
+
+Use structured logging in tasks:
+
+```typescript
+execute: async ({ logger }) => {
+  logger.info("Starting fetch", { source: "ics" });
+  logger.debug("Request details", { url, timeout });
+  logger.warn("Rate limit approaching", { remaining: 10 });
+  logger.error("Fetch failed", { error: err.message });
+}
+```
+
+## Manifest Configuration
+
+### Task Cadence
+
+ISO 8601 durations for scheduling:
+
+| Duration | ISO 8601 | Use Case |
+|----------|----------|----------|
+| 5 minutes | `PT5M` | Real-time data (occupancy) |
+| 15 minutes | `PT15M` | Frequent updates |
+| 30 minutes | `PT30M` | Standard events |
+| 1 hour | `PT1H` | Hourly data |
+| 6 hours | `PT6H` | Semi-daily |
+| 1 day | `P1D` | Daily sync |
+
+### Instruction Modes
+
+| Mode | Behavior |
+|------|----------|
+| `replace` | Completely replace existing data |
+| `merge` | Merge with existing data (arrays concatenate, objects shallow merge) |
+| `diff` | Apply incremental changes |
+
+### Data Freshness
+
+Set `expiresAt` based on data volatility:
+
+```typescript
+instructions: {
+  mode: "replace",
+  // Frequent: 5-15 minutes
+  expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString()
+}
+
+// Moderate: 30-60 minutes
+// Infrequent: 6-24 hours
+```
+
+## Best Practices
+
+### Error Handling
+
+```typescript
+execute: async ({ logger }) => {
+  try {
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    // Process...
+  } catch (error) {
+    logger.error("Fetch failed", {
+      error: error instanceof Error ? error.message : String(error),
+      url
+    });
+    throw error;  // Re-throw to mark task as failed
+  }
+}
+```
+
+### Multiple Data Sources
+
+Split distinct sources into separate tasks:
+
+```typescript
+tasks: [
+  {
+    id: "events-ics",
+    execute: async ({ manifest }) => {
+      manifest.setModule("events", icsEvents);
+    }
+  },
+  {
+    id: "events-api",
+    execute: async ({ manifest }) => {
+      // Merge with ICS events
+      manifest.appendToModule("events", apiEvents);
+    }
+  }
+]
+```
+
+### Data Normalization
+
+Transform external data to consistent schemas:
+
+```typescript
+const normalizeEvent = (raw: any) => ({
+  id: raw.uid || raw.id || `event-${Date.now()}`,
+  title: raw.title || raw.summary || "Untitled",
+  description: raw.description || raw.body || null,
+  start: normalizeDate(raw.start || raw.startDate),
+  end: normalizeDate(raw.end || raw.endDate),
+  location: raw.location || raw.venue || null,
+  categories: Array.isArray(raw.categories) ? raw.categories : []
+});
+```
+
+## Deployment
+
+### Registration
+
+Plugins are registered in the `plugin_registry` table:
+
+```sql
+INSERT INTO plugin_registry (
+  plugin_id, scope, target_id, version,
+  status, manifest, runtime_config
+) VALUES (
+  'dw.my-university',
+  'campus',
+  'my-university',
+  '1.0.0',
+  'active',
+  '{"tasks": [...]}',
+  '{"entrypoint": "dist/index.js"}'
+);
+```
+
+### Admin UI
+
+1. Go to **Admin > Campuses**
+2. Select campus > **Plugins** tab
+3. View registered plugins
+4. Click **Run** for manual execution
+
+### Monitoring
+
+Check plugin execution:
+
+```bash
+# Recent manifests
+SELECT plugin_id, run_id, generated_at,
+       jsonb_pretty(payload)
+FROM plugin_manifests
+WHERE plugin_id = 'dw.my-university'
+ORDER BY generated_at DESC LIMIT 5;
+
+# Plugin status
+SELECT plugin_id, status, last_run_at, last_run_status
+FROM plugin_registry
+WHERE target_id = 'my-university';
+```
+
+## Output Manifest Format
+
+The final manifest structure:
+
+```json
+{
+  "pluginId": "dw.my-university",
+  "pluginVersion": "1.0.0",
+  "runId": "uuid",
+  "target": {
+    "type": "campus",
+    "campusId": "my-university"
+  },
+  "generatedAt": "2024-01-15T10:30:00.000Z",
+  "instructions": {
+    "mode": "replace",
+    "expiresAt": "2024-01-15T11:00:00.000Z"
+  },
+  "payload": {
+    "events": [...],
+    "dining": [...],
+    "transit": [...]
+  }
+}
+```
+
+## Example: Complete Events Plugin
+
+```typescript
+import {
+  definePlugin,
+  runPlugin,
+  parseICS,
+  filterEventsByDate,
+  type PluginExecutionRequest,
+  type PluginExecutionResult
+} from "@dormway/campus-sdk";
+
+const EVENTS_URL = "https://my-university.edu/events.ics";
+const THIRTY_MINUTES = 30 * 60 * 1000;
+const THIRTY_DAYS = 30 * 24 * 60 * 60 * 1000;
+
+const plugin = definePlugin({
+  metadata: {
+    pluginId: "dw.my-university",
+    pluginVersion: "1.0.0",
+    target: { type: "campus", campusId: "my-university" },
+    description: "University events from ICS calendar"
+  },
+  instructions: {
+    mode: "replace",
+    expiresAt: new Date(Date.now() + THIRTY_MINUTES).toISOString()
+  },
+  tasks: [
+    {
+      id: "events",
+      description: "Fetch and process campus events",
+      execute: async ({ manifest, logger, generatedAt }) => {
+        logger.info("Fetching events", { url: EVENTS_URL });
+
+        const response = await fetch(EVENTS_URL);
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+
+        const icsText = await response.text();
+        const calendar = parseICS(icsText);
+
+        const now = new Date();
+        const upcoming = filterEventsByDate(
+          calendar,
+          now.toISOString(),
+          new Date(now.getTime() + THIRTY_DAYS).toISOString()
+        );
+
+        logger.info(`Found ${upcoming.length} events`);
+
+        const events = upcoming.map(event => ({
+          id: event.uid || `event-${Date.now()}-${Math.random()}`,
+          title: event.title || "Untitled Event",
+          description: event.description,
+          location: event.location,
+          start: event.start?.iso,
+          end: event.end?.iso,
+          isAllDay: event.start?.isAllDay ?? false,
+          categories: event.categories,
+          sourceUrl: event.url,
+          fetchedAt: generatedAt
+        }));
+
+        manifest.setModule("events", events);
+      }
+    }
+  ]
+});
+
+export default plugin;
+
+export async function execute(
+  request: PluginExecutionRequest = {}
+): Promise<PluginExecutionResult> {
+  return runPlugin(plugin, request);
+}
+
+if (require.main === module) {
+  execute()
+    .then(result => console.log(JSON.stringify(result.manifest, null, 2)))
+    .catch(err => {
+      console.error("Plugin failed:", err);
+      process.exitCode = 1;
+    });
+}
+```
+
+## Related Documentation
+
+- [Campus Processing Runbook](/docs/operations/runbooks/campus-processing-runbook) - Operations guide
+- Campus Processing DAG Flow - Workflow architecture
+- [dw-campus-sdk README](https://github.com/DormWay/dw-campus-sdk) - SDK repository

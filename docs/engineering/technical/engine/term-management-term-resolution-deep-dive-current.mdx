@@ -135,6 +135,75 @@ The Engine populates these via an LLM-backed enrichment prompt:
 
 - `.repos/dormway-platform/services/engine/src/activities/campusEnrichment.activities.ts` (`fetchCampusTermDates`)
 
+### 2.3 How campus term data gets automatically updated
+
+Campus academic calendars and current term data are refreshed through an **automatic prioritized enrichment workflow**.
+
+#### Automatic Enrichment Orchestration
+
+**Primary workflow:** `enrichCampusesPrioritized(limit = 100)`
+- **Location:** `.repos/dormway-platform/services/engine/src/workflows/campusProcessor.workflow.ts` (line 839)
+- **Scheduling:** Triggered periodically (exact schedule TBD - investigate Temporal schedule definitions)
+- **Execution:** Processes in batches of 5 campuses with 5-second delays between batches
+
+**Campus selection activity:** `getCampusesForEnrichment(limit)`
+- **Location:** `.repos/dormway-platform/services/engine/src/activities/campus.activities.ts` (line 1922)
+
+#### Selection Criteria
+
+Campuses are eligible for enrichment if:
+1. **Active:** `campus_ctx.is_active = true`
+2. **Stale:** Last enriched 7+ days ago (configured via `CAMPUS_ENRICHMENT_WINDOW_DAYS`, default 7)
+3. **Prioritized:** Ranked by priority score, top 100 selected
+
+#### Priority Scoring Formula
+
+```sql
+priority_score =
+  (account_count_active × 800) +     -- Active students (onboarding_status = 'completed')
+  (student_count × 250) +            -- Total student contexts
+  (course_count × 400) +             -- Course contexts
+  CASE
+    WHEN housing_capacity > 0 THEN 600
+    WHEN campus is online_only THEN 150
+    ELSE 350
+  END +
+  (enrollment_total × 0.02) +
+  LEAST(days_since_last_enrichment, 45) × 60  -- Staleness bonus (capped at 45 days)
+```
+
+**Impact on selection:**
+- Campus with 100 active students: **~80,000+ points**
+- Campus with 0 students: **~600-1,000 points**
+
+This ensures campuses with students are kept current, while empty campuses are rarely enriched.
+
+#### Automatic Current Term Detection
+
+When `fetchCampusTermDates` runs, it:
+1. Fetches the full academic calendar from Perplexity AI
+2. **Automatically determines the current term** by date comparison:
+
+```typescript
+const currentDate = new Date();
+const currentTerm = parsed.academicCalendar?.terms?.find((term: any) => {
+  const start = new Date(term.startDate);
+  const end = new Date(term.endDate);
+  return currentDate >= start && currentDate <= end;  // 🔑 Date-based selection
+}) || parsed.academicCalendar?.terms?.[0];  // Fallback to first term
+```
+
+3. Updates both:
+   - `campus_configs.current_term_data` (single term object)
+   - `campus_configs.academic_calendar` (full year with all terms)
+
+This means **no manual intervention is required** for term transitions. The system automatically updates `current_term_data` when enrichment runs and finds today's date falls into a new term.
+
+#### Code Reference
+
+Full implementation:
+- `.repos/dormway-platform/services/engine/src/activities/campusEnrichment.activities.ts` (lines 1019-1026 for current term detection)
+
 ---
 
 ## 3) How term IDs get normalized (and what that means)
@@ -411,6 +480,12 @@ DB cache table:
    - `getActiveTermForScheduleImport` returns `termYear`, but schedule import currently only passes `termId` into `createCourseEnrollments`.
 4) **Notification tracking uses dynamic JSON path construction**:
    - `jsonb_set(..., '{term_notifications, ${termId}}', ...)` assumes term IDs are safe as JSON path tokens.
+5) **`scheduledCampusUpdates` workflow may be broken**:
+   - Workflow exists at `.repos/dormway-platform/services/engine/src/workflows/campusProcessor.workflow.ts` (line 892)
+   - Calls `fetchCampuses(organizationId)` which returns empty array in SupabaseAdapter
+   - Warning: `'fetchCampuses not implemented in Aurora adapter'`
+   - **Actual campus enrichment** uses `enrichCampusesPrioritized` workflow (documented in section 2.3)
+   - Status of `scheduledCampusUpdates` is unclear - investigate whether this is deprecated or needs implementation
 
 ---
 

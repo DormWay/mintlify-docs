@@ -30,12 +30,13 @@ description: "sequenceDiagram participant Workflow as scheduleImport.workflow pa
 - `time_blocks` deduplicates by `source_type + source_id + (user_id or context_id)` (unique index).
 - Calendar storage validates timezone strings and normalizes to UTC (`normalizeToProperUTC`); floating times without timezone are warned and treated as server-local.
 - ICS all-day detection: `normalizeICSData` sets `all_day` via date-only ICS markers (`datetype: date`, `VALUE=DATE`), and Canvas assignment normalization preserves `assignment.all_day` to avoid timezone shifts.
-- `student_time_blocks` is a view alias to `v_student_calendar_events` in Neon migrations; API reads from `student_time_blocks` and filters by active lifecycle.
+- `student_time_blocks` is **currently a BASE TABLE** (not a view) in production Neon. It was intended to be a view alias to `v_student_calendar_events` but the migration creating the view did not convert the existing table. User-only sources (e.g., `enrolled`, schedule rules) write directly to this table. Data deletion operations must clear both `time_blocks` and `student_time_blocks`. API reads from `student_time_blocks` and filters by active lifecycle.
 - API reads:
   - `GET /calendar/events` queries `student_time_blocks` for the authenticated user.
   - `GET /v2/students/me/calendar/events` is the web schedule canonical endpoint (v2 range wrapper over calendar events).
 - `POST /v2/students/me/time-blocks` creates manual time blocks for web tasks/schedule.
 - `DELETE /v2/students/me/time-blocks/:id` soft-deletes manual time blocks.
+- `scheduleProcessor` must not return an empty enrolled schedule solely due to missing term metadata; it retries enrollment resolution using `term_id` and then unfiltered enrollments before giving up.
 - `GET /v2/students/me/preferences` provides calendar timezone display preferences.
 - `GET /calendar/master` joins student enrollments to `time_blocks` for course schedules.
 - `POST /v2/students/me/schedule/intent` parses natural-language scheduling intent; it does not create blocks (UI must call time-blocks).
@@ -148,6 +149,12 @@ sequenceDiagram
 - Changing calendar API filters: update `mobile-routes.ts` queries and any downstream consumers.
 
 ## Recent Changes
+- 2026-01-13: schedule import now verifies reconciliation and retries `scheduleProcessor` if enrolled class blocks are missing; enrollment lookup falls back to `term_id` and unfiltered enrollments when term metadata is absent.
+- 2026-01-07: Documented that `student_time_blocks` is currently a BASE TABLE (not a view) in production; data deletion must clear both tables.
+- 2026-01-07: Fixed schedule import to handle concatenated day abbreviations (MoWe, TuTh) in `calendarNormalization.service.ts`.
+- 2026-01-06: Unified course color palette derivation for schedule event blocks across light/dark themes to preserve hue consistency.
+- 2026-01-05: Web Schedule reads canonical schedule preferences (week start, time format, work hours) for its grid defaults.
+- 2026-01-05: Schedule rules now resolve display timezone and placement constraints from canonical preferences (work hours + quiet hours).
 - 2026-01-05: Documented preference alignment gaps + preference-aware scheduling requirements for Smart Schedule.
 - 2026-01-04: Added schedule rules table + v2 schedule-rules endpoint to materialize recurring habits into `student_time_blocks`.
 - 2026-01-04: Google Calendar connect now triggers an immediate schedule reconciliation; web schedule relies on v2 calendar events for personal calendar coverage.

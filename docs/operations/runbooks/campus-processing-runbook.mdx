@@ -1,0 +1,383 @@
+---
+title: "Campus Processing Runbook"
+description: "Operations guide for managing campus data collection and processing in the DormWay platform."
+---
+
+# Campus Processing Runbook
+
+Operations guide for managing campus data collection and processing in the DormWay platform.
+
+## Quick Reference
+
+| Feature | Status | Admin Location |
+|---------|--------|----------------|
+| Feature Flags | Partial | Campus Modal > Feature Flags |
+| Processing Rules | NOT IMPLEMENTED | N/A (dead code) |
+| Custom Workflows | IMPLEMENTED | Campus Modal > Configuration |
+| Plugin System | IMPLEMENTED | Campus Modal > Plugins |
+
+## Feature Flags (What's Actually Implemented)
+
+### Implemented Flags
+
+These flags are checked in `campusProcessor.workflow.ts` and affect processing:
+
+| Flag | Default | Effect |
+|------|---------|--------|
+| `process_campus_events` | ON | Fetches and processes campus events from ICS/API sources |
+| `use_events_crew` | OFF | Enables AI crew for event enrichment |
+| `use_logistics_crew` | OFF | Enables AI crew for logistics/transportation processing |
+| `use_news_crew` | OFF | Enables AI crew for campus news processing |
+| `enable_cascade_triggers` | OFF | Triggers downstream student workflows after events are processed |
+
+### Code References
+
+```typescript
+// campusProcessor.workflow.ts
+
+// Line ~464 - Events processing gate
+if (campusConfig.featureFlags?.process_campus_events !== false) {
+  // Fetch and process campus events
+}
+
+// Line ~612 - Events crew (AI enrichment)
+if (!skipCrews && campusConfig.featureFlags?.use_events_crew === true) {
+  // Run events AI crew
+}
+
+// Line ~626 - Logistics crew
+if (!skipCrews && campusConfig.featureFlags?.use_logistics_crew === true) {
+  // Run logistics AI crew
+}
+
+// Line ~640 - News crew
+if (!skipCrews && campusConfig.featureFlags?.use_news_crew === true) {
+  // Run news AI crew
+}
+
+// Line ~738 - Cascade triggers
+if (freshCampusEvents && campusConfig.featureFlags?.enable_cascade_triggers !== false) {
+  // Trigger student workflow cascades
+}
+```
+
+### NOT Implemented
+
+These flags appear in the admin UI but do NOT affect processing:
+
+| Flag | Notes |
+|------|-------|
+| `process_parking_data` | No code checks this flag |
+| `process_dining_menus` | No code checks this flag |
+
+## Processing Rules (NOT IMPLEMENTED)
+
+Processing rules are stored in the `campus_configs` table but are completely ignored by the engine. This is dead code.
+
+**DO NOT configure processing rules** - they have no effect on campus processing.
+
+The admin UI shows a warning indicating this.
+
+## Custom Workflows
+
+Custom workflows ARE implemented and working.
+
+### How Custom Workflows Work
+
+1. Set `data_collection_method = 'custom_workflow'` in campus config
+2. Set `workflow_name` to the name of a registered Temporal workflow
+3. The campus processor will execute your workflow as a child workflow
+
+### Code Reference
+
+```typescript
+// campusProcessor.workflow.ts lines 239-287
+if (campusConfig.hasCustomWorkflow && campusConfig.workflowName) {
+  const customData = await executeChild(campusConfig.workflowName, {
+    workflowId: `custom-${campusConfig.workflowName}-${campusId}`,
+    taskQueue: taskQueues.campus,
+    args: [campusId, campusConfig]
+  });
+}
+```
+
+### Creating a Custom Workflow
+
+1. Define the workflow in `services/engine/src/workflows/`
+2. Register it with the campus worker
+3. Configure the campus to use it via Admin > Campuses > Configuration
+
+## Plugin System
+
+The plugin system is the recommended way to extend campus data collection.
+
+### Overview
+
+- Plugins are external modules that fetch and normalize campus-specific data
+- Registered in the `plugin_registry` database table
+- Executed by the `plugin-runner` service
+- Output manifests stored in `plugin_manifests` table
+
+### Managing Plugins in Admin
+
+1. Go to **Admin > Campuses**
+2. Click on a campus to open the details dialog
+3. Navigate to the **Plugins** tab
+4. View registered plugins and their status
+5. Click **Run** to manually trigger a plugin
+
+### Plugin API Endpoints
+
+```bash
+# List plugins for a campus
+GET /admin/plugins?scope=campus&targetId={campusId}
+
+# Trigger a plugin run
+POST /admin/plugins/{pluginId}/run
+{
+  "trigger": "admin"
+}
+```
+
+### Writing Plugins
+
+See the [Plugin SDK Guide](/docs/engineering/technical/plugin-sdk-guide) and the [dw-campus-sdk README](https://github.com/DormWay/dw-campus-sdk).
+
+Key SDK exports:
+- `definePlugin` - Define a plugin with metadata and tasks
+- `runPlugin` - Execute a plugin
+- `ManifestBuilder` - Build output manifests
+- `parseICS` / `filterEventsByDate` - ICS calendar parsing
+- `parseRSS` - RSS/Atom feed parsing
+
+## Automatic Campus Enrichment
+
+### Overview
+
+Campus enrichment (fetching academic calendars, term dates, housing data, etc.) runs **automatically** through a prioritized batch workflow.
+
+**Workflow:** `enrichCampusesPrioritized(limit = 100)`
+- **Location:** `.repos/dormway-platform/services/engine/src/workflows/campusProcessor.workflow.ts` (line 839)
+- **Frequency:** Triggered periodically (exact schedule TBD - check Temporal schedules)
+- **Batch size:** 5 campuses at a time with 5-second delays between batches
+
+### How Campuses Are Selected
+
+**Activity:** `getCampusesForEnrichment(limit)`
+- **Location:** `.repos/dormway-platform/services/engine/src/activities/campus.activities.ts` (line 1922)
+
+**Selection criteria:**
+- Campus must be `is_active = true`
+- Last enriched **7+ days ago** (configurable via `CAMPUS_ENRICHMENT_WINDOW_DAYS`)
+- Ranked by priority score (top 100 returned)
+
+### Priority Scoring Algorithm
+
+Campuses are ranked using this formula:
+
+```sql
+priority_score =
+  (account_count_active × 800) +     -- Active students (onboarding completed)
+  (student_count × 250) +            -- Total students in contexts
+  (course_count × 400) +             -- Number of courses
+  CASE
+    WHEN housing_capacity > 0 THEN 600
+    WHEN online_only THEN 150
+    ELSE 350
+  END +
+  (enrollment_total × 0.02) +
+  LEAST(days_since_last_enrichment, 45) × 60  -- Capped at 45 days
+```
+
+**Impact:** Campuses with students receive significantly higher priority:
+- Campus with 100 active students: **80,000+ points**
+- Campus with 0 students: **600-1,000 points**
+
+This ensures student-facing campuses stay up-to-date while empty campuses are rarely enriched.
+
+### What Gets Updated
+
+When a campus is enriched, the workflow calls:
+
+1. **`fetchCampusMetadata()`** - General campus information via Perplexity AI
+2. **`fetchCampusTermDates()`** - Academic calendar + **automatic current term detection**
+3. **`fetchCampusHousing()`** - Housing capacity and policies
+
+**Automatic Current Term Detection:**
+The system automatically determines which term is "current" by finding the term whose date range contains today:
+
+```typescript
+const currentTerm = academicCalendar.terms.find(term => {
+  const start = new Date(term.startDate);
+  const end = new Date(term.endDate);
+  return currentDate >= start && currentDate <= end;
+});
+```
+
+This updates both:
+- `campus_configs.current_term_data` (single term)
+- `campus_configs.academic_calendar` (full year calendar)
+
+### Checking Enrichment Status
+
+```bash
+# Check when a campus was last enriched
+bash -c 'doppler run -- bash -c '\''psql "$DATABASE_URL_ADMIN" -c "
+SELECT
+  cc.campus_name,
+  cc.last_calendar_update AS last_enriched,
+  NOW() - cc.last_calendar_update AS time_since_enrichment,
+  cc.current_term_data->>'\''name'\'' AS current_term
+FROM campus_configs cc
+WHERE cc.campus_id = '\''your-campus-id'\'';
+"'\'''
+
+# Check priority score for a campus
+bash -c 'doppler run -- bash -c '\''psql "$DATABASE_URL_ADMIN" -c "
+SELECT
+  c.name,
+  calculate_sync_priority(c.id) AS priority_score,
+  (SELECT COUNT(*) FROM contexts s
+   WHERE s.parent_id = c.id AND s.type = '\''student'\''
+   AND s.is_active = true) AS student_count
+FROM contexts c
+WHERE c.id = '\''your-campus-id'\'';
+"'\'''
+```
+
+### Forcing Enrichment
+
+If a campus needs immediate enrichment:
+
+1. **Via Admin UI:**
+   - Go to Admin > Campuses
+   - Click campus > Plugins tab
+   - Click "Enrich with AI" button
+
+2. **Via API:**
+   ```bash
+   curl -X POST "http://localhost:3001/api/admin/campus-configs/trigger-enrichment" \
+     -H "Content-Type: application/json" \
+     -H "X-User-Id: admin-user-id" \
+     -H "X-User-Role: admin" \
+     -d '{"campusId": "your-campus-id"}'
+   ```
+
+3. **Via Temporal UI:**
+   - Start workflow: `enrichCampusesPrioritized`
+   - Args: `[10]` (limit to 10 campuses)
+
+## Common Operations
+
+### Manually Trigger Campus Processing
+
+```bash
+# Via Temporal UI
+# 1. Go to Temporal UI
+# 2. Start workflow: processSingleCampus
+# 3. Input: { "campusId": "your-campus-id" }
+
+# Via API (admin only)
+curl -X POST "http://localhost:3001/api/admin/campuses/{campusId}/process" \
+  -H "X-User-Id: admin-user-id" \
+  -H "X-User-Role: authenticated"
+```
+
+### Check Campus Processing Status
+
+```bash
+# Check latest service_data
+bash -c 'doppler run -- bash -c '\''psql "$DATABASE_URL_ADMIN" -c "
+SELECT method, fetched_at, status
+FROM service_data
+WHERE context_id = (SELECT id FROM contexts WHERE type = '\''campus'\'' AND source_id = '\''your-campus-id'\'')
+ORDER BY fetched_at DESC LIMIT 5;
+"'\'''
+```
+
+### Enable/Disable Feature Flags
+
+1. Go to **Admin > Campuses**
+2. Click campus > **Feature Flags** tab
+3. Toggle flags as needed
+4. Click **Save**
+
+Changes take effect on the next scheduled or manual workflow run.
+
+### Debug Plugin Execution
+
+```bash
+# Check plugin registry
+bash -c 'doppler run -- bash -c '\''psql "$DATABASE_URL_ADMIN" -c "
+SELECT plugin_id, scope, target_id, status, version
+FROM plugin_registry
+WHERE target_id = '\''your-campus-id'\'';
+"'\'''
+
+# Check recent plugin manifests
+bash -c 'doppler run -- bash -c '\''psql "$DATABASE_URL_ADMIN" -c "
+SELECT plugin_id, run_id, generated_at, payload->'\''events'\'' IS NOT NULL as has_events
+FROM plugin_manifests
+WHERE target_id = '\''your-campus-id'\''
+ORDER BY generated_at DESC LIMIT 5;
+"'\'''
+```
+
+## Troubleshooting
+
+### Events Not Updating
+
+1. **Check feature flag**: Ensure `process_campus_events` is enabled (default: ON)
+2. **Check data sources**: Verify ICS/API endpoints in campus config
+3. **Check workflow logs**: Look for errors in Temporal UI
+4. **Check service_data**: Query recent entries for the campus
+
+### AI Crews Not Running
+
+AI crews are OFF by default. To enable:
+1. Go to Admin > Campuses > Feature Flags
+2. Enable `use_events_crew`, `use_logistics_crew`, or `use_news_crew`
+3. Ensure crews service (`dormway-crews`) is running
+
+### Student Cascades Not Triggering
+
+1. Check `enable_cascade_triggers` flag is ON
+2. Verify there are actually new events (cascades only trigger on changes)
+3. Check dependent student contexts exist
+
+### Plugin Not Running
+
+1. Verify plugin is registered: Check Plugins tab in Admin
+2. Check plugin status is `active`
+3. Check plugin-runner service is running
+4. Review plugin-runner logs for errors
+
+## Architecture Reference
+
+See Campus Processing DAG Flow for the complete workflow architecture diagram.
+
+### Key Services
+
+| Service | Role |
+|---------|------|
+| `engine` | Runs Temporal workflows |
+| `api-router` | Admin API endpoints |
+| `plugin-runner` | Executes campus plugins |
+| `dormway-crews` | AI crew processing |
+
+### Key Tables
+
+| Table | Purpose |
+|-------|---------|
+| `campus_configs` | Feature flags, processing rules, workflow config |
+| `contexts` | Campus context with latest data |
+| `service_data` | Time-series campus data |
+| `plugin_registry` | Registered plugins |
+| `plugin_manifests` | Plugin output data |
+
+## Related Documentation
+
+- Campus Processing DAG Flow - Architecture diagram
+- [Plugin SDK Guide](/docs/engineering/technical/plugin-sdk-guide) - Writing campus plugins
+- Engineering/Technical/Engine/Engine Workflow DAG Analysis - All Temporal workflows
+- Student Processing DAG Flow - Student cascade workflows

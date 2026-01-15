@@ -1,0 +1,253 @@
+---
+title: "Course Management"
+description: "_Last updated: 2026-01-07_"
+---
+
+# Course Management Runbook
+
+_Last updated: 2026-01-07_
+
+This runbook documents the Course Management features in the admin dashboard, including common operations, troubleshooting, and API endpoints.
+
+## Overview
+
+Course Management is accessible at **Admin Dashboard (port 3004) > Course Management > Course Catalog**. It provides:
+
+- View and manage course contexts
+- Preview syllabi attached to courses
+- Edit course aliases (alternate course codes)
+- Edit term information (term ID and year)
+- Enroll students in courses manually
+
+## Accessing Course Details
+
+1. Navigate to **Course Management** in the admin sidebar
+2. Click **Course Catalog** tab
+3. Select a course from the DataGrid to open the Course Details dialog
+
+## Features & Operations
+
+### Syllabus Preview
+
+**Purpose:** View the full syllabus analysis without leaving the course context.
+
+**How to use:**
+1. In Course Details dialog, scroll to **Syllabi** section
+2. Click **View** button next to any syllabus entry
+3. The syllabus opens in a modal with the full SyllabusVisualization component
+
+**Common issues:**
+
+| Problem | Cause | Solution |
+|---------|-------|----------|
+| "Failed to load syllabus data" | API returns nested response | Check that `response.data?.data || response.data` pattern is used |
+| Empty syllabus modal | No `serviceData` in response | Verify syllabus has been processed (check `service_data` table) |
+| Loading spinner stuck | API timeout | Check api-router logs, restart if needed with `make rs s=api` |
+
+### Edit Course Aliases
+
+**Purpose:** Manage alternate course codes that map to the same course (e.g., "CS 101", "COMP-101", "CS101").
+
+**How to use:**
+1. In Course Details dialog, find **Aliases** section
+2. Click **Edit** button
+3. Add new aliases in the text field, press Enter or click Add
+4. Remove aliases by clicking the X on each chip
+5. Click **Save** to persist changes
+
+**Data storage:** Aliases are stored in `contexts.metadata` as:
+- `courseCodeAliases`: Array of normalized aliases (uppercase)
+- `courseCodeAliasCompacts`: Array of aliases with non-alphanumeric chars removed
+
+**API endpoint:**
+```
+PATCH /api/admin/courses/:courseContextId/aliases
+Body: { "aliases": ["CS 101", "COMP-101"] }
+```
+
+**Common issues:**
+
+| Problem | Cause | Solution |
+|---------|-------|----------|
+| Aliases not saving | courseContextId missing | Ensure course is selected before editing |
+| Duplicate aliases | User added same alias twice | UI should filter duplicates; check `handleAddAlias` |
+| Case sensitivity issues | Aliases should be normalized | Backend normalizes to uppercase automatically |
+
+### Edit Term Information
+
+**Purpose:** Assign or update the academic term for a course.
+
+**How to use:**
+1. In Course Details dialog, find **Term Information** section
+2. Click **Edit** button
+3. Select term ID from dropdown (e.g., "winter_2026") or type custom
+4. Enter year (e.g., 2026)
+5. Click **Save** to persist
+
+**Data storage:** Term info is stored in `contexts.metadata` as:
+- `term`: String like "winter_2026", "fall_2025", "spring_2026"
+- `year`: Number like 2025, 2026
+
+**Term ID format:** `{season}_{year}` where season is: `fall`, `winter`, `spring`, `summer`
+
+**API endpoint:**
+```
+PATCH /api/admin/courses/:courseContextId/term
+Body: { "term": "winter_2026", "year": 2026 }
+```
+
+**Common issues:**
+
+| Problem | Cause | Solution |
+|---------|-------|----------|
+| TypeScript error on `term`/`year` | Missing type definition | Add `term?: string \| null` and `year?: number \| null` to `CourseMetadata` interface in `types.ts` |
+| Term not displaying | Metadata field names mismatch | Verify using `term` and `year` (not `term_name` or `term_classification`) |
+| Save fails with 404 | Invalid course context ID | Check the course exists in `contexts` table with `type='course'` |
+
+### Enroll Students
+
+**Purpose:** Manually enroll a student in a course by creating a context dependency.
+
+**How to use:**
+1. In Course Details dialog, find **Enrolled Students** section
+2. Click **Add Student** button
+3. Search for student by name or email (minimum 2 characters)
+4. Select student from dropdown results
+5. Click **Enroll** to create the enrollment
+
+**Data storage:** Enrollments are stored in `context_dependencies` table:
+- `parent_context_id`: Student's context ID (type='student')
+- `child_context_id`: Course's context ID (type='course')
+- `dependency_type`: 'enrolled_in'
+- `metadata`: `{ source: 'admin_enrollment', enrolledBy: adminUserId, enrolledAt: timestamp }`
+
+**API endpoints:**
+```
+# Search users
+GET /api/admin/users/search?q=searchTerm&limit=10
+
+# Enroll user
+POST /api/admin/courses/:courseId/enroll
+Body: { "userId": "user-uuid", "enrollmentType": "enrolled_in" }
+```
+
+**Common issues:**
+
+| Problem | Cause | Solution |
+|---------|-------|----------|
+| No search results | Query too short | Minimum 2 characters required |
+| "User not found" error | User doesn't have account | Verify user exists in `accounts` table |
+| "Course not found" error | Invalid course context | Check course exists with `type='course'` in `contexts` |
+| Duplicate enrollment | User already enrolled | Backend uses `ON CONFLICT` to update existing enrollment |
+
+## API Endpoints Reference
+
+### Course Details
+```
+GET /api/admin/courses/:courseContextId/details
+```
+Returns: Course info, enrolled students, syllabi, child dependencies
+
+### Update Aliases
+```
+PATCH /api/admin/courses/:courseContextId/aliases
+Body: { "aliases": string[] }
+```
+Replaces all aliases with the provided array.
+
+### Update Term
+```
+PATCH /api/admin/courses/:courseContextId/term
+Body: { "term": string | null, "year": number | null }
+```
+Updates term metadata fields.
+
+### Search Users
+```
+GET /api/admin/users/search?q=query&limit=10
+```
+Searches accounts by email, name, or full name (given_name + family_name).
+
+### Enroll Student
+```
+POST /api/admin/courses/:courseId/enroll
+Body: { "userId": string, "enrollmentType": "enrolled_in" | "provisional_enrollment" }
+```
+Creates or updates enrollment. Auto-creates student context if none exists.
+
+## Troubleshooting Guide
+
+### TypeScript Build Errors
+
+**Error:** `Property 'term' does not exist on type 'CourseMetadata'`
+
+**Fix:** Add missing fields to `services/dormway-admin/src/pages/courses/catalog/types.ts`:
+```typescript
+export interface CourseMetadata {
+  // ... existing fields
+  term?: string | null;
+  year?: number | null;
+}
+```
+
+### API Response Structure
+
+**Problem:** Data not displaying correctly after API call
+
+**Cause:** API returns nested `{ success: true, data: {...} }` structure
+
+**Fix:** Always extract with safe pattern:
+```typescript
+const data = response.data?.data || response.data;
+```
+
+### Service Restart
+
+**When to restart api-router:**
+- After modifying route handlers
+- After changing database queries
+- After updating types that affect serialization
+
+**Command:**
+```bash
+make rs s=api  # Quick restart shortcut
+```
+
+### Database Schema
+
+**Key tables involved:**
+
+| Table | Purpose |
+|-------|---------|
+| `contexts` | Course entities (type='course'), student entities (type='student') |
+| `context_dependencies` | Enrollment relationships |
+| `service_data` | Syllabus data (method='processed_syllabus_crew') |
+| `accounts` | User accounts for search |
+
+**Common query patterns:**
+```sql
+-- Get course with metadata
+SELECT id, name, metadata FROM contexts
+WHERE id = 'course-uuid' AND type = 'course';
+
+-- Get enrolled students
+SELECT a.email, a.name, cd.*
+FROM context_dependencies cd
+JOIN contexts sc ON sc.id = cd.parent_context_id AND sc.type = 'student'
+JOIN accounts a ON a.id = sc.user_id
+WHERE cd.child_context_id = 'course-uuid'
+  AND cd.dependency_type = 'enrolled_in';
+```
+
+## Related Documentation
+
+- [Syllabus Campus Linker](/docs/operations/runbooks/syllabus-campus-linker) - How syllabi are linked to courses
+- [Production Operations](/docs/operations/runbooks/production-operations) - General production procedures
+- [Context System Database Schema](/docs/engineering/technical/database/context-system-database-schema) - Full context hierarchy docs
+
+## Change Log
+
+| Date | Change | Author |
+|------|--------|--------|
+| 2026-01-07 | Initial runbook creation | Claude |
+| 2026-01-07 | Added term/year type fix documentation | Claude |

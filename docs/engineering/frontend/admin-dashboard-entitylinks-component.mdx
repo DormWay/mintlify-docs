@@ -1,0 +1,177 @@
+---
+title: "Admin Dashboard   EntityLinks Component"
+description: "The `EntityLinks` component provides clickable navigation links between related entities (cities and campuses) in the dormway-admin dashboard. It enables use..."
+---
+
+# Admin Dashboard - EntityLinks Component
+
+## Purpose
+
+The `EntityLinks` component provides clickable navigation links between related entities (cities and campuses) in the dormway-admin dashboard. It enables users to quickly navigate from a campus detail modal to its parent city, or from a city to its associated campuses.
+
+## Executive Summary
+
+- Provides `CityLink` and `CampusLink` reusable components
+- Navigates using URL parameters (`?selected=<id>`) to auto-open detail modals
+- Falls back to search (`?search=<name>`) when ID is unavailable
+- Uses full page navigation to ensure target page useEffect triggers
+
+## Location
+
+```
+services/dormway-admin/src/components/EntityLinks.tsx
+```
+
+## Components
+
+### CityLink
+
+Renders a clickable link to a city that opens its detail modal.
+
+```tsx
+interface CityLinkProps {
+  cityId?: string;      // Optional - uses search fallback if not provided
+  cityName: string;     // Required - display text and search fallback
+  showIcon?: boolean;   // Show city icon (default: false)
+  variant?: 'text' | 'chip';  // Display variant (default: 'text')
+  onClick?: () => void; // Custom click handler override
+}
+```
+
+**Usage:**
+```tsx
+<CityLink
+  cityId={campus?.city_id}
+  cityName={campus?.city_name || 'Unknown City'}
+  showIcon
+/>
+```
+
+### CampusLink
+
+Renders a clickable link to a campus that opens its detail modal.
+
+```tsx
+interface CampusLinkProps {
+  campusId: string;     // Required - campus ID
+  campusName: string;   // Required - display text
+  showIcon?: boolean;   // Show campus icon (default: false)
+  variant?: 'text' | 'chip';  // Display variant (default: 'text')
+  onClick?: () => void; // Custom click handler override
+}
+```
+
+**Usage:**
+```tsx
+<CampusLink
+  campusId={campus.campus_id}
+  campusName={campus.campus_name}
+  showIcon
+/>
+```
+
+## Navigation Pattern
+
+### URL Parameter Handling
+
+The components navigate using URL parameters that target pages listen for:
+
+| Parameter | Purpose | Example |
+|-----------|---------|---------|
+| `?selected=<id>` | Open detail modal by ID | `/cities?selected=abc-123` |
+| `?search=<name>` | Search and open exact match | `/cities?search=Ann%20Arbor` |
+
+### Target Page Implementation
+
+List pages (`cities/list.tsx`, `campuses/list.tsx`) include a useEffect to handle these parameters:
+
+```typescript
+useEffect(() => {
+  const urlParams = new URLSearchParams(window.location.search);
+  const entityId = urlParams.get('selected');
+  const searchQuery = urlParams.get('search');
+
+  if (entityId) {
+    // Fetch entity by ID and open modal
+    loadEntityById(entityId);
+  } else if (searchQuery) {
+    // Apply search filter, find exact match, open modal
+    searchAndOpen(searchQuery);
+  }
+}, []);
+```
+
+### Full Page Navigation
+
+The components use `window.location.href` instead of React Router's `navigate()`:
+
+```typescript
+// Uses full page navigation to ensure useEffect runs
+window.location.href = `/cities?selected=${cityId}`;
+```
+
+**Why:** React Router's `navigate()` doesn't always trigger component remount, which means the target page's useEffect (with empty deps) may not run.
+
+## API Requirements
+
+### Campus API - City Data
+
+For CityLink to work from campus modals, the campus API must return city data:
+
+```sql
+-- syllabus-ingestion-config.ts query
+SELECT
+  cc.*,
+  city.id as city_id,
+  city.name as city_name
+FROM campus_configs cc
+LEFT JOIN contexts c ON c.id = cc.campus_id
+LEFT JOIN contexts city ON city.id = c.parent_id AND city.type = 'city'
+```
+
+### City API - Campus Associations
+
+Cities already return associated campuses via the campus_ids array and linked_campus_names.
+
+## Usage Locations
+
+| Location | Component | Purpose |
+|----------|-----------|---------|
+| `CampusDialogTabs.tsx` | CityLink | Link to parent city in Location & City tab |
+| `CityDialogTabs.tsx` | CampusLink | Link to associated campuses |
+| Future: DataGrid columns | Both | Inline entity links in list views |
+
+## Styling
+
+Components use MUI Link with custom styling:
+
+```tsx
+<Link
+  component="button"
+  sx={{
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 0.5,
+    cursor: 'pointer',
+    textDecoration: 'none',
+    '&:hover': {
+      textDecoration: 'underline',
+    },
+  }}
+>
+```
+
+Icons are from MUI Icons:
+- `LocationCity` (CityIcon) - for cities
+- `School` (CampusIcon) - for campuses
+
+## Related Documents
+
+- [Admin Dashboard - ServiceDataView Component](/docs/engineering/frontend/admin-dashboard-servicedataview-component) - Service data rendering
+- [Context System Database Schema](/docs/engineering/technical/database/context-system-database-schema) - City/campus hierarchy
+- DormWay Platform Architecture - Overall system architecture
+
+---
+
+**Last Updated**: 2026-01-06
+**Component Path**: `services/dormway-admin/src/components/EntityLinks.tsx`

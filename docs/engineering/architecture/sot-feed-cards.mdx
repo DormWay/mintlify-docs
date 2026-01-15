@@ -1,9 +1,12 @@
 ---
 title: "Feed Cards"
-description: "1. [Data Pipeline](#data-pipeline) 2. [Card Type Deep Dive](#card-type-deep-dive) 3. [Priority Scoring Algorithm](#priority-scoring-algorithm) 4. [Time Relev..."
+description: "Terminology note:"
 ---
 
 # SoT - Feed Cards
+
+Terminology note:
+- Cue is the user-facing label for the Heads Up signal layer. Code and some docs still use `headsup`/HeadsUp identifiers. This doc uses Cue except when referencing identifiers or filenames.
 
 ## Executive Summary
 
@@ -13,6 +16,7 @@ description: "1. [Data Pipeline](#data-pipeline) 2. [Card Type Deep Dive](#card-
 - **Time relevance**: Widgets display only during valid time windows
 - **Max 5 cards** returned per feed request
 - **Dismissal system**: Permanent dismiss or snooze (1h, 4h, tomorrow)
+- **Copy rules**: titles/subtitles stay short, action-first, and avoid AI phrasing
 
 ---
 
@@ -20,11 +24,12 @@ description: "1. [Data Pipeline](#data-pipeline) 2. [Card Type Deep Dive](#card-
 
 1. [Data Pipeline](#data-pipeline)
 2. [Card Type Deep Dive](#card-type-deep-dive)
-3. [Priority Scoring Algorithm](#priority-scoring-algorithm)
-4. [Time Relevance System](#time-relevance-system)
-5. [Dismissal & Snooze System](#dismissal--snooze-system)
-6. [API Response Format](#api-response-format)
-7. [Key Files](#key-files)
+3. [Copy & Scannability Rules](#copy--scannability-rules)
+4. [Priority Scoring Algorithm](#priority-scoring-algorithm)
+5. [Time Relevance System](#time-relevance-system)
+6. [Dismissal & Snooze System](#dismissal--snooze-system)
+7. [API Response Format](#api-response-format)
+8. [Key Files](#key-files)
 
 ---
 
@@ -135,7 +140,7 @@ flowchart LR
 ```mermaid
 sequenceDiagram
     participant User
-    participant UI as HeadsUp Widget
+    participant UI as Cue Widget
     participant API as API Router
     participant DB as PostgreSQL
     participant Cache as React Query
@@ -208,6 +213,39 @@ interface FeedCard {
 }
 ```
 
+### 🔴 RevealContent Pattern (PR #711, #712)
+
+**Critical Rule:** `revealContent` must only contain **NEW information not already visible in `subtitle`**.
+
+iOS and web clients show `subtitle` always visible, and `revealContent` is shown when the card is expanded. If both contain the same text, users see duplicate content.
+
+**Pattern:**
+```typescript
+// ❌ WRONG - Duplicates subtitle text
+subtitle: data.description,
+revealContent: `**Details:**\n${data.description}`,  // Same as subtitle!
+
+// ✅ CORRECT - Only new information
+subtitle: data.description,
+revealContent: data.additionalDetails ? `**More:**\n${data.additionalDetails}` : undefined,
+```
+
+**Cards fixed in PR #712 (2026-01-05):**
+- `LocalOpportunity` - valueProp only shown if different from studentBenefit
+- `DayConditions` - conditionsSummary removed from reveal
+- `MorningBriefing` - skip first highlight in revealContent
+- `PortfolioOpportunity` - description removed from reveal
+- `SynergyHighImpact` - only suggestedAction in reveal
+- `EveningReview` - dayRecapMessage removed from reveal
+- `WeatherChange` - current conditions removed from reveal
+- `CommunityPulse` - jobMarket removed from reveal
+- `TrafficAlert` - workaround removed from reveal
+- `TransitionAlert` - source/travelTime removed from reveal
+
+**Testing:** After generating cards, expand each card type in iOS to verify no duplicate text appears.
+
+---
+
 ### URL Access Pattern (DORM-817)
 
 Cards with external URLs store the URL in `metadata.url` for simpler access. This enables "tap anywhere to open link" functionality.
@@ -219,7 +257,7 @@ Cards with external URLs store the URL in `metadata.url` for simpler access. Thi
 - `events` - Event details URL
 - `deals` - Deal/offer URL
 
-**Backend (HeadsUp Builder):**
+**Backend (Cue builder, `headsup` in code):**
 ```typescript
 // headsup-builder.ts - Checks metadata.url first, falls back to actions array
 const metadataUrl = card.metadata?.url as string | undefined;
@@ -247,8 +285,8 @@ public var metadataUrl: URL? {
 }
 ```
 
-**Web (HeadsUpWidget):**
-Already handled via `primaryCta.kind === 'url'` from HeadsUp builder transformation.
+**Web (Cue widget, `HeadsUpWidget` in code):**
+Already handled via `primaryCta.kind === 'url'` from Cue builder transformation (`headsup` in code).
 
 ---
 
@@ -911,16 +949,24 @@ Campus processing crews generate `guidance` widgets with `key_insights[]` contai
 
 ```typescript
 {
-  label: "BREAK TIME",
+  label: "ON BREAK",
   title: "Winter Break",
-  subtitle: "Classes resume January 15",
-  icon: "snowflake",
+  subtitle: "Enjoy your time off! No classes or assignments to worry about.",
+  icon: "sparkles",
+  hasReveal: true,  // Derived from revealContent existence
+  revealText: "See when classes resume",
+  revealContent: "**Classes Resume:** Monday, January 6\n**Break Ends:** January 6",
   metadata: {
-    breakType: "winter",
-    resumeDate: "2025-01-15"
+    breakType: "winter_break",
+    breakName: "Winter Break",
+    startDate: "2025-12-15",
+    endDate: "2026-01-06",
+    nextTermStart: "2026-01-06"
   }
 }
 ```
+
+**Note (2026-01-05):** `revealContent` contains **only date info**, not the subtitle message. This prevents duplicate text when iOS expands the card (subtitle + revealContent are shown separately). See PR #711.
 
 #### `travel_mode`
 
@@ -1000,6 +1046,23 @@ Campus processing crews generate `guidance` widgets with `key_insights[]` contai
 - Uses `alert` category to avoid deduplication with `travel_mode`
 - Dynamic priority: 55 when has incidents, 25 when "clear conditions" (empty)
 - Boosted 1.5× when context is `traveling`
+
+---
+
+## Copy & Scannability Rules
+
+- **Title = the thing.** Short noun/action (course, task, event). No framing or filler.
+- **Subtitle = the context.** One line that answers "why now" or "what changed."
+- **No AI voice.** Avoid "I noticed", "It looks like", "Based on", "I can help".
+- **Length caps.** Titles <= 64 chars; subtitles <= 72 chars (truncate with "...").
+- **Details live in reveal.** Longer explanations belong in `revealContent`, not subtitles.
+- **Source-first cleanup.** City + AI cards strip AI-style lead-ins at generation time.
+
+Enforcement points:
+
+- Generator copy normalization: `.repos/dormway-platform/services/shared/dormway-core/src/domains/feed/generator.ts`
+- iOS scannability: `.repos/ios-clean/App/Views/Feed/FeedCardView.swift` (1-line subtitle)
+- iOS keyline context: `.repos/ios-clean/App/Views/Feed/FeedCardView.swift` (uses metadata: `courseName`, `courseCode`, `location`)
 
 ---
 
@@ -1161,7 +1224,7 @@ CREATE TABLE feed_dismissals (
 ```mermaid
 sequenceDiagram
     participant User
-    participant UI as HeadsUp Widget
+    participant UI as Cue Widget
     participant RQ as React Query
     participant API as API Router
     participant DB as PostgreSQL
@@ -1324,15 +1387,15 @@ services/api-router/src/
 ├── routes/feed-routes.ts              # GET /feed, POST /feed/dismiss
 └── services/headsup/
     ├── headsup-builder.ts             # Widget builder
-    └── headsup-types.ts               # HeadsUp types
+    └── headsup-types.ts               # Cue types (file name uses headsup)
 ```
 
 ### Frontend
 ```
 services/dormway-lockedin/src/
-├── hooks/home/useHeadsUpDismiss.ts    # Dismissal mutation
+├── hooks/home/useHeadsUpDismiss.ts    # Cue dismissal mutation (file name uses HeadsUp)
 └── app/dashboard/home-v2/widgets/
-    ├── HeadsUpWidget.tsx              # Main widget
+    ├── HeadsUpWidget.tsx              # Cue widget UI (file name uses HeadsUp)
     └── types.ts                       # Widget types
 ```
 
@@ -1608,5 +1671,5 @@ conflictWarnings.push({
 
 ---
 
-**Last Updated**: 2026-01-04
+**Last Updated**: 2026-01-05
 **Document Type**: State of Things (SoT)
