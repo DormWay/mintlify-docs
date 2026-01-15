@@ -1,0 +1,206 @@
+---
+title: "Growth Ops Platform Overview"
+description: "Complete internal tools suite for scaling DormWay's growth and operations"
+icon: "chart-line"
+---
+
+<img
+  className="block dark:hidden"
+  src="/images/hero-light.svg"
+  alt="Growth Ops Hero Light"
+/>
+<img
+  className="hidden dark:block"
+  src="/images/hero-dark.svg"
+  alt="Growth Ops Hero Dark"
+/>
+
+## What is Growth Ops?
+
+The **Growth Ops Platform** is DormWay's internal operations suite designed to streamline growth initiatives, quality assurance, and campus expansion. It provides integrated tools for:
+
+- **Bug tracking & quality assurance** - Student-reported issues with triage and resolution workflow
+- **Labs program management** - Task assignment, tracking, and payouts for student contributors
+- **Campus outreach CRM** - Activity tracking and contact management for campus expansion
+- **Growth analytics** - Real-time metrics dashboards for signups, engagement, and retention
+- **Syllabus tracking** - Monitor syllabus collection progress across campuses
+
+<CardGroup cols={2}>
+  <Card title="Bug Reports" icon="bug" href="/docs/growth-ops/bug-reports">
+    Student-reported bugs with severity tracking, Linear integration, and screenshots
+  </Card>
+  <Card title="Labs Program" icon="users-gear" href="/docs/growth-ops/labs">
+    Manage student tasks, track deliverables, and process payments for Labs members
+  </Card>
+  <Card title="Campus Outreach" icon="megaphone" href="/docs/growth-ops/outreach">
+    CRM for campus campaigns, ambassador recruitment, and partnership management
+  </Card>
+  <Card title="Growth Scoreboard" icon="chart-simple" href="/docs/growth-ops/scoreboard">
+    Weekly metrics dashboard: signups, WFAU, Day 7 return rates by source
+  </Card>
+</CardGroup>
+
+---
+
+## System Architecture
+
+### Tech Stack
+
+<AccordionGroup>
+  <Accordion title="Backend (api-router)" icon="server">
+    - **Framework**: Express.js with TypeScript
+    - **Database**: PostgreSQL (Neon) with Row-Level Security (RLS)
+    - **Auth**: Role-based access control (`admin`, `growth_ops` roles)
+    - **Real-time**: Ably pub/sub for live updates
+    - **Files**: S3 integration for screenshots and deliverables
+  </Accordion>
+
+  <Accordion title="Frontend (dormway-admin)" icon="desktop">
+    - **Framework**: React + Vite
+    - **UI Library**: Refine v4 + Material-UI (MUI)
+    - **Auth**: Clerk with RBAC
+    - **Data Grid**: MUI X DataGrid with pagination, sorting, filtering
+    - **Charts**: Recharts (planned for analytics dashboards)
+  </Accordion>
+
+  <Accordion title="Database Schema" icon="database">
+    - `growth_bug_reports` - Bug tracking with severity, status, screenshots
+    - `growth_labs_members` - Labs program members and their status
+    - `growth_labs_tasks` - Task assignments with payouts and deliverables
+    - `campus_outreach` - Campus outreach activities and campaigns
+    - `campus_outreach_contacts` - Contact management for campus leads
+    - `growth_scoreboard` - Pre-computed weekly growth metrics
+  </Accordion>
+</AccordionGroup>
+
+### Security Model
+
+All Growth Ops tables use **PostgreSQL Row-Level Security (RLS)** with role-based policies:
+
+| Role | Permissions |
+|------|-------------|
+| **admin** | Full access to all Growth Ops features (read/write/delete) |
+| **growth_ops** | Read-only access to analytics, limited write access to tasks |
+| **Labs members** | Can view own tasks, update status, submit deliverables |
+| **Authenticated users** | Can submit bug reports, view own reports |
+
+<Tip>
+  **Development Tip**: Use `DATABASE_URL_ADMIN` in local dev to bypass RLS policies. Production uses `DATABASE_URL` with RLS enabled.
+</Tip>
+
+---
+
+## Quick Start
+
+### Accessing Growth Ops Tools
+
+<Steps>
+  <Step title="Login to Admin Dashboard">
+    Navigate to `https://admin.dormway.app` and sign in with your Clerk admin account
+  </Step>
+  <Step title="Verify Role">
+    Ensure your account has `admin` or `growth_ops` role assigned in Clerk
+  </Step>
+  <Step title="Navigate to Growth Section">
+    Find the **Growth** menu in the sidebar with these sections:
+    - Labs Dashboard
+    - Scoreboard
+    - Bug Reports
+    - Campus Outreach
+  </Step>
+</Steps>
+
+### Local Development Setup
+
+```bash
+# Start all services
+cd dormway-platform
+make dev
+
+# Access admin dashboard
+open http://localhost:3004
+
+# Access API directly
+curl http://localhost:3001/api/admin/growth/bug-reports \
+  -H "X-User-Role: admin"
+```
+
+<Warning>
+  **Important**: The admin dashboard (`dormway-admin`) uses **Clerk** for authentication, NOT Auth0. Some legacy docs may reference Auth0 - those are outdated.
+</Warning>
+
+---
+
+## Feature Status
+
+| Feature | Status | Admin UI | Mobile UI | API Endpoints |
+|---------|--------|----------|-----------|---------------|
+| Bug Reports | ✅ Complete | ✅ Yes | ✅ Yes | ✅ Full CRUD |
+| Labs Tasks | ✅ Complete | ✅ Yes | ❌ No | ✅ Full CRUD |
+| Labs Members | ✅ Complete | ✅ Yes | ❌ No | ✅ Full CRUD |
+| Campus Outreach | ✅ Complete | ✅ Yes | ❌ No | ✅ Full CRUD |
+| Outreach Contacts | ✅ Complete | ✅ Yes | ❌ No | ✅ Full CRUD |
+| Growth Scoreboard | ✅ Complete | ✅ Yes | ❌ No | ✅ Read-only |
+| Syllabus Tracking | ✅ Complete | ✅ Yes | ❌ No | ✅ Read-only |
+| **Analytics Dashboards** | 🚧 Planned | ❌ No | ❌ No | ❌ Not started |
+
+<Info>
+  **Analytics Implementation**: Full analytics dashboards (charts, trends, leaderboards) are planned for 24 hours of development work. See [GROWTH_OPS_ANALYTICS_PLAN.md](https://github.com/DormWay/dormway-platform/blob/main/GROWTH_OPS_ANALYTICS_PLAN.md) for details.
+</Info>
+
+---
+
+## Common Use Cases
+
+<CardGroup cols={2}>
+  <Card title="Bug Triage Workflow" icon="list-check">
+    1. Student reports bug via mobile app
+    2. Bug appears in admin dashboard
+    3. Admin assigns severity and status
+    4. Bug forwarded to Linear for engineering
+    5. Resolved in app, marked complete
+  </Card>
+
+  <Card title="Labs Task Assignment" icon="clipboard-check">
+    1. Admin creates task (e.g., "Gather 10 syllabi")
+    2. Task assigned to Labs member
+    3. Member completes task, uploads deliverable
+    4. Admin reviews and marks complete
+    5. Payout processed (tracked in `payout_cents`)
+  </Card>
+
+  <Card title="Campus Campaign Tracking" icon="rocket">
+    1. Create outreach activity (e.g., "Spring '26 Ambassador Recruitment")
+    2. Add campus contacts (student leaders, admins)
+    3. Schedule follow-ups and track engagement
+    4. Monitor signup conversion rates
+    5. Update activity status to completed
+  </Card>
+
+  <Card title="Weekly Growth Review" icon="chart-pie">
+    1. Open Growth Scoreboard dashboard
+    2. View weekly metrics by source
+    3. Compare WFAU and Day 7 return rates
+    4. Drill down by campus or platform
+    5. Identify high-performing channels
+  </Card>
+</CardGroup>
+
+---
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Bug Reports Deep Dive" icon="bug" href="/docs/growth-ops/bug-reports">
+    Learn about bug tracking, severity levels, and Linear integration
+  </Card>
+  <Card title="Labs Program Guide" icon="users-gear" href="/docs/growth-ops/labs">
+    Understand task types, payout tracking, and member management
+  </Card>
+  <Card title="Campus Outreach CRM" icon="megaphone" href="/docs/growth-ops/outreach">
+    Explore activity tracking, contact management, and campaigns
+  </Card>
+  <Card title="API Reference" icon="code" href="/docs/growth-ops/api">
+    Complete API documentation with request/response examples
+  </Card>
+</CardGroup>
