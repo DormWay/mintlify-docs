@@ -344,9 +344,69 @@ WHERE a.id = $1;
 - `trackMetric(metricName, value, tags)` - Log metric
 - `trackError(error, context)` - Log error with context
 
-#### 9. SyllabusCacheService
+#### 9. ContentIngestionService
 
-**Purpose**: Centralize syllabus deduplication cache access and standardize syllabus cache shapes (so Engine/API Router/etc don’t re-implement the same SQL + JSON shapes).
+**Purpose**: Manage content_ingestions table for email-based syllabus uploads (PLG flow).
+
+**Methods**:
+- `findByWebExperienceToken(token: string)` - Find content ingestion by preview token
+
+**Example**:
+```typescript
+import { ContentIngestionService } from '@dormway/core';
+
+const service = new ContentIngestionService({ pool, logger });
+
+// Find ingestion by token
+const result = await service.findByWebExperienceToken('token-123');
+if (result.success && result.data) {
+  const ingestion = result.data;
+  const email = ingestion.email_address;
+  const webToken = ingestion.web_experience_token;
+}
+```
+
+**Added**: January 2026 (PLG refactoring)
+**Purpose**: Eliminate raw SQL in api-router for PLG preview flow
+
+#### 10. SyllabusFactory (Extended)
+
+**Purpose**: CRUD operations for syllabus documents (extends base entity functionality).
+
+**PLG-Specific Methods** (added January 2026):
+- `findByWebExperienceToken(token: string)` - Find syllabus by preview token
+- `linkToAccount(syllabusId: string, accountId: string, contextId?: string)` - Link syllabus to user account
+
+**Example**:
+```typescript
+import { getSyllabusFactory } from '@dormway/core';
+
+const syllabusFactory = getSyllabusFactory();
+
+// Find syllabus by preview token
+const result = await syllabusFactory.findByWebExperienceToken('token-123');
+if (result.success && result.data) {
+  const syllabus = result.data;
+  console.log('Course:', syllabus.contextId);
+}
+
+// Link syllabus to account after "Save to Dashboard"
+await syllabusFactory.linkToAccount(
+  syllabusId,
+  accountId,
+  contextId // optional: link to specific course
+);
+```
+
+**Critical Notes**:
+- Preview tokens stored in both `service_data.data.web_experience.webExperienceToken` and `service_data.metadata.web_experience_token`
+- `findByWebExperienceToken` checks both locations for backward compatibility
+- Syllabus entity uses `processedAt` (not `fetchedAt`) for timestamp
+- Property `contextId` (not `context_id`) when accessing entity fields
+
+#### 11. SyllabusCacheService
+
+**Purpose**: Centralize syllabus deduplication cache access and standardize syllabus cache shapes (so Engine/API Router/etc don't re-implement the same SQL + JSON shapes).
 
 **Key Exports**:
 - `SYLLABUS_PARSER_VERSION` - Single source of truth for cache invalidation

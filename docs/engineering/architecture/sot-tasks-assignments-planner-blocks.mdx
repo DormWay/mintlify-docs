@@ -11,12 +11,18 @@ description: "sequenceDiagram participant Client participant API as API Router p
 
 ## Invariants & Contracts
 - `tasks` is the canonical persistent task table with status in `pending|scheduled|completed|deleted` and `scheduled_block_id` FK to `student_time_blocks` (ON DELETE SET NULL). RLS restricts access to the owner. (`infrastructure/database/migrations/20251009_add_tasks_table.sql`)
+- Canvas sync upserts assignment-backed task rows with `source='assignment'`, `source_type='canvas'`, and `source_id=canvas_assignments.id`; submissions mark tasks completed. (`services/engine/src/activities/canvas.activities.ts`)
 - `assignment_completion` is partitioned by `created_at` and stores `assignment_id` as text plus completion metadata; RLS is enforced on the parent table. (`infrastructure/database/migrations/20251003_create_assignment_completion.sql`, `infrastructure/database/migrations/20251202_rls_user_tables.sql`)
+- Assignment completion IDs are canonical: Canvas uses `canvas-<canvas_assignment_id>` (numeric LMS ID), syllabus uses `syllabus-<courseContextId>-<index>`, and generic assignments use UUIDs from `tasks.assignment_id`.
+- Manual completion updates assignment-backed `tasks` rows (Canvas by `metadata.canvasAssignmentId`, generic by `assignment_id`) so Tasks V2 remains consistent with `assignment_completion`.
 - `/v2/students/me/tasks` is non-cacheable and merges persistent tasks with synthetic syllabus tasks from `service_data`. (`services/api-router/src/routes/v2/students.routes.ts`, `services/shared/dormway-core/src/entities/student/student.entity.ts`)
-- `/v2/students/me/task-bank` returns unified unscheduled work (DayPlan suggestions, Canvas, quick captures, persistent tasks) for Smart Schedule. (`services/api-router/src/routes/v2/students.routes.ts`)
+- `/v2/students/me/task-bank` returns unified unscheduled work (DayPlan suggestions, Canvas, quick captures, persistent tasks) with server-side canonicalization (`canonical_id`, `canonical_key`, `sources`, `has_time`, `due_date`). (`services/api-router/src/routes/v2/students.routes.ts`, `services/api-router/src/utils/task-bank-canonicalization.ts`)
+- `/api/mobile/planner/task-bank` shares the same canonicalization helper for cross-surface parity. (`services/api-router/src/routes/mobile-routes.ts`, `services/api-router/src/utils/task-bank-canonicalization.ts`)
 - Syllabus tasks use IDs `syllabus-{courseContextId}-{index}` and can only be marked `completed`; other updates are rejected. (`services/shared/dormway-core/src/entities/student/student.entity.ts`, `services/api-router/src/routes/v2/students.routes.ts`)
 - Assignments used in DayPlan are read from `student_time_blocks` where `type='assignment'` and `lifecycle_status='active'`. (`services/shared/dormway-core/src/domains/day-plan-data/day-plan-data.service.ts`)
 - Canvas assignments in dashboard views are derived from `student_time_blocks` joined to Canvas submissions, marking `isCompleted` when `submission_status` is `submitted` or `graded`. (`services/api-router/src/services/dashboard-aurora-service.ts`)
+- Courses term insights pull assignments via `/v2/students/me/current-term/assignments` and map them into `summary.course_assignments` in `useSemesterAggregate`. (`services/api-router/src/routes/v2/students.routes.ts`, `services/dormway-lockedin/src/hooks/useSemesterAggregate.ts`)
+- V2 term insights payloads (summary/workload/insights/warnings/conflicts/analysis + assignments) are validated with Zod before returning. (`services/api-router/src/routes/v2/students.routes.ts`)
 - DueSoon items drop placeholders, skip items beyond ~45 days (non-syllabus) and older than 3 days overdue, and mark submitted items as `completed` before applying `overdue` logic. (`services/api-router/src/services/dashboard-composite-transformer.ts`)
 - Scheduling a task creates a `student_time_blocks` row (`source='manual_planner'`, `type='other'`) and updates the task to `scheduled`; unscheduling deletes the block and resets the task to `pending`. (`services/api-router/src/routes/task-routes.ts`)
 - Manual planner blocks use `student_time_blocks` with `source='manual_planner'` and are soft-deleted via `lifecycle_status='deleted'`. (`services/api-router/src/routes/mobile-routes.ts`)
@@ -27,12 +33,14 @@ description: "sequenceDiagram participant Client participant API as API Router p
 - Current: Web Tasks renders a unified list powered by `/v2/students/me/tasks` with deliverables as fallback coverage (no gaps).
 - Target: Web Tasks remains the canonical "all tasks" inbox with V2 authoritative status and schedule/unschedule actions; composite is legacy-only.
 - Plan: `services/dormway-lockedin/docs/LOCKEDIN_WEB_OS_CONSISTENCY_PLAN.md`.
+- Term data surface map (Courses/Today/Tasks): [Term Data Surface Audit](/docs/engineering/technical/lockedin/term-data-surface-audit)
 
 ## Roadmap (Current)
 - Add `GET /v2/students/me/academic-summary` to replace `/api/proxy/academic/*`, `/api/proxy/canvas/assignments`, and `/api/proxy/student/courses` fan-out.
 - Move deliverables, completion, and weekly matrix into the summary payload with a stable `meta.partialFailures` field.
 - Keep `/v2/students/me/tasks` as the authoritative task list; summary provides context only.
 - Roadmap: [V2-Standardization-Roadmap (Current)](/docs/engineering/technical/api/v2-standardization-roadmap-current)
+- Task Bank canonicalization (Phase 1 implemented; Phase 2 persistence in progress): shared helper across `/v2/students/me/task-bank` + `/api/mobile/planner/task-bank`, canonical_key uses display timezone + date-only detection, normalize source types, dedupe by source_id then canonical_key, canonical_id = tasks.id or hashed key. Spec: [Task Bank Canonicalization Spec (Draft)](/docs/engineering/architecture/task-bank-canonicalization-spec-draft)
 
 ## Web Tasks Merge + Status Rules (LockedIn)
 - Dedup priority: V2 `metadata.canvasAssignmentId` (matches `Deliverable` canvas IDs) before fallback composite key (`courseContextId|courseCode + normalized title + due day`).
@@ -104,7 +112,7 @@ sequenceDiagram
         API->>DB: Query persistent tasks
     end
     API->>API: Merge all sources
-    API->>API: Dedupe via metadata.originalId
+    API->>API: Canonicalize via source_id + canonical_key (canonicalizeTaskBank)
     API-->>Client: Task bank
 ```
 
@@ -170,6 +178,7 @@ sequenceDiagram
 ## Data Models / IDs / Terminology
 - `tasks` table: `id` UUID, `status`, `priority`, `course_code`, `due_date`, `scheduled_block_id`, `assignment_id`, and JSON `metadata`. (`infrastructure/database/migrations/20251009_add_tasks_table.sql`, `services/api-router/src/types/tasks.ts`)
 - Task sources: `manual`, `assignment`, `dayplan`, `ai_suggestion`. (`infrastructure/database/migrations/20251009_add_tasks_table.sql`, `services/api-router/src/types/tasks.ts`)
+- Task canonical fields: `canonical_key`, `source_type`, `source_id`, `source_priority`. (`infrastructure/database/migrations/20260116_add_task_canonical_fields.sql`)
 - Syllabus task IDs: `syllabus-{courseContextId}-{index}`; they are synthetic and completion-only. (`services/shared/dormway-core/src/entities/student/student.entity.ts`)
 - `assignment_completion`: partitioned table keyed by `(id, created_at)` with `assignment_id` text and `completion_source` enums. (`infrastructure/database/migrations/20251003_create_assignment_completion.sql`)
 - `student_time_blocks`: schedule/assignment storage with `type` from `time_block_type` enum (no `planner_block` value). Planner blocks are stored as `type='other'` with `source='manual_planner'`. (`infrastructure/docker/init-scripts/01-schema.sql`, `services/api-router/src/routes/task-routes.ts`, `services/api-router/src/routes/mobile-routes.ts`)
@@ -197,6 +206,8 @@ sequenceDiagram
 - `services/dormway-lockedin/src/hooks/home/useTasksV2.ts`
 - `services/dormway-lockedin/src/types/tasks-v2.ts`
 - `services/dormway-lockedin/src/hooks/useSemesterAggregate.ts`
+- `services/dormway-lockedin/src/components/courses/insights/AssignmentTimelineCard.tsx`
+- `services/dormway-lockedin/src/components/courses/TermInsightsContent.tsx`
 - `services/dormway-lockedin/docs/LOCKEDIN_WEB_OS_CONSISTENCY_PLAN.md`
 
 ## Update Checklist
@@ -211,6 +222,8 @@ sequenceDiagram
 - Plans/Tasks-Page-Canonicalization-Plan
 
 ## Recent Changes
+- 2026-01-28: Added V2 term assignments endpoint and migrated Courses term insights to V2 (`useSemesterAggregate`).
+- 2026-01-28: Added Zod validation for V2 term insights responses (including plan/trends).
 - 2026-01-04: Documented Smart Schedule intent scheduling as manual time blocks distinct from task lifecycle.
 - 2026-01-04: Added `/v2/students/me/task-bank` as the web-facing Task Bank endpoint.
 - 2025-12-30: Standardized task creation UI on `TaskCreateModal`; legacy `AddTaskModal` is deprecated.

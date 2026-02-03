@@ -1,0 +1,48 @@
+---
+title: "Term Data Surface Audit"
+description: "This doc captures where the Courses, Today, and Tasks surfaces get their data today, plus a repeatable way to inspect real backend payloads."
+---
+
+# Term Data Surface Audit (Courses / Today / Tasks)
+
+This doc captures where the Courses, Today, and Tasks surfaces get their data today, plus a repeatable way to inspect real backend payloads.
+
+Primary reference (full mapping + test steps):
+- `services/dormway-lockedin/docs/TERM_DATA_SURFACE_AUDIT.md`
+
+## API Trace (Fast Inspection)
+To capture real responses without editing each hook, enable the API trace in the browser console:
+```js
+localStorage.setItem('dw.apiTrace', '1');
+window.__DW_API_TRACE_ENABLED__ = true;
+```
+Inspect:
+```js
+window.__DW_API_TRACE__
+```
+Disable:
+```js
+localStorage.removeItem('dw.apiTrace');
+window.__DW_API_TRACE_ENABLED__ = false;
+```
+
+## Key Surfaces (Short Map)
+- **Courses (`/dashboard/courses`)**
+  - Course list: `/api/v2/students/me/courses` (fallback to legacy if flagged)
+  - Term insights: `/api/v2/students/me/current-term/*` or `/terms/:termId/*`
+  - Course detail sheet: `/api/v2/courses/:contextId/*` + syllabus processors
+- **Today (`/dashboard/today`)**
+  - Widget batch: `/api/v2/widgets/batch`
+  - Per-widget fallback: `/api/v2/widgets/{today|schedule|tasks|courses|headsup}` (used when batch fails)
+  - Schedule widget: `/api/v2/widgets/schedule`
+  - Schedule events: `/api/v2/students/me/calendar/events`
+  - Class popover: `/api/v2/students/me/class-sessions/:eventId`
+  - Task completion: `/api/v2/students/me/tasks/:taskId`
+- **Tasks (`/dashboard/tasks`)**
+  - Tasks V2: `/api/v2/students/me/tasks`
+  - Academic summary: `/api/v2/students/me/academic-summary`
+
+## Known Friction
+- `getCourseColor is not a function` observed in Courses timeline view (verify `AssignmentTimelineCard` + course color hooks).
+- 404s on `/api/v2/courses/:id/syllabus` in local dev (missing context fixtures).
+- 429s on `/api/v2/students/me/preferences` and Canvas proxies in dev (rate limits).

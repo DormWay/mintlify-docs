@@ -1,6 +1,6 @@
 ---
 title: "Calendar, Time Blocks, Timezones"
-description: "sequenceDiagram participant Workflow as scheduleImport.workflow participant Parser participant Norm as normalizeAndStoreCalendarData participant DB as time_b..."
+description: "Class scheduled for March 8, 10:00 AM EDT..."
 ---
 
 # SoT - Calendar, Time Blocks, Timezones
@@ -28,9 +28,53 @@ description: "sequenceDiagram participant Workflow as scheduleImport.workflow pa
 ## Invariants & Contracts
 - `time_blocks` enforces exactly one owner: either `user_id` or `context_id` (check constraint in table DDL).
 - `time_blocks` deduplicates by `source_type + source_id + (user_id or context_id)` (unique index).
+- `course_code_normalized` exists on both `time_blocks` and `student_time_blocks` and is the canonical key for schedule reconciliation and course health metrics.
 - Calendar storage validates timezone strings and normalizes to UTC (`normalizeToProperUTC`); floating times without timezone are warned and treated as server-local.
 - ICS all-day detection: `normalizeICSData` sets `all_day` via date-only ICS markers (`datetype: date`, `VALUE=DATE`), and Canvas assignment normalization preserves `assignment.all_day` to avoid timezone shifts.
 - `student_time_blocks` is **currently a BASE TABLE** (not a view) in production Neon. It was intended to be a view alias to `v_student_calendar_events` but the migration creating the view did not convert the existing table. User-only sources (e.g., `enrolled`, schedule rules) write directly to this table. Data deletion operations must clear both `time_blocks` and `student_time_blocks`. API reads from `student_time_blocks` and filters by active lifecycle.
+
+### DST-Aware Date Handling (Critical)
+
+**Problem:** JavaScript's `new Date()` constructor does NOT correctly handle DST transitions. Using it to parse stored UTC times and display them in local time causes 1-hour shifts on DST transition dates (March 8 / November 2).
+
+**Why it breaks on DST transition days:**
+```
+Class scheduled for March 8, 10:00 AM EDT...
+
+If created BEFORE DST with EST offset (-5):
+  Stored: 2025-03-08T15:00:00Z  (10:00 + 5 = 15:00 UTC) ❌ Wrong!
+
+When displayed AFTER DST starts (EDT = -4):
+  new Date("...T15:00:00Z") → 15:00 - 4 = 11:00 AM ❌ Shows 1 hour late!
+```
+
+**Solution - Always use `date-fns-tz` for timezone operations:**
+
+| Operation | Wrong Way | Correct Way |
+|-----------|-----------|-------------|
+| Store local time as UTC | `new Date(localTime).toISOString()` | `fromZonedTime(localTime, timezone).toISOString()` |
+| Display UTC as local | `new Date(utcTime).toLocaleString()` | `formatInTimeZone(utcDate, timezone, format)` |
+| Parse stored time | `new Date(isoString)` | `parseISO(isoString)` + format with timezone |
+
+**Canonical pattern (from `time-blocks.service.ts`):**
+```typescript
+import { fromZonedTime, formatInTimeZone } from 'date-fns-tz';
+import { parseISO } from 'date-fns';
+
+// STORING: Convert campus local time to UTC
+const localTimeStr = '2025-03-08T10:00:00';  // 10 AM campus time
+const utcDate = fromZonedTime(localTimeStr, 'America/New_York');
+const stored = utcDate.toISOString();  // Correct UTC accounting for DST
+
+// DISPLAYING: Convert stored UTC to local time
+const displayTime = formatInTimeZone(
+  parseISO(stored),
+  'America/New_York',
+  'h:mm a'  // "10:00 AM" - correct even on DST days
+);
+```
+
+**Key rule:** Always store the IANA timezone (e.g., `America/New_York`) WITH the data so display can correctly account for DST. Never use fixed offsets like `-05:00`.
 - API reads:
   - `GET /calendar/events` queries `student_time_blocks` for the authenticated user.
   - `GET /v2/students/me/calendar/events` is the web schedule canonical endpoint (v2 range wrapper over calendar events).
@@ -121,17 +165,30 @@ sequenceDiagram
 - `time_blocks`: generic calendar table keyed by `source_type`/`source_id`, with `user_id` or `context_id`, and UTC `start_time`/`end_time`.
 - `student_time_blocks` view: `id`, `user_id`, `start_time`, `end_time`, `label`, `type`, `status`, `source`, `metadata`, `is_deadline`, timestamps.
 - Calendar sources include `google`, `ics_campus`, `ics_lms`, `ics_atlas`, `syllabus`, `academic`, `manual`, `schedule_import`, `canvas`, `system`.
+- `time_block_source_type` includes `manual_course_add` for course lifecycle meeting creation (context-scoped).
 
 ## Key Files (Code + Docs)
+
+### Timezone Utilities (dormway-core)
+- `services/shared/dormway-core/src/utils/datetime/formatting.ts` (DST-aware formatting: `formatInTimeZone`, `fromZonedTime`, `parseTimezoneAwareDate`)
+- `services/shared/dormway-core/src/utils/datetime/timezone.ts` (timezone lookup: `getTimezoneForState`, `isDST`, `getTimezoneOffset`)
+- `services/shared/dormway-core/src/entities/lecture/lecture.entity.ts` (DST-aware schedule methods: `formatScheduledStart()`, `formatScheduledEnd()`)
+
+### Calendar & Time Blocks
 - `services/engine/src/activities/calendar.activities.ts` (normalize + store calendar events; storage routing)
 - `services/engine/src/services/calendarNormalization.service.ts` (normalization contract + source/event enums)
 - `services/engine/src/activities/student.activities.ts` (legacy normalization in scheduleProcessor)
 - `services/engine/src/workflows/scheduleImport.workflow.ts` (schedule import → calendar normalization)
 - `services/engine/src/workflows/studentProcessor.workflow.ts` (`scheduleProcessor` orchestration)
 - `services/engine/src/utils/timezone.utils.ts` (UTC storage guidance + timezone helpers)
+- `services/shared/dormway-core/src/domains/time-blocks/time-blocks.service.ts` (DST-correct block generation with `fromZonedTime`)
+
+### Database Migrations
 - `services/engine/migrations/create_generic_time_blocks.sql` (`time_blocks` DDL + `v_student_calendar_events`)
 - `infrastructure/database/migrations/099_create_student_time_blocks_view.sql` (Neon alias view)
 - `infrastructure/database/migrations/20250820_fix_timezone_consistency.sql` (UTC timestamp guidance)
+
+### API & Frontend
 - `services/api-router/src/routes/mobile-routes.ts` (calendar API queries)
 - `services/api-router/src/services/schedule-intent-classifier.ts` (smart schedule intent parsing)
 - `services/api-router/src/services/schedule-rule-scheduler.ts` (rule creation + materialization)
@@ -147,8 +204,14 @@ sequenceDiagram
 - Changing timezone conversion: update `normalizeToProperUTC` and ensure callers pass `options.timezone`.
 - Changing `time_blocks` schema or constraints: update DDL migration and `v_student_calendar_events`/`student_time_blocks` views.
 - Changing calendar API filters: update `mobile-routes.ts` queries and any downstream consumers.
+- **Adding schedule time display:** NEVER use bare `new Date()` for display. Use `formatInTimeZone(parseISO(isoString), timezone, format)` from `date-fns-tz`. Store the IANA timezone with the data.
+- **Adding schedule time storage:** NEVER use `new Date(localTime).toISOString()`. Use `fromZonedTime(localTime, timezone).toISOString()` to correctly handle DST.
 
 ## Recent Changes
+- 2026-02-02: Fixed DST bug in `lecture.entity.ts` - added timezone-aware formatting methods (`formatScheduledStart()`, `formatScheduledEnd()`) using `date-fns-tz`. Added `timezone` field to `LectureData` and `LectureSummary` types. Deprecated bare `scheduledStart`/`scheduledEnd` Date getters for display purposes. Added DST-Aware Date Handling section to this SoT.
+- 2026-02-02: Added `course_code_normalized` columns + indexes and extended `time_block_source_type` to include `canvas`/`schedule_import`/`manual_course_add`.
+- 2026-01-25: Syllabus calendar normalization now resolves Week/Finals references using term windows and maps class_sessions/schedule_events into calendar events for assignment deadlines.
+- 2026-01-20: Web Schedule creates pre-class reminders via `POST /v2/students/me/time-blocks` and derives term week ranges from v2 term-calendar data (no legacy current-term/app-conf fetch).
 - 2026-01-13: schedule import now verifies reconciliation and retries `scheduleProcessor` if enrolled class blocks are missing; enrollment lookup falls back to `term_id` and unfiltered enrollments when term metadata is absent.
 - 2026-01-07: Documented that `student_time_blocks` is currently a BASE TABLE (not a view) in production; data deletion must clear both tables.
 - 2026-01-07: Fixed schedule import to handle concatenated day abbreviations (MoWe, TuTh) in `calendarNormalization.service.ts`.

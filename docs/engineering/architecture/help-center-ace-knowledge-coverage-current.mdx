@@ -1,0 +1,87 @@
+---
+title: "Help Center & Ace Knowledge Coverage (Current)"
+description: "DormWay needs a reliable, self-serve documentation surface for core student flows (schedule, syllabus, Canvas, planning). Today, the Help Center seed doc exi..."
+---
+
+# Help Center & Ace Knowledge Coverage (Current)
+
+## Summary
+DormWay needs a reliable, self-serve documentation surface for core student flows (schedule, syllabus, Canvas, planning). Today, the Help Center seed doc exists but does not fully cover Canvas or define how Ace should answer product "how-to" questions. This document defines the coverage map, adds concrete implementation references, and outlines how to make Ace aware of Help Center content.
+
+## Goals
+- Ensure students can complete core setup actions without live support.
+- Keep help content aligned with actual UI paths and API behavior.
+- Make Ace capable of answering "how do I..." questions by indexing product help docs.
+- Provide clear implementation references for future agents.
+
+## Non-goals
+- Replace product onboarding (see [Onboarding Discovery & First-Run Strategy (Current)](/docs/engineering/architecture/onboarding-discovery-first-run-strategy-current)).
+- Redesign the Ace UI or introduce new chat providers.
+- Document every feature; focus on the top setup and data ingestion flows.
+
+## Current State (Verified)
+- Help Center seed content exists and documents schedule upload + syllabus upload.
+  - Doc: `Product/Features/Documentation/Help Center/DormWay LockedIn Help Center Seed.md`
+- In-app Help Center now lives at `/dashboard/help` (web) and is accessible without AI.
+  - Page: `services/dormway-lockedin/src/app/dashboard/help/page.tsx`
+  - Content: `services/dormway-lockedin/src/content/help-center.ts`
+  - Entry points: sidebar utility nav, command palette, Settings > Support
+- Canvas connection and sync are implemented in the web app but were not previously documented in the Help Center.
+  - UI: `services/dormway-lockedin/src/components/canvas/CanvasIntegration.tsx`
+- Ace uses structured data + Ragie (RAG) for user/course documents, but no ingestion path exists for product help docs.
+  - RAG: `services/api-router/src/services/ace-llm.ts`
+  - Ragie activities: `services/engine/src/activities/ragie.activities.ts`
+
+## Coverage Map (Help Center + UI + Code)
+
+| User task | Help Center location | UI entry points | Code / endpoint references |
+| --- | --- | --- | --- |
+| Connect Canvas | Help Center seed: "How Do I Connect Canvas LMS?" | Settings > Connections > Canvas LMS; Courses > Canvas tab; `/dashboard/canvas` | `components/canvas/CanvasIntegration.tsx`, `components/settings/ConnectionsContent.tsx`, `components/courses/CanvasContent.tsx`, `app/dashboard/canvas/page.tsx`, `lib/canvas-proxy.ts` (`/api/proxy/v2/integrations/canvas/*`, `/api/proxy/canvas/*`) |
+| Sync/Disconnect Canvas | Help Center seed: "How Do I Sync or Disconnect Canvas?" | Canvas header buttons (Sync, Disconnect) | `components/canvas/CanvasIntegration.tsx` (`/sync`, `/disconnect`), `components/canvas/CanvasSyncTriggers.tsx` |
+| Upload schedule | Help Center seed: "How Do I Upload My Class Schedule?" | Schedule page > Import Schedule; Settings > Connections > Schedule Upload; Courses empty state | `components/schedule/ScheduleHeader.tsx`, `components/integrations/ScheduleUploadIntegration.tsx`, `components/schedule/PendingSchedulePreviewModal.tsx`, `app/dashboard/schedule/page.tsx` |
+| Upload syllabus | Help Center seed: "How Do I Upload a Syllabus?" | Courses > Syllabus/Insights; Settings > Connections > Syllabus Manager; Course detail actions | `components/courses/modals/SyllabusModal.tsx`, `components/UploadSyllabusModal.tsx`, `components/SyllabusCoursesView.tsx`, `components/integrations/SyllabusManagerIntegration.tsx`, `components/GenericUploadModal.tsx`, `/api/syllabus/*` |
+| Ask Ace (course Q&A) | Help Center seed: "What Is Ace LLM?" | Ace bubble, `/dashboard/ace` routes | `components/AceChatBubble.tsx`, `app/dashboard/ace/*`, `services/api-router/src/routes/ace-llm-chat-routes.ts` |
+
+## Ace Help Knowledge (Gap + Path Forward)
+
+### Gap
+Ace is not currently trained on (or indexed with) product Help Center docs. It answers questions based on:
+- Structured data (tasks, assignments, schedules) via `ace-context-aggregator.ts`.
+- Ragie documents indexed from user and course content.
+
+There is no ingestion path that indexes Help Center docs into Ragie, and there is no explicit "help" scope in the Ace query flow.
+
+### Path Forward (Recommended)
+1. **Create a Help Center corpus in Ragie**
+   - Partition: `org_dormway` (or `org_help`), using the existing partition rules in `ace-llm.ts`.
+   - Document type: `help_center` with metadata tags (feature, platform, last_updated).
+   - Source files: `Product/Features/Documentation/Help Center/*`.
+2. **Add a Help scope to Ace**
+   - Extend Ace scope to support `help` or `org` queries that include the Help Center partition.
+   - Suggested heuristic: if message matches "how do I", "where do I", or "connect" + feature name, include help partition.
+3. **Ingestion pipeline**
+   - Use `storeGenericDocumentInRagie` in `ragie.activities.ts` to index Help Center docs on publish.
+   - Trigger indexing from a docs build hook or a lightweight CLI script (keeps docs and Ace in sync).
+4. **User-facing fallback**
+   - Until help docs are indexed, Ace should surface a "View Help Center" CTA for product questions.
+
+### References
+- RAG partitions: `services/api-router/src/services/ace-llm.ts`
+- Ragie indexing: `services/engine/src/activities/ragie.activities.ts`
+- Ace context: `services/api-router/src/services/ace-context-aggregator.ts`
+
+## Acceptance Criteria
+- Help Center includes Canvas connection/sync instructions aligned to current UI.
+- Students can complete Schedule, Syllabus, and Canvas setup without support.
+- Ace can answer at least 80% of "how do I" product questions using Help Center docs (after ingestion is added).
+- Help Center doc updates propagate to Ace within 24 hours.
+
+## Known Risks
+- Help content can drift if UI labels change; keep references tied to `NAVIGATION_ROUTES` and component names.
+- Without ingestion, Ace answers for product "how-to" will be inconsistent or generic.
+
+## Related Docs
+- [Onboarding Discovery & First-Run Strategy (Current)](/docs/engineering/architecture/onboarding-discovery-first-run-strategy-current)
+- [Canvas Integration](/docs/engineering/architecture/sot-canvas-integration)
+- [Ace LLM](/docs/engineering/architecture/sot-ace-llm)
+- [BrainGains & RAG](/docs/engineering/architecture/sot-braingains-rag)

@@ -1,0 +1,81 @@
+---
+title: "Context First Planner Grid Plan"
+description: "Upgrade the “Plan time for this task” scheduler to be context-first: jump to now, Sunday-first week framing, clear today emphasis, and environmental cues (we..."
+---
+
+# Context-First Planner Grid (Plan Time UI)
+
+## Summary
+Upgrade the “Plan time for this task” scheduler to be context-first: jump to now, Sunday-first week framing, clear today emphasis, and environmental cues (weather + daylight) without gradients. This keeps the planner aligned with the widget/command-center vision while keeping Tasks the canonical execution surface.
+
+## Current State (Web)
+- Planner grid renders via `WeekPlannerGrid` with Monday-first ordering and hour-grid background lines.
+- Auto-scroll uses a fixed buffer from current time.
+- No explicit “Now” line and no today column emphasis.
+- Planner does not surface weather or daylight context.
+
+## Goals
+1. **Temporal Jump**: auto-scroll so current time sits ~top third of the view; add a prominent “Now” line and timestamp.
+2. **Sunday–Saturday**: week layout matches typical academic planners/syllabi.
+3. **Today Emphasis**: soft tint on today column; today header in primary brand color.
+4. **Context Cues** (phase 2): lightweight weather + daylight indicators, flat visual styling (no gradients).
+5. **No Regression**: preserve planner selection semantics and task scheduling flow.
+
+## Non-goals
+- Changing task scheduling backend or time block APIs.
+- Reworking the main Schedule page or Today widget layouts.
+- Broad visual redesign of Tasks page outside the planner panel.
+
+## UX Requirements
+- **Current Time**: 2px solid line spanning the grid with “NOW 2:05 PM” label on far left.
+- **Sunday-first**: hard-coded Sunday → Saturday ordering.
+- **Today Highlight**: subtle solid tint (no gradient) for today’s column.
+- **Draft Blocks**: keep dashed border / translucent fill for draft selections.
+- **Zoom** (future): coarse grid in overview; detail grid in focus (not in scope for phase 1).
+
+## Implementation Plan
+
+### Progress
+- Phase 1 complete (Sunday-first, now line, auto-scroll, today tint, dashed draft block).
+- Phase 2 in progress (hourly weather + night shading + temperature band).
+
+### Phase 1 — Core Temporal UX (low risk)
+- Update `WeekPlannerGrid` to Sunday-first ordering.
+- Add `todayIndex` detection and column tint in the grid.
+- Add “Now” line + timestamp label.
+- Replace auto-scroll buffer with top-third anchoring logic.
+
+**Files**
+- `services/dormway-lockedin/src/components/schedule/WeekPlannerGrid.tsx`
+- `services/dormway-lockedin/src/app/dashboard/tasks/page.tsx`
+
+### Phase 2 — Contextual Weather/Daylight (medium risk)
+- Reuse existing weather pipeline (LocalWeather + Weather widget data) to supply hourly forecast slices.
+- Add small hourly icons + precip % in the grid (next 48 hours) only if data is present.
+- Add daylight marker for post-sunset hours (subtle flat background, not gradients).
+- Trigger forecast refresh when planner/overlay opens to ensure 48h intervals are available.
+
+**Dependencies**
+- Weather data source that includes hourly intervals (see Weather widget refactor plan for extraction from forecast payloads).
+  - Update forecast storage to keep 16 hourly intervals (48h) instead of 8 (24h).
+
+**Files**
+- `services/dormway-lockedin/src/components/schedule/WeekPlannerGrid.tsx`
+- `services/dormway-lockedin/src/hooks/useLocalWeather.ts`
+- `services/dormway-lockedin/src/app/dashboard/today/widgets/weather/*` (shared utils for icons + conditions)
+
+### Phase 3 — Zoomed Overview (future)
+- Add grid density toggle (Detail vs Overview) scoped to planner panel.
+- Overview mode: collapsed 2–3 hour buckets with “Open vs Busy” visualization.
+
+## Open Questions
+- Should Sunday-first apply only to planner or also to “Week runway” visualizations on Tasks?
+- Do we want campus-timezone vs browser-timezone for the “Now” line label?
+- Which weather intervals are canonical (1-hour vs 3-hour blocks)?
+
+## QA / Validation
+- Planner opens and auto-scrolls to current time on current-week view.
+- “Now” line appears only when the current week is in view.
+- Sunday-first layout matches task scheduling day labels.
+- Scheduling still produces correct `day` values (Sun–Sat) in `handleConfirmTimeBlock`.
+- No visual regressions in dark/glass themes.

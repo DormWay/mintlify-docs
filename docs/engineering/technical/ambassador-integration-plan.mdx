@@ -1,248 +1,233 @@
 ---
-title: "Ambassador Integration - Implementation Status"
-description: "GetAmbassador.com API integration for campus ambassador referral tracking and commission management"
+title: "Ambassador Integration Plan"
+description: "DormWay integrates with [Ambassador](https://getambassador.com) for referral tracking and attribution. This document covers the current implementation."
 ---
 
-# Ambassador Integration - Implementation Status
+# Ambassador Platform Integration
 
-<Note>
-**Status:** ✅ **IMPLEMENTED** (January 2026)
+DormWay integrates with [Ambassador](https://getambassador.com) for referral tracking and attribution. This document covers the current implementation.
 
-Core integration completed including automatic ambassador sync to GetAmbassador platform, referral tracking, and commission management.
-</Note>
+## Implementation Status
 
----
+| Component | Status | Notes |
+|-----------|--------|-------|
+| Ambassador API Client | ✅ Complete | `services/api-router/src/services/ambassador-client.ts` |
+| Engine Activity | ✅ Complete | `services/engine/src/activities/ambassador.activities.ts` |
+| Temporal Workflow Integration | ✅ Complete | `onboardStudent` workflow, 16th parameter |
+| Web (dormway-lockedin) | ✅ Complete | Passes `referralCode` through onboarding |
+| iOS | ✅ Complete | `ReferralService.swift` captures deep links |
+| Admin Retrigger | ✅ Complete | Manual referral code input in admin UI |
 
-## Implementation Overview
+## Architecture
 
-### What Was Built
-
-The GetAmbassador.com integration provides automated referral tracking and commission management for campus ambassadors:
-
-**Backend Services:**
-- **Ambassador Client** (`services/api-router/src/services/ambassador-client.ts`): Singleton HTTP client for GetAmbassador API
-  - Auto-creation support via `auto_create=1` parameter
-  - Referral code extraction from memorable URLs
-  - Stats synchronization and event tracking
-- **Ambassador Service** (`services/api-router/src/services/ambassador.service.ts`): Business logic layer
-  - Application approval workflow with automatic GetAmbassador sync
-  - Retry sync mechanism for failed synchronizations
-  - Campus-based ambassador queries
-  - Commission tracking and analytics
-- **Admin Routes** (`services/api-router/src/routes/admin/ambassador-routes.ts`): RESTful API endpoints
-  - `GET /admin/ambassador/analytics` - Platform-wide metrics
-  - `GET /admin/ambassador/applications` - Pending applications
-  - `POST /admin/ambassador/applications/:id/approve` - Approve and sync
-  - `POST /admin/ambassador/applications/:id/retry-sync` - Retry failed syncs
-  - `POST /admin/ambassador/applications/:id/reject` - Reject with reason
-  - `GET /admin/ambassador/by-campus/:campusId` - Ambassadors by campus
-  - `GET /admin/ambassador/ambassadors` - All ambassadors with stats
-  - `GET /admin/ambassador/commissions` - Commission tracking
-
-**Frontend (dormway-admin):**
-- **Ambassadors Tab in Campus Detail** (`services/dormway-admin/src/pages/growth/outreach/detail.tsx`):
-  - DataGrid showing all ambassadors for a campus
-  - Columns: Full Name, Email, Status, Referral ID, Joined date
-  - Actions: Email ambassador, View dashboard
-- **Ambassador Management Views**:
-  - Application review interface
-  - Bulk actions for approval/rejection
-  - Sync status indicators
-  - Commission tracking dashboard
-
-### Integration Flow
+### Referral Attribution Flow
 
 ```mermaid
 sequenceDiagram
-    participant Admin as dormway-admin
-    participant API as api-router
-    participant DB as PostgreSQL
-    participant GA as GetAmbassador.com
+    participant User
+    participant App as Web/iOS
+    participant API as API Router
+    participant Temporal
+    participant Activity as Ambassador Activity
+    participant Ambassador as Ambassador API
 
-    Admin->>API: POST /applications/:id/approve
-    API->>DB: Update application status to 'approved'
-    API->>DB: Update account.ambassador_status to 'approved'
-    API->>GA: GET /ambassador/get/ (auto_create=1)
-    GA-->>API: Return ambassador profile + referral code
-    API->>DB: Store ambassador_external_id, ambassador_referral_url
-    API->>DB: Update ambassador_status to 'active'
-    API-->>Admin: Return success with status
+    User->>App: Click referral link (e.g., join.dormway.app/7fjnwc)
+    App->>App: Capture referral code
+    User->>App: Complete onboarding
+    App->>API: POST /onboarding/complete {referralCode}
+    API->>Temporal: Start onboardStudent workflow
+    Temporal->>Activity: processReferralAttribution()
+    Activity->>Ambassador: POST /referral_attribution/record/
+    Ambassador-->>Activity: Attribution confirmed
+    Activity->>Activity: Update accounts table
+    Activity->>Activity: Insert referral_events
+    Activity-->>Temporal: {success: true}
 ```
 
-**Key Implementation Details:**
+### Key Design Decisions
 
-1. **Auto-Creation via GET Request**: GetAmbassador's `/ambassador/get/` endpoint creates ambassadors when `auto_create=1` parameter is included (no separate POST needed)
+1. **Temporal Workflow**: Referral attribution runs as a Temporal activity inside `onboardStudent`, making it:
+   - **Repeatable** - Temporal retries on transient failures
+   - **Consistent** - All platforms use the same workflow
+   - **Retriggerable** - Admin can retrigger with referral code
 
-2. **Atomic Approval Process**: Single transaction updates local DB and syncs to GetAmbassador, with status tracking throughout
+2. **Non-blocking Validation**: If Ambassador API validation fails, we still attempt to record the attribution. Ambassador validates the `short_code` during recording.
 
-3. **Error Handling**: Failed syncs stay in "approved" state with error tracking; retry mechanism available
+3. **Idempotent Operations**: All database updates use `COALESCE` to avoid overwriting existing data. Ambassador returns 409 for duplicate attributions (safe to ignore).
 
-4. **Referral Code Extraction**: Parses memorable_url (`https://blue.mbsy.co/dormway/171571724`) to extract referral code (`171571724`)
+## Configuration
 
-### Configuration
+### Doppler Secrets (Required)
 
-**Doppler Secrets:**
+| Secret | Description |
+|--------|-------------|
+| `AMBASSADOR_API_BASE_URL` | Base URL (default: `https://getambassador.com`) |
+| `AMBASSADOR_API_USERNAME` | API username for path auth |
+| `AMBASSADOR_API_KEY` | API key/token for path auth |
+| `AMBASSADOR_CAMPAIGN_ID` | Campaign UID for DormWay referral program |
+
+### Config Files
+
+- **API Router**: `services/api-router/src/config/ambassador.ts`
+- **Engine**: `services/engine/src/config/ambassador.ts`
+
+## Code Reference
+
+### Files
+
+| File | Purpose |
+|------|---------|
+| `services/engine/src/activities/ambassador.activities.ts` | Core attribution activity |
+| `services/engine/src/config/ambassador.ts` | Engine config |
+| `services/api-router/src/services/ambassador-client.ts` | Full Ambassador API client |
+| `services/api-router/src/routes/mobile-routes.ts` | Web onboarding endpoint |
+| `services/api-router/src/routes/admin/accounts-routes.ts` | Admin retrigger endpoint |
+| `ios-clean/.../ReferralService.swift` | iOS deep link capture |
+
+### Database Schema
+
+**accounts table columns:**
+- `referred_by` (UUID, FK) - User ID of referrer
+- `referral_code_used` (TEXT) - The short code used
+- `referred_at` (TIMESTAMPTZ) - When attribution occurred
+- `ambassador_external_id` (TEXT) - Ambassador platform ID
+- `ambassador_status` (TEXT) - 'active', 'pending', etc.
+
+**referral_events table:**
+- `referrer_id` - Ambassador user ID
+- `referred_id` - New user ID
+- `event_type` - 'onboarding_complete'
+- `status` - 'synced' or 'pending'
+
+### Activity: processReferralAttribution
+
+```typescript
+// services/engine/src/activities/ambassador.activities.ts
+export async function processReferralAttribution(params: {
+  userId: string;
+  userEmail: string;
+  firstName?: string;
+  lastName?: string;
+  referralCode: string;
+  campusName?: string;
+}): Promise<{ success: boolean; referrerId?: string; attributionUid?: number; error?: string }>
+```
+
+**Steps:**
+1. Validate referral code via `/ambassador/all/` (non-blocking)
+2. Find referrer in local database
+3. Record attribution via `/referral_attribution/record/`
+4. Update `accounts` table
+5. Insert into `referral_events`
+
+### Workflow Integration
+
+```typescript
+// services/engine/src/workflows/studentProcessor.workflow.ts
+export async function onboardStudent(
+  first_name, last_name, user_id, school_id,
+  source?, referrer?, platform?, device?, full_name?,
+  campus_name?, year?, major?, housing?, dorm_id?, dorm_name?,
+  referral_code?  // 16th parameter - DORM-206
+): Promise<{success: boolean, contextId?: string}>
+```
+
+## Ambassador API Reference
+
+### Authentication
+
+Ambassador uses path-based authentication:
+```
+https://api.getambassador.com/api/v2/{username}/{token}/json/{endpoint}/
+```
+
+### Endpoints Used
+
+#### GET /ambassador/all/
+Lookup ambassador by short code:
+```typescript
+params: { short_code: "7fjnwc" }
+// Response: { ambassadors: [...] } or { response: { data: { ambassadors: [...] } } }
+```
+
+#### POST /referral_attribution/record/
+Record referral attribution (parameters as query string):
+```typescript
+params: {
+  short_code: "7fjnwc",      // Identifies the advocate
+  customer_email: "user@example.com",
+  customer_uid: "uuid",       // Our user ID
+  customer_status: "enrolled",
+  campaign_uid: "12345",
+  first_name: "John",
+  last_name: "Doe"
+}
+// Response: { response: { data: { referral_attribution: { uid, advocate, customer } } } }
+```
+
+## Platform-Specific Details
+
+### Web (dormway-lockedin)
+
+Referral codes are captured from URL parameters on landing pages and stored in session. On onboarding completion:
+
+```typescript
+// mobile-routes.ts validates with Zod
+referralCode: z.string().max(64).regex(/^[A-Za-z0-9_-]*$/).optional()
+```
+
+### iOS
+
+`ReferralService.swift` handles:
+1. Capturing referral code from universal links (`join.dormway.app/{code}`)
+2. Storing in UserDefaults
+3. Passing to onboarding API
+
+### Admin Retrigger
+
+Admin UI at `/users` allows retriggering onboarding with optional referral code:
+- Queries existing `referral_code_used` from database
+- Allows override via text input
+- Passes to `onboardStudent` workflow
+
+## Testing
+
+### Test with Referral Code
+
 ```bash
-AMBASSADOR_API_USERNAME=dormway_username
-AMBASSADOR_API_KEY=your_api_key
-AMBASSADOR_CAMPAIGN_ID=your_campaign_id
-AMBASSADOR_API_BASE_URL=https://api.getambassador.com
+# 1. Use a known referral link
+https://join.dormway.app/7fjnwc
+
+# 2. Complete onboarding
+
+# 3. Verify in database
+SELECT referred_by, referral_code_used, referred_at
+FROM accounts WHERE id = 'user-id';
+
+# 4. Check referral_events
+SELECT * FROM referral_events
+WHERE referred_id = 'user-id' AND event_type = 'onboarding_complete';
 ```
 
-**Database Schema:**
-```sql
--- accounts table columns for ambassador tracking
-ambassador_status TEXT CHECK (ambassador_status IN ('none', 'pending', 'approved', 'active', 'rejected'))
-ambassador_external_id TEXT  -- Platform ID from GetAmbassador
-ambassador_referral_url TEXT -- Memorable URL for sharing
-ambassador_approved_at TIMESTAMPTZ
-ambassador_sync_status TEXT CHECK (ambassador_sync_status IN ('pending', 'synced', 'error'))
-ambassador_sync_error TEXT
-ambassador_last_sync_at TIMESTAMPTZ
+### Admin Retrigger Test
+
+```bash
+curl -X POST "http://localhost:3001/api/admin/accounts/{userId}/retrigger-onboarding" \
+  -H "Content-Type: application/json" \
+  -H "X-User-Id: admin-id" \
+  -H "X-User-Role: admin" \
+  -d '{"referralCode": "7fjnwc"}'
 ```
 
-### API Endpoints Reference
+## Related Documents
 
-<AccordionGroup>
-  <Accordion title="GET /admin/ambassador/analytics" icon="chart-simple">
-    **Purpose:** Get platform-wide ambassador analytics
+- DORM-206-Ambassador-Platform-Integration - Original spec
+- [Campus Ambassador Recruitment](/docs/product/go-to-market/campus-ambassador-recruitment) - Go-to-market strategy
+- Engine Workflow DAG Analysis - Temporal workflow overview
 
-    **Response:**
-    ```json
-    {
-      "success": true,
-      "data": {
-        "totalAmbassadors": 42,
-        "totalPendingApplications": 8,
-        "totalReferrals": 215,
-        "totalPaidCommission": 107500,  // cents
-        "totalPendingCommission": 25000, // cents
-        "conversionRate": 0.35
-      }
-    }
-    ```
-  </Accordion>
+## Changelog
 
-  <Accordion title="POST /admin/ambassador/applications/:id/approve" icon="check">
-    **Purpose:** Approve ambassador application and sync to GetAmbassador
-
-    **Request:** `POST /admin/ambassador/applications/abc123/approve`
-
-    **Process:**
-    1. Validates application exists and is pending
-    2. Updates application status to 'approved'
-    3. Updates account.ambassador_status to 'approved'
-    4. Calls GetAmbassador API with `auto_create=1`
-    5. Stores external_id and referral_url
-    6. Updates status to 'active' on success
-
-    **Response:**
-    ```json
-    {
-      "success": true,
-      "data": {
-        "status": "active",
-        "externalId": "171571724",
-        "referralUrl": "https://blue.mbsy.co/dormway/171571724",
-        "syncStatus": "synced"
-      }
-    }
-    ```
-  </Accordion>
-
-  <Accordion title="POST /admin/ambassador/applications/:id/retry-sync" icon="rotate">
-    **Purpose:** Retry syncing approved ambassador to GetAmbassador platform
-
-    **Use Case:** Ambassador stuck in "approved" status due to sync failure
-
-    **Request:** `POST /admin/ambassador/applications/abc123/retry-sync`
-
-    **Response:**
-    ```json
-    {
-      "success": true,
-      "data": {
-        "status": "active",
-        "syncStatus": "synced"
-      }
-    }
-    ```
-  </Accordion>
-
-  <Accordion title="GET /admin/ambassador/by-campus/:campusId" icon="building-columns">
-    **Purpose:** Get all ambassadors for a specific campus
-
-    **Request:** `GET /admin/ambassador/by-campus/8e6db902-0450-412d-8f74-59f3700d1632?limit=50&offset=0`
-
-    **Query Params:**
-    - `limit` (optional): Max results (default: 50, max: 200)
-    - `offset` (optional): Pagination offset (default: 0)
-
-    **Response:**
-    ```json
-    {
-      "success": true,
-      "data": {
-        "ambassadors": [
-          {
-            "id": "user-abc-123",
-            "givenName": "Alex",
-            "familyName": "Johnson",
-            "email": "alex@umass.edu",
-            "status": "active",
-            "externalId": "171571724",
-            "referralUrl": "https://blue.mbsy.co/dormway/171571724",
-            "enrolledAt": "2026-01-15T10:30:00Z",
-            "totalReferrals": 12,
-            "totalEarnings": 6000  // cents
-          }
-        ],
-        "total": 5
-      }
-    }
-    ```
-  </Accordion>
-</AccordionGroup>
-
----
-
-## Original Planning Context
-- Goal: use Ambassador for referral tracking for campus ambassadors across web and iOS.
-- Waitlist gating: the app uses Clerk allowlist/waitlist (see `services/dormway-lockedin/CLERK_WAITLIST_SETUP.md`). Clerk emits `session.denied` for non-allowed emails; we should capture those with referral/UTM params. Legacy GetWaitlist endpoints still exist for marketing/landing, but primary gating for the app is Clerk.
-- Onboarding already accepts `source` and `referrer`; no Ambassador integration or IDs are stored.
-- Docs scraped: base URL `https://api.getambassador.com/api/v2/{username}/{token}/json/...`; primary endpoint `/ambassador/get/` (GET, supports `auto_create=1`, metadata, groups); events via `/event/multi_record/`.
-
-## Proposed architecture
-- Server-only client in `dormway-platform` (api-router/shared service):
-  - Credentials from Doppler: `AMBASSADOR_USERNAME`, `AMBASSADOR_TOKEN`.
-  - Helpers: `getOrCreateAmbassador(email, opts)` wraps `/ambassador/get/`; `recordEvents(batch)` wraps `/event/multi_record/`.
-  - Retry with backoff + logging; mark sandbox requests when testing (`sandbox=1`).
-- Data flow:
-  - When a user is marked as a campus ambassador, call `getOrCreateAmbassador` with `auto_create=1`, name, campus metadata in custom fields, and optional `add_to_group_id`.
-  - Persist returned IDs/link: `ambassador_uid`, `memorable_url`, `campaign_links` on the user/ambassador profile for dashboards and share links.
-  - Referral attribution on inbound:
-    - Web: read `amb_uid`/`campaign_uid` params from referral links; store in first-party cookie/localStorage; forward in waitlist/signup requests via existing `referrer`/`source` fields.
-    - iOS: capture params via universal link; persist locally; send on signup/onboarding API calls.
-    - Clerk waitlist: add webhook for `session.denied` (and `user.created`) to record waitlist attempts with ambassador/UTM params; optionally post to `/ambassador/get/` with `auto_create=0` and `status=prospect` to seed leads.
-  - Conversions: enqueue jobs to `/event/multi_record/` on milestones (signup, first schedule import, first paid action) including referred user identifiers + referring ambassador IDs and revenue/points metadata.
-  - Webhooks: add verified endpoint for reward/commission updates → update internal rewards ledger, notify ambassador, expose status in dashboard.
-- Fraud controls: cap rewards per device/IP/email domain, allow sandbox ambassadors for QA, and optionally manual review before payout.
-
-## API reference (needed fields)
-- Auth: path params `{username}/{token}`.
-- `/ambassador/get/` (GET): query params include `email` (required), `auto_create`, `first_name`, `last_name`, `status` (`enrolled|prospect|banned|unsubscribed`), `notify` (`none|new_ambassador|campaign_access`), `add_to_group_id` / `set_groups`, address/phone, `custom1–10`, `email_new_ambassador` (default 1), `sandbox` (default 0), `deactivate_new_ambassador` (default 0).
-- `/event/multi_record/`: batch events/conversions (use for signup and revenue milestones).
-
-## Work breakdown
-1) Add Ambassador client module (config, retries, typed helpers) in `dormway-platform`.
-2) Schema/storage: store `ambassador_uid`, `memorable_url`, `campaign_uid` on ambassador users; add referral metadata fields to onboarding record if needed.
-3) Attribution capture: front-end (marketing site/waitlist) + mobile deep link handling to pass ambassador params into existing API payloads; Clerk webhook for `session.denied` to persist waitlist attempts with referral data.
-4) Event pipeline: queue + worker to post `/event/multi_record/` on milestones; ensure idempotency.
-5) Webhook ingestion: verify signature, map to rewards ledger, send notifications.
-6) Admin/dashboard surface: show share link, conversion counts, reward status for ambassadors.
-7) QA with `sandbox=1`, then production rollout with Doppler secrets + monitoring.
-
-## Open questions
-- Precise referral link param schema (`amb_uid`, `campaign_uid`, others?) and whether to keep legacy `referrer` usage as-is.
-- Which milestones count for payout (signup vs first paid action vs N actions).
-- Grouping strategy in Ambassador (`add_to_group_id` for campuses?).
+| Date | Change |
+|------|--------|
+| 2026-01-21 | Implemented referral attribution in Temporal workflow (DORM-206) |
+| 2026-01-19 | Initial draft with proposed architecture |
