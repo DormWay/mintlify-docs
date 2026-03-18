@@ -1,0 +1,1002 @@
+---
+title: "January 26 Multiple ICS Plan"
+description: "Multi-Account Calendar Support Implementation Plan"
+---
+
+Multi-Account Calendar Support Implementation Plan
+
+ Executive Summary
+
+ Goal: Enable users to connect multiple Google Calendar accounts (e.g.,
+ riley@dormway.app + rileync@umich.edu) and multiple ICS calendar feeds
+ (e.g., multiple Canvas instances) simultaneously.
+
+ Current Limitation: The service_credentials table enforces UNIQUE
+ (user_id, service_id), allowing only ONE credential per service type
+ per user.
+
+ Solution: Create a new calendar_accounts table (mirroring the existing
+ canvas_accounts pattern) with UNIQUE (user_id, account_identifier) to
+ support multiple accounts.
+
+ Estimated Effort: 24-32 hours
+
+ ---
+ Architecture Analysis
+
+ Current State
+
+ Database Schema:
+ - service_credentials - UNIQUE (user_id, service_id) → Single account
+ only
+ - user_calendar_preferences - Has account_id, account_name,
+ account_type fields → Ready for multi-account
+ - canvas_accounts - UNIQUE (user_id, canvas_instance_url) →
+ Multi-account pattern exists
+
+ Calendar Fetching:
+ - Google Calendar API already fetches ALL calendars within one account
+ - System stores calendar_id, calendar_name, calendar_color metadata
+ - Deduplication works across calendars within same account
+
+ UI Components:
+ - GoogleCalendarCard - Shows single connection status
+ - CalendarVisibilityCard - Shows calendar-level toggles
+ - CanvasIntegration - Already supports multiple Canvas instances
+
+ Gap Analysis
+ Component: Database
+ Current State: Single credential per service
+ Needs Update: ✅ Create calendar_accounts table
+ ────────────────────────────────────────
+ Component: OAuth Flow
+ Current State: No account identifier
+ Needs Update: ✅ Add account context
+ ────────────────────────────────────────
+ Component: Token Storage
+ Current State: Overwrites on reconnect
+ Needs Update: ✅ Store by account identifier
+ ────────────────────────────────────────
+ Component: Event Fetching
+ Current State: Single account only
+ Needs Update: ✅ Loop through all accounts
+ ────────────────────────────────────────
+ Component: UI - Connection
+ Current State: Single connect button
+ Needs Update: ✅ Add account management UI
+ ────────────────────────────────────────
+ Component: UI - Visibility
+ Current State: Calendar toggles only
+ Needs Update: ✅ Group by account
+ ────────────────────────────────────────
+ Component: Preferences
+ Current State: Has account metadata fields
+ Needs Update: ✅ Populate account context
+ ---
+ Implementation Plan
+
+ Phase 1: Database Schema Changes (4 hours)
+
+ 1.1 Create calendar_accounts Table
+
+ Migration File:
+ infrastructure/database/migrations/20260126_multi_account_calendars.sql
+
+ -- Create calendar_accounts table (mirrors canvas_accounts pattern)
+ CREATE TABLE IF NOT EXISTS calendar_accounts (
+   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+   user_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+
+   -- Account identification
+   account_identifier TEXT NOT NULL,              -- Email or unique ID
+ (e.g., "riley@dormway.app")
+   account_email TEXT,                            -- Display email
+   account_type TEXT NOT NULL DEFAULT 'google',   -- 'google',
+ 'ics_feed', 'outlook', etc.
+
+   -- Credentials (encrypted or URL)
+   access_token TEXT,                             -- OAuth access token
+ (encrypted)
+   refresh_token TEXT,                            -- OAuth refresh token
+  (encrypted)
+   expires_at TIMESTAMP WITH TIME ZONE,           -- Token expiry
+
+   -- ICS feed specific
+   ics_feed_url TEXT,                             -- For ICS-based
+ connections
+
+   -- Metadata
+   scopes TEXT[],                                 -- OAuth scopes
+ granted
+   sync_status TEXT DEFAULT 'active',             -- 'active',
+ 'expired', 'disconnected'
+   last_synced_at TIMESTAMP WITH TIME ZONE,       -- Last successful
+ sync
+
+   -- Timestamps
+   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+   updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+
+   -- Multi-account support: unique per account email
+   CONSTRAINT calendar_accounts_user_account_unique UNIQUE (user_id,
+ account_identifier, account_type)
+ );
+
+ -- Indexes for performance
+ CREATE INDEX IF NOT EXISTS idx_calendar_accounts_user_id ON
+ calendar_accounts(user_id);
+ CREATE INDEX IF NOT EXISTS idx_calendar_accounts_sync_status ON
+ calendar_accounts(user_id, sync_status);
+ CREATE INDEX IF NOT EXISTS idx_calendar_accounts_account_type ON
+ calendar_accounts(account_type);
+
+ 1.2 Data Migration from service_credentials
+
+ -- Migrate existing Google Calendar credentials to new table
+ INSERT INTO calendar_accounts (
+   user_id,
+   account_identifier,
+   account_email,
+   account_type,
+   access_token,
+   refresh_token,
+   expires_at,
+   scopes,
+   sync_status,
+   created_at,
+   updated_at
+ )
+ SELECT
+   sc.user_id,
+   -- Use user email as default account identifier (or 'primary')
+   COALESCE(a.email, 'primary-' || sc.user_id),
+   a.email,
+   'google',
+   sc.credentials->>'access_token',
+   sc.credentials->>'refresh_token',
+   sc.valid_until,
+   ARRAY(SELECT jsonb_array_elements_text(sc.credentials->'scope')),
+   'active',
+   sc.created_at,
+   sc.updated_at
+ FROM service_credentials sc
+ JOIN accounts a ON a.id = sc.user_id
+ WHERE sc.service_id = '767c1c5f-4968-4e5e-8d29-f4a7f0e2e6dc'  -- Google
+  Calendar service ID
+ ON CONFLICT (user_id, account_identifier, account_type) DO NOTHING;
+
+ -- Do NOT delete from service_credentials yet (rollback safety)
+ -- Keep both tables in sync during transition period
+
+ 1.3 Add Triggers for Timestamps
+
+ CREATE OR REPLACE FUNCTION update_calendar_accounts_updated_at()
+ RETURNS TRIGGER AS $$
+ BEGIN
+   NEW.updated_at = NOW();
+   RETURN NEW;
+ END;
+ $$ LANGUAGE plpgsql;
+
+ CREATE TRIGGER trigger_calendar_accounts_updated_at
+   BEFORE UPDATE ON calendar_accounts
+   FOR EACH ROW
+   EXECUTE FUNCTION update_calendar_accounts_updated_at();
+
+ ---
+ Phase 2: Backend API Changes (8 hours)
+
+ 2.1 Create CalendarAccountsService
+
+ File: services/api-router/src/services/calendar-accounts.service.ts
+
+ import { auroraClient, SessionContext } from './aurora-client';
+ import { createLogger } from '../utils/logger';
+ import { encryptToken, decryptToken } from '../utils/token-encryption';
+
+ const logger = createLogger('calendar-accounts');
+
+ export interface CalendarAccount {
+   id: string;
+   userId: string;
+   accountIdentifier: string;
+   accountEmail: string | null;
+   accountType: 'google' | 'ics_feed' | 'outlook';
+   accessToken?: string;
+   refreshToken?: string;
+   expiresAt?: string;
+   icsFeedUrl?: string;
+   scopes: string[];
+   syncStatus: 'active' | 'expired' | 'disconnected';
+   lastSyncedAt?: string;
+   createdAt: string;
+   updatedAt: string;
+ }
+
+ export const calendarAccountsService = {
+   /**
+    * List all calendar accounts for a user
+    */
+   async listAccounts(userId: string, session: SessionContext):
+ Promise<CalendarAccount[]> {
+     const { data, error } = await auroraClient.queryWithSession(
+       `SELECT * FROM calendar_accounts
+        WHERE user_id = $1 AND sync_status != 'disconnected'
+        ORDER BY created_at ASC`,
+       [userId],
+       session
+     );
+
+     if (error) throw new Error(`Failed to list calendar accounts:
+ ${error}`);
+
+     return (data || []).map(row => ({
+       id: row.id,
+       userId: row.user_id,
+       accountIdentifier: row.account_identifier,
+       accountEmail: row.account_email,
+       accountType: row.account_type,
+       scopes: row.scopes || [],
+       syncStatus: row.sync_status,
+       lastSyncedAt: row.last_synced_at,
+       createdAt: row.created_at,
+       updatedAt: row.updated_at,
+       expiresAt: row.expires_at,
+     }));
+   },
+
+   /**
+    * Save or update calendar account credentials
+    */
+   async saveAccount(params: {
+     userId: string;
+     accountIdentifier: string;
+     accountEmail?: string;
+     accountType: 'google' | 'ics_feed';
+     accessToken?: string;
+     refreshToken?: string;
+     expiresAt?: string;
+     icsFeedUrl?: string;
+     scopes?: string[];
+   }, session: SessionContext): Promise<CalendarAccount> {
+     const {
+       userId,
+       accountIdentifier,
+       accountEmail,
+       accountType,
+       accessToken,
+       refreshToken,
+       expiresAt,
+       icsFeedUrl,
+       scopes = [],
+     } = params;
+
+     // Encrypt tokens before storage
+     const encryptedAccess = accessToken ? encryptToken(accessToken) :
+ null;
+     const encryptedRefresh = refreshToken ? encryptToken(refreshToken)
+ : null;
+
+     const { data, error } = await auroraClient.queryWithSession(
+       `INSERT INTO calendar_accounts (
+         user_id, account_identifier, account_email, account_type,
+         access_token, refresh_token, expires_at, ics_feed_url,
+         scopes, sync_status, created_at, updated_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
+       ON CONFLICT (user_id, account_identifier, account_type)
+       DO UPDATE SET
+         access_token = EXCLUDED.access_token,
+         refresh_token = EXCLUDED.refresh_token,
+         expires_at = EXCLUDED.expires_at,
+         ics_feed_url = EXCLUDED.ics_feed_url,
+         scopes = EXCLUDED.scopes,
+         sync_status = 'active',
+         updated_at = NOW()
+       RETURNING *`,
+       [
+         userId,
+         accountIdentifier,
+         accountEmail,
+         accountType,
+         encryptedAccess,
+         encryptedRefresh,
+         expiresAt,
+         icsFeedUrl,
+         scopes,
+         'active',
+       ],
+       session
+     );
+
+     if (error) throw new Error(`Failed to save calendar account:
+ ${error}`);
+     if (!data?.[0]) throw new Error('No data returned after insert');
+
+     return {
+       id: data[0].id,
+       userId: data[0].user_id,
+       accountIdentifier: data[0].account_identifier,
+       accountEmail: data[0].account_email,
+       accountType: data[0].account_type,
+       scopes: data[0].scopes || [],
+       syncStatus: data[0].sync_status,
+       createdAt: data[0].created_at,
+       updatedAt: data[0].updated_at,
+       expiresAt: data[0].expires_at,
+     };
+   },
+
+   /**
+    * Disconnect a calendar account
+    */
+   async disconnectAccount(
+     userId: string,
+     accountIdentifier: string,
+     accountType: string,
+     session: SessionContext
+   ): Promise<void> {
+     const { error } = await auroraClient.queryWithSession(
+       `UPDATE calendar_accounts
+        SET sync_status = 'disconnected', updated_at = NOW()
+        WHERE user_id = $1 AND account_identifier = $2 AND account_type
+ = $3`,
+       [userId, accountIdentifier, accountType],
+       session
+     );
+
+     if (error) throw new Error(`Failed to disconnect account:
+ ${error}`);
+   },
+
+   /**
+    * Get credentials for a specific account (decrypts tokens)
+    */
+   async getCredentials(
+     userId: string,
+     accountIdentifier: string,
+     accountType: string,
+     session: SessionContext
+   ): Promise<{
+     accessToken?: string;
+     refreshToken?: string;
+     expiresAt?: string;
+     icsFeedUrl?: string;
+   } | null> {
+     const { data, error } = await auroraClient.queryWithSession(
+       `SELECT access_token, refresh_token, expires_at, ics_feed_url
+        FROM calendar_accounts
+        WHERE user_id = $1 AND account_identifier = $2 AND account_type
+ = $3
+          AND sync_status = 'active'
+        LIMIT 1`,
+       [userId, accountIdentifier, accountType],
+       session
+     );
+
+     if (error || !data?.[0]) return null;
+
+     const row = data[0];
+     return {
+       accessToken: row.access_token ? decryptToken(row.access_token) :
+ undefined,
+       refreshToken: row.refresh_token ? decryptToken(row.refresh_token)
+  : undefined,
+       expiresAt: row.expires_at,
+       icsFeedUrl: row.ics_feed_url,
+     };
+   },
+ };
+
+ 2.2 Update OAuth Callback Handler
+
+ File: services/api-router/src/routes/calendar-routes.ts
+
+ Changes:
+ 1. Extract account_email from Google OAuth user profile API
+ 2. Store credentials using calendarAccountsService.saveAccount()
+ instead of tokenStore.save()
+ 3. Use email as account_identifier
+
+ // After token exchange (line 226):
+ // NEW: Fetch user profile to get email
+ const profileResponse = await
+ fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
+   headers: { Authorization: `Bearer ${tokens.accessToken}` },
+ });
+ const profile = await profileResponse.json();
+ const accountEmail = profile.email;
+
+ // Store in new calendar_accounts table
+ await calendarAccountsService.saveAccount({
+   userId: resolvedUserId,
+   accountIdentifier: accountEmail,
+   accountEmail: accountEmail,
+   accountType: 'google',
+   accessToken: tokens.accessToken,
+   refreshToken: tokens.refreshToken,
+   expiresAt: tokens.expiresAt,
+   scopes: tokens.scope,
+ }, session);
+
+ // Also update user_calendar_preferences with account context
+ await auroraClient.queryWithSession(
+   `UPDATE user_calendar_preferences
+    SET account_id = $1, account_name = $2, account_type = 'google'
+    WHERE user_id = $3 AND calendar_source = 'google'`,
+   [accountEmail, accountEmail, resolvedUserId],
+   session
+ );
+
+ 2.3 New API Endpoints
+
+ File: services/api-router/src/routes/calendar-routes.ts
+
+ // GET /v1/calendar/accounts - List all connected accounts
+ router.get('/v1/calendar/accounts', authMiddleware, async (req, res) =>
+  {
+   const userId = req.user?.id;
+   const session = buildSession(req);
+
+   const accounts = await calendarAccountsService.listAccounts(userId,
+ session);
+
+   return res.json({ accounts });
+ });
+
+ // DELETE /v1/calendar/accounts/:accountId - Disconnect specific
+ account
+ router.delete('/v1/calendar/accounts/:accountId', authMiddleware, async
+  (req, res) => {
+   const userId = req.user?.id;
+   const { accountId } = req.params;
+   const session = buildSession(req);
+
+   // Get account to verify ownership
+   const { data } = await auroraClient.queryWithSession(
+     `SELECT account_identifier, account_type FROM calendar_accounts
+ WHERE id = $1 AND user_id = $2`,
+     [accountId, userId],
+     session
+   );
+
+   if (!data?.[0]) {
+     return res.status(404).json({ error: 'Account not found' });
+   }
+
+   await calendarAccountsService.disconnectAccount(
+     userId,
+     data[0].account_identifier,
+     data[0].account_type,
+     session
+   );
+
+   return res.json({ success: true });
+ });
+
+ ---
+ Phase 3: Engine Calendar Fetching Updates (6 hours)
+
+ 3.1 Update fetchGoogleCalendarData Activity
+
+ File: services/engine/src/activities/student.activities.ts
+
+ Current: Fetches from single service_credentials entry (lines
+ 3415-3650)
+
+ New: Loop through all active calendar_accounts for this user
+
+ // Replace single credential fetch with:
+ const { pool } = await getCoreServices();
+ const accountsResult = await pool.query(
+   `SELECT id, account_identifier, account_email, access_token,
+ refresh_token, expires_at
+    FROM calendar_accounts
+    WHERE user_id = $1 AND account_type = 'google' AND sync_status =
+ 'active'
+    ORDER BY created_at ASC`,
+   [studentId]
+ );
+
+ const calendarAccounts = accountsResult.rows;
+
+ if (calendarAccounts.length === 0) {
+   logger.info('No active Google Calendar accounts', { studentId });
+   return [];
+ }
+
+ logger.info('Fetching calendars from multiple accounts', {
+   studentId,
+   accountCount: calendarAccounts.length,
+ });
+
+ let allEvents: any[] = [];
+
+ // Loop through each connected account
+ for (const account of calendarAccounts) {
+   const accessToken = decryptToken(account.access_token);
+   const accountEmail = account.account_email ||
+ account.account_identifier;
+
+   logger.info('Fetching calendar list for account', {
+     studentId,
+     accountEmail,
+     accountId: account.id,
+   });
+
+   // Fetch calendar list for this account
+   const calendarListResponse = await fetch(
+     'https://www.googleapis.com/calendar/v3/users/me/calendarList?minAc
+ cessRole=reader',
+     { headers: { Authorization: `Bearer ${accessToken}` } }
+   );
+
+   const calendarListData = await calendarListResponse.json();
+   const calendars = calendarListData.items || [];
+
+   // Apply user preferences (filter by account_id context)
+   const enabledCalendars = await filterCalendarsByPreferences(
+     studentId,
+     calendars,
+     accountEmail  // NEW: Pass account context
+   );
+
+   // Fetch events from each calendar
+   for (const calendar of enabledCalendars) {
+     const events = await fetchEventsFromCalendar(
+       calendar,
+       accessToken,
+       accountEmail  // NEW: Tag events with account
+     );
+
+     // Tag events with account metadata
+     events.forEach(event => {
+       event.accountId = account.id;
+       event.accountEmail = accountEmail;
+       event.calendarId = calendar.id;
+       event.calendarName = calendar.summary ||
+ calendar.summaryOverride;
+     });
+
+     allEvents.push(...events);
+   }
+
+   // Update last_synced_at for this account
+   await pool.query(
+     `UPDATE calendar_accounts SET last_synced_at = NOW() WHERE id =
+ $1`,
+     [account.id]
+   );
+ }
+
+ // Continue with existing normalization logic
+ return normalizeGoogleCalendar(allEvents);
+
+ 3.2 Update Preference Filtering
+
+ File: services/engine/src/activities/student.activities.ts (lines
+ 3450-3470)
+
+ async function filterCalendarsByPreferences(
+   studentId: string,
+   calendars: any[],
+   accountEmail: string  // NEW parameter
+ ) {
+   const { pool } = await getCoreServices();
+
+   // Load preferences WITH account context
+   const result = await pool.query(
+     `SELECT calendar_id, calendar_name, is_enabled, account_id
+      FROM user_calendar_preferences
+      WHERE user_id = $1
+        AND calendar_source = 'google'
+        AND (account_id = $2 OR account_id IS NULL)  -- Match account or
+  legacy
+        AND is_enabled = true`,
+     [studentId, accountEmail]
+   );
+
+   const preferences = result.rows;
+
+   if (preferences.length === 0) {
+     // Fallback: Auto-select calendars for this account
+     return calendars.filter(cal => cal.selected && !cal.hidden);
+   }
+
+   // Filter by preference
+   const enabledCalendarIds = new Set(preferences.map(p =>
+ p.calendar_id));
+   return calendars.filter(cal => enabledCalendarIds.has(cal.id));
+ }
+
+ ---
+ Phase 4: Frontend UI Updates (8 hours)
+
+ 4.1 Update GoogleCalendarCard Component
+
+ File: services/dormway-lockedin/src/components/integrations/GoogleCalen
+ darCard.tsx
+
+ Current: Shows single connection status
+
+ New: Show list of connected accounts with individual management
+
+ interface GoogleAccount {
+   id: string;
+   accountEmail: string;
+   lastSync: string | null;
+   expiresAt: string | null;
+ }
+
+ export function GoogleCalendarCard() {
+   const [accounts, setAccounts] = useState<GoogleAccount[]>([]);
+   const [loading, setLoading] = useState(true);
+   const [connectingNew, setConnectingNew] = useState(false);
+
+   // Load all connected accounts
+   const loadAccounts = async () => {
+     const response = await
+ authorizedFetch('/api/proxy/v1/calendar/accounts');
+     const data = await response.json();
+
+     const googleAccounts = data.accounts
+       .filter((a: any) => a.accountType === 'google')
+       .map((a: any) => ({
+         id: a.id,
+         accountEmail: a.accountEmail || a.accountIdentifier,
+         lastSync: a.lastSyncedAt,
+         expiresAt: a.expiresAt,
+       }));
+
+     setAccounts(googleAccounts);
+   };
+
+   // Handle adding new account
+   const handleConnectNew = async () => {
+     setConnectingNew(true);
+     // Same OAuth flow as before, but doesn't disconnect existing
+     const response = await
+ authorizedFetch('/api/proxy/v1/calendar/google/auth', {
+       method: 'POST',
+       body: JSON.stringify({ platform: 'web' }),
+     });
+     const data = await response.json();
+     window.open(data.authorize_url, 'GoogleOAuth',
+ 'width=600,height=700');
+     // Poll for new account
+     beginStatusPolling();
+   };
+
+   // Handle disconnecting specific account
+   const handleDisconnect = async (accountId: string) => {
+     if (!confirm('Disconnect this Google Calendar account?')) return;
+
+     await
+ authorizedFetch(`/api/proxy/v1/calendar/accounts/${accountId}`, {
+       method: 'DELETE',
+     });
+
+     await loadAccounts();
+   };
+
+   return (
+     <Card>
+       <CardHeader>
+         <CardTitle>Google Calendar Accounts</CardTitle>
+         <CardDescription>
+           Connect multiple Google accounts to sync all your calendars
+         </CardDescription>
+       </CardHeader>
+       <CardContent>
+         {accounts.length === 0 ? (
+           <div className="text-center py-8">
+             <p className="text-sm text-gray-500 mb-4">No accounts
+ connected</p>
+             <Button onClick={handleConnectNew}>
+               <PlugZap className="h-4 w-4 mr-2" />
+               Connect Google Calendar
+             </Button>
+           </div>
+         ) : (
+           <div className="space-y-3">
+             {accounts.map(account => (
+               <div
+                 key={account.id}
+                 className="flex items-center justify-between p-3
+ rounded-lg border"
+               >
+                 <div className="flex items-center gap-3">
+                   <CheckCircle2 className="h-4 w-4 text-green-500" />
+                   <div>
+                     <p className="font-medium
+ text-sm">{account.accountEmail}</p>
+                     <p className="text-xs text-gray-500">
+                       Last synced: {formatDate(account.lastSync)}
+                     </p>
+                   </div>
+                 </div>
+                 <Button
+                   variant="ghost"
+                   size="sm"
+                   onClick={() => handleDisconnect(account.id)}
+                 >
+                   <XCircle className="h-4 w-4" />
+                   Disconnect
+                 </Button>
+               </div>
+             ))}
+
+             <Button
+               variant="outline"
+               className="w-full"
+               onClick={handleConnectNew}
+               disabled={connectingNew}
+             >
+               {connectingNew ? (
+                 <>
+                   <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                   Connecting...
+                 </>
+               ) : (
+                 <>
+                   <Plus className="h-4 w-4 mr-2" />
+                   Add Another Account
+                 </>
+               )}
+             </Button>
+           </div>
+         )}
+       </CardContent>
+     </Card>
+   );
+ }
+
+ 4.2 Update CalendarVisibilityCard Component
+
+ File: services/dormway-lockedin/src/components/integrations/CalendarVis
+ ibilityCard.tsx
+
+ Current: Shows flat list of calendars
+
+ New: Group calendars by account
+
+ export function CalendarVisibilityCard() {
+   const { preferences, togglePreference } = useCalendarPreferences();
+
+   // Group calendars by account
+   const calendarsByAccount = preferences.reduce((acc, pref) => {
+     const accountId = pref.account_id || 'legacy';
+     const accountName = pref.account_name || 'Google Calendar';
+
+     if (!acc[accountId]) {
+       acc[accountId] = {
+         accountName,
+         calendars: [],
+       };
+     }
+
+     acc[accountId].calendars.push(pref);
+     return acc;
+   }, {} as Record<string, { accountName: string; calendars:
+ CalendarPreference[] }>);
+
+   return (
+     <Card>
+       <CardHeader>
+         <CardTitle>Calendar Visibility</CardTitle>
+       </CardHeader>
+       <CardContent>
+         {Object.entries(calendarsByAccount).map(([accountId, {
+ accountName, calendars }]) => (
+           <div key={accountId} className="mb-6">
+             <h4 className="text-sm font-semibold text-gray-600 mb-2">
+               {accountName}
+             </h4>
+             <div className="space-y-2">
+               {calendars.map(calendar => (
+                 <div key={calendar.calendar_id} className="flex
+ items-center justify-between">
+                   <div className="flex items-center gap-2">
+                     <div
+                       className="h-3 w-3 rounded-full"
+                       style={{ backgroundColor: calendar.color }}
+                     />
+                     <span
+ className="text-sm">{calendar.calendar_name}</span>
+                   </div>
+                   <Switch
+                     checked={calendar.is_enabled}
+                     onCheckedChange={(enabled) =>
+ togglePreference(calendar, enabled)}
+                   />
+                 </div>
+               ))}
+             </div>
+           </div>
+         ))}
+       </CardContent>
+     </Card>
+   );
+ }
+
+ ---
+ Phase 5: Testing & Verification (4 hours)
+
+ 5.1 Database Testing
+
+ -- Test multi-account insert
+ INSERT INTO calendar_accounts (user_id, account_identifier,
+ account_email, account_type)
+ VALUES
+   ('test-user-id', 'riley@dormway.app', 'riley@dormway.app', 'google'),
+   ('test-user-id', 'rileync@umich.edu', 'rileync@umich.edu', 'google');
+
+ -- Verify unique constraint allows multiple accounts
+ SELECT * FROM calendar_accounts WHERE user_id = 'test-user-id';
+ -- Should return 2 rows
+
+ -- Test conflict on re-auth (should update, not error)
+ INSERT INTO calendar_accounts (user_id, account_identifier,
+ account_email, account_type, access_token)
+ VALUES ('test-user-id', 'riley@dormway.app', 'riley@dormway.app',
+ 'google', 'new-token')
+ ON CONFLICT (user_id, account_identifier, account_type)
+ DO UPDATE SET access_token = EXCLUDED.access_token;
+
+ 5.2 API Testing
+
+ # Test account listing
+ curl http://localhost:3001/v1/calendar/accounts \
+   -H "X-User-Id: test-user-id" \
+   -H "X-User-Role: authenticated"
+
+ # Expected: Array of connected accounts
+
+ # Test disconnecting account
+ curl -X DELETE http://localhost:3001/v1/calendar/accounts/{account-id}
+ \
+   -H "X-User-Id: test-user-id" \
+   -H "X-User-Role: authenticated"
+
+ # Expected: { "success": true }
+
+ 5.3 End-to-End Flow Testing
+
+ 4. Connect first Google account (riley@dormway.app):
+   - OAuth flow completes
+   - Account saved in calendar_accounts
+   - Events synced and tagged with accountEmail: 'riley@dormway.app'
+   - Calendars appear in visibility UI under "riley@dormway.app" section
+ 2. Connect second Google account (rileync@umich.edu):
+   - Click "Add Another Account"
+   - Complete OAuth for second account
+   - Second account saved (doesn't overwrite first)
+   - Both accounts visible in UI
+ 3. Toggle calendar visibility:
+   - Disable work calendar from riley@dormway.app
+   - Verify events from that calendar stop appearing in schedule
+ 4. Disconnect one account:
+   - Disconnect riley@dormway.app
+   - Verify only rileync@umich.edu calendars remain
+   - Verify events from disconnected account removed from schedule
+
+ 5.4 Edge Case Testing
+
+ - Reconnect same account: Should update credentials, not duplicate
+ - Account with no calendars: Should handle gracefully
+ - Expired token refresh: Should refresh for correct account
+ - 500-event limit: Should distribute fairly across accounts
+ - Deduplication: Events from different accounts with same course code
+ should deduplicate correctly
+
+ ---
+ Critical Files to Modify
+
+ Backend (api-router)
+
+ - ✅ services/api-router/src/services/calendar-accounts.service.ts
+ (new)
+ - ✅ services/api-router/src/routes/calendar-routes.ts (modify)
+ - ✅
+ infrastructure/database/migrations/20260126_multi_account_calendars.sql
+  (new)
+
+ Backend (engine)
+
+ - ✅ services/engine/src/activities/student.activities.ts (modify
+ fetchGoogleCalendarData)
+ - ✅ services/engine/src/activities/calendar.activities.ts (modify
+ metadata tagging)
+
+ Frontend (dormway-lockedin)
+
+ - ✅ services/dormway-lockedin/src/components/integrations/GoogleCalend
+ arCard.tsx (modify)
+ - ✅ services/dormway-lockedin/src/components/integrations/CalendarVisi
+ bilityCard.tsx (modify)
+ - ✅ services/dormway-lockedin/src/hooks/useCalendarPreferences.ts (add
+  account context)
+
+ ---
+ Rollout Strategy
+
+ Phase A: Database Migration (Week 1)
+
+ 1. Run migration to create calendar_accounts table
+ 2. Migrate existing credentials from service_credentials
+ 3. Verify data integrity
+ 4. Keep both tables in sync during transition
+
+ Phase B: Backend Implementation (Week 2)
+
+ 1. Implement calendarAccountsService
+ 2. Update OAuth callback to use new table
+ 3. Add new API endpoints
+ 4. Update Engine fetching logic
+ 5. Deploy to staging
+
+ Phase C: Frontend Updates (Week 3)
+
+ 6. Update GoogleCalendarCard for multi-account UI
+ 7. Update CalendarVisibilityCard grouping
+ 8. Test end-to-end flows
+ 9. Deploy to staging
+
+ Phase D: Production Rollout (Week 4)
+
+ 10. Run migration on production database
+ 11. Deploy backend changes
+ 12. Deploy frontend changes
+ 13. Monitor for issues
+ 14. After 1 week of stability, deprecate service_credentials for
+ calendars
+
+ ---
+ Risk Mitigation
+ Risk: Data loss during migration
+ Mitigation: Keep service_credentials in sync during transition; can
+   rollback
+ ────────────────────────────────────────
+ Risk: OAuth flow breaks
+ Mitigation: Test thoroughly in staging; feature flag for multi-account
+ ────────────────────────────────────────
+ Risk: Token encryption issues
+ Mitigation: Reuse existing encryptToken/decryptToken from Canvas
+ ────────────────────────────────────────
+ Risk: 500-event limit exceeded
+ Mitigation: Implement per-account event cap (e.g., 250 per account)
+ ────────────────────────────────────────
+ Risk: UI confusion
+ Mitigation: Clear labeling, onboarding tooltip explaining multi-account
+ ────────────────────────────────────────
+ Risk: Deduplication failures
+ Mitigation: Test with real multi-account scenarios; log duplicates
+ ---
+ Success Metrics
+
+ - ✅ User can connect 2+ Google accounts simultaneously
+ - ✅ Events from all accounts appear in schedule
+ - ✅ Calendar visibility works per-account
+ - ✅ Disconnect one account without affecting others
+ - ✅ No performance degradation (sync time < 30s for 2 accounts)
+ - ✅ Zero data loss during migration
+ - ✅ Token refresh works correctly for each account
+
+ ---
+ Future Enhancements
+
+ 1. Multi-account ICS feeds: Apply same pattern to ICS URLs (multiple
+ Canvas instances)
+ 2. Outlook integration: Add account_type: 'outlook' support
+ 3. Account nicknames: Let users name accounts ("Work", "School",
+ "Personal")
+ 4. Primary account: Mark one account as "primary" for default sync
+ 5. Selective calendar sync: Choose which calendars to sync per account
+ during OAuth
+ 6. Account switching: Quick switcher in UI to view events from specific
+  account only
+
+ ---
+ Questions for User
+
+ None - the exploration phase provided comprehensive information. Ready
+ to implement.

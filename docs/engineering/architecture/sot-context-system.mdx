@@ -26,6 +26,9 @@ description: "sequenceDiagram participant Router as API Router participant Servi
 - Creating student contexts without an explicit `externalId` defaults to `student:${userId}`.
 - `createDependency` performs cycle detection, upserts by `(parent_context_id, child_context_id, dependency_type)`, merges metadata, and captures `term_id`, `term_year`, `enrolled_at`; cache invalidation runs on both parent and child contexts.
 - `organizationId` is deprecated in `createDependency` because `context_dependencies` has no `organization_id` column.
+- Course lifecycle read semantics are centralized in `resolveCourseLifecycleState` (`services/shared/dormway-core/src/entities/course-lifecycle.ts`).
+- `resolveCourseLifecycleState` maps `completed`, `dropped`, and `has_taken` dependency states (plus explicit archived flags/status) into canonical lifecycle outputs where `isArchived=true`.
+- Term-facing enrollment reads (`TermFactory.getForStudent` / `getAllForStudent`) include `enrolled_in`, `completed`, `dropped`, and `has_taken`, then rank one edge per course with priority `enrolled_in > completed > dropped > has_taken`.
 
 ## Key Flows (High-Level)
 
@@ -91,7 +94,7 @@ sequenceDiagram
 - `ContextNode`: `id`, `parent_id`, `type`, `metadata`, `user_id`, `is_active`, `created_at`, `updated_at`.
 - Core context types (`@dormway/core`): `country`, `state`, `city`, `campus`, `building`, `student`, `course`, `user`.
 - `ContextDependency`: `parent_context_id`, `child_context_id`, `dependency_type`, `metadata`, plus `term_id`, `term_year`, `enrolled_at`.
-- Dependency types include enrollment and containment relationships (`enrolled_in`, `has_enrolled`, `contains`, etc.).
+- Dependency types include enrollment, lifecycle, and containment relationships (`enrolled_in`, `completed`, `dropped`, `has_taken`, `has_enrolled`, `contains`, etc.).
 - API context types include `student`, `building`, `campus`, `city`, `course`, `organization`, `room`, `event` (used for API responses and TTLs).
 - `RLSSessionContext`: `{ userId, role, contextId? }` for session-scoped queries and caching.
 
@@ -117,4 +120,5 @@ sequenceDiagram
 - Context type enums differ between core (`services/shared/dormway-core/src/database/context-graph/types.ts`) and API interface (`services/api-router/src/interfaces/context.ts`); clients and services may diverge if not reconciled.
 
 ## Recent Changes
+- 2026-02-10: Documented canonical lifecycle resolver and TermFactory lifecycle dependency/ranking behavior (DORM-959).
 - 2025-12-22: Populated with code-backed context graph contracts, RLS/caching rules, and onboarding flow.

@@ -1,0 +1,537 @@
+---
+title: "LockedIn Web Today Page   Current Functionality (Current)"
+description: "This is the current-state technical reference for the LockedIn web Today page."
+---
+
+# LockedIn Web Today Page - Current Functionality (Current)
+
+## Purpose
+
+This is the current-state technical reference for the LockedIn web Today page.
+
+Use this when:
+- reviewing the current implementation before making UX or product decisions
+- explaining what the current screen actually does vs. what a spec says it should do
+- aligning product critique with code reality
+- planning implementation changes without losing track of current widget, edit-mode, and persistence behavior
+
+This doc is intentionally about **what exists now**, not what the ideal Today experience should become.
+
+For product direction, use:
+- [Today Screen Product Principles (Current)](/docs/product/today-screen-product-principles-current)
+- [DayPlan Today Screen Decision Memo (Current)](/docs/product/dayplan-today-screen-decision-memo-current)
+- [Today V2 Concept Note (Draft)](/docs/product/today-v2-concept-note-draft)
+
+## Route and Surface Ownership
+
+- `/dashboard` is no longer a separate home surface; it redirects to `/dashboard/today`
+- `/dashboard/today` is the current primary web home / Today experience
+- the page is implemented as a responsive widget grid using `react-grid-layout`
+- layout persistence uses the layout service and saves canonical 12-column geometry for the `home` tab
+
+## High-Level Screen Model
+
+The current Today page is not a single fixed dashboard card stack. It is a **modular widget workspace** with:
+
+1. a top status / utility rail
+2. a week-row panel above the grid
+3. a setup widget area
+4. a responsive grid of Today widgets
+5. an edit mode for rearranging, resizing, hiding, restoring, and adding widgets
+
+At a conceptual level, the page is trying to be:
+- a daily academic workspace
+- a glanceable "what matters now" surface
+- a customizable command center for students who want to shape the layout
+
+## Current Default Widget Set
+
+### Canonical addable Home widgets
+
+The current canonical addable Today widgets are:
+
+1. `today`
+2. `schedule`
+3. `tasks`
+4. `courses`
+5. `headsup`
+6. `notes`
+
+These are defined in the Today widget registry and are the core Home widget contract.
+
+### Local-only widget behavior
+
+There is also a local-first `in_class` widget type in the page code path. It is treated differently from the core addable Home set:
+
+- it is part of the default Home ordering in code
+- it can be rendered locally from schedule context and local capture state
+- it is not part of the canonical addable widget toolbar catalog
+
+### Deprecated / aliased widget behavior
+
+The codebase still understands legacy or deprecated widget identifiers such as:
+
+- `dayplan`
+- `schedule_v2`
+- `canvas`
+- `course_intel`
+- `syllabus`
+- `attendance`
+- `policy_highlights`
+
+These normalize into canonical current widgets, mainly:
+- `schedule`
+- `courses`
+
+Deprecated Home widgets may still appear in old layouts, but they are not part of the current canonical Home surface and are removed on save.
+
+## Top-of-Page Functionality
+
+## 1. Status / utility rail
+
+The Today page currently includes a small top toolbar above the widget grid with:
+
+- freshness / status pill
+- manual `Refresh`
+- `Edit layout` entry point on desktop
+- mobile floating `Edit layout` button
+- dev-only debug entry point when in development mode
+
+The refresh button invalidates / refetches widget data.
+
+The edit entry points are currently the clearest visible way into customization mode, but they do not fully solve discoverability because the page also supports long-press entry.
+
+## 2. Week row panel
+
+The week row panel is a meaningful part of the current Today experience and not just decoration.
+
+It currently provides:
+
+- a "This week" framing on the left
+- week/day bubble navigation across the top center
+- a compact event-count / summary treatment on the right
+- hover / preview behavior for a day
+- click-to-expand behavior for a fuller weekly schedule view
+
+From implementation and observed behavior, the week row is doing at least three jobs:
+
+1. orienting the student within the current week
+2. previewing a day's density before switching context
+3. opening a broader weekly schedule view than the main grid alone provides
+
+This means the screen already has two schedule layers:
+- the top week-row schedule preview / expansion layer
+- the main schedule widget inside the grid
+
+## 3. Setup widget
+
+The page renders a `SetupWidget` in the top stack below the status rail and week row.
+
+This means the Today page can still surface setup / completion prompts above the widget grid when needed, rather than relying only on in-grid cards.
+
+## Current Widget-Level Functionality
+
+## 4. Today widget
+
+The `today` widget is the daily context snapshot.
+
+Its purpose in current code is:
+- day / date / time awareness
+- campus weather context
+- next-event / ambient current-state awareness
+
+It is designed to adapt by size and shape rather than rendering as one fixed card.
+
+Current behavior includes:
+- multiple layout variants depending on available space
+- weather access and weather popover behavior
+- event popover behavior
+- next-event and current-time context
+
+This widget is acting more like a compact status layer than a full planner.
+
+## 5. Schedule widget
+
+The schedule widget is one of the most functionally rich parts of the page.
+
+Current behavior:
+
+- canonical schedule widget is `schedule`
+- the current implementation uses `ScheduleWidgetV2`
+- it supports elastic / context-aware rendering rather than one fixed layout
+- it supports disclosure modes like glance / expanded / focus
+- it renders from schedule content and merged timeline data
+- it can show vertical or more horizontal-feeling presentations depending on layout shape
+
+Observed and code-confirmed interactions include:
+
+- a day timeline view
+- timeline event rendering
+- event detail popovers / context menus
+- quick-add slot behavior
+- event form sheet behavior
+- floating timeline actions
+- class detail popover behavior
+- calendar / timeline interactions on both imported and user-created blocks
+
+Important nuance:
+
+This widget is not just "a calendar." It is already trying to be a shape-adaptive schedule module with CRUD and context overlays.
+
+### Event interaction behavior
+
+Observed from the GIFs and supported by schedule widget code:
+
+- clicking an event can open event details
+- user-created or editable blocks can expose edit / delete actions
+- some blocks are treated as lower-signal event types (`free`, `sleep`, `break`, etc.)
+- the schedule system distinguishes between editable/deletable events and other event kinds
+
+### Current schedule-view flexibility
+
+The schedule module appears to materially reshape when given different widget sizes.
+
+This is important:
+- the schedule is not locked to a single tall left-column timeline form
+- when widened or repositioned, it can present more like a horizontal strip or week-oriented ribbon
+
+Whether that is one widget adapting responsively or multiple schedule presentations under one widget contract, the functional outcome is the same:
+
+**the schedule widget is elastic, not static.**
+
+## 6. Tasks widget
+
+The tasks widget is also more capable than a simple list.
+
+Current behavior includes:
+
+- merged task surface for due assignments and unscheduled/personal tasks
+- prioritization by urgency and due date
+- expandable / disclosure-aware rendering by widget size
+- task detail popovers
+- quick complete behavior
+- task completion for both task and assignment flows
+- task creation modal
+- filter chips and density-based variations
+- local "ghost task" onboarding placeholders in some states
+
+This means the Tasks widget is not read-only.
+
+It already supports meaningful action:
+- open detail
+- mark complete
+- create task
+- dismiss placeholder quick-start states
+
+That matters because the current Today page is already partially action-oriented, not just informational.
+
+## 7. Heads Up widget
+
+The Heads Up widget is the current priority feed / alert layer.
+
+It currently:
+- surfaces critical alerts and due-date-oriented cards
+- supports category/severity prioritization
+- supports fallback CTAs like:
+  - `Open Tasks`
+  - `Open Schedule`
+  - `Open Courses`
+- supports snooze and dismiss flows
+- can open a quick overlay / detail treatment for an item
+
+Functionally, Heads Up is the screen's alert rail:
+- due items
+- alerts
+- suggestions
+
+This is distinct from the task list because it behaves like a lightweight feed of priority cards rather than a full task inbox.
+
+## 8. Courses widget
+
+The Courses widget is not just a roster.
+
+Current behavior includes:
+- active course list
+- quick access to course detail
+- course context and schedule cues
+- support for grades / assignments / policy / timeline-related detail through deeper flows
+- shape-adaptive rendering from compact list to larger course grid/list treatments
+
+In practice, it gives the Today page a course-context layer so the student can pivot from "what's happening today" into "what do I need in this course?"
+
+## 9. Notes widget
+
+The Notes widget is a real embedded work surface.
+
+Current behavior includes:
+- embedded editor
+- auto-save
+- recent-notes rail
+- preview / edit modes
+- class-linked drafting context
+- smart note class context resolution
+- slash commands
+- recent-notes collapse / expand behavior
+- focus mode for longer writing
+
+Observed behavior from the GIFs confirms:
+- the notes panel can contain full class notes
+- it can also be used as a quick drafting space
+- the right side of the widget functions as recent note context / shortcuts
+
+This means the page is not just "showing information." It is also a place where work can happen directly.
+
+## Current Interaction Model Outside Edit Mode
+
+The current Today page already supports several distinct interaction patterns:
+
+### Navigation
+- switch selected day/week context
+- enter full week preview / schedule view from the week row
+- navigate from course surfaces into course detail
+- navigate from CTA cards into tasks / schedule / courses
+
+### Drill-in
+- open assignment detail
+- open event detail
+- open class detail
+- inspect notes / recent notes
+
+### Action
+- complete tasks / assignments
+- edit or delete at least some schedule blocks
+- create tasks
+- open calendar-related actions
+- refresh the page data
+
+### Workspace use
+- type directly in notes
+- use notes as a live contextual drafting space
+
+That is why the page should be thought of as a **workspace with modular tools**, not just a homepage.
+
+## Edit Mode / Customization Functionality
+
+## 10. How edit mode is entered
+
+Edit mode currently has multiple entry points:
+
+- explicit `Edit layout` button in the top toolbar on desktop
+- explicit floating `Edit layout` button on smaller screens
+- long press on the page background / non-interactive surface area
+
+### Long-press mechanics
+
+The current implementation uses:
+- `500ms` long press duration
+- movement cancellation after roughly `10px`
+- blocking on interactive targets such as:
+  - buttons
+  - links
+  - inputs
+  - textareas
+  - contenteditable surfaces
+  - resize handles
+
+This matches the behavior you described:
+- users cannot reliably long-press "through" interactive content inside a widget
+- they need to long-press on background or a non-interactive area
+- because of that, many users likely do not discover edit mode organically
+
+### Discoverability support currently in code
+
+The page includes a first-visit edit hint:
+
+- "Customize your dashboard"
+- "Long-press anywhere to rearrange widgets"
+
+But based on observed product behavior and your note, this is still not clear enough from the get-go.
+
+## 11. What changes in edit mode
+
+When edit mode is entered:
+
+- widgets become draggable
+- widgets become resizable
+- a grid-dot background appears
+- delete badges appear on widgets
+- a drag handle overlay appears across each widget
+- a toolbar appears for edit actions
+- the page enters a distinct customization state with save/cancel semantics
+
+Importantly, this is not a lightweight hover affordance. It is a full mode switch with preserved pre-edit state.
+
+## 12. Save / cancel / persistence behavior
+
+The page preserves pre-edit state so that:
+- `Cancel` restores prior layout and widget state
+- `Save` persists the canonical layout and widget preferences
+
+Persistence currently includes:
+- widget geometry
+- hidden widget IDs
+- user widgets
+- canonical 12-column layout save across breakpoints
+- server persistence via the layout service
+- local cache fallback for offline resilience
+
+This means the customization system is not purely local fluff. It is intended to be a persisted personalized layout system.
+
+## 13. Current edit toolbar behavior
+
+The toolbar currently supports:
+
+- `Cancel`
+- `Save`
+- `Tidy Up`
+- `Undo` after organize
+- `Restore` hidden widgets
+- direct add/drag for available widgets
+
+### Tidy Up
+
+`Tidy Up` is not random. It uses a deterministic organization strategy based on:
+- widget priority
+- widget category
+- time-of-day adjustments
+- some data-sensitive scoring
+
+So the system currently includes a light opinionated "organize my layout for me" capability, not just manual dragging.
+
+### Add widget behavior
+
+In the current Today page flow, adding widgets is primarily handled by the toolbar itself:
+- available widgets appear in the toolbar
+- they can be tapped or dragged to add
+
+There is also a `WidgetPicker.tsx` component in the codebase, but the current Today page flow uses the toolbar as the practical add-widget interface.
+
+## 14. Current resize behavior
+
+Current code and visual behavior confirm:
+- resize handles are corner-only
+- side handles are intentionally hidden
+- the corner affordances are rendered as small blue-ish glowing dots
+
+This matches your description:
+- intended as little arrows / grab handles
+- read by users more like inconsistent blue dots
+- people do not like the corner-only resize interaction as much as expected
+
+This is a real current-state usability note, not just a visual opinion.
+
+## 15. Widget shape adaptation
+
+A key part of the current implementation is that widgets are not simply stretched.
+
+They are intended to **reshape based on the space they are given**.
+
+That is visible in:
+- the schedule widget
+- the Today widget
+- the courses widget
+- the tasks widget
+
+The intended system behavior is:
+- same widget identity
+- different presentation depending on available width/height
+- different content density depending on the grid footprint
+
+This is one of the strongest architectural ideas in the current Today page.
+
+## 16. Hiding and restoring widgets
+
+The page supports hidden widget IDs and restoring hidden widgets.
+
+This means the customization system is not only:
+- reorder
+- resize
+- add
+
+It is also:
+- hide
+- restore hidden
+
+That supports real personalization, assuming discoverability is improved and value remains high at different widget sizes.
+
+## Known Current-State Realities
+
+## 17. The page is more modular than it looks at first glance
+
+From the outside, the current Today page can look like a large dashboard.
+
+But under the hood it is currently:
+- widgetized
+- persisted
+- responsive
+- reorderable
+- resizable
+- partly shape-adaptive
+- partly action-oriented
+
+That means criticism of the current default layout should not be confused with criticism of the underlying architecture.
+
+The architecture is more flexible than the default presentation suggests.
+
+## 18. The default experience and the customization system are separate questions
+
+Right now there are really two different product questions:
+
+1. Is the **default Today layout** the right one?
+2. Is the **customizable widget architecture** a good foundation?
+
+Current answer from implementation:
+- the architecture is real and fairly capable
+- the default discoverability and some interaction details still need work
+
+## 19. Current canonical Home behavior vs observed GIF behavior
+
+One important caveat:
+
+The current canonical addable Home widget registry exposes six core widgets:
+- Today
+- Schedule
+- Tasks
+- Courses
+- Heads Up
+- Notes
+
+In the recorded customization GIF, a `Term Progress` panel appears during layout editing.
+
+As of the current code read, `Term Progress` is **not** part of the canonical addable Home widget registry for `/dashboard/today`.
+
+So the most accurate current interpretation is:
+- the GIF demonstrates that a progress-style card can appear in the layout flow
+- but the current canonical Home widget toolbar does not expose `Term Progress` as one of the standard Home widget types
+
+Treat that as:
+- observed in the recording
+- not yet confirmed as part of the canonical current add-widget set
+
+## 20. Current discoverability problem
+
+The current Today page does support full customization, but that is not immediately obvious to a new user because:
+
+- long press is hidden behavior
+- long press does not work cleanly on interactive child content
+- the corner resize dots are not legible enough as resize affordances
+- the system's flexibility is not made explicit from the default static view
+
+So the product currently has a genuine gap between:
+- capability
+- user understanding of capability
+
+## Functional Summary
+
+The current LockedIn web Today page is a persisted, widget-based academic workspace. It combines a top week-row schedule layer with a responsive dashboard grid containing daily context, schedule, tasks, courses, notes, and alert widgets. The page already supports real work, not just passive viewing: students can inspect and sometimes edit schedule events, open assignment detail, complete tasks, navigate into course detail, and write directly in notes.
+
+The biggest hidden capability is that the page is fully customizable. Users can enter edit mode, drag widgets, resize them, hide them, restore them, and save a personalized layout. Widgets are intended to reshape based on the space they are given, so the architecture is meaningfully more flexible than the default layout alone suggests.
+
+## Related Documents
+
+- [Home & Widgets](/docs/engineering/architecture/sot-home-widgets)
+- [Today Screen Product Principles (Current)](/docs/product/today-screen-product-principles-current)
+- [DayPlan Today Screen Decision Memo (Current)](/docs/product/dayplan-today-screen-decision-memo-current)
+- [LockedIn Web Today - Customization & Discoverability Memo (Current)](/docs/product/lockedin-web-today-customization-discoverability-memo-current)
+- [Today V2 Concept Note (Draft)](/docs/product/today-v2-concept-note-draft)
+- [LockedIn Web vs iOS - Functionality, Completion, and Quality Deep Dive (Current)](/docs/engineering/technical/lockedin/lockedin-web-vs-ios-functionality-completion-and-quality-deep-dive-current)

@@ -21,6 +21,8 @@ description: "flowchart TD A[Engine boot] --> B{SYNC_SCHEDULES_ENABLED?} B -->|Y
 - Scheduled syncs use overlap policy `SKIP` with a 5-minute catchup window.
 - `runScheduledSyncWorkflow` triggers `triggerSyncOrchestration`, which requires `API_ROUTER` + `API_KEY` and calls `/cron/sync/orchestrate`.
 - Sync workflow IDs are idempotent: `city-sync-${contextId}` and `campus-sync-${contextId}`; task queues are `city-worker` and `campus-worker`.
+- Calendar-triggered sync workflow IDs are bucketed + sharded to dedupe bursts (`schedule-manual-s{shard}-{userId}-{bucket}`).
+- Account-level calendar sync execution uses dedupe windows (`calendar-sync:account:{studentId}:{accountId}:{bucket}`) to suppress duplicate fan-out.
 - Cleanup schedules: `daily-graph-cleanup` (2am), `weekly-timeblock-cleanup` (Sun 3am), `weekly-duplicate-detection` (Sun 4am) with overlap `SKIP`.
 - Plugin runner schedule: `plugin-runner-5m` every 5 minutes, overlap `SKIP`.
 - Schedule import writes `schedule_import` events into `time_blocks`; schedule reconciliation populates student-facing blocks via `scheduleProcessor`.
@@ -113,11 +115,15 @@ sequenceDiagram
 - `services/engine/src/schedules/cleanupSchedules.ts` (cleanup schedule definitions)
 - `services/engine/src/schedules/pluginRunnerSchedules.ts` (plugin runner schedule)
 - `services/engine/src/index.ts` (schedule provisioning on worker boot)
+- `services/engine/src/workflows/utils/calendarSyncLoadShedding.ts` (calendar shard + bucket + account dedupe keys)
+- `services/engine/src/workflows/studentWatcher.simplified.workflow.ts` (calendar sync workflow id usage)
+- `services/engine/src/activities/student.activities.ts` (account-level dedupe during Google sync)
 - `services/engine/src/workflows/syncOrchestratorSchedule.workflow.ts` (schedule -> activity bridge)
 - `services/engine/src/activities/syncScheduler.activities.ts` (API router trigger)
 - `services/api-router/src/routes/cron-routes.ts` (cron sync entry point)
 - `services/api-router/src/routes/admin/sync-orchestrator.ts` (manual orchestration endpoint)
 - `services/api-router/src/services/sync-orchestrator-service.ts` (candidate selection + workflow starts)
+- `services/api-router/src/routes/calendar-routes.ts` (manual calendar sync trigger + dedupe-aware fallback workflow IDs)
 - `services/engine/src/workflows/scheduleImport.workflow.ts` (schedule import orchestration)
 - `services/engine/src/workflows/scheduleRemoval.workflow.ts` (schedule removal orchestration)
 - `services/engine/src/workflows/studentProcessor.workflow.ts` (`scheduleProcessor` entry point)
@@ -129,4 +135,5 @@ sequenceDiagram
 - Changing schedule import/removal behavior: update `scheduleImport.workflow.ts`/`scheduleRemoval.workflow.ts` and verify `scheduleProcessor` assumptions.
 
 ## Recent Changes
+- 2026-02-10: Added sharded, window-bucketed calendar sync IDs and account-level dedupe keys to reduce duplicate fan-out under bursty trigger patterns.
 - 2025-12-22: Populated and verified against sync schedules, orchestrator routes, and schedule workflows.

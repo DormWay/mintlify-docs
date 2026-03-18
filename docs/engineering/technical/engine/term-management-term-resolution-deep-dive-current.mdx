@@ -356,10 +356,17 @@ Important details:
 
 Important details:
 
-- `getForStudent(studentContextId, term, year)` queries enrollments where:
-  - `cd.term_id ILIKE %term% OR cd.term_id IS NULL`
-  - `cd.term_year = year OR cd.term_year IS NULL`
-- This means missing `term_year` reduces the ability to separate terms by year.
+- `getForStudent(studentContextId, term, year)` matches enrollments by canonical term ID first (`${term.toLowerCase()}_${year}`), with legacy fallback (`term_id ILIKE %term%` + `term_year=year`).
+- `getForStudent` and `getAllForStudent` include lifecycle dependency types:
+  - `enrolled_in`, `completed`, `dropped`, `has_taken`
+- Both methods rank dependencies per course context and keep one canonical row:
+  - priority: `enrolled_in > completed > dropped > has_taken`
+  - tie-breaker: latest `updated_at`
+- Lifecycle output is normalized via `resolveCourseLifecycleState` in `@dormway/core`:
+  - `completed` -> `status='completed'`, `isArchived=true`
+  - `dropped` -> `status='dropped'`, `isArchived=true`
+  - `has_taken` or explicit archived flags -> `status='archived'`, `isArchived=true`
+- Missing `term_year` still reduces year-level separation for legacy rows.
 
 ### 5.5 Comparison flowchart (who uses what)
 
@@ -377,13 +384,13 @@ flowchart LR
   end
 
   subgraph Core["@dormway/core"]
-    C1["TermFactory.getForStudent(term, year)\nfilters on context_dependencies.term_id/year"]
+    C1["TermFactory.getForStudent(term, year)\nfilters on context_dependencies.term_id/year + lifecycle deps"]
     C2["Term entity\nhas estimated dates\n(typical US patterns)"]
   end
 
   subgraph DB["Postgres"]
     D1["campus_configs\ncurrent_term_data + academic_calendar"]
-    D2["context_dependencies\nterm_id + term_year + metadata.term"]
+    D2["context_dependencies\nterm_id + term_year + dependency_type + metadata.term"]
   end
 
   E1 --> D1
@@ -471,7 +478,7 @@ DB cache table:
 1) **Multiple sources of “current term”**:
    - Engine uses `campus_configs.current_term_data` (and sometimes academic_calendar).
    - API Router uses the same but filters by `edge.metadata.term`.
-   - `@dormway/core` uses `context_dependencies.term_id` + `term_year`.
+   - `@dormway/core` uses `context_dependencies.term_id` + `term_year` + lifecycle dependency states.
    - Canvas sync uses a month-based term window.
 2) **Term format drift**:
    - Old values like `fall2025` exist (see `.repos/dormway-platform/infrastructure/database/migrations/085_backfill_enrollment_term.sql`).

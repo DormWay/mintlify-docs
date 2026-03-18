@@ -1,0 +1,373 @@
+---
+title: "Nemotron 3 Evaluation Plan for DormWay"
+description: "These are the questions worth answering first. If DormWay cannot get clear answers here, the rest of the Nemotron discussion is mostly noise."
+---
+
+# Nemotron 3 Evaluation Plan for DormWay
+
+## Summary
+- Goal: determine whether NVIDIA Nemotron 3 should be adopted for any DormWay production workloads.
+- Primary question: can Nemotron 3 Nano reduce cost or improve throughput for DormWay's async AI jobs without degrading quality?
+- Recommendation: evaluate `Nemotron 3 Nano` first; do not start with `Super` and do not start with live student chat.
+
+## Five Specific Investigations
+
+These are the questions worth answering first. If DormWay cannot get clear answers here, the rest of the Nemotron discussion is mostly noise.
+
+### 1. Can Nemotron replace high-cost async synthesis without hurting quality?
+Why this matters:
+- This is where DormWay already spends real model budget.
+- Async crews can tolerate more latency than live chat.
+- A win here would immediately matter to cost and throughput.
+
+Where to test:
+- `.repos/dormway-platform/services/dormway-crews/crews/student_daily_intelligence_v3.py`
+- `.repos/dormway-platform/services/dormway-crews/crews/semester_analysis.py`
+- `.repos/dormway-platform/services/dormway-crews/crews/morning_briefing.py`
+
+What to compare:
+- Current GPT and Gemini baselines versus Nemotron 3 Nano
+- Human rubric score
+- Runtime
+- Estimated cost per successful run
+
+Pass condition:
+- Quality is effectively neutral and cost or runtime improves materially.
+
+### 2. Does Nemotron's long-context story actually help with DormWay's document-heavy jobs?
+Why this matters:
+- Nemotron's public positioning is strongest on long context.
+- DormWay has real long-context tasks, especially syllabus and multi-document synthesis.
+- If this advantage does not show up here, it is probably not a meaningful product fit.
+
+Where to test:
+- `.repos/dormway-platform/services/dormway-crews/crews/syllabus_processor.py`
+- `.repos/dormway-platform/services/dormway-crews/crews/semester_analysis.py`
+
+What to compare:
+- Deadline extraction accuracy
+- Policy summary accuracy
+- Workload synthesis quality
+- Truncation rate on dense inputs
+
+Pass condition:
+- Fewer truncation or omission failures without a hallucination increase.
+
+### 3. How reliable is Nemotron on structured outputs and tool-shaped tasks?
+Why this matters:
+- DormWay is not only generating prose; it also needs valid JSON and grounded actions.
+- Nemotron claims strength on agentic and tool-use benchmarks, but DormWay needs local proof.
+
+Where to test:
+- `.repos/dormway-platform/services/api-router/src/services/schedule-intent-classifier.ts`
+- `.repos/dormway-platform/services/api-router/src/services/update-term-classifier.ts`
+- One crew subtask that emits stable structured output
+
+What to compare:
+- JSON validity
+- Schema adherence
+- Hallucinated operations
+- Recovery behavior on malformed inputs
+
+Pass condition:
+- Structured validity stays at or above current baseline and invalid action suggestions do not increase.
+
+### 4. Is the deployment path simple enough to be worth the experiment?
+Why this matters:
+- A good model with a painful serving path is not a good near-term product choice.
+- Nano is only attractive if DormWay can test it with low integration cost.
+
+Where to test:
+- `.repos/dormway-platform/services/dormway-crews/crews/base.py`
+- `.repos/dormway-platform/services/api-router/src/routes/braingains-chat-routes.ts`
+
+What to compare:
+- Amount of routing code required
+- Observability parity with existing PortKey flows
+- Env/config complexity
+- Rollback simplicity
+
+Pass condition:
+- One guarded integration point can enable Nemotron for targeted workloads without changing the default provider path.
+
+### 5. Is this a real workflow-economics improvement or just an interesting benchmark result?
+Why this matters:
+- NVIDIA's reports are good enough to justify evaluation, not adoption.
+- DormWay should care about end-to-end workflow economics, not leaderboard prestige.
+
+Where to test:
+- Replay dataset across the Tier 1 workloads
+- Shadow mode on one async crew if offline replay passes
+
+What to compare:
+- End-to-end completion cost
+- Throughput under representative load
+- Retry and timeout rates
+- Human-rated usefulness
+
+Pass condition:
+- Nemotron creates a clear operational advantage on at least one important DormWay workflow.
+
+## Why This Matters
+
+DormWay already has meaningful AI surface area:
+- `dormway-crews` runs multi-step async reasoning workflows for student planning and analysis.
+- BrainGains and ACE combine RAG, live student data, and model-generated responses.
+- The platform already uses multiple model providers through PortKey and provider-specific routing.
+
+Nemotron 3 is interesting for DormWay because it appears strongest on the traits that matter for backend agent workloads:
+- High throughput relative to similarly sized open reasoning models.
+- Long context windows for syllabus, semester, and multi-document synthesis.
+- Open deployment options for privacy-sensitive or cost-controlled infrastructure.
+- Reasoning budget controls, which map well to "cheap by default, expensive only when needed."
+
+## Current DormWay Integration Points
+
+### 1. Async crews
+- Current code path: `.repos/dormway-platform/services/dormway-crews/crews/base.py`
+- `create_llm()` currently special-cases `gpt`, `claude`, and `gemini` model families via PortKey virtual keys.
+- This is the cleanest insertion point for a Nemotron experiment.
+
+### 2. BrainGains / document Q&A
+- Current code path: `.repos/dormway-platform/services/api-router/src/services/braingains-knowledge.ts`
+- BrainGains currently calls Ragie for answer generation and sources.
+- This is not the best first integration target because the retrieval + generation stack is externally managed.
+
+### 3. Structured low-latency classification
+- Current code path: `.repos/dormway-platform/services/api-router/src/services/schedule-intent-classifier.ts`
+- This path currently makes a direct structured-output LLM call with a default `gpt-4o-mini` fallback.
+- It is useful as a later benchmark, but not the first production candidate because correctness and latency are more important than long-context reasoning.
+
+## Recommended Starting Point
+
+Start with `Nemotron 3 Nano`.
+
+Why:
+- Lower infra commitment than `Super`.
+- Better fit for DormWay's first-pass experiment: async workflows, longer prompts, moderate concurrency.
+- Easier to test through Bedrock or another OpenAI-compatible endpoint without immediately owning self-hosted GPU infrastructure.
+
+Do not start with `Nemotron 3 Super` unless one of these becomes true:
+- DormWay has sustained async AI volume large enough to justify dedicated GPU capacity.
+- Privacy or enterprise deployment requirements make self-hosting strategically important.
+- Nano passes evals but still cannot meet quality targets on top-priority workloads.
+
+## Workloads To Evaluate
+
+### Tier 1: evaluate first
+
+#### A. Student Daily Intelligence Crew
+Why it fits:
+- Multi-step async reasoning.
+- Long personalized context assembly.
+- Output quality matters, but sub-second latency does not.
+
+Success conditions:
+- Matches or beats current baseline on actionability and personalization.
+- Reduces cost per completed run.
+- Maintains acceptable failure and retry rates.
+
+#### B. Semester Analysis / workload synthesis
+Why it fits:
+- Long-context summarization and planning.
+- Existing workflows are expensive enough that throughput gains would matter.
+- Easy to score with rubric-based review.
+
+Success conditions:
+- Maintains decision usefulness.
+- Preserves factual alignment to student data.
+- Achieves a meaningful cost or runtime improvement.
+
+#### C. Syllabus and multi-document synthesis
+Why it fits:
+- Nemotron's long-context positioning is most relevant here.
+- Easy to compare against reference outputs for extracted deadlines, policy summaries, and action plans.
+
+Success conditions:
+- No regression on factual extraction.
+- No increase in hallucinated policies or invented deadlines.
+
+### Tier 2: evaluate second
+
+#### D. Campus research / enrichment jobs
+Why it fits:
+- Async.
+- Can tolerate higher latency.
+- High token volume over time.
+
+Risk:
+- These jobs may depend more on search quality and retrieval freshness than on model quality.
+
+### Not recommended for the first rollout
+
+#### E. BrainGains live student chat
+Why not first:
+- Current answer generation is coupled to Ragie.
+- User-facing latency sensitivity is higher.
+- Quality regressions are more visible to end users.
+
+#### F. Schedule intent classification
+Why not first:
+- This task is small, structured, and latency-sensitive.
+- Nemotron may work, but the upside is lower than for crew-style workloads.
+
+## Evaluation Dataset
+
+Build a DormWay-specific replay set instead of relying on generic benchmarks.
+
+Target dataset:
+- 30 Student Daily Intelligence inputs
+- 25 Semester Analysis inputs
+- 25 syllabus or multi-document synthesis inputs
+- 20 campus research or enrichment inputs
+
+Dataset rules:
+- Use real historical payloads where possible.
+- De-identify student data before export.
+- Preserve difficult edge cases: sparse context, conflicting deadlines, malformed docs, overloaded weeks, and mixed-quality campus data.
+
+Store artifacts under:
+- `.workspace/nemotron-eval/inputs/`
+- `.workspace/nemotron-eval/outputs/`
+- `.workspace/nemotron-eval/scorecards/`
+
+## Baselines
+
+Compare Nemotron against the models DormWay actually uses, not abstract frontier models.
+
+Primary baselines:
+- Existing GPT-based crew baselines in `dormway-crews`
+- Current production BrainGains / ACE outputs where applicable
+- Current structured-output baseline for schedule intent, only if that task is included later
+
+Each test case should preserve:
+- Prompt version
+- Model name
+- Runtime
+- token usage if available
+- cost estimate
+- structured parse success
+- human rubric score
+
+## Scorecard
+
+Every evaluated output should be scored on a 1-5 rubric:
+- Factual accuracy
+- Grounding to DormWay data
+- Actionability
+- Completeness
+- Tone / student usefulness
+
+Track binary failure flags:
+- Invalid JSON
+- Hallucinated deadline or policy
+- Missed critical deadline
+- Unsupported recommendation
+- Empty or truncated response
+
+Operational metrics:
+- p50 runtime
+- p95 runtime
+- retries per 100 runs
+- timeout rate
+- cost per successful run
+
+## Pass / Fail Gates
+
+Nemotron 3 Nano passes Phase 1 only if all of the following are true:
+- Average human score is not worse than baseline by more than `0.2` points on the 1-5 rubric.
+- Hallucination-style critical errors are not higher than baseline.
+- Structured output validity is at least `99%` on tasks that require JSON.
+- Runtime improves by at least `25%` or estimated cost improves by at least `25%`.
+- No new operational instability appears in orchestration or retries.
+
+Immediate no-go conditions:
+- Invented deadlines or policies increase materially.
+- Output truncation becomes common.
+- Tool or workflow compatibility issues require broad code changes across services.
+
+## Implementation Plan
+
+### Phase 0: routing spike
+Goal:
+- Prove DormWay can call Nemotron cleanly from `dormway-crews`.
+
+Changes:
+- Update `.repos/dormway-platform/services/dormway-crews/crews/base.py` to support a `nemotron` family or a generic OpenAI-compatible provider mapping.
+- Keep the change behind an environment flag.
+- Do not alter existing default model routing.
+
+Expected output:
+- A single crew can run against Nemotron in a non-production environment.
+
+### Phase 1: offline replay
+Goal:
+- Run the replay dataset through Nemotron 3 Nano and baseline models.
+
+Changes:
+- Add a lightweight replay harness under `.workspace/nemotron-eval/`.
+- Capture outputs and metadata in stable JSON.
+- Manually score the first 20-30 samples to validate rubric quality.
+
+Expected output:
+- A comparison table by workload, with pass/fail status.
+
+### Phase 2: shadow mode on one async workflow
+Goal:
+- Run Nemotron alongside the current production model for one crew without user-visible output changes.
+
+Candidate workflow:
+- Student Daily Intelligence Crew
+
+Changes:
+- Duplicate execution for sampled jobs.
+- Log output diffs, cost, latency, and failures.
+
+Expected output:
+- Real production-shaped evidence without rollout risk.
+
+### Phase 3: limited production rollout
+Goal:
+- Route a small percentage of one async workflow to Nemotron.
+
+Guardrails:
+- Feature flag by workflow.
+- Fast rollback.
+- Daily review of hallucination and timeout metrics.
+
+## Suggested Engineering Slice
+
+Smallest useful implementation slice:
+1. Add model routing support in `dormway-crews/crews/base.py`.
+2. Add env-based model selection for one crew.
+3. Build a replay harness in `.workspace/nemotron-eval/`.
+4. Evaluate Student Daily Intelligence and Semester Analysis first.
+
+Avoid in the first slice:
+- Replacing Ragie generation in BrainGains.
+- Modifying ACE user-facing chat flows.
+- Swapping schedule-intent classification.
+
+## Recommendation
+
+Proceed with a bounded Nano evaluation.
+
+This should be treated as a workflow economics experiment, not a company-wide model migration.
+
+If Nano clears the pass gates on async planning and synthesis jobs, DormWay should:
+- adopt it selectively for those workloads,
+- keep current providers for live chat and small structured tasks,
+- revisit `Super` only after usage volume or privacy requirements justify dedicated inference infrastructure.
+
+If Nano fails, DormWay still benefits from the exercise by producing a reusable eval harness and workload scorecard for future model evaluations.
+
+## External References
+
+- NVIDIA Nemotron 3 family page
+- NVIDIA Nemotron 3 Nano technical report
+- NVIDIA Nemotron 3 white paper
+- NVIDIA Nemotron 3 Super family page
+- NVIDIA Nemotron 3 Super technical report
+- NVIDIA Nemotron 3 Nano model card
+- NVIDIA Nemotron 3 Super model card
+- AWS Bedrock Nemotron 3 Nano announcement

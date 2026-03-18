@@ -6,7 +6,7 @@ description: "Maps are not a separate product area. They're a **2-click affordan
 # Campus Maps Roadmap
 
 **Created:** 2025-12-12
-**Updated:** 2025-12-15
+**Updated:** 2026-02-10
 **Status:** Draft
 **Related Issues:** DORM-447 (OSM research), DORM-731 (map/calendar links), DORM-690 (Moovit research)
 
@@ -14,8 +14,8 @@ description: "Maps are not a separate product area. They're a **2-click affordan
 | Issue | Title | Status |
 |-------|-------|--------|
 | DORM-747 | [Maps P1.0] Geo infrastructure config | Triage |
-| DORM-748 | [Maps P1.1] Add LocationRef to dormway-core | Triage |
-| DORM-749 | [Maps P1.2] Backend: emit walkingTimes | Triage |
+| DORM-748 | [Maps P1.1] Add LocationRef to dormway-core | Done |
+| DORM-749 | [Maps P1.2] Backend: emit walkingTimes | Done |
 | DORM-750 | [Maps P1.3] LockedIn: interactive map modal | Triage |
 | DORM-751 | [Maps P1.4] iOS: Location map sheet | Triage |
 | DORM-752 | [Maps P1.5] Map quality dashboard (admin) | Triage |
@@ -139,95 +139,32 @@ export type LocationRef = {
 > **This is v1 ETA using straight-line distance.** It intentionally over-estimates via buffer.
 > Real routed ETAs come in Phase 3.
 
-**Acceptance criteria:**
-- Must not under-estimate by more than 2 minutes for typical campus distances (<1km)
-- Buffer multiplier ensures we err on the side of "leave earlier"
-- Fallback to 10 min when coords unavailable
+**Current implementation (DORM-749):**
+- Utility shipped in `services/shared/dormway-core/src/utils/walking-time.ts`.
+- Haversine distance + buffered ETA (`bufferMultiplier: 1.4` / 40%).
+- Exposed on schedule events as optional `walkingTimeMinutes`.
+- Emitted only when two consecutive timed events both have valid `locationRef.lat/lng` and the current event starts after the previous event ends.
+- No synthetic fallback minutes are emitted when coordinates are missing.
 
 ```typescript
 // services/shared/dormway-core/src/utils/walking-time.ts
-
-export interface WalkingTimeResult {
-  minutes: number;
-  confidence: 'routed' | 'estimated' | 'fallback';
-  distanceMeters?: number;
-  /** Indicates this is v1 straight-line estimate, not routed */
-  isV1Estimate: boolean;
-}
-
-export function estimateWalkingTimeV1(
-  from: { lat: number; lng: number } | null,
-  to: { lat: number; lng: number } | null,
+export function estimateWalkingTimeMinutes(
+  from: { lat: number; lng: number },
+  to: { lat: number; lng: number },
   options?: {
-    walkingSpeedMps?: number;  // default: 1.4 m/s (~5 km/h)
-    bufferMultiplier?: number; // default: 1.4 (40% buffer for stairs, crowds, indirect paths)
+    walkingSpeedMetersPerMinute?: number; // default: 84 (~1.4 m/s)
+    bufferMultiplier?: number;            // default: 1.4
   }
-): WalkingTimeResult {
-  const { walkingSpeedMps = 1.4, bufferMultiplier = 1.4 } = options ?? {};
-
-  // No coords? Fall back to heuristic
-  if (!from?.lat || !to?.lat) {
-    return { minutes: 10, confidence: 'fallback', isV1Estimate: true };
-  }
-
-  // Haversine straight-line distance
-  const distanceMeters = haversineDistance(from, to);
-
-  // Walking time with buffer (40% accounts for non-straight paths)
-  const rawMinutes = (distanceMeters / walkingSpeedMps) / 60;
-  const bufferedMinutes = Math.ceil(rawMinutes * bufferMultiplier);
-
-  return {
-    minutes: Math.max(2, bufferedMinutes), // Minimum 2 min
-    confidence: 'estimated',
-    distanceMeters,
-    isV1Estimate: true,
-  };
-}
-
-function haversineDistance(
-  a: { lat: number; lng: number },
-  b: { lat: number; lng: number }
-): number {
-  const R = 6371000; // Earth radius in meters
-  const dLat = toRad(b.lat - a.lat);
-  const dLng = toRad(b.lng - a.lng);
-  const lat1 = toRad(a.lat);
-  const lat2 = toRad(b.lat);
-
-  const x = Math.sin(dLat / 2) ** 2 +
-            Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
-
-  return R * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1 - x));
-}
-
-const toRad = (deg: number) => deg * (Math.PI / 180);
+): number;
 ```
 
-**Dashboard composite changes:**
-
 ```typescript
-// In buildScheduleWidget() or buildDayPlanWidget()
-
-// Calculate walking times between consecutive events
-const eventsWithWalkTime = events.map((event, i) => {
-  const nextEvent = events[i + 1];
-  if (!nextEvent) return event;
-
-  const walkTime = estimateWalkingTimeV1(
-    event.location?.lat && event.location?.lng
-      ? { lat: event.location.lat, lng: event.location.lng }
-      : null,
-    nextEvent.location?.lat && nextEvent.location?.lng
-      ? { lat: nextEvent.location.lat, lng: nextEvent.location.lng }
-      : null
-  );
-
-  return {
-    ...event,
-    walkingTimeToNext: walkTime,
-  };
-});
+// services/api-router/src/services/schedule-timeline.ts
+export interface ScheduleTimelineEvent {
+  // ...
+  locationRef?: LocationRef;
+  walkingTimeMinutes?: number;
+}
 ```
 
 ---

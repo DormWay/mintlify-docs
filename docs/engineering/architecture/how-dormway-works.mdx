@@ -1200,48 +1200,58 @@ Key files:
 
 ## 8) LLM + Retrieval: How “AI Stuff” Works
 
-DormWay uses **two related patterns**:
+DormWay uses a **single unified call path** for all LLM calls (DORM-953, Feb 2026):
 
-1) **Managed prompts** (IDs in a registry, synced to Portkey)
-2) **Direct model calls** (Portkey chat completions with inline prompts)
+1) **`callRegistryPrompt(promptId, variables, metadata)`** — loads prompt from DB registry, renders Handlebars template, calls Portkey as gateway
+2) **`callLLMDirect(systemPrompt, userPrompt, options)`** — raw call for inline prompts not in the registry
+
+Portkey is used as a **gateway only** (routing, virtual keys, observability). It no longer stores prompt templates.
 
 And it uses **Ragie** for retrieval so answers can cite user/course/org content.
 
-### 8.1 Prompt registry + managed prompts
+### 8.1 Prompt registry (`llm_prompts` table)
 
-Managed prompts are identified by a stable `promptId` (e.g. `schedule-ocr-parsing`) and mapped to a Portkey prompt ID.
+All prompts live in the **`llm_prompts` database table**. This is the single source of truth.
 
-Shared implementation:
+**Key fields:** `prompt_id` (kebab-case), `messages` (JSON system+user), `model`, `provider`, `temperature`, `max_tokens`, `scope_type`, `scope_id`, `variant`
 
-- `.repos/dormway-platform/services/shared/dormway-core/src/llm/prompt-loader.ts`
-- `.repos/dormway-platform/services/shared/dormway-core/src/llm/llm-caller.ts` (`callPortkeyPrompt`)
+**51 active prompts** covering: campus enrichment, city context, syllabus processing, dayplan, semester intelligence, student workflows, schedule parsing, and classification.
 
-Engine also has a local prompt loader in:
+**Scoped resolution** — `factory.resolve(promptId, { userId, campusId, variant })` cascades:
+```
+user override → campus override → global default
+```
+Variants support time-of-day: `morning`, `afternoon`, `evening`, `night`, `baseline`, `next-day`
 
-- `.repos/dormway-platform/services/engine/src/utils/portkey.ts`
+**Admin UI:** `/llm-prompts` in dormway-admin — edit content, model config, view call history, playground with real data, analytics.
 
-**CI Sync (enabled):**
+**Call tracking:** Every `callRegistryPrompt` call updates `call_count`, `last_called_at`, `avg_latency_ms` and writes a row to `llm_call_logs` (full request/response for debugging).
 
-Prompts are synced from Git to Portkey via GitHub Actions (`.github/workflows/sync-prompts.yml`):
-- On push to main: syncs and publishes changed prompts
-- On PR: dry-run preview of what would be synced
-- Script: `scripts/sync-prompts-to-portkey.js`
+**Key files:**
+- `services/shared/dormway-core/src/entities/llm-prompt/llm-prompt.factory.ts` — CRUD + Redis cache + scoped resolve
+- `services/shared/dormway-core/src/llm/llm-caller.ts` — `callRegistryPrompt`, `callLLMDirect`
+- `services/api-router/src/routes/admin/llm-prompt-routes.ts` — admin API
 
-The sync handles provider mapping (virtual keys), `max_tokens`, `temperature`, and `search_recency_filter` (Perplexity-specific). See Deep Dive SoT on prompts for the full prompt audit.
+**CI Sync:** ~~Disabled~~ — `sync-prompts.yml` was removed (DORM-953). Portkey no longer stores prompt templates.
+
+**Dead/deprecated prompts** (tagged in registry):
+- `dead` tag: student notification/study/wellness prompts — only in deprecated `processSingleStudent` workflow
+- `v1-fallback` tag: DayPlan V1 system prompts — only reached if V2 fails
+
+See Deep Dive SoT on prompts for the historical audit (pre-DORM-953).
 
 ### 8.2 DayPlan generation (LLM usage)
 
-DayPlan V2 uses a direct LLM call with runtime-configurable model settings:
+DayPlan V2 is the **active path** (`DAYPLAN_V2_ENABLED=true` in production):
 
+- V2 strategy loads `dayplan-system` from registry via `factory.resolve('dayplan-system', { userId, campusId })` — supports campus overrides
+- Model settings: SystemConfig `llm.dayplan_model` / `llm.dayplan_temperature` / `llm.dayplan_max_tokens` (take precedence over registry)
 - V2 strategy: `.repos/dormway-platform/services/engine/src/activities/dayplan/v2-strategy.ts`
-  - Reads model settings via SystemConfig keys like `llm.dayplan_model`, `llm.dayplan_temperature`, `llm.dayplan_max_tokens`.
 
-StudentWatcher calls DayPlan generation via activities:
-
+StudentWatcher calls DayPlan via:
 - `.repos/dormway-platform/services/engine/src/workflows/studentWatcher.simplified.workflow.ts`
 
 Deep dives:
-
 - [DayPlan & Semester Summary Generation Deep Dive (Current)](/docs/engineering/technical/engine/dayplan-semester-summary-generation-deep-dive-current)
 - [DayPlan V2 Architecture](/docs/engineering/architecture/dayplan-v2-architecture)
 

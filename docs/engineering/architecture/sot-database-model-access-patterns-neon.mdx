@@ -23,6 +23,7 @@ description: "sequenceDiagram participant Router as API Router participant Pool 
 - Core Postgres adapter requires `DATABASE_URL` with `postgres://` or `postgresql://` and uses a pooled connection (default max 20, 30s idle, 2s connect timeout).
 - SSL is auto-detected: Neon/Railway hosts use `rejectUnauthorized: false`, local hosts disable SSL, other hosts use standard SSL.
 - RLS session queries set `app.current_user_id`, `app.current_role`, and optional `app.current_context_id` via `SET LOCAL` inside a transaction; roles are limited to `authenticated`, `admin`, `demo`, `service`.
+- For compatibility with RLS policies that use `auth.uid()` / `auth.role()`, session queries also set `request.jwt.claim.sub` and `request.jwt.claim.role`.
 - api-router standard pool uses `DATABASE_URL` (RLS enforced); admin pool uses `DATABASE_URL_ADMIN` to bypass RLS and falls back to standard pool if not configured.
 - engine uses `DATABASE_URL_ADMIN` (RLS bypass) with fallback to `DATABASE_URL`.
 - Supabase client is still used for some tables (e.g., `user_devices`, `app_device_tokens`) via `SUPABASE_URL` + service role key.
@@ -45,6 +46,8 @@ sequenceDiagram
     Pool->>Client: queryWithSession()
     Client->>DB: SET LOCAL app.current_user_id
     Client->>DB: SET LOCAL app.current_role
+    Client->>DB: SET LOCAL request.jwt.claim.sub
+    Client->>DB: SET LOCAL request.jwt.claim.role
     Client->>DB: Execute query
     DB-->>Router: Result
 ```
@@ -160,6 +163,7 @@ sequenceDiagram
 ## Update Checklist
 - Adding or changing schema: add SQL in `infrastructure/database/migrations`, run `scripts/database/run-migrations.sh`, and ensure `migration_history` tracking stays intact.
 - Adding a new RLS-sensitive query: use `queryWithSession()` and ensure the session variables are set for the role you expect.
+- Adding/maintaining policies that rely on `auth.uid()` / `auth.role()`: confirm `request.jwt.claim.sub` and `request.jwt.claim.role` are set in `aurora-client.ts`.
 - Changing admin access rules: update `DATABASE_URL_ADMIN` usage in `services/api-router/src/services/auroraDb.ts` and `services/engine/src/services/auroraDb.ts`.
 - Adding a new materialized view for dashboard: add migration + update `dashboard-mv-queries.ts` fallback logic.
 - Changing DB connection behavior/SSL: update `postgres.adapter.ts` and `connection-manager.ts`.

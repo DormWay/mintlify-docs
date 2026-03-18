@@ -1,0 +1,809 @@
+---
+title: "Ably System Source of Truth"
+description: "This document is the canonical reference for ALL Ably real-time channels, events, producers, and consumers in the DormWay platform."
+---
+
+# Ably Real-Time System - Source of Truth
+
+This document is the canonical reference for ALL Ably real-time channels, events, producers, and consumers in the DormWay platform.
+
+## Quick Reference
+
+| Service | Role | Location |
+|---------|------|----------|
+| **engine** | Producer | `services/engine/src/services/ably-publisher.ts`, `src/activities/ably.activities.ts` |
+| **api-router** | Producer | `services/api-router/src/services/ably-service.ts`, `src/services/ably-growth.ts` |
+| **ably-relay** | Consumer/Router | `services/ably-relay/src/services/ably-listener.ts` |
+| **dormway-core** | Adapter | `services/shared/dormway-core/src/adapters/realtime/ably.adapter.ts` |
+| **dormway-lockedin** | Consumer | `services/dormway-lockedin/src/hooks/useRealtimeInvalidation.ts` |
+| **dormway-admin** | Consumer | `services/dormway-admin/src/hooks/useAdminGrowthRealtime.ts` |
+| **iOS** | Consumer | Native Ably SDK integration |
+
+---
+
+## Channel Reference
+
+### 1. User Channels
+
+| Channel Pattern | Purpose | Producers | Consumers |
+|-----------------|---------|-----------|-----------|
+| `user:{userId}:updates` | General user updates, invalidations | engine, api-router | LockedIn, iOS |
+| `user:{userId}:dashboard` | Dashboard-specific deltas (legacy) | engine | LockedIn |
+| `user:{userId}:processing` | Background processing status | engine | LockedIn, iOS |
+| `user:{userId}:social` | Friend activity signals | engine | LockedIn, iOS |
+
+### 2. Campus/City Channels
+
+| Channel Pattern | Purpose | Producers | Consumers |
+|-----------------|---------|-----------|-----------|
+| `campus:{campusId}:alerts` | Campus-wide notifications | engine | LockedIn, iOS, Admin |
+| `city:{cityId}:updates` | City-level updates | engine | LockedIn |
+
+### 3. Growth/Admin Channels
+
+| Channel Pattern | Purpose | Producers | Consumers |
+|-----------------|---------|-----------|-----------|
+| `growth:admin-bugs` | Bug report notifications | api-router | dormway-admin |
+| `growth:admin-tasks` | Labs task notifications | api-router | dormway-admin |
+
+### 4. System Channels
+
+| Channel Pattern | Purpose | Producers | Consumers |
+|-----------------|---------|-----------|-----------|
+| `system:broadcast` | Platform-wide announcements | engine | All clients |
+| `prod-telemetry` / `dev-telemetry` | Client telemetry ingestion | LockedIn, iOS | ably-relay |
+
+---
+
+## Event Catalog
+
+### Invalidation Events
+
+Published to `user:{userId}:updates` with event name `invalidate`:
+
+```typescript
+interface InvalidationEvent {
+  type: 'invalidate';
+  resource: InvalidationResource;
+  entityId?: string;
+  context?: string;
+  ts: number;
+}
+
+type InvalidationResource =
+  | 'dashboard'
+  | 'tasks'
+  | 'schedule'
+  | 'academic'
+  | 'canvas'
+  | 'courses'
+  | 'profile'
+  | 'notifications'
+  | 'feed';
+```
+
+**Produced by:**
+- `api-router/src/services/ably-service.ts`: `publishInvalidation()`, `publishInvalidationBatch()`
+- `engine/src/activities/ably.activities.ts`: `publishInvalidation()`, `publishInvalidationBatch()`
+
+**Consumed by:**
+- `dormway-lockedin/src/hooks/useRealtimeInvalidation.ts` → invalidates React Query cache
+
+### Dashboard Events
+
+Published to `user:{userId}:updates` or `user:{userId}:dashboard`:
+
+| Event Name | Payload | Producer | Purpose |
+|------------|---------|----------|---------|
+| `dashboard.update` | `{ type, changes, timestamp }` | engine | Notify dashboard data changed |
+| `dashboard.delta` | `{ path, operation, value }` | engine | Granular delta update (legacy) |
+
+### Processing Events
+
+Published to `user:{userId}:updates`:
+
+| Event Name | Payload | Producer | Purpose |
+|------------|---------|----------|---------|
+| `processing.started` | `{ contextType, contextId }` | engine | Background job started |
+| `processing.progress` | `{ step, total, message }` | engine | Progress update |
+| `processing.complete` | `{ contextId, result }` | engine | Job completed |
+| `processing.error` | `{ contextId, error }` | engine | Job failed |
+
+### DayPlan Events
+
+Published to `user:{userId}:updates`:
+
+| Event Name | Payload | Producer | Purpose |
+|------------|---------|----------|---------|
+| `dayplan.generating` | `{ date }` | engine | DayPlan generation started |
+| `dayplan.update` | `{ date, planId }` | engine | DayPlan ready |
+| `dayplan.error` | `{ date, error }` | engine | Generation failed |
+
+### Canvas Events
+
+Published to `user:{userId}:updates`:
+
+| Event Name | Payload | Producer | Purpose |
+|------------|---------|----------|---------|
+| `canvas.sync.started` | `{ userId }` | engine | Canvas sync began |
+| `canvas.sync.complete` | `{ userId, syncedAt }` | engine | Canvas sync finished |
+| `canvas.update` | `{ courses?, assignments? }` | api-router | Canvas data refreshed |
+
+### Growth/Admin Events
+
+Published to `growth:admin-bugs` or `growth:admin-tasks`:
+
+| Event Name | Payload | Producer | Purpose |
+|------------|---------|----------|---------|
+| `bug.created` | `{ bugId, title, reporter }` | api-router | New bug report |
+| `bug.updated` | `{ bugId, changes }` | api-router | Bug status changed |
+| `task.created` | `{ taskId, title }` | api-router | New labs task |
+| `task.claimed` | `{ taskId, claimant }` | api-router | Task claimed by user |
+| `task.completed` | `{ taskId }` | api-router | Task marked complete |
+| `comment.added` | `{ entityType, entityId, comment }` | api-router | Comment on bug/task |
+
+### Telemetry Events
+
+Published to `prod-telemetry` / `dev-telemetry`:
+
+| Event Name | Payload | Producer | Purpose |
+|------------|---------|----------|---------|
+| `calendar_data_updated` | `{ userId, eventCount }` | api-router | Calendar sync occurred |
+| `screen_view` | `{ screen, userId, timestamp }` | LockedIn, iOS | Analytics |
+| `user_action` | `{ action, context }` | LockedIn, iOS | User interaction |
+
+---
+
+## Producer Reference
+
+### dormway-core Adapter
+
+**Location:** `services/shared/dormway-core/src/adapters/realtime/ably.adapter.ts`
+
+Generic publishing interface:
+
+```typescript
+const adapter = getAblyAdapter();
+
+// Generic publish
+await adapter.publish(channelName, eventName, data);
+
+// Convenience methods
+await adapter.publishToUserChannel(userId, event, data);
+await adapter.publishUserUpdate(userId, data);
+await adapter.publishDashboardUpdate(userId, updates);
+await adapter.publishProcessingProgress(userId, progress);
+await adapter.publishContextUpdate(contextId, type, data);
+await adapter.publishCampusAlert(campusId, alert);
+await adapter.publishSystemBroadcast(message);
+await adapter.publishDashboardDelta(userId, delta);
+await adapter.publishPathDelta(userId, path, data);
+```
+
+### Engine Publisher
+
+**Location:** `services/engine/src/services/ably-publisher.ts`
+
+Wrapper functions for engine workflows:
+
+```typescript
+// User-scoped
+await publishToUserChannel(userId, event, data);
+await publishDashboardUpdate(userId, updates);
+await publishProcessingProgress(userId, step, total, message);
+
+// Context-scoped
+await publishContextUpdate(contextId, type, data);
+await publishCampusAlert(campusId, alert);
+
+// System
+await publishSystemBroadcast(message);
+await publishChannelEvent(channel, event, data);
+```
+
+### Engine Temporal Activities
+
+**Location:** `services/engine/src/activities/ably.activities.ts`
+
+Activities callable from Temporal workflows:
+
+```typescript
+// Invalidation
+await publishInvalidation({ userId, resource, entityId?, context? });
+await publishInvalidationBatch(userId, resources[]);
+await publishCampusStudentsInvalidation(campusId, resource);
+
+// DayPlan
+await publishDayPlanUpdate(userId, date, dayPlanId);
+```
+
+### API Router Publisher
+
+**Location:** `services/api-router/src/services/ably-service.ts`
+
+```typescript
+await publishUserUpdate(userId, data);
+await publishAblyEvent(channel, event, data);
+await publishCanvasUpdate(userId, data);
+await publishInvalidation({ userId, resource, entityId?, context? });
+await publishInvalidationBatch(userId, resources[]);
+await publishChannelEvent(channel, event, data);
+```
+
+### API Router Growth Publisher
+
+**Location:** `services/api-router/src/services/ably-growth.ts`
+
+Admin-specific publishing:
+
+```typescript
+await publishBugReportUpdate(bugId, action, data);
+await publishLabsTaskUpdate(taskId, action, data);
+await publishLabsTaskPoolUpdate(action, data);
+await publishCommentNotification(entityType, entityId, comment);
+```
+
+---
+
+## Consumer Reference
+
+### dormway-lockedin
+
+**Hook:** `services/dormway-lockedin/src/hooks/useRealtimeInvalidation.ts`
+
+Listens to `user:{userId}:updates` for `invalidate` events:
+
+```typescript
+// Mapping: resource → React Query keys
+const resourceToQueryKeys: Record<InvalidationResource, string[]> = {
+  dashboard: ['dashboard-composite', 'dashboard'],
+  tasks: ['tasks', 'my-tasks'],
+  schedule: ['schedule', 'time-blocks'],
+  academic: ['academic', 'courses', 'grades'],
+  canvas: ['canvas', 'canvas-courses', 'assignments'],
+  courses: ['courses', 'enrolled-courses'],
+  profile: ['profile', 'user-profile'],
+  notifications: ['notifications'],
+  feed: ['feed', 'activity-feed'],
+};
+```
+
+**Provider:** `services/dormway-lockedin/src/components/RealtimeProvider.tsx`
+- Connects to Ably on mount
+- Dispatches `window.dispatchEvent(new CustomEvent('realtime:event', { detail }))`
+
+### dormway-admin
+
+**Hook:** `services/dormway-admin/src/hooks/useAdminGrowthRealtime.ts`
+
+Listens to:
+- `growth:admin-bugs` for bug report updates
+- `growth:admin-tasks` for labs task updates
+
+Shows snackbar notifications and invalidates DataGrid queries.
+
+**Basic Hook:** `services/dormway-admin/src/hooks/useAbly.ts`
+- Generic Ably connection hook
+- In DEV mode, skips actual Ably connection
+
+**Component:** `services/dormway-admin/src/components/AblyFeed.tsx`
+- Visual telemetry stream for dashboard
+- Subscribes to `dev-telemetry` channel
+
+### ably-relay Service
+
+**Location:** `services/ably-relay/src/services/ably-listener.ts`
+
+Subscribes to telemetry channels and routes events:
+- `prod-telemetry` (production)
+- `dev-telemetry` (development)
+
+Routes to:
+- Temporal workflow signals
+- Database writes
+- Metric collection
+
+---
+
+## 🔴 Critical Architecture Gap: Invalidation Coverage
+
+**Linear Ticket:** [DORM-935](https://linear.app/dormwayllc/issue/DORM-935/centralize-ably-invalidation-in-dormway-core)
+
+### Current Problem
+
+Invalidation is fragmented with **~3% coverage** of write operations:
+
+| Category | Write Ops | With Invalidation | Coverage |
+|----------|-----------|-------------------|----------|
+| Web Routes | 150+ | 8 | 5.3% |
+| Admin Routes | 100+ | 0 | 0% |
+| Engine Activities | 100+ | 2 | ~2% |
+
+**Critical gaps:**
+- Canvas routes: 7 write endpoints, 0 invalidations
+- Course lifecycle: 4 write endpoints, 0 invalidations
+- Mobile routes: 30+ write endpoints, 0 invalidations
+
+### Current Architecture (Fragmented)
+
+```
+api-router/ably-service.ts     → defines InvalidationResource type locally
+                               → defines publishInvalidation() locally
+
+engine/ably.activities.ts      → duplicates InvalidationResource type
+                               → duplicates publishInvalidation()
+
+dormway-core/ably.adapter.ts   → has generic publish methods
+                               → NO invalidation-specific methods
+```
+
+### Target Architecture (Centralized)
+
+```
+dormway-core/adapters/realtime/
+├── ably.adapter.ts           → generic Ably publishing
+├── invalidation.ts           → InvalidationResource type
+│                             → publishInvalidation()
+│                             → publishInvalidationBatch()
+│                             → Invalidation registry mapping
+└── index.ts                  → exports everything
+
+Domain services call publishInvalidation() after writes
+Entity factories can optionally publish invalidation
+```
+
+### Implementation Plan
+
+1. **Phase 1:** Move `InvalidationResource` and `publishInvalidation()` to dormway-core
+2. **Phase 2:** Create invalidation registry mapping tables to resources
+3. **Phase 3:** Instrument domain services to publish after writes
+
+---
+
+## Integration Gaps & Opportunities
+
+### Currently NOT Using Real-Time (Could Benefit)
+
+| Event | Current Behavior | Opportunity |
+|-------|-----------------|-------------|
+| User registration | No Ably event | Could publish `user.registered` for admin dashboards |
+| Campus processing complete | Only invalidation | Could show toast in admin when campus enrichment finishes |
+| Term calendar sync | Internal only | Could notify admin of calendar health changes |
+| Syllabus processing | Progress via polling | Could push real-time progress updates |
+
+### Dormway-Admin Gaps
+
+Currently admin only integrates:
+- Growth channels (`growth:admin-bugs`, `growth:admin-tasks`)
+- Telemetry feed visualization (`dev-telemetry`)
+
+**Missing integrations:**
+- `user:{userId}:processing` - Could show when users have background jobs running
+- `campus:{campusId}:alerts` - Could display campus alerts in admin
+- `system:broadcast` - Could show system-wide notifications
+
+---
+
+## User-Facing Toast Audit
+
+All user-facing toasts generated from Ably events in dormway-lockedin.
+
+**Location**: `services/dormway-lockedin/src/components/RealtimeProvider.tsx` → `friendlyEventMessage()`
+
+### Toast Messages by Event
+
+| Event Name | Toast Message | Variant |
+|------------|---------------|---------|
+| `dashboard.update` | "Refreshing your dashboard…" / "Updating your dashboard…" | info |
+| `context.update` | "Your context was refreshed." | info |
+| `dayplan.update` (generating) | "We're putting your day plan together…" | info |
+| `dayplan.update` (ready) | "Your day plan is ready." | success |
+| `processing.started` | "We're processing your document…" | info |
+| `processing.progress` | "Processing your document (X% done)…" | info |
+| `processing.complete` | "All done! Your document is ready." | success |
+| `processing.failed` | "We ran into an issue while processing your document." | error |
+| `upload.started` | "Uploading your file…" | info |
+| `syllabus.processing` | "Processing your syllabus…" | info |
+| `syllabus.completed` | "Your syllabus is ready to review." | success |
+| `syllabus.failed` | "We couldn't process that syllabus. Please try again." | error |
+| `canvas.assignments.updated` | "[Course] has [N] new/changed assignment(s)" | info |
+| `canvas.grades.updated` | "New grade: [Course] - [Assignment]: [Score]" | success |
+| `canvas.sync.complete` | "Canvas sync complete ([N] courses, [M] assignments)." | success |
+
+### Toast Suppression Logic
+
+**Canvas noise reduction** (non-admin users):
+- `canvas.assignments.updated` with ≤3 changes → suppressed (silent refresh)
+- `canvas.grades.updated` → always shown (grades are important)
+- `canvas.sync.complete` → shown only if courses or assignments > 0
+
+**Toast Throttling**:
+- `notify` library includes built-in throttling via `shouldThrottle()` function
+- Prevents toast spam from rapid-fire events
+
+### Toast Library
+
+**Location**: `services/dormway-lockedin/src/lib/notify.ts`
+
+```typescript
+import { notify } from '@/lib/notify';
+
+notify.success('Task completed!');
+notify.info('Processing...');
+notify.warning('Check your connection');
+notify.error('Something went wrong');
+notify.message('Custom message');
+```
+
+---
+
+## Red Dot Badge Opportunities
+
+Visual indicators ("red dot badges") help users notice new activity without intrusive toasts. These should appear on navigation items, tabs, or cards.
+
+### High-Value Badge Locations
+
+| Location | Event Trigger | Badge Clears When |
+|----------|---------------|-------------------|
+| **Courses nav item** | `canvas.grades.updated` | User visits courses page |
+| **Courses nav item** | `canvas.assignments.updated` | User visits courses page |
+| **Dashboard tab** | `dayplan.update` | User views updated day plan |
+| **Documents nav** | `syllabus.completed` | User views the syllabus |
+| **Tasks tab/nav** | `canvas.assignments.updated` (new due dates) | User views tasks |
+| **Schedule nav** | `canvas.sync.complete` (new events) | User views schedule |
+
+### Implementation Pattern
+
+```typescript
+// In a context or hook (e.g., useUnreadBadges)
+const [badges, setBadges] = useState<Record<string, boolean>>({
+  courses: false,
+  tasks: false,
+  documents: false,
+  schedule: false,
+});
+
+// Listen for Ably events
+useEffect(() => {
+  const handleRealtimeEvent = (event: CustomEvent) => {
+    const { name, data } = event.detail;
+
+    if (name === 'canvas.grades.updated' || name === 'canvas.assignments.updated') {
+      setBadges(prev => ({ ...prev, courses: true, tasks: true }));
+    }
+    if (name === 'syllabus.completed') {
+      setBadges(prev => ({ ...prev, documents: true }));
+    }
+    if (name === 'canvas.sync.complete' && data?.assignments > 0) {
+      setBadges(prev => ({ ...prev, schedule: true }));
+    }
+  };
+
+  window.addEventListener('realtime:event', handleRealtimeEvent);
+  return () => window.removeEventListener('realtime:event', handleRealtimeEvent);
+}, []);
+
+// Clear badge when user visits page
+const clearBadge = (key: string) => {
+  setBadges(prev => ({ ...prev, [key]: false }));
+};
+```
+
+### Badge UI Component
+
+```tsx
+// In navigation item
+<NavItem href="/dashboard/courses">
+  Courses
+  {badges.courses && (
+    <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
+  )}
+</NavItem>
+```
+
+### Future Badge Opportunities
+
+| Feature | Event | Notes |
+|---------|-------|-------|
+| New notifications | `notification.created` | When notification system is added |
+| Friend activity | `social.friend.activity` | When social features expand |
+| Campus alerts | `campus.alert` | Urgent campus-wide announcements |
+| New messages | `message.received` | When messaging is added |
+
+---
+
+## System Broadcast Capability
+
+The `system:broadcast` channel enables platform-wide announcements to ALL connected users simultaneously.
+
+### Channel Details
+
+| Property | Value |
+|----------|-------|
+| Channel Name | `system:broadcast` |
+| Scope | All authenticated users |
+| Current Status | **Exists but underutilized** |
+| Producer | engine (via `publishSystemBroadcast()`) |
+| Consumers | LockedIn, iOS, Admin (potential) |
+
+### Use Cases
+
+1. **Scheduled Maintenance**: "DormWay will be briefly unavailable for maintenance at 2:00 AM EST"
+2. **Feature Announcements**: "🎉 New feature: Course comparison is now available!"
+3. **Emergency Alerts**: "We're experiencing issues with Canvas sync. Working on a fix."
+4. **Product Updates**: "Version 2.5 is rolling out with improved schedule views"
+
+### Publishing a Broadcast
+
+**From Engine** (Temporal workflow or activity):
+```typescript
+import { publishSystemBroadcast } from '../services/ably-publisher';
+
+await publishSystemBroadcast({
+  type: 'announcement',
+  title: 'Scheduled Maintenance',
+  message: 'DormWay will be briefly unavailable tonight at 2:00 AM EST.',
+  severity: 'info',  // 'info' | 'warning' | 'error'
+  dismissible: true,
+  expiresAt: '2026-02-04T07:00:00Z',  // Optional: auto-dismiss after this time
+});
+```
+
+**From dormway-core adapter**:
+```typescript
+import { getAblyAdapter } from '@dormway/core';
+
+const adapter = getAblyAdapter();
+await adapter.publishSystemBroadcast({
+  type: 'announcement',
+  title: 'New Feature',
+  message: 'Course comparison is now available in the Courses tab!',
+  severity: 'info',
+  dismissible: true,
+});
+```
+
+### Consuming Broadcasts (Client)
+
+**In RealtimeProvider** (add to existing subscriptions):
+```typescript
+// Subscribe to system broadcast channel
+const broadcastChannel = ably.channels.get('system:broadcast');
+broadcastChannel.subscribe('announcement', (message) => {
+  const { title, message: body, severity, dismissible } = message.data;
+
+  // Show as banner or modal based on severity
+  if (severity === 'error') {
+    showBanner({ title, body, variant: 'error', dismissible });
+  } else {
+    notify[severity](body, { duration: dismissible ? 10000 : Infinity });
+  }
+});
+```
+
+### Admin Dashboard Integration (Opportunity)
+
+Create an admin UI for sending broadcasts:
+
+```typescript
+// POST /api/admin/broadcast
+{
+  title: string;
+  message: string;
+  severity: 'info' | 'warning' | 'error';
+  dismissible: boolean;
+  targetAudience?: 'all' | 'campus:{campusId}' | 'beta';
+  expiresAt?: string;  // ISO timestamp
+}
+```
+
+### In-App Announcements (Replaces Email)
+
+**Goal**: Announce features, updates, tips, and news directly in the app instead of email.
+
+**Why in-app beats email:**
+- 📬 Emails get buried, filtered, or ignored
+- 👀 In-app has ~100% visibility when user is active
+- 🎯 Can target by campus, beta status, feature usage
+- 📊 Can track views/dismissals/CTA clicks
+- ⚡ Instant delivery vs email delays
+
+**Announcement Types:**
+
+| Type | Example | Persistence |
+|------|---------|-------------|
+| **Feature Launch** | "🎉 Course comparison is here! See how your workload stacks up." | Card until dismissed |
+| **Product Update** | "We've improved Canvas sync - grades now update in real-time." | Card for 7 days |
+| **Tips & Tricks** | "Pro tip: Use keyboard shortcuts (⌘K) to navigate faster." | Card until dismissed |
+| **Onboarding Nudge** | "You haven't connected Canvas yet. Get automatic assignment tracking!" | Card until action taken |
+| **Beta Invite** | "Want early access to AI study plans? Join the beta." | Card until dismissed |
+| **Seasonal/Event** | "Finals week mode: We've enabled focus features for you." | Card for event duration |
+| **Changelog** | "What's new in v2.5: 5 improvements based on your feedback." | Card for 14 days |
+
+**Targeting Options:**
+
+```typescript
+await publishAnnouncement({
+  type: 'feature-launch',
+  title: 'Course Comparison is Here',
+  message: 'See how your workload compares across courses.',
+  cta: { label: 'Try it now', href: '/dashboard/courses?view=compare' },
+
+  // Targeting (optional - defaults to all users)
+  target: {
+    audience: 'all',                    // 'all' | 'beta' | 'new-users' | 'power-users'
+    campusIds: ['uuid1', 'uuid2'],      // Specific campuses (optional)
+    hasFeature: 'canvas-connected',      // Users with specific feature enabled
+    excludeFeature: 'dismissed-compare', // Exclude users who dismissed before
+  },
+
+  // Lifecycle
+  startsAt: '2026-02-03T09:00:00Z',     // Don't show before this time
+  expiresAt: '2026-02-17T00:00:00Z',    // Auto-remove after 2 weeks
+  dismissible: true,
+  priority: 'normal',                    // 'low' | 'normal' | 'high'
+});
+```
+
+**Admin UI for Announcements:**
+
+Create a simple admin page at `/admin/announcements`:
+- **Draft announcements** with live preview
+- **Schedule** for future (e.g., launch day)
+- **Target** by audience segment
+- **Track** views, dismissals, CTA clicks
+- **Archive** past announcements
+
+**Analytics Events:**
+```typescript
+// Track when user sees announcement
+amplitude.track('announcement_viewed', { announcementId, type });
+
+// Track CTA clicks
+amplitude.track('announcement_cta_clicked', { announcementId, href });
+
+// Track dismissals
+amplitude.track('announcement_dismissed', { announcementId, viewDuration });
+```
+
+### Priority Card in Feed (Opportunity)
+
+Instead of fleeting toasts, high-priority broadcasts could render as a **pinned card** at the top of the dashboard feed. This provides:
+- **Persistence** - Card stays until user dismisses or it expires
+- **Rich content** - Can include links, CTAs, images
+- **Better visibility** - Doesn't disappear after 5 seconds
+
+**Suggested Event Structure:**
+```typescript
+await publishSystemBroadcast({
+  type: 'priority-card',
+  title: 'Canvas Integration Now Available',
+  message: 'Connect your Canvas account to automatically sync assignments and grades.',
+  severity: 'info',
+  cta: {
+    label: 'Connect Canvas',
+    href: '/dashboard/integrations?setup=canvas',
+  },
+  icon: 'graduation-cap',  // Lucide icon name
+  dismissible: true,
+  expiresAt: '2026-02-10T00:00:00Z',
+});
+```
+
+**Feed Integration Pattern:**
+```typescript
+// In dashboard feed/widget data hook
+const [priorityCards, setPriorityCards] = useState<PriorityCard[]>([]);
+const [dismissedCards, setDismissedCards] = useLocalStorage<string[]>('dismissed-cards', []);
+
+useEffect(() => {
+  const channel = ably.channels.get('system:broadcast');
+  channel.subscribe('priority-card', (message) => {
+    const card = message.data;
+    // Don't show if already dismissed or expired
+    if (dismissedCards.includes(card.id)) return;
+    if (card.expiresAt && new Date(card.expiresAt) < new Date()) return;
+
+    setPriorityCards(prev => [card, ...prev.filter(c => c.id !== card.id)]);
+  });
+}, []);
+
+// Render at top of feed
+{priorityCards.map(card => (
+  <PriorityCardWidget
+    key={card.id}
+    {...card}
+    onDismiss={() => {
+      setDismissedCards(prev => [...prev, card.id]);
+      setPriorityCards(prev => prev.filter(c => c.id !== card.id));
+    }}
+  />
+))}
+```
+
+**Priority Card vs Toast Decision Matrix:**
+
+| Scenario | Use Toast | Use Priority Card |
+|----------|-----------|-------------------|
+| Brief status update | ✅ | |
+| Maintenance in 1 hour | ✅ | |
+| New feature announcement | | ✅ |
+| Action required from user | | ✅ |
+| Ongoing incident | | ✅ |
+| Processing complete | ✅ | |
+| Beta invite/onboarding CTA | | ✅ |
+
+### Broadcast Best Practices
+
+1. **Use sparingly** - Broadcasts interrupt all users; reserve for important announcements
+2. **Keep messages short** - Users should understand in <5 seconds
+3. **Set expiration** - Auto-dismiss stale announcements
+4. **Make dismissible** - Unless truly critical (downtime, data loss)
+5. **Test in dev first** - Use `dev-telemetry` channel for testing
+6. **Choose the right format** - Toast for transient, card for persistent/actionable
+
+---
+
+## Channel Naming Conventions
+
+```
+{scope}:{identifier}:{category}
+
+Scopes:
+- user      → User-specific channel
+- campus    → Campus-wide channel
+- city      → City-level channel
+- course    → Course-specific channel
+- growth    → Admin/growth operations
+- system    → Platform-wide
+- {env}-telemetry → Client telemetry (prod-telemetry, dev-telemetry)
+```
+
+---
+
+## Debugging Checklist
+
+1. **Message not arriving?**
+   - Check channel name matches exactly (case-sensitive)
+   - Verify producer is actually publishing (check logs)
+   - Confirm consumer is subscribed to correct channel
+   - Check Ably connection state
+
+2. **UI not updating?**
+   - For LockedIn: Check if receiving `invalidate` event (not just informational events)
+   - Open realtime debug view in LockedIn
+   - Verify React Query key mapping
+
+3. **Telemetry not processing?**
+   - Confirm using correct telemetry channel (`prod-telemetry` vs `dev-telemetry`)
+   - Check ably-relay is running and subscribed
+   - Verify Temporal workflow exists to receive signal
+
+---
+
+## Related Documentation
+
+- [Realtime Invalidation & Update Propagation Deep Dive (Current)](/docs/engineering/technical/realtime/realtime-invalidation-update-propagation-deep-dive-current) - Detailed invalidation patterns
+- [Realtime Adapter](/docs/engineering/technical/dormway-core/adapters/realtime-adapter) - dormway-core adapter usage
+- Ably Real-Time Updates Implementation Strategy - Original architecture strategy
+- Event Flow Architecture with Ably - High-level event flow
+- [Ably Relay Service Architecture](/docs/engineering/architecture/ably-relay-service-architecture) - Telemetry relay details
+
+---
+
+**Last Updated**: 2026-02-03
+**Maintainer**: Platform Team
+**Related Tickets**:
+- [DORM-935](https://linear.app/dormwayllc/issue/DORM-935/centralize-ably-invalidation-in-dormway-core) - Centralize Ably invalidation in dormway-core
+- [DORM-936](https://linear.app/dormwayllc/issue/DORM-936/expand-web-feed-coverage-headsupwidget-full-feed) - Expand Web Feed Coverage (related to system broadcasts)
+
+---
+
+## Changelog
+
+| Date | Change |
+|------|--------|
+| 2026-02-03 | Added DORM-936 reference for Web Feed Expansion (relates to system broadcasts) |
+| 2026-02-03 | Added User-Facing Toast Audit, Red Dot Badge Opportunities, System Broadcast Capability sections |
+| 2026-02-03 | Added Critical Architecture Gap section with DORM-935 ticket |
+| 2026-02-03 | Initial Source of Truth document created |

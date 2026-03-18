@@ -29,8 +29,11 @@ description: "Class scheduled for March 8, 10:00 AM EDT..."
 - `time_blocks` enforces exactly one owner: either `user_id` or `context_id` (check constraint in table DDL).
 - `time_blocks` deduplicates by `source_type + source_id + (user_id or context_id)` (unique index).
 - `course_code_normalized` exists on both `time_blocks` and `student_time_blocks` and is the canonical key for schedule reconciliation and course health metrics.
+- Google calendar credential lifecycle is canonical in `calendar_accounts` and mediated by `@dormway/core` `CalendarCredentialsService` (save/list/token update/sync status).
 - Calendar storage validates timezone strings and normalizes to UTC (`normalizeToProperUTC`); floating times without timezone are warned and treated as server-local.
 - ICS all-day detection: `normalizeICSData` sets `all_day` via date-only ICS markers (`datetype: date`, `VALUE=DATE`), and Canvas assignment normalization preserves `assignment.all_day` to avoid timezone shifts.
+- Token encryption key parity (`TOKEN_ENCRYPTION_KEY` vs `CANVAS_TOKEN_ENCRYPTION_KEY`) is a required health signal for calendar decryption safety across api-router + engine.
+- Calendar sync SLO surfaces must include decrypt failure count, sync success count, sync latency distribution, and p95 last-successful-sync age.
 - `student_time_blocks` is **currently a BASE TABLE** (not a view) in production Neon. It was intended to be a view alias to `v_student_calendar_events` but the migration creating the view did not convert the existing table. User-only sources (e.g., `enrolled`, schedule rules) write directly to this table. Data deletion operations must clear both `time_blocks` and `student_time_blocks`. API reads from `student_time_blocks` and filters by active lifecycle.
 
 ### DST-Aware Date Handling (Critical)
@@ -78,8 +81,9 @@ const displayTime = formatInTimeZone(
 - API reads:
   - `GET /calendar/events` queries `student_time_blocks` for the authenticated user.
   - `GET /v2/students/me/calendar/events` is the web schedule canonical endpoint (v2 range wrapper over calendar events).
-- `POST /v2/students/me/time-blocks` creates manual time blocks for web tasks/schedule.
-- `DELETE /v2/students/me/time-blocks/:id` soft-deletes manual time blocks.
+  - **Proxy/gateway note:** when calling through LockedIn's proxy (or Zuplo relay), use `/api/v2/*` paths; the api-router mounts v2 routes at both `/v2` and `/api/v2`.
+  - `POST /v2/students/me/time-blocks` creates manual time blocks for web tasks/schedule.
+  - `DELETE /v2/students/me/time-blocks/:id` soft-deletes manual time blocks.
 - `scheduleProcessor` must not return an empty enrolled schedule solely due to missing term metadata; it retries enrollment resolution using `term_id` and then unfiltered enrollments before giving up.
 - `GET /v2/students/me/preferences` provides calendar timezone display preferences.
 - `GET /calendar/master` joins student enrollments to `time_blocks` for course schedules.
@@ -182,6 +186,11 @@ sequenceDiagram
 - `services/engine/src/workflows/studentProcessor.workflow.ts` (`scheduleProcessor` orchestration)
 - `services/engine/src/utils/timezone.utils.ts` (UTC storage guidance + timezone helpers)
 - `services/shared/dormway-core/src/domains/time-blocks/time-blocks.service.ts` (DST-correct block generation with `fromZonedTime`)
+- `services/shared/dormway-core/src/domains/calendar-credentials/calendar-credentials.service.ts` (canonical Google calendar credentials lifecycle)
+- `services/shared/dormway-core/src/security/token-encryption.ts` (shared encryption/decryption contract)
+- `services/engine/src/metrics/calendar-slo-metrics.ts` (calendar SLO counters/histogram and health snapshot)
+- `services/api-router/src/routes/health-routes.ts` (calendar sync health signal + p95 sync freshness)
+- `docs/operations/calendar-sync-slo-runbook.md` (operations response for calendar SLO regressions)
 
 ### Database Migrations
 - `services/engine/migrations/create_generic_time_blocks.sql` (`time_blocks` DDL + `v_student_calendar_events`)
@@ -208,6 +217,7 @@ sequenceDiagram
 - **Adding schedule time storage:** NEVER use `new Date(localTime).toISOString()`. Use `fromZonedTime(localTime, timezone).toISOString()` to correctly handle DST.
 
 ## Recent Changes
+- 2026-02-10: Calendar credential lifecycle is now centralized in `@dormway/core` (`CalendarCredentialsService`), and health/SLO signals now explicitly gate on encryption key parity plus sync freshness percentile.
 - 2026-02-02: Fixed DST bug in `lecture.entity.ts` - added timezone-aware formatting methods (`formatScheduledStart()`, `formatScheduledEnd()`) using `date-fns-tz`. Added `timezone` field to `LectureData` and `LectureSummary` types. Deprecated bare `scheduledStart`/`scheduledEnd` Date getters for display purposes. Added DST-Aware Date Handling section to this SoT.
 - 2026-02-02: Added `course_code_normalized` columns + indexes and extended `time_block_source_type` to include `canvas`/`schedule_import`/`manual_course_add`.
 - 2026-01-25: Syllabus calendar normalization now resolves Week/Finals references using term windows and maps class_sessions/schedule_events into calendar events for assignment deadlines.
