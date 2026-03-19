@@ -1,12 +1,277 @@
 ---
 title: "Temporal Workflows"
-description: "How to write, test, and debug Temporal workflows and activities in the DormWay engine."
+description: "How to write, register, test, and debug Temporal workflows and activities in the DormWay engine."
 source:
-  type: "obsidian"
+  type: "manual"
   path: ""
-  distilled_at: ""
+  distilled_at: "2026-03-19"
 ---
 
 # Temporal Workflows
 
-*This page is pending distillation.*
+DormWay uses [Temporal](https://temporal.io) for all long-running, durable business logic. The engine service (`services/engine/`) contains all workflows and activities.
+
+**Engine port:** 3030
+**Service path:** `services/engine/src/`
+
+## Core Concepts
+
+- **Workflows** — Durable, deterministic orchestrators. They define the sequence of steps but do no I/O themselves.
+- **Activities** — Functions that perform actual I/O (database queries, external API calls, LLM calls). Activities are retried automatically on failure.
+- **Task queues** — Route work to the correct worker pool. DormWay uses three:
+  - `student-worker` — Student-related workflows
+  - `campus-worker` — Campus sync and onboarding
+  - `city-worker` — City-level operations
+
+<Warning>
+  **Workflows must be deterministic.** Never use `Date.now()`, `Math.random()`, or make external calls inside workflow code. Put all I/O and non-deterministic logic in activities.
+</Warning>
+
+## Workflow Naming Conventions
+
+- File naming: `*.workflow.ts`
+- Function naming: PascalCase with `Workflow` suffix (e.g., `processSingleCampusWorkflow`)
+- Workflow IDs: Include entity IDs for idempotency (e.g., `student-watcher-${studentId}`)
+
+## Key Workflows
+
+| Workflow | Task Queue | Description |
+|----------|------------|-------------|
+| `StudentWatcher` | `student-worker` | Digital twin — runs continuously per student, manages DayPlan generation |
+| `processSingleCampus` | `campus-worker` | Full campus onboarding: academic calendar, term contexts, metadata enrichment |
+| `campusOnboardingWorkflow` | `campus-worker` | Batch campus onboarding from registry |
+| `enrichCampusesPrioritized` | `campus-worker` | Enrichment-only mode (skips full Perplexity fetch) |
+| `processSemester` | `student-worker` | Process a student's semester (courses, schedule) |
+
+## Build Requirements
+
+<Warning>
+  After ANY workflow or activity change, you must run **both** build commands. Running only `npm run build` is not enough — Temporal requires a separately bundled workflow artifact.
+</Warning>
+
+```bash
+cd services/engine
+
+# After any change:
+npm run build           # Compile TypeScript
+npm run build:workflow  # Bundle workflows for Temporal sandbox
+
+# Then restart engine
+make remote-dev-restart s=engine
+```
+
+## Adding a New Workflow
+
+### 1. Create the workflow file
+
+```typescript
+// services/engine/src/workflows/myFeature.workflow.ts
+import { proxyActivities } from '@temporalio/workflow';
+import type * as activities from '../activities/myFeature.activities';
+
+const { myActivity, anotherActivity } = proxyActivities<typeof activities>({
+  startToCloseTimeout: '5 minutes',
+  retry: { maximumAttempts: 3 },
+});
+
+export async function myFeatureWorkflow(entityId: string): Promise<void> {
+  const data = await myActivity(entityId);
+  await anotherActivity(entityId, data);
+}
+```
+
+### 2. Export from the workflows index
+
+```typescript
+// services/engine/src/workflows/index.ts
+export * from './myFeature.workflow';
+```
+
+### 3. Create activities
+
+```typescript
+// services/engine/src/activities/myFeature.activities.ts
+import { getCampusFactory } from '@dormway/core';
+
+export async function myActivity(entityId: string): Promise<SomeData> {
+  const factory = getCampusFactory();
+  const result = await factory.getById(entityId);
+  if (!result.success) throw new Error(result.error);
+  return result.data;
+}
+
+export async function anotherActivity(entityId: string, data: SomeData): Promise<void> {
+  // ... more I/O
+}
+```
+
+### 4. Export activities from the index
+
+```typescript
+// services/engine/src/activities/index.ts
+export * from './myFeature.activities';
+```
+
+### 5. Register activities in the worker
+
+```typescript
+// services/engine/src/index.ts
+import * as myFeatureActivities from './activities/myFeature.activities';
+
+const worker = await Worker.create({
+  activities: {
+    ...existingActivities,
+    ...myFeatureActivities,  // MUST add here or Temporal won't find them
+  },
+  // ...
+});
+```
+
+## Triggering Workflows from api-router
+
+Use the centralized Temporal client — never create a new `Connection` instance:
+
+```typescript
+import { getTemporalClient } from '../utils/temporal';
+
+const client = await getTemporalClient();
+
+await client.startWorkflow({
+  workflowId: `my-feature-${entityId}`,
+  workflowName: 'myFeatureWorkflow',
+  taskQueue: 'student-worker',
+  args: [entityId],
+});
+```
+
+**Example — trigger campus onboarding on user signup:**
+
+```typescript
+await temporalClient.startWorkflow({
+  workflowId: `campus-onboard-signup-${campusId}-${userId}`,
+  workflowName: 'processSingleCampus',
+  taskQueue: 'campus-worker',
+  args: [campusId],
+});
+```
+
+The idempotent workflow ID ensures only one run per campus if multiple users sign up simultaneously.
+
+## Signals
+
+Signals allow external code to send events into a running workflow:
+
+```typescript
+// In the workflow — declare signal handler
+import { setHandler, defineSignal } from '@temporalio/workflow';
+
+const refreshSignal = defineSignal<[RefreshPayload]>('refresh');
+
+export async function StudentWatcherWorkflow(studentId: string) {
+  setHandler(refreshSignal, async (payload) => {
+    // Handle signal — update internal state
+  });
+
+  // Main workflow loop
+  while (true) {
+    await runDayPlanGeneration(studentId);
+    await sleep('1 day');
+  }
+}
+
+// From api-router — send a signal to a running workflow
+const handle = client.getHandle(`student-watcher-${studentId}`);
+await handle.signal(refreshSignal, { reason: 'schedule-updated' });
+```
+
+## Timezones in Workflows
+
+<Warning>
+  The engine uses `date-fns-tz` **v2** (not v3). The API changed significantly between versions.
+</Warning>
+
+In date-fns-tz v2:
+- `utcToZonedTime()` returns a Date where **UTC getters** return zoned values
+- Always use `getUTCDay()`, `setUTCDate()`, `setUTCHours()` — NOT `getDay()`, `setDate()`, `setHours()`
+- v3 names (`toZonedTime`/`fromZonedTime`) do not exist in v2
+
+```typescript
+import { utcToZonedTime, zonedTimeToUtc } from 'date-fns-tz';
+
+// Convert UTC → campus local time
+const zonedDate = utcToZonedTime(new Date(), campusTimezone);
+const dayOfWeek = zonedDate.getUTCDay();   // ✅ UTC getter on zoned date
+const hour = zonedDate.getUTCHours();      // ✅
+
+// ❌ Wrong — these return UTC values, not zoned
+// const dayOfWeek = zonedDate.getDay();
+// const hour = zonedDate.getHours();
+```
+
+## Workflow State Management (StudentWatcher)
+
+StudentWatcher persists state between iterations. Use the correct call signature:
+
+```typescript
+// ✅ CORRECT — pass an object with stateData key
+await saveWorkflowState(studentId, {
+  stateData: workflowStateData,
+  lastPlanGeneration: new Date().toISOString(),
+});
+
+// ❌ WRONG — passes workflowStateData directly (wrong arg shape, state won't persist)
+// await saveWorkflowState(studentId, workflowStateData);
+```
+
+Signal handlers must use timezone-aware dates:
+
+```typescript
+// ✅ CORRECT — timezone-aware "today"
+const today = new Date().toLocaleDateString('en-CA', { timeZone: timezone });
+
+// ❌ WRONG — UTC date, mismatches cron's local "today"
+// const today = new Date().toISOString().split('T')[0];
+```
+
+## Workflow Retry and Timeout Patterns
+
+```typescript
+const { importantActivity } = proxyActivities<typeof activities>({
+  startToCloseTimeout: '10 minutes',
+  retry: {
+    maximumAttempts: 5,
+    initialInterval: '1s',
+    backoffCoefficient: 2,
+    maximumInterval: '60s',
+  },
+});
+
+const { quickActivity } = proxyActivities<typeof activities>({
+  startToCloseTimeout: '30 seconds',
+  retry: { maximumAttempts: 3 },
+});
+```
+
+## Checking Workflow Status
+
+```bash
+# List running workflows
+ssh dev-vm 'docker exec docker-engine-1 temporal workflow list'
+
+# Check a specific workflow
+ssh dev-vm 'docker exec docker-engine-1 temporal workflow describe --workflow-id "student-watcher-USER_ID"'
+
+# View workflow history
+ssh dev-vm 'docker exec docker-engine-1 temporal workflow show --workflow-id "WORKFLOW_ID"'
+```
+
+## Common Mistakes
+
+| Mistake | Consequence | Fix |
+|---------|-------------|-----|
+| Not running `build:workflow` | Temporal uses stale bundled code | Always run both builds |
+| Not exporting from index | Activity "not registered" error at runtime | Add to `activities/index.ts` |
+| Not registering in worker | "Activity not found" error | Add to `src/index.ts` worker definition |
+| I/O inside workflow code | Non-determinism errors on replay | Move all I/O to activities |
+| Creating new Temporal connections | Connection leaks | Use `getTemporalClient()` |
+| Using date-fns-tz v3 API names | TypeScript/runtime error | Use v2 API: `utcToZonedTime`, `zonedTimeToUtc` |

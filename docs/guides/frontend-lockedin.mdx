@@ -2,11 +2,193 @@
 title: "Frontend: LockedIn (Next.js)"
 description: "Development patterns, component conventions, and rules for the dormway-lockedin Next.js web app."
 source:
-  type: "obsidian"
+  type: "manual"
   path: ""
-  distilled_at: ""
+  distilled_at: "2026-03-19"
 ---
 
 # Frontend: LockedIn (Next.js)
 
-*This page is pending distillation.*
+`dormway-lockedin` is the student-facing Next.js web application. It runs on port 3008.
+
+**Service path:** `services/dormway-lockedin/`
+
+## Hot Reload — Never Restart
+
+<Warning>
+  **dormway-lockedin uses Turbopack and hot reloads automatically.** Never restart the container after code changes. Restarting is slow (30-60s) and unnecessary. Only restart for dependency changes, environment variable changes, or config file changes.
+</Warning>
+
+## File Edit Rules
+
+<Warning>
+  **Always use `Write` (not multiple `Edit` calls) for dormway-lockedin files.**
+
+  Every filesystem write triggers Turbopack. Multiple sequential edits = multiple filesystem events = cache corruption risk. A single `Write` is atomic and safe.
+
+  Process: Read the full file → make all changes mentally → write the complete new version in one tool call.
+</Warning>
+
+This applies even for a single small change. Turbopack can pick up an intermediate (truncated) file state between Edit calls and cache a malformed parse, requiring a container restart.
+
+## Component Discovery — Search Before Assuming
+
+<Warning>
+  **Always search for the exact UI text before assuming a component name.** Components are often named differently from their apparent function.
+</Warning>
+
+```bash
+# Find the component that shows "Ask a question" menu
+grep -r "Ask a question" services/dormway-lockedin/src/components/
+
+# Find all modal components
+grep -r "createPortal" services/dormway-lockedin/src/components/
+
+# List available UI primitives
+ls services/dormway-lockedin/src/components/ui/
+```
+
+**Real example:** A floating action button showing "Ask a question", "Share Feedback", "Take notes" menu is `AceChatBubble.tsx` — not `AceFAB.tsx`. Searching for the exact text finds the right file instantly.
+
+## Available UI Components
+
+Before using any component, verify it exists:
+
+```bash
+ls services/dormway-lockedin/src/components/ui/
+```
+
+Currently available:
+
+| Component | File | Notes |
+|-----------|------|-------|
+| Sheet | `sheet.tsx` | Slide-in panel |
+| Confirm dialog | `confirm-dialog.tsx` | Confirmation prompts |
+| Button | `button.tsx` | |
+| Input | `input.tsx` | |
+| Textarea | `textarea.tsx` | |
+| Label | `label.tsx` | |
+| Overlay system | `overlay-system/` | Inline, Hint, Quick, Deep, Critical overlays |
+| Toast | `toast/` | Notifications |
+
+<Warning>
+  `@/components/ui/dialog` (shadcn Dialog) **does not exist** in dormway-lockedin. Using it will cause `Module not found` build errors. Use the `createPortal` modal pattern instead.
+</Warning>
+
+## Modal Pattern (createPortal)
+
+dormway-lockedin modals use `createPortal` + a custom overlay — not shadcn Dialog. Reference: `GenericUploadModal.tsx`.
+
+```typescript
+import { createPortal } from 'react-dom';
+import { useState, useEffect } from 'react';
+
+export function MyModal({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const [mounted, setMounted] = useState(false);
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  if (!open || !mounted) return null;
+
+  const modal = (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      {/* Backdrop */}
+      <div
+        className="fixed inset-0 bg-black/60 backdrop-blur-sm"
+        onClick={onClose}
+      />
+      {/* Modal Content */}
+      <div className="relative z-10 w-full max-w-lg rounded-2xl bg-[var(--ds-surface-1)] border border-[var(--ds-border-1)] shadow-2xl">
+        {/* your content */}
+      </div>
+    </div>
+  );
+
+  return createPortal(modal, document.body);
+}
+```
+
+## Design Tokens
+
+dormway-lockedin uses CSS custom properties prefixed with `--ds-*`:
+
+```css
+/* Surfaces */
+--ds-surface-1
+--ds-surface-2
+
+/* Borders */
+--ds-border-1
+
+/* Text */
+--ds-text-primary
+--ds-text-secondary
+```
+
+The app supports multiple themes: `light`, `dark`, `glass`, `paper`, `calm`.
+
+## Quick Overlay Focus Theft Prevention
+
+When using `useOverlayLifecycle`, the options object **must** be memoized:
+
+```typescript
+// ✅ CORRECT — memoized options prevent re-renders
+const lifecycleOptions = useMemo(() => ({
+  onOpen: handleOpen,
+  onClose: handleClose,
+}), [handleOpen, handleClose]);
+
+useOverlayLifecycle(lifecycleOptions);
+
+// ❌ WRONG — inline object causes re-renders → focus theft
+useOverlayLifecycle({ onOpen: handleOpen, onClose: handleClose });
+```
+
+## No Browser Alerts
+
+Never use browser dialogs in dormway-lockedin:
+
+```typescript
+// ❌ NEVER use these
+window.alert('message');
+window.confirm('Are you sure?');
+window.prompt('Enter value');
+
+// ✅ Use confirm-dialog for confirmations
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
+
+// ✅ Use notify for simple messages
+import { notify } from '@/lib/notify';
+notify('Operation complete');
+```
+
+## Importing from API Router
+
+dormway-lockedin fetches data via the API router on port 3001 locally, or through the Zuplo gateway in production. Use the configured `apiClient` or `fetch` with the appropriate base URL from env vars.
+
+```typescript
+// API calls use NEXT_PUBLIC_API_BASE_URL
+const response = await fetch(`${process.env.NEXT_PUBLIC_API_BASE_URL}/v2/students/me/courses`);
+```
+
+## Pre-Implementation Checklist
+
+Before implementing any UI feature:
+
+- [ ] Search for exact UI text to find the right component: `grep -r "text" services/dormway-lockedin/src/`
+- [ ] Verify UI components exist: `ls services/dormway-lockedin/src/components/ui/`
+- [ ] Read a similar existing component to understand patterns
+- [ ] Plan all changes before writing — use `Write` not multiple `Edit` calls
+- [ ] Never use `dialog` from shadcn — use `createPortal` pattern
+
+## Key Reference Components
+
+| Pattern | File |
+|---------|------|
+| Modal with createPortal | `src/components/GenericUploadModal.tsx` |
+| Floating menu | `src/components/AceChatBubble.tsx` |
+| Confirm dialog | `src/components/ui/confirm-dialog.tsx` |
+| Sheets | `src/components/ui/sheet.tsx` |
+| Overlay system | `src/components/ui/overlay-system/` |

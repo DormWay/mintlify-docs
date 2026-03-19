@@ -1,12 +1,317 @@
 ---
 title: "Debugging Playbook"
-description: "Step-by-step debugging procedures for common DormWay failure modes: API, workflows, sync, and auth."
+description: "Log capture, database queries, API testing, service health checks, and common DormWay failure modes."
 source:
-  type: "obsidian"
+  type: "manual"
   path: ""
-  distilled_at: ""
+  distilled_at: "2026-03-19"
 ---
 
 # Debugging Playbook
 
-*This page is pending distillation.*
+Practical debugging procedures for the DormWay platform. When something is broken, follow this order: check the API response → check the database → trace backwards.
+
+## Logs
+
+### Capture logs
+
+```bash
+# Docker service logs (from the remote VM)
+./scripts/capture-logs.sh server
+
+# Filter out noise
+./scripts/capture-logs.sh server --clean
+
+# Errors only
+./scripts/capture-logs.sh server --errors-only
+
+# Specific service
+./scripts/capture-logs.sh server -s api-router
+./scripts/capture-logs.sh server -s engine
+
+# Temporal workflow history
+./scripts/capture-logs.sh temporal
+```
+
+Log files are saved to `.workspace/logs/{server,temporal}/latest.log`.
+
+### Tail logs live (remote VM)
+
+```bash
+# Via Makefile
+make remote-dev-logs s=api-router
+make remote-dev-logs s=engine
+
+# Directly via SSH
+ssh dev-vm 'docker logs docker-api-router-1 --tail 50 -f'
+ssh dev-vm 'docker logs docker-engine-1 --tail 100 -f'
+
+# Dozzle web UI (all services)
+open http://localhost:8888
+```
+
+---
+
+## API Testing
+
+<Note>
+  All `curl` commands must use `bash -c` wrapper when running from Claude Code's sandbox. This escapes the sandbox to access localhost.
+</Note>
+
+### Test an endpoint directly
+
+```bash
+# Basic endpoint check
+bash -c 'curl -s "http://localhost:3001/health" | jq .'
+
+# Authenticated endpoint (bypass JWT in local dev)
+bash -c 'curl -s "http://localhost:3001/api/v2/students/me/courses" \
+  -H "X-User-Id: YOUR_USER_ID" \
+  -H "X-User-Role: authenticated" | jq .'
+
+# Admin endpoint
+bash -c 'curl -s "http://localhost:3001/api/admin/campus-configs" \
+  -H "X-User-Id: 058d2a14-ab1a-49c0-aa67-0312fd87e342" \
+  -H "X-User-Role: admin" | jq .'
+
+# Dashboard BFF
+bash -c 'curl -s "http://localhost:3001/dashboard/v1/composite?tab=home" \
+  -H "X-User-Id: YOUR_USER_ID" \
+  -H "X-User-Role: authenticated" | jq .'
+```
+
+### Check service health endpoints
+
+```bash
+bash -c 'curl -s http://localhost:3001/health'   # api-router
+bash -c 'curl -s http://localhost:3030/health'   # engine
+bash -c 'curl -s http://localhost:3032/health'   # ably-relay
+```
+
+### Inspect API response shape
+
+```bash
+# See top-level keys
+bash -c 'curl -s "http://localhost:3001/api/endpoint" \
+  -H "X-User-Id: USER_ID" \
+  -H "X-User-Role: authenticated" | jq "keys"'
+
+# Check a specific field
+bash -c 'curl -s "http://localhost:3001/api/endpoint" \
+  -H "X-User-Id: USER_ID" \
+  -H "X-User-Role: authenticated" | jq ".data.fieldName"'
+```
+
+---
+
+## Database Queries
+
+<Warning>
+  **Always use `DATABASE_URL_ADMIN`** (not `DATABASE_URL`). The standard URL has RLS (Row Level Security) enabled and will return empty results when debugging. The admin URL bypasses RLS.
+</Warning>
+
+### The one correct pattern
+
+```bash
+cd /Users/ethankaplan/Development/dormway-beta-workspace/.repos/dormway-platform
+
+# ✅ CORRECT — outer bash -c escapes sandbox, inner expands $DATABASE_URL_ADMIN
+bash -c 'doppler run -- bash -c '\''psql "$DATABASE_URL_ADMIN" -c "SELECT ..."'\'''
+```
+
+### Common queries
+
+```bash
+# Check accounts
+bash -c 'doppler run -- bash -c '\''psql "$DATABASE_URL_ADMIN" -c "SELECT id, email, created_at FROM accounts LIMIT 5;"'\'''
+
+# Get a student's campus
+bash -c 'doppler run -- bash -c '\''psql "$DATABASE_URL_ADMIN" -c "
+  SELECT c.id, c.name, c.type
+  FROM accounts a
+  JOIN contexts sc ON sc.user_id = a.id AND sc.type = '\''student'\''
+  JOIN contexts c ON c.id = sc.parent_id AND c.type = '\''campus'\''
+  WHERE a.id = '\''USER_ID'\'';
+"'\'''
+
+# Check contexts hierarchy
+bash -c 'doppler run -- bash -c '\''psql "$DATABASE_URL_ADMIN" -c "
+  SELECT id, name, type, parent_id
+  FROM contexts
+  WHERE type IN ('\''city'\'', '\''campus'\'')
+  LIMIT 10;
+"'\'''
+
+# Check service_data (always include fetched_at for partition pruning)
+bash -c 'doppler run -- bash -c '\''psql "$DATABASE_URL_ADMIN" -c "
+  SELECT method, fetched_at, user_id
+  FROM service_data
+  WHERE fetched_at >= NOW() - INTERVAL '\''7 days'\''
+  ORDER BY fetched_at DESC
+  LIMIT 10;
+"'\'''
+
+# Check migration history
+bash -c 'doppler run -- bash -c '\''psql "$DATABASE_URL_ADMIN" -c "
+  SELECT filename, success, executed_at
+  FROM migration_history
+  ORDER BY executed_at DESC LIMIT 10;
+"'\'''
+```
+
+### Complex queries — write to file first
+
+For queries with lots of quotes, write SQL to a temp file then execute it:
+
+```bash
+# Write query to temp file (avoids quote escaping hell)
+cat > /tmp/debug_query.sql << 'EOF'
+SELECT
+  a.email,
+  sc.id as student_context_id,
+  c.name as campus_name,
+  cc.current_term_data->>'name' as current_term
+FROM accounts a
+JOIN contexts sc ON sc.user_id = a.id AND sc.type = 'student'
+JOIN contexts c ON c.id = sc.parent_id AND c.type = 'campus'
+LEFT JOIN campus_configs cc ON cc.campus_id = c.id
+WHERE a.email = 'user@example.com';
+EOF
+
+bash -c 'doppler run -- bash -c '\''psql "$DATABASE_URL_ADMIN" -f /tmp/debug_query.sql'\'''
+```
+
+---
+
+## Service Health Checks
+
+### Check all container status
+
+```bash
+make remote-dev-status
+
+# Or directly via SSH
+ssh dev-vm 'docker ps -a --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"'
+```
+
+### Restart a specific service
+
+```bash
+make remote-dev-restart s=api-router
+make remote-dev-restart s=engine
+make remote-dev-restart s=ably-relay
+```
+
+### Check if dormway-core is built
+
+```bash
+ssh dev-vm 'ls -la ~/dormway-platform/services/shared/dormway-core/dist/ | head -5'
+```
+
+If `dist/` is empty or missing, build it:
+
+```bash
+ssh dev-vm 'cd ~/dormway-platform/services/shared/dormway-core && npm run build'
+make remote-dev-restart s=api-router
+```
+
+---
+
+## Temporal Workflow Debugging
+
+### List running workflows
+
+```bash
+ssh dev-vm 'docker exec docker-engine-1 temporal workflow list'
+```
+
+### Describe a specific workflow
+
+```bash
+ssh dev-vm 'docker exec docker-engine-1 temporal workflow describe \
+  --workflow-id "student-watcher-USER_ID"'
+```
+
+### View workflow execution history
+
+```bash
+ssh dev-vm 'docker exec docker-engine-1 temporal workflow show \
+  --workflow-id "WORKFLOW_ID"'
+```
+
+### Trigger a workflow manually
+
+```bash
+bash -c 'curl -s -X POST "http://localhost:3001/api/temporal/workflow/start" \
+  -H "Content-Type: application/json" \
+  -H "X-User-Id: 058d2a14-ab1a-49c0-aa67-0312fd87e342" \
+  -H "X-User-Role: admin" \
+  -d "{
+    \"workflowName\": \"processSingleCampus\",
+    \"args\": [\"CAMPUS_ID\"],
+    \"taskQueue\": \"campus-worker\"
+  }" | jq .'
+```
+
+---
+
+## Common Issues Table
+
+| Symptom | Likely Cause | Fix |
+|---------|--------------|-----|
+| API returns empty data | `DATABASE_URL` used (RLS active) | Use `DATABASE_URL_ADMIN` |
+| "Factory not initialized" | Factory startup skipped | Check service startup logs; ensure `initializeCampusFactory()` is called |
+| "Activity not found" | Not registered in worker | Add to `src/activities/index.ts` AND `src/index.ts` worker |
+| Temporal uses stale workflow | Only ran `build`, not `build:workflow` | Run both: `npm run build && npm run build:workflow` |
+| Container "unhealthy" | dormway-core not built | `ssh dev-vm 'cd ~/dormway-platform/services/shared/dormway-core && npm run build'` |
+| Mutagen sync stuck | Daemon issue | `mutagen daemon stop && mutagen daemon start` |
+| Port in use locally | Previous process | `lsof -i :PORT` then kill the PID |
+| SSH tunnel drops | Laptop sleep | Re-run `make remote-dev` |
+| dormway-lockedin build error after edits | Multiple Edit calls corrupted Turbopack cache | Container restart: `make remote-dev-restart s=lockedin` |
+| Doppler auth expired | Token invalidated | Re-run `make remote-dev` (re-fetches Doppler env) |
+| "Module not found: @/components/ui/dialog" | Importing non-existent shadcn component | Use `createPortal` modal pattern instead |
+| Campus has no terms configured | First user signup, campus onboarding not triggered | Trigger `processSingleCampus` workflow for the campus |
+| service_data query returns nothing | Missing `fetched_at` partition key | Always include `WHERE fetched_at >= ...` in service_data queries |
+
+---
+
+## Tracing "Data in DB but Not in API" Issues
+
+When data exists in the database but doesn't appear in the API response:
+
+1. **Verify the data is actually in the database:**
+   ```bash
+   bash -c 'doppler run -- bash -c '\''psql "$DATABASE_URL_ADMIN" -c "SELECT * FROM table WHERE id = '\''ID'\'';"'\'''
+   ```
+
+2. **Find the endpoint handler in api-router:**
+   ```bash
+   grep -r "endpoint-path" services/api-router/src/routes/
+   ```
+
+3. **Find the entity's `toJSON()` method in dormway-core:**
+   ```bash
+   grep -r "toJSON" services/shared/dormway-core/src/entities/your-entity/
+   ```
+
+4. **Add the missing field to `toJSON()`**, rebuild, and restart:
+   ```bash
+   cd services/shared/dormway-core && npm run build
+   make remote-dev-restart s=api-router
+   ```
+
+5. **Never derive missing data in the frontend** — fix the entity, not the UI.
+
+---
+
+## Common Field Name Mistakes
+
+| Wrong | Correct | Context |
+|-------|---------|---------|
+| `location_point` | `location` | PostGIS column on `user_locations` |
+| `accuracy` | `accuracy_meters` | `user_locations` table |
+| `target_context_id` | `child_context_id` | `context_dependencies` table |
+| `campus_id` on `accounts` | Use contexts join | `accounts` has no `campus_id` column |
+| `first_name` | `given_name` | `accounts` table |
+| `last_name` | `family_name` | `accounts` table |
+| `city_registry` | `contexts WHERE type='city'` | No `city_registry` table exists |

@@ -1,12 +1,354 @@
 ---
 title: "Dev Environment Setup"
-description: "How to set up a local DormWay development environment with Docker, Doppler, and Mutagen on the remote VM."
+description: "Set up the remote Hetzner VM, Mutagen sync, SSH tunnels, and Doppler for DormWay local development."
 source:
   type: "obsidian"
   path: "Engineering/Technical/Development Guides/Remote Dev Environment Setup.md"
-  distilled_at: ""
+  distilled_at: "2026-03-19"
 ---
 
 # Dev Environment Setup
 
-*This page is pending distillation.*
+DormWay runs Docker containers on a remote Hetzner cloud VM rather than your laptop. Files sync from your Mac via Mutagen, and SSH tunnels expose all service ports back to `localhost`. The dev experience is identical to running Docker locally — same URLs, same ports — but without battery drain or memory pressure.
+
+## Architecture
+
+```
+┌──────────────────────────┐           ┌──────────────────────────┐
+│  Your MacBook             │           │  Hetzner VM (~$15/mo)    │
+│                           │  Mutagen  │                          │
+│  Claude Code / Cursor     │◄────────►│  Docker Engine            │
+│  Git repos (local)        │  2-way   │  ├─ api-router  :3001    │
+│                           │  file    │  ├─ engine      :3030    │
+│  localhost:3001 ──────────┼──SSH────►│  ├─ lockedin    :3008    │
+│  localhost:3008 ──────────┼──tunnel─►│  ├─ admin       :3004    │
+│  localhost:3004 ──────────┼─────────►│  ├─ crews       :8000    │
+│                           │          │  ├─ zuplo       :9000    │
+│  Files = source of truth  │          │  └─ redis, dozzle, ...   │
+└──────────────────────────┘           └──────────────────────────┘
+```
+
+**How it works:**
+1. Mutagen syncs your local repo files to the VM in ~100-300ms
+2. Docker containers mount the synced files via the same volume structure as local
+3. SSH tunnels forward all service ports to `localhost`
+4. Caddy on the VM provides auto-HTTPS for iOS testing — no ngrok needed
+
+## Prerequisites
+
+- macOS with Homebrew
+- SSH key at `~/.ssh/id_ed25519` (generate with `ssh-keygen -t ed25519` if needed)
+- Hetzner Cloud account
+- The `dormway-beta-workspace` checked out locally with repos in `.repos/`
+
+---
+
+## One-Time Setup
+
+### Step 1: Create Hetzner VM
+
+Create the server via the Hetzner Cloud Console:
+
+- **Location:** Ashburn, VA (`us-east`) — lowest latency from East Coast
+- **Image:** Ubuntu 22.04
+- **Type:** CPX31 (4 vCPU / 8 GB RAM / ~$15/mo)
+- **SSH Key:** Add your `~/.ssh/id_ed25519.pub`
+- **Firewall:** Allow inbound TCP on ports `22`, `80`, `443`, `8443`
+- **Name:** `dormway-dev-YOURNAME`
+
+Note the IP address — you'll need it for all subsequent steps.
+
+### Step 2: Add DNS Record
+
+In Cloudflare (or your DNS provider), add:
+
+```
+dev-YOURNAME.dormway.app  →  YOUR_VM_IP
+```
+
+Caddy will auto-provision an HTTPS certificate via Let's Encrypt.
+
+```bash
+# Verify DNS propagation
+dig +short dev-YOURNAME.dormway.app
+# Expected: YOUR_VM_IP
+```
+
+### Step 3: Configure SSH
+
+```bash
+mkdir -p ~/.ssh/sockets
+
+cat >> ~/.ssh/config << 'EOF'
+
+Host dev-vm
+  HostName YOUR_VM_IP
+  User root
+  IdentityFile ~/.ssh/id_ed25519
+  ServerAliveInterval 30
+  ServerAliveCountMax 3
+  Compression yes
+  ControlMaster auto
+  ControlPath ~/.ssh/sockets/%r@%h-%p
+  ControlPersist 600
+EOF
+```
+
+Replace `YOUR_VM_IP` with the actual IP. The `ControlMaster` settings prevent fail2ban from blocking you when Mutagen opens multiple SSH connections.
+
+```bash
+# Verify
+ssh dev-vm 'echo "Connected!"'
+```
+
+### Step 4: Provision the VM
+
+Run from your workspace root:
+
+```bash
+DEV_DOMAIN=dev-YOURNAME.dormway.app ssh dev-vm 'bash -s' < scripts/remote-dev/setup-vm.sh
+```
+
+This installs Docker, Docker Compose, Doppler CLI, Node.js 20 LTS, Dozzle (log viewer), and Caddy.
+
+### Step 5: Configure Doppler on the VM
+
+**Option A — Service token (recommended, survives reboots):**
+
+```bash
+# Generate token on your Mac
+doppler configs tokens create \
+  --project dormway \
+  --config dev_YOURNAME \
+  --name "dev-vm-$(date +%s)" \
+  --plain
+
+# Save it to the VM
+ssh dev-vm "echo 'DOPPLER_TOKEN=dp.st.YOUR_TOKEN_HERE' > ~/dormway-platform/.doppler_token"
+ssh dev-vm "cd ~/dormway-platform && doppler configure set project dormway && doppler configure set config dev_YOURNAME"
+```
+
+**Option B — Interactive login:**
+
+```bash
+ssh dev-vm 'doppler login --no-timeout'
+ssh dev-vm 'cd ~/dormway-platform && doppler setup'
+# Select: project = dormway, config = dev_YOURNAME
+```
+
+```bash
+# Verify
+ssh dev-vm 'cd ~/dormway-platform && doppler secrets get DATABASE_URL --plain | head -c 20'
+# Expected: starts with "postgresql://"
+```
+
+### Step 6: Install Mutagen
+
+```bash
+brew install mutagen-io/mutagen/mutagen
+mutagen daemon start
+
+# Verify
+mutagen version
+```
+
+### Step 7: Create the Environment Config
+
+```bash
+cd /path/to/dormway-beta-workspace
+cp scripts/remote-dev/remote-dev.env.example .remote-dev.env
+```
+
+Edit `.remote-dev.env`:
+
+```
+REMOTE_DEV_HOST=YOUR_VM_IP
+REMOTE_DEV_USER=root
+REMOTE_DEV_SSH_KEY=~/.ssh/id_ed25519
+```
+
+### Step 8: Start Everything
+
+```bash
+make remote-dev
+```
+
+First run takes a few minutes (Docker builds images). Subsequent starts take ~30 seconds.
+
+### Step 9: First-Run Only — Build dormway-core
+
+After the initial Mutagen sync, build the shared library on the VM:
+
+```bash
+ssh dev-vm 'cd ~/dormway-platform/services/shared/dormway-core && npm ci --ignore-scripts && npm run build'
+ssh dev-vm 'docker restart docker-api-router-1 docker-engine-1 docker-ably-relay-1'
+```
+
+After this, dormway-core's `dist/` syncs automatically via Mutagen.
+
+### Step 10: Start Caddy for HTTPS
+
+```bash
+ssh dev-vm 'systemctl start caddy && systemctl enable caddy'
+
+# Verify
+curl -s -o /dev/null -w "%{http_code}" https://dev-YOURNAME.dormway.app/health
+# Expected: 200
+```
+
+---
+
+## Daily Workflow
+
+```bash
+# Morning — start everything (~30 sec after first run)
+make remote-dev
+
+# Check status
+make remote-dev-status
+
+# Restart a service after code changes
+make remote-dev-restart s=api-router
+
+# View logs
+make remote-dev-logs s=engine
+
+# End of day
+make remote-dev-stop
+```
+
+## Service URLs
+
+All services are available at `localhost` — same ports as local Docker:
+
+| Service | URL |
+|---------|-----|
+| LockedIn (student app) | http://localhost:3008 |
+| Admin Dashboard | http://localhost:3004 |
+| Zuplo Gateway | http://localhost:9000 |
+| API Router (direct) | http://localhost:3001 |
+| Dozzle (log viewer) | http://localhost:8888 |
+
+## Hot Reload Rules
+
+<Warning>
+  **dormway-lockedin (Next.js) and dormway-admin (Vite) hot reload automatically.** Never restart these services after code changes — that's unnecessary and loses dev server state.
+
+  Only restart api-router and engine after code changes to those services.
+</Warning>
+
+## After dormway-core Changes
+
+dormway-core's `dist/` syncs via Mutagen, so you only need to:
+
+```bash
+# 1. Build locally
+cd .repos/dormway-platform/services/shared/dormway-core && npm run build
+
+# 2. Mutagen syncs dist/ to VM in ~200ms, then restart consumers
+make remote-dev-restart s=api-router
+```
+
+## iOS Testing
+
+Configure the iOS app to point at your dev domain:
+
+```
+https://dev-YOURNAME.dormway.app
+```
+
+This hits Caddy → Zuplo Gateway → api-router, identical to production. No ngrok needed.
+
+## Port Map
+
+| Port | Service |
+|------|---------|
+| 3001 | api-router |
+| 3008 | dormway-lockedin |
+| 3004 | dormway-admin |
+| 3030 | engine (Temporal workers) |
+| 8000 | dormway-crews (AI agents) |
+| 9000 | zuplo (API gateway) |
+| 3032 | ably-relay |
+| 6379 | redis |
+| 8888 | dozzle (log viewer UI) |
+
+---
+
+## Makefile Reference
+
+| Command | What it does |
+|---------|--------------|
+| `make remote-dev` | Start everything (sync + tunnels + containers) |
+| `make remote-dev-stop` | Stop everything |
+| `make remote-dev-status` | Show sync, tunnel, and container status |
+| `make remote-dev-restart s=SERVICE` | Restart one container |
+| `make remote-dev-logs s=SERVICE` | Tail logs from one container |
+
+## Key Files
+
+| File | Purpose |
+|------|---------|
+| `scripts/remote-dev/setup-vm.sh` | One-time VM provisioning |
+| `scripts/remote-dev/start.sh` | Orchestrator (Mutagen + tunnels + Docker) |
+| `scripts/remote-dev/mutagen.yml` | Mutagen sync configuration |
+| `.remote-dev.env` | Your config (gitignored) |
+
+---
+
+## Troubleshooting
+
+### "Operation timed out" on SSH
+
+Hetzner fail2ban blocked your IP. Power-cycle the server in the Hetzner Console. Then clear the stale socket:
+
+```bash
+rm -f ~/.ssh/sockets/root@YOUR_VM_IP-22
+ssh dev-vm 'echo "reconnected"'
+```
+
+### VM rebooted / OOM killed
+
+```bash
+# Check container state
+ssh dev-vm 'docker ps -a --format "table {{.Names}}\t{{.Status}}"'
+
+# All containers have restart: unless-stopped — they should auto-start
+# If they didn't:
+ssh dev-vm 'cd ~/dormway-platform/infrastructure/docker && \
+  docker compose -f docker-compose.local-dev.yml --env-file .env.doppler up -d'
+```
+
+### Container shows "unhealthy"
+
+dormway-core is likely not built. Run:
+
+```bash
+ssh dev-vm 'cd ~/dormway-platform/services/shared/dormway-core && npm run build'
+make remote-dev-restart s=api-router
+```
+
+### Mutagen sync stuck
+
+```bash
+mutagen sync list           # Check status
+mutagen sync flush          # Force sync
+mutagen daemon stop && mutagen daemon start  # Nuclear option
+```
+
+### Caddy 502 errors
+
+Caddy proxies to Zuplo on port 9000. Check Zuplo:
+
+```bash
+ssh dev-vm 'docker ps -a | grep zuplo'
+ssh dev-vm 'docker start dormway-zuplo-gateway'
+```
+
+### SSH tunnel drops (laptop sleep)
+
+Re-run `make remote-dev`. Mutagen reconnects automatically; containers are still running.
+
+### VM cost management
+
+The VM costs ~$15/mo running 24/7. Stop it from the Hetzner Console when not in use (~$1.50/mo stopped). Containers auto-restart when you power it back on.

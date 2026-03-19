@@ -2,11 +2,251 @@
 title: "iOS Development"
 description: "iOS app architecture, local development setup, and patterns for the DormWay Swift/SwiftUI app."
 source:
-  type: "obsidian"
+  type: "manual"
   path: ""
-  distilled_at: ""
+  distilled_at: "2026-03-19"
 ---
 
 # iOS Development
 
-*This page is pending distillation.*
+DormWay's iOS app is a SwiftUI application targeting iPhone, iPad, and Mac Catalyst. The repo lives at `ios-clean/`.
+
+## Build Commands
+
+```bash
+# Always run from the ios-clean directory
+cd .repos/ios-clean
+
+# Build for iPad simulator (use for most testing)
+xcodebuild -project DormWay.xcodeproj \
+  -scheme DormWay \
+  -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M5)' \
+  -quiet build
+
+# Build for iPhone simulator
+xcodebuild -project DormWay.xcodeproj \
+  -scheme DormWay \
+  -destination 'platform=iOS Simulator,name=iPhone 16 Pro' \
+  -quiet build
+```
+
+**Critical:**
+- Project: `DormWay.xcodeproj` (NOT `.xcworkspace`)
+- Scheme: `DormWay` (NOT `DormWayFresh`)
+- We no longer use XcodeGen — the `.xcodeproj` is managed directly in Xcode
+
+## Project Structure
+
+```
+ios-clean/
+├── DormWay.xcodeproj/    # Xcode project (checked into git)
+├── App/
+│   ├── DormWayApp.swift  # App entry point, title bar hiding
+│   ├── AppDelegate.swift # SceneDelegate registration for Mac Catalyst
+│   ├── SceneDelegate.swift
+│   ├── Shell/            # Navigation containers (iPad sidebar, adaptive shell)
+│   └── Views/            # Feature views (Schedule, Library, Lecture, etc.)
+└── Packages/
+    ├── DWServices/       # Network, Ably, user/campus services
+    ├── DWDataCollection/ # HealthKit, location, screen time collectors
+    ├── DWContext/        # Context engine and service
+    ├── DWWidgetKit/      # Home screen widgets
+    ├── DWCore/           # Core models and utilities
+    ├── DWDesign/         # Design system tokens
+    └── DWBrainGainsAssistant/
+```
+
+## Dependency Injection Architecture
+
+The app uses protocol-based DI without singletons. All services are injected via a central `Container` and passed through the SwiftUI environment.
+
+### Core Principles
+
+1. **No singletons** — all services injected via the DI container
+2. **Protocol-based** — services are defined by protocols, not concrete types
+3. **`@MainActor`** — all services use `@MainActor` for thread safety
+4. **`@Observable`** — use Swift's `@Observable` macro (not `ObservableObject`) for new code
+5. **Environment injection** — container passed through SwiftUI environment
+
+### Service Packages
+
+| Package | Contents |
+|---------|----------|
+| `DWServices` | `NetworkService`, `AblyService`, `UserProfileService`, `UserContextService`, `CampusDataService`, `RealtimeUpdatesService` |
+| `DWDataCollection` | `TelemetryService`, `HealthDataCollector`, `LocationDataCollector`, `CalendarDataCollector` |
+| `DWContext` | `ContextEngine`, `ContextService` |
+| `DWWidgetKit` | `WidgetEngine` |
+
+### Adding a New Service
+
+```swift
+// 1. Create in appropriate package
+// Packages/DWServices/Sources/DWServices/MyNewService.swift
+@MainActor
+public final class MyNewService {
+    private let networkService: NetworkService
+
+    public init(networkService: NetworkService) {
+        self.networkService = networkService
+    }
+}
+
+// 2. Define protocol in Core/DependencyInjection/ServiceProtocols.swift
+@MainActor
+public protocol MyNewServiceProtocol {
+    func doSomething() async
+}
+
+// 3. Register in Container.registerServices()
+let myNewService = MyNewService(networkService: networkService)
+registerSingleton(MyNewServiceProtocol.self, implementation: MyNewServiceAdapter(myNewService))
+```
+
+## Backend Integration
+
+The app uses two backend patterns:
+
+| Pattern | Endpoint | Data Model |
+|---------|----------|------------|
+| Dashboard BFF v1 | `/dashboard/v1/composite` | `DashboardCompositeV1` with `widgets[]` array |
+| Aurora Direct | `/dashboard/aurora/composite` | `DashboardResponse` with service-specific fields |
+
+The BFF v1 pattern is preferred for new work — it supports ETag caching and real-time delta updates via Ably.
+
+## Real-Time Communication (Ably)
+
+The app subscribes to context-specific Ably channels:
+
+| Channel | Direction | Purpose |
+|---------|-----------|---------|
+| `telemetry` | Send TO server | Telemetry data |
+| `user:{userId}:updates` | Receive | User-specific updates |
+| `system:broadcast` | Receive | Global announcements, maintenance |
+| `city:{cityId}` | Receive | City-specific updates (weather, news) |
+| `campus:{campusId}` | Receive | Campus-specific updates (events, dining, parking) |
+
+Ably initialization is deferred until after authentication.
+
+## iOS Testing Against Dev VM
+
+The remote dev VM provides a public HTTPS endpoint via Caddy — no ngrok needed.
+
+Configure the iOS app's API base URL to point at your dev domain:
+
+```
+https://dev-YOURNAME.dormway.app
+```
+
+This hits Caddy → Zuplo Gateway → api-router, identical to the production path.
+
+See the Dev Environment Setup guide for VM configuration details.
+
+## Mac Catalyst Patterns
+
+The app supports Mac Catalyst. Key adaptations:
+
+### Title Bar Hiding
+
+```swift
+// SceneDelegate.swift — hides title bar on initial connection
+func scene(_ scene: UIScene, willConnectTo session: UISceneSession, ...) {
+    #if targetEnvironment(macCatalyst)
+    if let titlebar = windowScene.titlebar {
+        titlebar.titleVisibility = .hidden
+        titlebar.toolbar = nil
+    }
+    #endif
+}
+```
+
+Apply to views:
+
+```swift
+ContentView()
+    .hideMacCatalystTitleBar()  // Custom modifier in DormWayApp.swift
+```
+
+### Platform-Conditional Compilation
+
+```swift
+#if targetEnvironment(macCatalyst)
+    // Mac Catalyst-specific code
+    return false
+#else
+    // iOS-specific code
+    return true
+#endif
+```
+
+**Features unavailable on Mac Catalyst:**
+- Screen Time API (`DeviceActivityMonitor`)
+- Shake gestures
+- Live Activities
+- Apple Pencil / PencilKit drawing (use `CompactLectureView` instead)
+
+### Adaptive Lecture View
+
+The lecture experience routes to different views based on platform:
+
+| Platform | View | Features |
+|----------|------|----------|
+| iPad | `LectureView` | PencilKit canvas, drawing tools, Notes mode toggle |
+| iPhone | `CompactLectureView` | Text-only, tabbed interface |
+| Mac Catalyst | `CompactLectureView` | Text-only, wide-screen context panel |
+
+## Design System Tokens
+
+```swift
+// Color tokens
+DS.Color.Semantic.Background.base
+DS.Color.Semantic.Text.primary
+DS.Color.Palette.Brand.primary
+
+// Typography
+Text("Hello").dsTypography(DS.Typography.Body.default)
+    .foregroundColor(DS.Color.Semantic.Text.primary)
+    .padding(DS.Spacing.md)
+
+// Spacing and radius
+DS.Spacing.xs, .sm, .md, .lg, .xl
+DS.Radius.sm, .md, .lg
+```
+
+The generated DWDesign files are the source of truth for available tokens — check them before using a token.
+
+## No Synthetic Data
+
+<Warning>
+  **Never construct synthetic API responses from partial data.** All data displayed to users must come from real API endpoints. If a screen needs data that doesn't have an endpoint, create the endpoint — don't fake it from cached/partial data.
+</Warning>
+
+For example: never build a `CurrentTermResponse` by reading fields from a `TermSummary`. Call the actual endpoint.
+
+## Course Color Resolution
+
+Colors come from API metadata, with an index-based fallback:
+
+```swift
+// 1. Use API color (primary)
+color: colorFromHex(course.color) ?? fallbackColor(for: index)
+
+// 2. Fallback palette when API color unavailable
+private func fallbackColor(for index: Int) -> Color {
+    let colors: [Color] = [.purple, .blue, .green, .orange, .pink, .cyan, .indigo, .mint]
+    return colors[index % colors.count]
+}
+```
+
+`course.color` returns `metadata?.color` from `TermCourse.metadata` — populated during Canvas sync.
+
+## Key Files
+
+| File | Purpose |
+|------|---------|
+| `App/DormWayApp.swift` | App entry, title bar hiding, notification observers |
+| `App/SceneDelegate.swift` | Mac Catalyst title bar hiding at scene level |
+| `App/Shell/iPad/IPadSidebarView.swift` | iPad sidebar with course list and color resolution |
+| `App/Shell/AdaptiveNavigationShell.swift` | Device-adaptive navigation container |
+| `App/Views/Lecture/AdaptiveLectureView.swift` | Routes iPad/iPhone/Catalyst to correct lecture view |
+| `Core/DependencyInjection/Container.swift` | Central DI container |
+| `Core/DependencyInjection/ServiceProtocols.swift` | Protocol definitions for all services |
