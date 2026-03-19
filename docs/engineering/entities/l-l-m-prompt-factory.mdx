@@ -1,0 +1,151 @@
+---
+title: "LLMPromptFactory"
+description: "LLM Prompt Factory - Singleton pattern for prompt management"
+source:
+  type: "codegen"
+  paths:
+    - "services/shared/dormway-core/src/entities/llm-prompt/index.ts"
+  generated_at: "2026-03-19"
+---
+
+# LLMPromptFactory
+
+LLM Prompt Factory - Singleton pattern for prompt management
+
+**Source:** `services/shared/dormway-core/src/entities/llm-prompt/index.ts`
+
+## Methods
+
+### `getByPromptId`
+
+```typescript
+getByPromptId(promptId: string): Promise<ServiceResult<LLMPromptRaw>>
+```
+
+Get a single prompt by its prompt_id (kebab-case identifier)
+
+Checks Redis first, falls back to DB on cache miss.
+Only returns active prompts.
+
+### `getById`
+
+```typescript
+getById(id: string): Promise<ServiceResult<LLMPromptRaw>>
+```
+
+Get a prompt by its UUID (id column).
+
+Returns the exact row matching the UUID, regardless of is_active status.
+This preserves the ability to inspect historical/inactive versions.
+
+### `getAll`
+
+```typescript
+getAll(filters: LLMPromptListFilters): Promise<ServiceResult<LLMPromptRaw[]>>
+```
+
+List all prompts with optional filters.
+No caching (admin listing operation).
+
+### `resolve`
+
+```typescript
+resolve(promptId: string, context: LLMPromptResolveContext): Promise<ServiceResult<LLMPromptRaw>>
+```
+
+Resolve a prompt with scoping cascade and optional variant.
+
+Lookup order (most specific -> least specific):
+1. prompt_id + variant + scope_type='user' + scope_id=userId
+2. prompt_id + variant + scope_type='campus' + scope_id=campusId
+3. prompt_id + variant + scope_type='global'
+4. prompt_id + (no variant) + scope_type='user' + scope_id=userId
+5. prompt_id + (no variant) + scope_type='campus' + scope_id=campusId
+6. prompt_id + (no variant) + scope_type='global'
+
+Returns the first match found.
+
+### `getVersionHistory`
+
+```typescript
+getVersionHistory(promptId: string, scope: LLMPromptScopeSelector): Promise<ServiceResult<LLMPromptVersionRaw[]>>
+```
+
+Get version history for a prompt (from llm_prompt_versions)
+
+### `create`
+
+```typescript
+create(input: LLMPromptCreateInput): Promise<ServiceResult<LLMPromptRaw>>
+```
+
+Create a new prompt.
+Inserts a new active row into llm_prompts and appends to llm_prompt_versions.
+
+### `update`
+
+```typescript
+update(promptId: string, input: LLMPromptUpdateInput, targetScope: LLMPromptScopeSelector): Promise<ServiceResult<LLMPromptRaw>>
+```
+
+Update an existing prompt.
+In a transaction:
+  1. Lock current active row
+  2. Snapshot current row into llm_prompt_versions
+  3. Deactivate current row
+  4. Insert new active row with incremented version
+  5. Persist new version snapshot
+  6. Invalidate cache
+
+### `rollbackToVersion`
+
+```typescript
+rollbackToVersion(promptId: string, version: number, rollbackBy: string, scope: LLMPromptScopeSelector): Promise<ServiceResult<LLMPromptRaw>>
+```
+
+Rollback a prompt to a specific version.
+Reads the target row from llm_prompt_versions and performs a versioned update.
+
+### `softDelete`
+
+```typescript
+softDelete(promptId: string, scope: LLMPromptScopeSelector): Promise<ServiceResult<void>>
+```
+
+Soft-delete a prompt (set is_active = false).
+Invalidates Redis cache.
+
+### `recordCall`
+
+```typescript
+recordCall(promptId: string, metadata: { caller?: string; latencyMs?: number; …): Promise<void>
+```
+
+Record a call to a prompt. Fire-and-forget — non-critical.
+Atomically increments call_count, sets last_called_at, and computes rolling avg latency.
+
+### `logCall`
+
+```typescript
+logCall(log: { promptId?: string; promptVersion?: nu…): Promise<void>
+```
+
+Log an LLM call to the llm_call_logs table.
+Fire-and-forget — non-critical. Never throws.
+
+### `getTrackingStats`
+
+```typescript
+getTrackingStats(promptId: string, scopeType: string, scopeId: string, variant: string): Promise<ServiceResult<Pick<LLMPromptRaw, "call_count" | "la…
+```
+
+Get tracking stats (call_count, last_called_at, etc.) directly from DB.
+Bypasses the content cache — use this for analytics, not for prompt loading.
+
+### `getCallLogs`
+
+```typescript
+getCallLogs(promptId: string, opts: { limit?: number; offset?: number; }): Promise<ServiceResult<Record<string, unknown>[]>>
+```
+
+Get recent call logs for a prompt from llm_call_logs.

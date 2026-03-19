@@ -1,0 +1,210 @@
+---
+title: "SyllabusFactory"
+description: "Syllabus Factory - Singleton pattern for entity creation and queries"
+source:
+  type: "codegen"
+  paths:
+    - "services/shared/dormway-core/src/entities/syllabus/index.ts"
+  generated_at: "2026-03-19"
+---
+
+# SyllabusFactory
+
+Syllabus Factory - Singleton pattern for entity creation and queries
+
+**Source:** `services/shared/dormway-core/src/entities/syllabus/index.ts`
+
+## Methods
+
+### `invalidateCache`
+
+```typescript
+invalidateCache(syllabusId: string): Promise<void>
+```
+
+Invalidate cache for a syllabus
+
+### `invalidateCourseCache`
+
+```typescript
+invalidateCourseCache(courseContextId: string): Promise<void>
+```
+
+Invalidate cache for a course's syllabus
+Also invalidates bulk status cache entries containing this course
+
+### `getById`
+
+```typescript
+getById(id: string): Promise<ServiceResult<Syllabus>>
+```
+
+Get a syllabus by ID (service_data ID)
+
+### `getForCourse`
+
+```typescript
+getForCourse(courseContextId: string): Promise<ServiceResult<Syllabus>>
+```
+
+Get the latest syllabus for a course
+
+### `getForUserCourse`
+
+```typescript
+getForUserCourse(userId: string, courseContextId: string): Promise<ServiceResult<Syllabus>>
+```
+
+Get syllabus for a user's course (checks user-specific overlays)
+
+### `list`
+
+```typescript
+list(options: SyllabusListOptions): Promise<ServiceResult<PaginatedResult<Syllabus>>>
+```
+
+List syllabi with pagination and filtering
+
+### `getForCourses`
+
+```typescript
+getForCourses(courseContextIds: string[]): Promise<ServiceResult<Map<string, Syllabus>>>
+```
+
+Get syllabi for multiple courses (batch operation)
+
+### `hasSyllabus`
+
+```typescript
+hasSyllabus(courseContextId: string): Promise<ServiceResult<boolean>>
+```
+
+Check if a course has a processed syllabus
+
+### `hasSyllabusForCourses`
+
+```typescript
+hasSyllabusForCourses(courseContextIds: string[], options: { includeTimestamps?: boolean; }): Promise<ServiceResult<{ contextIds: Set<string>; timestamps…
+```
+
+Check which courses have processed syllabi (bulk operation)
+Always returns an object with contextIds Set and timestamps Map.
+
+BREAKING CHANGE (PR #732):
+- Previous: Return type was `Set<string> | { contextIds, timestamps }` (union)
+- Current: Always returns `{ contextIds: Set<string>; timestamps: Map<string, string> }`
+- Rationale: Simplified type eliminates runtime type checking, more predictable API
+- Impact: Only one caller existed (students.routes.ts), already updated
+
+NOTE: When includeTimestamps is true, returns fetched_at as the syllabus timestamp.
+fetched_at represents when the syllabus was processed and written to service_data,
+making it semantically equivalent to "processed_at" (no separate field exists).
+When includeTimestamps is false, timestamps Map will be empty.
+
+CACHING: Results are cached for 10 minutes (600 seconds) to reduce database load.
+All services calling this method benefit from the shared cache.
+
+### `getReadingsForUser`
+
+```typescript
+getReadingsForUser(userId: string): Promise<ServiceResult<Reading[]>>
+```
+
+Get readings for a user by looking up their enrolled courses
+and extracting reading materials from processed syllabus data.
+
+### `getReadingsForCourses`
+
+```typescript
+getReadingsForCourses(courseContextIds: string[]): Promise<ServiceResult<Reading[]>>
+```
+
+Extract readings from processed syllabus data for given courses.
+
+Pulls from two sources:
+1. `required_materials` — textbooks, articles, equipment
+2. `assignments` where type matches reading patterns
+
+### `findOrphaned`
+
+```typescript
+findOrphaned(options: { campusContextId?: string; limit?: num…): Promise<ServiceResult<{ syllabusId: string; courseContextId…
+```
+
+Find orphaned syllabi - syllabi whose course context has no enrollments
+
+An orphaned syllabus is one where:
+1. The course context exists but has no students enrolled
+2. The course was created by syllabus processing but never properly linked
+
+This helps identify syllabi that were uploaded but the course association
+was never completed (e.g., user didn't select a course, or the course
+was created from syllabus extraction without enrollment)
+
+### `findWithMissingCourse`
+
+```typescript
+findWithMissingCourse(options: { limit?: number; }): Promise<ServiceResult<{ syllabusId: string; contextId: stri…
+```
+
+Find syllabi with missing course contexts (dangling references)
+
+These are syllabi where the context_id doesn't point to a valid course context.
+This can happen if the course context was deleted but the syllabus wasn't cleaned up.
+
+### `getForCampus`
+
+```typescript
+getForCampus(campusContextId: string, options: { department?: string; term?: string; s…): Promise<ServiceResult<{ items: Syllabus[]; total: number; h…
+```
+
+DORM-872: Get syllabi for a campus (Campus Syllabus Library)
+
+Returns all processed syllabi for courses at a specific campus,
+with filtering and pagination support.
+
+### `getPublicIndex`
+
+```typescript
+getPublicIndex(options: { search?: string; campus?: string; dep…): Promise<ServiceResult<{ items: PublicCourseItem[]; total: n…
+```
+
+Get public course directory index (cross-campus)
+
+Returns paginated syllabi that have a web experience token,
+with facet arrays for campuses, departments, and terms.
+Used by the /courses public directory page.
+
+### `getTypeaheadSuggestions`
+
+```typescript
+getTypeaheadSuggestions(query: string): Promise<ServiceResult<{ courseCode: string; courseName: str…
+```
+
+Get typeahead suggestions for course search
+
+Returns up to 8 distinct suggestions matching the query,
+each with courseCode, courseName, and campusName.
+Used by the /courses page search typeahead component.
+
+### `findByWebExperienceToken`
+
+```typescript
+findByWebExperienceToken(token: string): Promise<ServiceResult<Syllabus>>
+```
+
+Find syllabus by web experience token
+
+Searches across multiple metadata fields for compatibility with different storage patterns.
+Used in PLG flows to locate the syllabus when a user clicks "Save to My Dashboard".
+
+### `linkToAccount`
+
+```typescript
+linkToAccount(syllabusId: string, accountId: string, contextId: string): Promise<ServiceResult<void>>
+```
+
+Link a syllabus to a user account
+
+Updates the service_data record to associate the syllabus with a user account.
+Optionally links to a specific course context if provided.

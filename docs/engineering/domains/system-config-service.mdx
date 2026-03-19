@@ -1,0 +1,160 @@
+---
+title: "SystemConfigService"
+description: "System Config Service Implementation"
+source:
+  type: "codegen"
+  paths:
+    - "services/shared/dormway-core/src/domains/system-config/index.ts"
+  generated_at: "2026-03-19"
+---
+
+# SystemConfigService
+
+System Config Service Implementation
+
+Provides type-safe access to runtime configuration values stored in the
+system_config table. Supports in-memory and Redis caching with automatic
+audit logging for all changes.
+
+**Source:** `services/shared/dormway-core/src/domains/system-config/index.ts`
+
+## Methods
+
+### `getNumber`
+
+```typescript
+getNumber(key: string, defaultValue: number, options: GetConfigOptions): Promise<number>
+```
+
+Get a config value as a number
+
+### `getString`
+
+```typescript
+getString(key: string, defaultValue: string, options: GetConfigOptions): Promise<string>
+```
+
+Get a config value as a string
+
+Handles unwrapping JSON-encoded strings stored in JSONB.
+PostgreSQL JSONB stores string values with their JSON quotes,
+so "gpt-4o-mini" in JSON becomes the string "gpt-4o-mini" when retrieved.
+This is handled automatically by the pg driver's JSONB parsing.
+
+### `getBoolean`
+
+```typescript
+getBoolean(key: string, defaultValue: boolean, options: GetConfigOptions): Promise<boolean>
+```
+
+Get a config value as a boolean
+
+### `getJson`
+
+```typescript
+getJson(key: string, defaultValue: T, options: GetConfigOptions): Promise<T>
+```
+
+Get a config value as JSON (typed)
+
+### `getByCategory`
+
+```typescript
+getByCategory(category: ConfigCategory): Promise<SystemConfigEntry[]>
+```
+
+Get all configs in a category
+
+Note: Uses dynamic column detection for is_migrated/migration_notes
+to handle deployment timing where code may deploy before migration runs.
+
+### `getAll`
+
+```typescript
+getAll(options: QueryConfigOptions): Promise<SystemConfigEntry[]>
+```
+
+Get all configs
+
+Note: Uses dynamic column detection for is_migrated/migration_notes
+to handle deployment timing where code may deploy before migration runs.
+
+### `getEntry`
+
+```typescript
+getEntry(key: string): Promise<SystemConfigEntry>
+```
+
+Get a single config entry with full metadata
+
+Note: Uses dynamic column detection for is_migrated/migration_notes
+to handle deployment timing where code may deploy before migration runs.
+
+### `set`
+
+```typescript
+set(key: string, value: unknown, options: SetConfigOptions): Promise<boolean>
+```
+
+Set a config value with audit logging
+
+### `setBulk`
+
+```typescript
+setBulk(entries: BulkUpdateEntry[], options: SetConfigOptions): Promise<BulkUpdateResult>
+```
+
+Set multiple config values in a transaction.
+
+IMPORTANT: This method uses the transaction client for validation to prevent
+race conditions where concurrent transactions could modify config data between
+validation and update. All validation and updates happen within the same
+transaction isolation level.
+
+### `reset`
+
+```typescript
+reset(key: string, options: SetConfigOptions): Promise<boolean>
+```
+
+Reset a config to its default value
+
+### `getAuditHistory`
+
+```typescript
+getAuditHistory(options: QueryAuditOptions): Promise<ConfigAuditEntry[]>
+```
+
+Get audit history
+
+### `invalidateCache`
+
+```typescript
+invalidateCache(key: string): void
+```
+
+Invalidate cache for a specific key or all keys.
+This is intentionally fire-and-forget - cache invalidation errors are logged but don't affect the caller.
+
+### `ensureDefaults`
+
+```typescript
+ensureDefaults(defaults: ConfigDefault[]): Promise<{ inserted: number; updated: number; }>
+```
+
+Ensure all default config entries exist in the database.
+
+- Inserts missing keys with their default values.
+- Updates metadata (description, constraints, default_value) on existing keys.
+- NEVER overwrites the current `value` column on existing keys.
+
+Processes entries in batches of 50 within a single transaction.
+Non-fatal: logs errors but does not throw, so service startup is not blocked.
+
+### `healthCheck`
+
+```typescript
+healthCheck(): Promise<boolean>
+```
+
+Health check
