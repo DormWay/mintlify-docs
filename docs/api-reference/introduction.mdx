@@ -1,12 +1,119 @@
 ---
-title: "API Reference Introduction"
+title: "API Reference"
 description: "Authentication, base URLs, rate limits, and conventions for the DormWay API."
 source:
   type: "manual"
-  path: ""
-  distilled_at: ""
+  distilled_at: "2026-03-19"
 ---
 
-# API Reference Introduction
+# API Reference
 
-*This page is pending distillation.*
+The DormWay API is a REST API that powers the student-facing web app, iOS app, and admin dashboard. All responses use JSON.
+
+## Base URL
+
+```
+https://api.dormway.com/v2/
+```
+
+In local development, requests flow through the Zuplo gateway on port 9000, which forwards to the api-router service on port 3001:
+
+```
+http://localhost:9000/v2/   (Zuplo gateway — same auth as production)
+http://localhost:3001/api/  (api-router direct — for internal/admin use)
+```
+
+<Note>
+v2 is the current API version. v1 is deprecated and should not be used in new integrations.
+</Note>
+
+## Authentication
+
+The DormWay API uses **Clerk JWT tokens** for authentication from web clients.
+
+### Web Clients (dormway-lockedin, dormway-admin)
+
+Include the Clerk JWT in the `Authorization` header:
+
+```http
+Authorization: Bearer <clerk_jwt_token>
+```
+
+The Zuplo gateway validates the JWT and injects enriched headers before forwarding to api-router:
+
+```http
+X-User-Id: <user_uuid>
+X-User-Role: authenticated | admin | demo
+```
+
+### Internal / Admin Routes
+
+Internal service-to-service calls and admin tooling can bypass Clerk validation using direct headers against the api-router (port 3001):
+
+```http
+X-User-Id: <user_uuid>
+X-User-Role: admin
+```
+
+<Warning>
+Direct header bypass is only available on the internal api-router port (3001) — never exposed through the Zuplo gateway in production.
+</Warning>
+
+### Mobile Clients
+
+iOS and Android clients authenticate using **device keys** managed via Customer.io. Mobile clients do not use Clerk.
+
+## Rate Limiting
+
+Rate limits are enforced by the Zuplo gateway. Limits are not currently published, but clients should implement exponential backoff on `429 Too Many Requests` responses.
+
+## Response Format
+
+All endpoints return JSON. Successful responses vary by endpoint but typically follow:
+
+```json
+{
+  "data": { ... }
+}
+```
+
+Error responses always include:
+
+```json
+{
+  "error": "short_error_code",
+  "message": "Human-readable description of what went wrong"
+}
+```
+
+### Common HTTP Status Codes
+
+| Status | Meaning |
+|--------|---------|
+| `200` | Success |
+| `201` | Created |
+| `204` | No content (successful delete) |
+| `304` | Not modified (ETag match — use cached response) |
+| `400` | Bad request — check request body |
+| `401` | Unauthorized — missing or invalid token |
+| `403` | Forbidden — authenticated but insufficient role |
+| `404` | Resource not found |
+| `429` | Rate limit exceeded |
+| `500` | Internal server error |
+
+## ETag Caching
+
+The Dashboard BFF endpoint (`GET /dashboard/v1/composite`) uses ETags for efficient caching. Include the `If-None-Match` header with the ETag value from a previous response to receive a `304 Not Modified` when data has not changed.
+
+```http
+GET /dashboard/v1/composite
+If-None-Match: W/"dcv1-abc123"
+```
+
+## OpenAPI Spec
+
+<Note>
+The OpenAPI spec included in this docs site is currently a **placeholder** (sample data). It will be replaced with the real DormWay endpoint schema in a future release.
+</Note>
+
+For detailed architecture documentation, endpoint patterns, and service internals, see the [Engineering Reference](/engineering/platform-architecture) tab.
