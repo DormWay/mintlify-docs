@@ -1,12 +1,225 @@
 ---
 title: "Entity Model"
-description: "The dormway-core entity system: how entities are defined, serialized, and used across services."
+description: "The dormway-core entity system: BaseEntity, factory pattern, domain services, and how to use them across services."
 source:
-  type: "obsidian"
-  path: ""
-  distilled_at: ""
+  type: "manual"
+  path: "services/shared/dormway-core/src/entities/"
+  distilled_at: "2026-03-19"
 ---
 
 # Entity Model
 
-*This page is pending distillation.*
+`@dormway/core` is the shared TypeScript library that centralizes all database access, domain entities, and service abstractions for the DormWay platform. All backend services — `api-router`, `engine`, etc. — must use `@dormway/core` for data access. Direct SQL in application code is prohibited.
+
+## Package Location
+
+```
+services/shared/dormway-core/
+├── src/
+│   ├── entities/          # Domain entities (BaseEntity + Factory pattern)
+│   │   ├── base/          # BaseEntity, EntityCache
+│   │   ├── campus/        # Campus entity + CampusFactory
+│   │   ├── city/          # City entity + CityFactory
+│   │   ├── course/        # Course entity + CourseFactory
+│   │   ├── student/       # Student entity + StudentFactory
+│   │   ├── syllabus/      # Syllabus entity + SyllabusFactory
+│   │   ├── term/          # Term entity + TermFactory
+│   │   └── workflows/     # EntityWorkflows (Temporal trigger config)
+│   ├── domains/           # Older domain services (accounts, contexts, etc.)
+│   ├── adapters/          # Third-party integrations (Ably, CustomerIO, Redis, Ragie)
+│   ├── middleware/        # Express middleware factories
+│   └── utils/             # Logger, errors, formatters
+```
+
+## BaseEntity
+
+All domain entities extend `BaseEntity<TRaw>`, which provides lazy loading with in-process caching:
+
+```typescript
+export abstract class BaseEntity<TRaw> {
+  protected readonly pool: Pool;
+  protected readonly raw: TRaw;
+  protected readonly cache: EntityCache;
+
+  abstract get contextId(): string;     // Used for service_data queries
+  protected abstract get entityType(): string;
+
+  // Lazy load with automatic caching (default TTL 600s)
+  protected async lazyLoad<T>(
+    key: string,
+    loader: () => Promise<T>,
+    ttlMs?: number
+  ): Promise<T>
+}
+```
+
+## ServiceResult Pattern
+
+All factory methods return a `ServiceResult<T>` to enforce explicit error handling:
+
+```typescript
+type ServiceResult<T> =
+  | { success: true; data: T }
+  | { success: false; error: string };
+```
+
+Always check `success` before accessing `data`:
+
+```typescript
+const result = await factory.getById(id);
+if (!result.success) {
+  logger.error('Failed to load entity', { error: result.error });
+  return;
+}
+const entity = result.data;
+```
+
+## Factory Pattern
+
+Factories are singletons initialized once at service startup with a database pool:
+
+```typescript
+// At app startup:
+import { initializeCampusFactory, initializeCityFactory } from '@dormway/core';
+
+await initializeCampusFactory({ pool, cacheAdapter });
+await initializeCityFactory({ pool, cacheAdapter });
+```
+
+Then anywhere in the service:
+
+```typescript
+import { getCampusFactory } from '@dormway/core';
+
+const factory = getCampusFactory();
+const result = await factory.getById('campus-uuid');
+
+if (result.success) {
+  const campus = result.data;
+  const city = await campus.getCity();        // lazy-loaded
+  const courses = await campus.getCourses();  // lazy-loaded
+}
+```
+
+## Available Entities
+
+| Entity | Factory | Key Lazy Methods |
+|--------|---------|-----------------|
+| `Campus` | `CampusFactory` | `getCity()`, `getCourses()`, `getPerplexityData()`, `getLogisticsWidget()` |
+| `City` | `CityFactory` | `getWeather()`, `getForecast()`, `getTransit()`, `getProcessedContext()` |
+| `Course` | `CourseFactory` | (context metadata, term assignment) |
+| `Student` | `StudentFactory` | `getCampus()`, `getDayPlan()`, `getCourses()`, `getContextPrediction()` |
+| `Syllabus` | `SyllabusFactory` | `hasSyllabusForCourses(courseIds[])` |
+| `Term` | `TermFactory` | (term dates, course list) |
+
+## Domain Services (Legacy Pattern)
+
+Older domain services in `src/domains/` predate the entity pattern. They wrap SQL and return typed results:
+
+```typescript
+import { AccountsService } from '@dormway/core';
+import { getDatabaseAdapter } from '@dormway/core/adapters/database';
+
+const db = getDatabaseAdapter();
+const accountsService = new AccountsService(db);
+const account = await accountsService.getById(userId);
+```
+
+Current domain services include: `accounts`, `campus`, `city`, `contexts`, `day-plan-data`, `preferences`, `service-data`, `syllabus-cache`, `system-config`, `telemetry`, `calendar-subscriptions`.
+
+## Adapters
+
+Adapters wrap third-party services with consistent interfaces:
+
+```typescript
+// Ably realtime
+import { getAblyAdapter } from '@dormway/core/adapters/realtime';
+const ably = getAblyAdapter({ apiKey });
+await ably.publish(`user:${userId}:updates`, { type: 'refresh' });
+
+// Customer.io
+import { getCustomerIOAdapter } from '@dormway/core/adapters/customerio';
+const cio = getCustomerIOAdapter({ logger });
+await cio.identify(userId, { campus_name: 'Cal Poly' });
+
+// Redis cache
+import { getCacheAdapter } from '@dormway/core/adapters/cache';
+const cache = getCacheAdapter({ redis });
+await cache.set('key', value, { ttl: 300 });
+
+// Ragie RAG
+import { getRagieAdapter } from '@dormway/core/adapters/ragie';
+```
+
+## Critical Usage Rules
+
+<Warning>
+Never use `getAuroraPool()` and raw SQL in `api-router` routes or `engine` activities. Always use `@dormway/core` entities and services. Violations require a rewrite.
+</Warning>
+
+The correct data access hierarchy is:
+
+```
+Application code (api-router, engine)
+  → @dormway/core entities / factories / domain services
+    → PostgreSQL (Neon)
+```
+
+## Database Access Pools
+
+When you must use a pool directly (e.g., in dormway-core itself):
+
+| Function | Variable | Purpose |
+|----------|----------|---------|
+| `getAdminPoolOrThrow()` | `DATABASE_URL_ADMIN` | Bypasses RLS — for system writes |
+| `getAuroraPoolOrThrow()` | `DATABASE_URL` | Has RLS — for user-scoped reads |
+
+Use `DATABASE_URL_ADMIN` when debugging or running migrations. `DATABASE_URL` applies Row Level Security and returns empty results if `app.current_user_id()` doesn't match.
+
+## Building and Testing
+
+```bash
+cd services/shared/dormway-core
+
+# Build CJS + ESM outputs to dist/
+npm run build
+
+# Type check only
+npm run typecheck
+
+# Run tests
+npm test
+
+# Reset factories between tests
+import { resetCampusFactory, resetCityFactory } from '@dormway/core';
+beforeEach(() => { resetCampusFactory(); resetCityFactory(); });
+```
+
+After making changes to dormway-core, dependent services pick up changes automatically via the monorepo symlink. Restart `api-router` and `engine` to apply.
+
+## Module Imports
+
+```typescript
+// Full package
+import { Campus, getCampusFactory, createStructuredLogger } from '@dormway/core';
+
+// Submodule imports (smaller bundles)
+import { createStructuredLogger } from '@dormway/core/logger';
+import { ValidationError } from '@dormway/core/errors';
+import { getAmplitudeAdapter } from '@dormway/core/adapters/analytics';
+```
+
+## Error Classes
+
+```typescript
+import {
+  ValidationError,
+  NotFoundError,
+  AuthenticationError,
+  AuthorizationError,
+  DatabaseError,
+} from '@dormway/core/errors';
+
+throw new NotFoundError('Campus not found', { campusId });
+throw new ValidationError('Invalid email', { field: 'email' });
+```

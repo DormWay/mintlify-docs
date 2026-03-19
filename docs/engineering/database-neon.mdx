@@ -1,12 +1,247 @@
 ---
-title: "Database & Neon"
-description: "DormWay's Neon PostgreSQL setup: branching workflow, RLS patterns, and access patterns."
+title: "Database and Neon"
+description: "DormWay's Neon PostgreSQL setup, RLS patterns, migration workflow, and safe query access."
 source:
-  type: "obsidian"
-  path: ""
-  distilled_at: ""
+  type: "manual"
+  path: "CLAUDE.md"
+  distilled_at: "2026-03-19"
 ---
 
-# Database & Neon
+# Database and Neon
 
-*This page is pending distillation.*
+DormWay uses **Neon** as its exclusive PostgreSQL provider. There is no local PostgreSQL container. All database operations target Neon cloud-hosted branches configured through Doppler.
+
+## Connection
+
+The correct way to connect via psql in a developer session:
+
+```bash
+cd .repos/dormway-platform
+bash -c 'doppler run -- bash -c '\''psql "$DATABASE_URL_ADMIN" -c "SELECT ..."'\'''
+```
+
+**Why `bash -c` twice:**
+1. Outer `bash -c` — escapes the Claude Code sandbox.
+2. `doppler run --` — injects `DATABASE_URL_ADMIN` from Doppler secrets.
+3. Inner `bash -c` — expands the `$DATABASE_URL_ADMIN` variable.
+
+For complex SQL with quotes, write to a temp file and use `-f`:
+
+```bash
+# Step 1: Write SQL to /tmp/query.sql
+# Step 2:
+bash -c 'doppler run -- bash -c '\''psql "$DATABASE_URL_ADMIN" -f /tmp/query.sql'\'''
+```
+
+## Connection Variables
+
+| Variable | RLS | When to Use |
+|----------|-----|-------------|
+| `DATABASE_URL_ADMIN` | Bypassed | **Always use this for debugging** — sees all data |
+| `DATABASE_URL` | Enforced | Application code only — RLS silently filters rows |
+
+<Warning>
+Never use `DATABASE_URL` when debugging. RLS will return empty results if the session doesn't match the data's owner. This looks like missing data but is actually a permissions filter.
+</Warning>
+
+## Neon Branches
+
+Neon supports Git-style database branches. Each developer uses a personal branch configured via Doppler (`dev_ethan`, `dev_riley`, etc.).
+
+### Branch Workflow for Schema Changes
+
+```bash
+# 1. Create a temporary branch for testing
+mcp__neon-server__create_branch(projectId, "test-my-migration")
+
+# 2. Apply migration on branch
+mcp__neon-server__run_sql(projectId, migrationSql, branchId)
+
+# 3. Verify on branch
+mcp__neon-server__run_sql(projectId, "SELECT ...", branchId)
+
+# 4. Apply to main (with confirmation)
+make db-migrate
+
+# 5. Delete test branch
+mcp__neon-server__delete_branch(projectId, branchId)
+```
+
+## Migrations
+
+Migration files live in `infrastructure/database/migrations/`. Naming convention: `YYYYMMDD_description.sql`.
+
+```bash
+# Run all pending migrations against Neon (dev branch)
+make db-migrate
+
+# Preview which migrations will run
+make db-migrate-dry
+
+# Run against production
+bash -c 'cd infrastructure/database && doppler run --config prd -- ../../scripts/database/run-migrations.sh'
+```
+
+The migration runner:
+- Uses `DATABASE_URL_ADMIN` from Doppler (write permissions).
+- Creates and uses a `migration_history` table to track applied migrations.
+- Calculates checksums to detect changed files.
+- Skips already-executed migrations.
+
+### Zero-Downtime Migration Patterns
+
+| Operation | Safe Pattern |
+|-----------|-------------|
+| Add column | Add as nullable first, backfill, then `NOT NULL` |
+| Add constraint | `NOT VALID` then `VALIDATE CONSTRAINT` |
+| Create index | `CREATE INDEX CONCURRENTLY` |
+| Drop index | `DROP INDEX CONCURRENTLY` |
+| Modify enum | Separate transaction per `ALTER TYPE ... ADD VALUE` |
+
+<Warning>
+PostgreSQL enum modifications (`ALTER TYPE ... ADD VALUE`) must run in their own transaction. Combining them with other DDL in a single transaction will fail.
+</Warning>
+
+## Core Schema
+
+### contexts (Hierarchical Entities)
+
+The central table. Every city, campus, term, course, and student is a row here:
+
+```sql
+CREATE TABLE contexts (
+  id            UUID PRIMARY KEY,
+  parent_id     UUID REFERENCES contexts(id),
+  type          TEXT,            -- 'city', 'campus', 'term', 'course', 'student'
+  name          TEXT,
+  metadata      JSONB,
+  user_id       UUID,            -- set for student contexts only
+  external_id   TEXT,
+  is_active     BOOLEAN DEFAULT true,
+  next_sync_at  TIMESTAMPTZ,
+  sync_frequency_minutes INTEGER,
+  sync_priority_score    NUMERIC
+);
+```
+
+### context_dependencies (Many-to-Many Graph)
+
+```sql
+CREATE TABLE context_dependencies (
+  parent_context_id  UUID NOT NULL,  -- NOT source_context_id
+  child_context_id   UUID NOT NULL,  -- NOT target_context_id
+  dependency_type    TEXT,           -- 'enrolled_in', 'attends', etc.
+  metadata           JSONB
+);
+```
+
+### accounts (Users)
+
+```sql
+-- Key: NO campus_id column. Use contexts join.
+-- Correct field names:
+given_name    -- NOT first_name
+family_name   -- NOT last_name
+```
+
+### service_data (Time-Series External Data)
+
+```sql
+-- Partitioned by month on fetched_at
+CREATE TABLE service_data (
+  id           UUID,
+  context_id   UUID,
+  user_id      UUID,
+  method       TEXT,
+  data         JSONB,
+  fetched_at   TIMESTAMPTZ,  -- partition key
+  expires_at   TIMESTAMPTZ
+) PARTITION BY RANGE (fetched_at);
+```
+
+Always include `fetched_at` in WHERE clauses for partition pruning.
+
+### campus_configs (Campus Configuration)
+
+```sql
+campus_id              UUID  -- FK to contexts (type='campus')
+academic_calendar      JSONB  -- Backfilled from Perplexity
+current_term_data      JSONB  -- Managed by course enrollment systems
+lms_config             JSONB
+email_domain_patterns  TEXT[]
+```
+
+### Locations (PostGIS)
+
+```sql
+CREATE TABLE locations (
+  id            UUID,
+  context_id    UUID,
+  location_type TEXT,              -- 'campus', 'city', 'building'
+  center_point  geometry(Point, 4326),
+  bounding_box  geometry(Polygon, 4326)
+);
+
+CREATE TABLE user_locations (
+  id          UUID,
+  user_id     UUID,
+  location    geometry(Point, 4326),  -- NOT location_point
+  accuracy_meters NUMERIC,            -- NOT accuracy
+  detected_location_id UUID
+);
+```
+
+## Common Field Name Mistakes
+
+| Wrong | Correct | Context |
+|-------|---------|---------|
+| `first_name` | `given_name` | `accounts` |
+| `last_name` | `family_name` | `accounts` |
+| `campus_id` on accounts | Use contexts join | `accounts` has no campus_id |
+| `target_context_id` | `child_context_id` | `context_dependencies` |
+| `source_context_id` | `parent_context_id` | `context_dependencies` |
+| `location_point` | `location` | `user_locations` |
+| `accuracy` | `accuracy_meters` | `user_locations` |
+| `city_registry` table | Use `contexts` (type='city') | No such table exists |
+
+## PostGIS Spatial Functions
+
+```sql
+-- Campus detection from coordinates
+SELECT detect_campus_from_coordinates(37.8719, -122.2585);
+SELECT detect_campus_from_email('student@umich.edu');
+
+-- Save user location with campus detection (atomic)
+SELECT save_user_location_with_campus(
+  p_user_id := 'uuid',
+  p_latitude := 42.2808,
+  p_longitude := -83.7430,
+  p_accuracy := 10.0,
+  p_timestamp := NOW()
+);
+
+-- Find nearest locations
+SELECT find_nearest_locations(lat, lon, max_distance_meters, limit);
+SELECT is_user_on_campus(user_id, lat, lon);
+```
+
+## Querying service_data Efficiently
+
+```sql
+-- Always include fetched_at for partition pruning
+SELECT method, data, fetched_at
+FROM service_data
+WHERE context_id = $1
+  AND method = 'processed_perplexity_campus_data'
+  AND fetched_at >= NOW() - INTERVAL '30 days'
+ORDER BY fetched_at DESC
+LIMIT 1;
+```
+
+## Schema Verification Before Writing SQL
+
+Always verify field names before writing any SQL query:
+
+1. Read migration files in `infrastructure/database/migrations/`.
+2. Use Neon MCP tools: `mcp__neon-server__describe_table_schema`.
+3. Never assume field names — mismatches cause silent production bugs.

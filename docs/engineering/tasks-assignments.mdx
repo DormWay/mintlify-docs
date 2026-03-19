@@ -1,12 +1,164 @@
 ---
-title: "Tasks & Assignments"
-description: "The two-table architecture for tasks and assignments, source of truth for the planner and task bank."
+title: "Tasks and Assignments"
+description: "How tasks and assignments are created, stored, deduplicated, and surfaced from Canvas, syllabi, and manual entry."
 source:
-  type: "obsidian"
-  path: ""
-  distilled_at: ""
+  type: "manual"
+  path: "services/engine/src/activities/canvasICS.activities.ts"
+  distilled_at: "2026-03-19"
 ---
 
-# Tasks & Assignments
+# Tasks and Assignments
 
-*This page is pending distillation.*
+Tasks and assignments in DormWay are stored as rows in `student_time_blocks` with a `type` of `assignment` or `assessment`. They can originate from three sources: Canvas ICS sync, syllabus crew processing, or manual student entry.
+
+## Data Model
+
+```sql
+-- student_time_blocks (key columns)
+id                    UUID PRIMARY KEY
+student_context_id    UUID  -- the student's context row
+course_context_id     UUID  -- the associated course context
+title                 TEXT
+type                  time_block_type  -- 'assignment', 'assessment', 'class', etc.
+source                TEXT  -- 'canvas', 'lms', 'syllabus', 'manual'
+source_type           TEXT  -- used for dedup key
+start_time            TIMESTAMPTZ
+end_time              TIMESTAMPTZ
+course_code_normalized TEXT
+metadata              JSONB  -- assignment_type, external_id, etc.
+is_active             BOOLEAN
+```
+
+## Sources
+
+### Canvas ICS Sync
+
+The `canvasICSSync` Temporal workflow fetches each student's Canvas ICS feed and parses assignment events into `student_time_blocks`. The sync runs every 6 hours via the StudentWatcher's `triggerCanvasSyncSignal`.
+
+Assignment events are identified by:
+- Canvas: SUMMARY containing `[CourseCode]` brackets
+- Moodle: CATEGORIES field identifying the course, zero-duration DTSTART=DTEND events
+
+All parsers normalize to the same Canvas API format before storage, so the downstream `syncCanvasAssignments()` activity is platform-agnostic.
+
+### Syllabus Crew Processing
+
+When a student uploads a syllabus, the `syllabusProcessor` Temporal workflow runs a CrewAI pipeline that extracts:
+- `assignments` — named assignments with due dates, weights, and types
+- `critical_dates` — exams, quizzes, project milestones
+- `class_sessions` — recurring class meeting times
+
+These are parsed by `semester.activities.ts` and stored as `student_time_blocks` with `source_type = 'syllabus'`. The table uses `ON CONFLICT` to avoid self-duplication within a single syllabus processing run.
+
+### Manual Entry
+
+Students can manually add tasks and events. These get `source = 'manual'` and are never overwritten by sync processes.
+
+## Assignment Types
+
+The `type` column uses the `time_block_type` enum. Assignment-specific subtypes live in `metadata.assignment_type`:
+
+```json
+{
+  "assignment_type": "quiz",
+  "weight": 0.15,
+  "estimated_hours": 2,
+  "submission_method": "online",
+  "canvas_id": "12345"
+}
+```
+
+Common `assignment_type` values: `quiz`, `exam`, `project`, `homework`, `paper`, `lab`, `presentation`.
+
+## Deduplication
+
+### Within-Source Dedup
+
+Syllabus tasks use `ON CONFLICT` based on `(student_context_id, course_context_id, source_type, title, start_time)` to prevent duplicates when a syllabus is reprocessed.
+
+### Cross-Source Dedup
+
+When both Canvas and a syllabus produce a task for the same assignment, syllabus yields to Canvas:
+
+- If a Canvas version of the assignment already exists in `student_time_blocks`, the syllabus insert is skipped.
+- Canvas version is identified by matching course code, approximate date, and title similarity.
+
+This prevents the "double homework" problem where Canvas and syllabus both show the same due date.
+
+### Admin Cleanup
+
+A bulk dedup tool is available in dormway-admin for clearing duplicate tasks and time blocks across a campus or student:
+
+```
+POST /api/admin/schedule/backfill-stb-context
+```
+
+This endpoint:
+- Matches orphaned `student_time_blocks` to course contexts using canonicalized course codes.
+- Writes `course_code_normalized` when a canonical code can be derived.
+- Logs any rows that cannot be matched for manual review.
+
+## Canvas ICS Assignment Shape (Normalized)
+
+After parsing, all LMS assignments are normalized to this shape before storage:
+
+```typescript
+interface NormalizedAssignment {
+  title: string;
+  dueDate: Date;
+  courseCode: string;
+  courseContextId?: string;
+  externalId?: string;      // Canvas UID from ICS
+  htmlUrl?: string;         // Deep link back to Canvas
+  source: 'canvas' | 'moodle' | 'blackboard';
+  assignmentType?: string;
+}
+```
+
+## Syllabus Crew Assignment Shape
+
+The crew outputs `assignments` as an array of rich objects. Key fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | Assignment title |
+| `type` | string | `homework`, `quiz`, `exam`, `project`, etc. |
+| `due_date` | string | ISO date string |
+| `weight` | number | Grade weight (0–1) |
+| `estimated_hours` | number | Estimated completion time |
+| `priority` | string | `high`, `medium`, `low` |
+| `submission_method` | string | `online`, `in-class`, etc. |
+| `rubric_summary` | string | Brief grading criteria |
+| `tips` | string | Study tips from the syllabus |
+| `collaboration_allowed` | boolean | Whether group work is permitted |
+
+The engine stores these in `service_data` (method `processed_syllabus_crew`) and also parses them into `student_time_blocks` via `semester.activities.ts`.
+
+## Accessing Assignments via API
+
+```bash
+# Student's courses with syllabus and assignment metadata
+GET /api/v2/students/me/courses
+
+# Response includes per-course syllabus status and assignment count
+{
+  "courses": [
+    {
+      "contextId": "...",
+      "courseCode": "EECS 281",
+      "hasSyllabus": true,
+      "assignmentCount": 12
+    }
+  ]
+}
+```
+
+## Key Files
+
+| File | Purpose |
+|------|---------|
+| `services/engine/src/activities/canvasICS.activities.ts` | ICS parsing for all LMS types |
+| `services/engine/src/workflows/canvasICSSync.workflow.ts` | Canvas sync workflow |
+| `services/engine/src/activities/semester.activities.ts` | Syllabus to time blocks conversion |
+| `services/shared/dormway-core/src/entities/syllabus/syllabus.factory.ts` | `hasSyllabusForCourses()` |
+| `services/api-router/src/routes/canvas-routes.ts` | ICS connect endpoint |
