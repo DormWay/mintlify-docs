@@ -1,0 +1,180 @@
+---
+title: "Growth Programs & Referral Attribution"
+description: "Source of truth for DormWay's Labs, Creators, and Ambassadors programs with shared referral attribution model"
+source:
+  type: "obsidian"
+  path: "Engineering/Architecture/SoT - Growth Programs & Referral Attribution.md"
+  distilled_at: "2026-03-20"
+---
+
+# Growth Programs & Referral Attribution
+
+## Overview
+
+DormWay operates three growth programs with a shared referral and retention attribution system:
+
+- **Labs** — Work-for-task model with FCFS task pool
+- **Creators** — Campus pod system for social media content creators
+- **Ambassadors** — Referral-based program integrated with GetAmbassador
+
+## Program Models
+
+### Labs Program
+- Account required for participation
+- First-come-first-served task pool model
+- Payment settings stored in `growth_labs_members` table
+
+### Creators Program
+- Public application flow (no account required initially)
+- Approved creators generate first-party DormWay referral links
+- Creators post on personal TikTok/Instagram channels
+- Organized into campus pods (3–5 creators per campus, one pod lead)
+- Creator dashboard shows referral metrics and pod roster
+
+**Creator Compensation:**
+- $25 per accepted post (quality-gated, no view minimum)
+- $5 onboard / $2 D7 / $3 W4 per referral ($10 max per user)
+- Milestone bonuses: +$50 at 50 onboarded, +$100 at 100, +$200 at 150
+- Automated via nightly cron `scheduledCreatorMilestoneSync`
+
+### Ambassadors Program
+- Account-based application flow
+- Auto-approval for valid submissions
+- Referral attribution syncs with GetAmbassador + local DB
+- Local account mapping via `accounts.ambassador_external_id`
+
+## Referral System
+
+### Referral Code Formats
+
+**Ambassador referrals:**
+- Source: GetAmbassador profile + local account mapping
+- Public link: `https://dormway.app/sign-up?ref=<ambassador_code>`
+- Safety rule: UUID-like codes rejected for new generation
+- Legacy support: Truncated UUID-like historic codes accepted via prefix fallback
+
+**Creator referrals:**
+- Format: `cr_[a-f0-9]{8}`
+- Stored in: `growth_creator_applications.creator_referral_code`
+- Public link: `https://dormway.app/sign-up?ref=<creator_code>`
+- Validation: Creator codes not valid as ambassador referrer identifiers
+
+### Attribution Storage
+- `accounts.referral_code_used` — inbound referral code at signup
+- `accounts.referred_by` — account UUID referrer linkage (ambassadors)
+- Creator milestone sync keys from `referral_code_used` matching `creator_referral_code`
+
+## Retention Milestones & Payouts
+
+### Payout Structure (Ambassador & Creator)
+- **Onboarding complete:** $5
+- **Day 7 retained:** $2
+- **Week 4 retained:** $3
+- **Maximum per referral:** $10
+
+### Retention Windows
+- **Day 7 retained:** Login between day 6-8 after account creation
+- **Week 4 retained:** Login between day 27-29 after account creation
+
+### Event Types
+Stored in `referral_events` table:
+- `onboarding_complete`
+- `day_7_retained`
+- `week_4_retained`
+
+### Creator Payout Counters
+Stored in `growth_creator_applications`:
+- `referral_onboarding_count`
+- `referral_day_7_retained_count`
+- `referral_week_4_retained_count`
+- `referral_last_synced_at`
+
+## GetAmbassador Integration
+
+### Custom Field Mapping
+- **custom1:** Campus context ID (reserved)
+- **custom2:** Onboarding complete count
+- **custom3:** Day 7 retained count
+- **custom5:** Week 4 retained count
+
+<Warning>
+`custom1` is reserved for campus metadata. `custom4` is avoided due to date field conflicts in current campaign configuration.
+</Warning>
+
+## API Endpoints
+
+### Public Creator Application Flow
+```
+POST /api/creators/applications/intent-token
+POST /api/creators/applications/upload-url (optional)
+POST /api/creators/applications
+```
+
+**Submission Requirements:**
+- Valid intent token
+- Campus context UUID (`contexts.type='campus'`)
+- Required application fields
+- Either `videoLink` OR uploaded video payload
+
+### Student Program APIs
+```
+GET /api/v2/students/me/programs          # Unified status
+GET /api/v2/students/me/creators
+GET /api/v2/students/me/creators/dashboard
+POST /api/v2/students/me/creators/referral-link
+PUT /api/v2/students/me/creators/payout-profile
+GET /api/v2/students/me/ambassador
+POST /api/v2/students/me/ambassador/apply
+POST /api/v2/students/me/ambassador/referral-link
+GET /api/v2/ambassadors/validate/:uid
+```
+
+### Admin Growth APIs
+```
+POST /api/admin/creators/*                              # Applications/pods management
+POST /api/admin/creators/milestone-sync-workflow/start  # Bootstrap nightly cron
+POST /api/admin/ambassador/retention-milestones/sync    # Manual retention sync
+```
+
+## Database Schema
+
+### Core Tables
+- **accounts**
+  - `ambassador_status`, `ambassador_external_id`, `ambassador_sync_status`
+  - `referred_by`, `referral_code_used`
+- **ambassador_applications**
+- **referral_events**
+- **ambassador_commissions**
+- **growth_creator_applications**
+- **growth_creator_pods**
+- **growth_labs_members**
+
+## Operational Tools
+
+### Testing Scripts
+```bash
+npm run test:growth-programs:e2e
+# Full growth flow coverage with --strict and --public-video-link-only options
+
+npm run repair:ambassador-external-ids
+# Repairs legacy ambassador external IDs via email lookup
+```
+
+### Scheduled Tasks
+- **Nightly cron:** `scheduled-creator-milestone-sync` workflow
+- **Namespace:** `dormway-stg`/`dormway-prd` Temporal
+
+## System Guardrails
+
+<Warning>
+Critical system rules:
+
+- Never derive public referral identity from internal UUIDs
+- Always URL-encode referral codes in signup links
+- Creator and ambassador referral namespaces must remain distinct
+- Update this documentation with any changes to:
+  - Payout milestone event names
+  - Referral code formats
+  - Custom field key mappings
+  - Public/application flow contracts
+</Warning>

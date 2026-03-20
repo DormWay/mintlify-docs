@@ -1,0 +1,291 @@
+---
+title: "Campus Outreach CRM - AI Research"
+description: "AI-powered research feature that automatically discovers the best pathways to reach students at any campus using Perplexity Sonar."
+source:
+  type: "obsidian"
+  path: "Product/Growth Ops/Campus Outreach CRM - AI Research.md"
+  distilled_at: "2026-03-20"
+---
+
+# Campus Outreach CRM - AI Research Feature
+
+The Campus Outreach CRM includes an AI-powered research feature that uses **Perplexity Sonar** to automatically discover the best pathways to reach students at any campus. This feature dramatically accelerates campus expansion by eliminating manual research.
+
+## What It Does
+
+When you click the magnifying glass icon next to a campus in the admin dashboard, the system:
+
+1. **Researches the campus** using Perplexity Sonar web search
+2. **Finds key contacts**:
+   - Student government president/VP
+   - Top student organizations (Greek life, clubs, professional orgs)
+   - Student media outlets (newspapers, radio, blogs)
+3. **Identifies upcoming events**:
+   - Orientation dates
+   - Career fairs, club fairs
+   - Greek rush periods
+   - Major campus events
+4. **Analyzes campus culture**:
+   - Communication channels (Instagram, GroupMe, Slack, Discord)
+   - Greek life presence
+   - Student priorities and values
+5. **Generates outreach strategy**:
+   - Primary approach recommendation
+   - Key contacts prioritized
+   - Timing recommendations
+   - Campus-specific messaging tips
+6. **Auto-creates database records**:
+   - Contact records for all organizations/people found
+   - Activity records for upcoming outreach events
+
+## User Experience
+
+### Admin Dashboard Flow
+
+1. Navigate to **Growth → Outreach → Campus List**
+2. Find your target campus
+3. Click the **🔍 magnifying glass icon** in the Actions column
+4. Wait 20-30 seconds while AI researches
+5. See success message: "Campus research completed successfully"
+6. Navigate to **Contacts** or **Activities** tabs to see auto-created records
+
+### What Gets Created
+
+**Contacts** (marked as `prospect` status):
+- Student government leaders
+- Top 5 student organizations (by influence)
+- Student media editors/contacts
+- All include: name, role, email, Instagram handle
+- Metadata includes `source: ai_research`
+
+**Activities** (marked as `planned` status):
+- Up to 3 upcoming events
+- Each includes: event name, date, outreach opportunity notes
+- Activity type: `event`
+- Metadata includes `source: ai_research` and `event_type`
+
+## Technical Architecture
+
+### Backend Components
+
+**Endpoint**: `POST /admin/outreach/research/:campusId`
+
+**Flow**:
+```typescript
+1. Fetch campus details from contexts table
+2. Call researchCampusOutreach() utility
+3. Parse AI response (CampusOutreachIntel interface)
+4. Auto-create contact records:
+   - Student government president/VP
+   - Top 5 organizations by influence
+   - Student media contacts
+5. Auto-create activity records:
+   - Up to 3 upcoming events
+6. Store research results in campus_outreach table
+7. Return intel to frontend
+```
+
+### AI Research Utility
+
+**Function**: `researchCampusOutreach(campusName, campusState?, enrollment?)`
+
+**Technology Stack**:
+- **Portkey SDK** - AI gateway for production observability
+- **Perplexity Sonar** - Web search LLM (real-time web access)
+- **Helicone** - LLM observability and cost tracking (via Portkey metadata)
+
+**Model Configuration**:
+```typescript
+{
+  model: 'sonar',
+  temperature: 0.3,  // Lower for factual accuracy
+  max_tokens: 16000,
+  provider: 'perplexity-ai'
+}
+```
+
+### Data Model
+
+**CampusOutreachIntel Interface**:
+```typescript
+interface CampusOutreachIntel {
+  campus_name: string;
+  campus_state: string;
+  student_government: {
+    president?: string;
+    vice_president?: string;
+    email?: string;
+    instagram?: string;
+    website?: string;
+  };
+  top_organizations: {
+    name: string;
+    type: 'greek' | 'club' | 'media' | 'professional' | 'cultural';
+    contact?: string;
+    instagram?: string;
+    website?: string;
+    influence_score?: number; // 1-10
+  }[];
+  communication_channels: {
+    channel: string;
+    popularity: 'high' | 'medium' | 'low';
+    notes?: string;
+  }[];
+  upcoming_events: {
+    name: string;
+    date?: string;
+    type: 'orientation' | 'career_fair' | 'club_fair' | 'greek_rush';
+    outreach_opportunity: string;
+  }[];
+  student_media: {
+    name: string;
+    type: 'newspaper' | 'radio' | 'blog' | 'youtube';
+    contact?: string;
+    website?: string;
+  }[];
+  campus_culture_insights: string[];
+  outreach_strategy: {
+    primary_approach: string;
+    key_contacts: string[];
+    timing_recommendations: string[];
+    messaging_tips: string[];
+  };
+  sources: string[];
+  researched_at: string;
+}
+```
+
+## Frontend Implementation
+
+**Research Button**:
+```tsx
+<IconButton
+  onClick={() => handleResearchCampus(campus.id, campus.name)}
+  disabled={researchingCampusId === campus.id}
+  size="small"
+  title="AI-powered campus research"
+>
+  {researchingCampusId === campus.id ? (
+    <CircularProgress size={20} />
+  ) : (
+    <SearchIcon />
+  )}
+</IconButton>
+```
+
+**API Call** (with extended timeout):
+```typescript
+const handleResearchCampus = async (campusId: string, campusName: string) => {
+  setResearchingCampusId(campusId);
+  try {
+    // AI research takes 20-30 seconds, need longer timeout than default 5s
+    const res = await apiClient.post(`/admin/outreach/research/${campusId}`, {}, {
+      timeout: 60000, // 60 second timeout
+    });
+
+    notify.success(`Campus research completed successfully for ${campusName}`);
+  } catch (error) {
+    notify.error(`Failed to research campus: ${error.message}`);
+  } finally {
+    setResearchingCampusId(null);
+  }
+};
+```
+
+<Warning>
+The default `apiClient` timeout is 5 seconds, but AI research takes 20-30 seconds. Always override timeout for this endpoint.
+</Warning>
+
+## Error Handling
+
+### Common Issues & Solutions
+
+**Frontend timeout (5 seconds)**
+- **Solution**: Override timeout to 60 seconds in API call
+- **Why**: AI research takes 20-30 seconds, default is too short
+
+**JSON parsing errors**
+- **Cause**: Perplexity adds citations after JSON
+- **Solution**: Extract content between first `{` and last `}`
+
+**Missing required columns**
+- **Cause**: Database schema mismatch
+- **Solution**: Always verify schema before INSERT
+
+**Activity type constraint violation**
+- **Valid values**: `ambassador_recruitment`, `campus_campaign`, `partnership`, `event`, `social_media`, `other`
+- **For research**: Use `other` for research record, `event` for discovered events
+
+## Performance Considerations
+
+### Timing
+- **Average research time**: 25-30 seconds
+- **Timeout configured**: 60 seconds
+- **Frontend shows**: Loading spinner during research
+
+### Cost
+- **Model**: Perplexity Sonar (web search LLM)
+- **Avg cost per research**: ~$0.10-0.20 (estimated)
+- **Tracking**: Via Portkey → Helicone observability
+
+## Usage Patterns
+
+### When to Use AI Research
+
+**Good use cases**:
+- ✅ New campus expansion planning
+- ✅ Quick discovery of key contacts
+- ✅ Identifying upcoming event opportunities
+- ✅ Understanding campus-specific culture/channels
+
+**Not ideal for**:
+- ❌ Already well-researched campuses (use manual contacts instead)
+- ❌ Very small campuses (< 500 students) - may lack online presence
+- ❌ Brand new campuses - insufficient web data
+
+### Workflow Integration
+
+**Typical campus expansion flow**:
+1. Add campus to system (if not already in contexts)
+2. Click 🔍 to run AI research
+3. Review auto-created contacts in Contacts tab
+4. Review auto-created events in Activities tab
+5. Manually edit/enrich contact details as needed
+6. Begin outreach to top-priority contacts
+7. Log all interactions in the CRM
+
+## Observability
+
+### Database Queries
+
+Check recent research:
+```sql
+SELECT
+  id,
+  campus_id,
+  title,
+  created_at,
+  metadata->'intel'->'org_count' as org_count,
+  metadata->'intel'->'event_count' as event_count
+FROM campus_outreach
+WHERE activity_type = 'other'
+  AND title LIKE 'AI Campus Research:%'
+ORDER BY created_at DESC
+LIMIT 10;
+```
+
+Check auto-created contacts:
+```sql
+SELECT
+  id,
+  name,
+  role,
+  email,
+  status,
+  metadata->>'source' as source,
+  created_at
+FROM campus_outreach_contacts
+WHERE metadata->>'source' = 'ai_research'
+ORDER BY created_at DESC
+LIMIT 20;
+```

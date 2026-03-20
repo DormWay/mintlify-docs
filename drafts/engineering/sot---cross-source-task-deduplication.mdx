@@ -1,0 +1,177 @@
+---
+title: "Cross-Source Task Deduplication"
+description: "How DormWay deduplicates assignments between Canvas and syllabus sources"
+source:
+  type: "obsidian"
+  path: "Engineering/Architecture/SoT - Cross-Source Task Deduplication.md"
+  distilled_at: "2026-03-20"
+---
+
+# Cross-Source Task Deduplication
+
+## Overview
+
+DormWay automatically deduplicates assignments that exist in both Canvas (API-synced) and syllabus/LMS-extracted sources. When a student has both Canvas API access and syllabus-extracted data for the same course, assignments would appear twice in every task surface without deduplication.
+
+The system runs cross-source deduplication at Canvas sync time, marking matching syllabus/LMS records as superseded. All user-facing queries filter `(lifecycle_status IS NULL OR lifecycle_status = 'active')`, so superseded entries disappear automatically.
+
+## Data Model
+
+### student_time_blocks
+
+Superseded entries receive:
+
+| Column | Value |
+|--------|-------|
+| `lifecycle_status` | `'superseded'` |
+| `metadata.superseded_by` | UUID of the Canvas time block |
+| `metadata.superseded_at` | Timestamp |
+| `metadata.match_confidence` | pg_trgm similarity score (0.0–1.0) |
+
+### tasks
+
+Superseded entries receive:
+
+| Column | Value |
+|--------|-------|
+| `status` | `'completed'` |
+| `completed_at` | `NOW()` |
+| `updated_at` | `NOW()` |
+| `metadata.superseded_by` | UUID of the Canvas task |
+| `metadata.superseded_at` | Timestamp |
+| `metadata.match_confidence` | pg_trgm similarity score |
+
+### Undo Operation
+
+Reverting a supersede sets `lifecycle_status = 'active'` on the time block and `status = 'pending'`, `completed_at = NULL` on the task, stripping all supersede metadata keys.
+
+## Deduplication Algorithm
+
+The algorithm runs entirely in PostgreSQL using two SQL builders—one per table.
+
+### Matching Process
+
+1. **Canvas entries**: Strip course code prefix from label/title
+   - Regex: `^[A-Z]{2,6}[[:space:]]*[[:digit:]]{2,4}[A-Z]?[[:space:]]*:[[:space:]]*`
+   - Example: `"MKT 407: Hot Topic #3"` → `"Hot Topic #3"`
+
+2. **Syllabus/LMS entries**: Strip trailing bracket suffix
+   - Regex: `[[:space:]]*\[[^\]]+\][[:space:]]*$`
+   - Example: `"Hot Topic #3 [MKT 407 001 WN 2026]"` → `"Hot Topic #3"`
+
+3. **Similarity matching**: `pg_trgm similarity()` on lowercased normalized labels
+   - Threshold from `system_config` key `processing.merge_confidence_threshold` (default 0.6)
+
+4. **Date proximity**: `start_time` / `due_date` within ±3 days (259200 seconds), or either is NULL
+
+5. **Selection**: `DISTINCT ON (syllabus.id)` picks highest-confidence Canvas match per syllabus entry
+
+### Table-Specific Differences
+
+| Aspect | student_time_blocks | tasks |
+|--------|-------------------|-------|
+| Title column | `label` | `title` |
+| Source column | `source = 'canvas'` / `source IN ('lms','syllabus','ics_lms')` | `source_type = 'canvas'` / `source_type = 'syllabus'` |
+| Course key | `metadata->>'course_context_id'` | `metadata->>'courseContextId'` (camelCase) |
+| Active filter | `lifecycle_status IS NULL OR = 'active'` | `status != 'completed'` |
+| Supersede action | `lifecycle_status = 'superseded'` | `status = 'completed'`, `completed_at = NOW()` |
+
+<Note>
+PostgreSQL uses POSIX regex syntax: `[[:space:]]` and `[[:digit:]]` instead of `\s`/`\d`. Course code digit count is `{2,4}` to handle courses like "CS 4850" and "ENGR 10".
+</Note>
+
+## Architecture
+
+### Code Organization
+
+```
+dormway-core/src/domains/task-dedup/
+├── index.ts
+├── cross-source-dedup.service.ts    # pg_trgm SQL dedup
+├── task-canonicalization.ts          # In-memory canonical task bank
+├── title-similarity.ts              # Levenshtein similarity
+└── __tests__/
+```
+
+The service is exported via `@dormway/core` and imported by both engine and api-router.
+
+### Execution Context
+
+1. **Canvas sync** (engine): After each course's assignments are upserted, calls `deduplicateForCourse(userId, courseContextId)`. Non-fatal—failure doesn't break sync.
+
+2. **Backfill script**: `scripts/backfill-cross-source-dedup.ts` processes all users with both sources. Supports `--dry-run` and uses `DATABASE_URL_ADMIN`.
+
+3. **Admin manual**: Undo-supersede endpoint reverts individual records.
+
+### Complementary Systems
+
+| System | Location | Execution | Purpose |
+|--------|----------|-----------|---------|
+| `CrossSourceDedupService` | dormway-core | PostgreSQL (pg_trgm SQL) | Cross-source: marks syllabus entries superseded when Canvas version exists |
+| `canonicalizeTaskBank` | dormway-core | In-memory (TypeScript) | Canonical key dedup for widget/API rendering—merges all sources by title+course+date |
+
+## Admin Tooling
+
+### Task Conflicts API
+
+**Base path:** `/api/admin/task-conflicts`
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/conflicts` | Paginated list with filters |
+| POST | `/:taskId/resolve` | Single conflict resolution |
+| POST | `/resolve-batch` | Bulk resolve |
+| POST | `/:timeBlockId/undo-supersede` | Revert supersede |
+
+### Resolution Actions
+
+- `accept_canvas`: Keep Canvas version
+- `accept_syllabus`: Keep syllabus version  
+- `split`: Keep both as separate entries
+- `dismiss`: Mark conflict as resolved
+- `override`: Custom resolution
+
+### Key Filters
+
+- `lifecycleStatus`: `active` (default) / `superseded` / `all`
+- `conflictStatus`: `detected` (default for active) / `resolved` / `overridden` / `all`
+- `userId`, `email`, `courseCode`, `source`, `minConfidence`, `maxConfidence`
+
+### Undo-Supersede Process
+
+1. Captures `metadata.superseded_by` before clearing it
+2. Updates `student_time_blocks`: `lifecycle_status = 'active'`, strips supersede metadata
+3. Updates `tasks`: `status = 'pending'`, `completed_at = NULL`, strips supersede metadata
+4. Task revert is non-fatal
+
+<Note>
+`student_time_blocks` is a TABLE in production but a VIEW in development. The system detects this via `information_schema.tables` and targets the underlying `time_blocks` table when needed.
+</Note>
+
+## Configuration
+
+| Key | Default | Purpose |
+|-----|---------|---------|
+| `processing.merge_confidence_threshold` | `0.6` | Minimum pg_trgm similarity score |
+
+Configurable via the admin System Settings page.
+
+## Affected User Surfaces
+
+All query paths already filter on `lifecycle_status`, so superseded entries automatically disappear from:
+
+- Tasks widget, Deadlines widget, Today widget, Schedule widget
+- Day plan generation, Student routes, Courses routes  
+- Crew deadline sync, Mobile endpoints, LLM context assembly
+
+No frontend changes were required for deduplication to work.
+
+## Limitations
+
+- Syllabus time blocks with NULL `metadata->>'course_context_id'` are silently skipped
+- Fuzzy matches below the confidence threshold remain as separate entries
+- No student-facing conflict indicators yet
+
+## Types and Contracts
+
+`TaskConflictItem` is defined in `dormway-core/src/domains/admin-api/types/task-conflicts.types.ts` and imported by both api-router (producer) and dormway-admin (consumer) for compile-time contract enforcement.

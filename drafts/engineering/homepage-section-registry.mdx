@@ -1,0 +1,328 @@
+---
+title: "Homepage Section Registry"
+description: "Dynamic homepage section ordering and toggling via Hypertune feature flags"
+source:
+  type: "obsidian"
+  path: "Engineering/Technical/LockedIn/Homepage-Section-Registry.md"
+  distilled_at: "2026-03-20"
+---
+
+# Homepage Section Registry
+
+The Homepage Section Registry enables dynamic ordering and toggling of homepage sections via Hypertune feature flags, supporting rapid experimentation without code deployments.
+
+## Overview
+
+This system replaces hardcoded homepage sections with dynamic rendering controlled by Hypertune flags. Changes can be made in the Hypertune dashboard and take effect immediately (30 seconds vs 30-60 minutes for code changes).
+
+## Hypertune Schema
+
+Add these fields to the Hypertune GraphQL schema at https://app.hypertune.com/projects/7826:
+
+### homepageSectionOrder
+
+```graphql
+"""
+Homepage section order - controls the display order of sections on the landing page.
+Sections are rendered in the order specified here.
+"""
+homepageSectionOrder: [String!]!
+```
+
+**Default Value**:
+```json
+[
+  "hero-hybrid",
+  "social-proof",
+  "term-preview",
+  "jobs-to-be-done",
+  "comparison",
+  "ace-ai",
+  "vs-comparison",
+  "express-cta",
+  "footer"
+]
+```
+
+### homepageSectionsEnabled
+
+```graphql
+"""
+Homepage sections enabled - controls which sections are visible on the landing page.
+Only sections in this array will be rendered.
+"""
+homepageSectionsEnabled: [String!]!
+```
+
+**Default Value** (all sections enabled):
+```json
+[
+  "hero-hybrid",
+  "social-proof",
+  "term-preview",
+  "jobs-to-be-done",
+  "comparison",
+  "ace-ai",
+  "vs-comparison",
+  "express-cta",
+  "footer"
+]
+```
+
+## Valid Section IDs
+
+- `hero-original` - Original hero section
+- `hero-improved` - Improved hero section  
+- `hero-hybrid` - Hybrid hero section (default)
+- `social-proof` - Social proof / campus roll call
+- `term-preview` - See Your Week bento overview
+- `jobs-to-be-done` - Jobs To Be Done feature blocks
+- `comparison` - Manual vs Auto slider comparison
+- `ace-ai` - Ace AI Q&A examples
+- `vs-comparison` - DormWay vs. the old way
+- `express-cta` - Express CTA (Canvas + Email)
+- `footer` - Site footer
+
+## How It Works
+
+### Before (Hardcoded)
+
+Sections are hardcoded in `LandingPageClient.tsx`:
+
+```tsx
+<HeroComponent detectedSchool={detectedSchool} />
+<SocialProofSection />
+<TermPreviewSection />
+<JobsToBeDoneSection />
+<ComparisonSection />
+<AceSection />
+```
+
+### After (Dynamic)
+
+Sections are rendered dynamically via `DynamicSectionRenderer`:
+
+```tsx
+<DynamicSectionRenderer detectedSchool={detectedSchool} />
+```
+
+The renderer:
+1. Reads `homepageSectionOrder` from Hypertune
+2. Reads `homepageSectionsEnabled` from Hypertune
+3. Filters out disabled sections
+4. Renders sections in specified order
+5. Falls back to default configuration if Hypertune is unavailable
+
+## Use Cases
+
+### Reorder Sections
+
+**Hypertune dashboard**:
+```json
+{
+  "homepageSectionOrder": [
+    "hero-hybrid",
+    "social-proof",
+    "term-preview",
+    "ace-ai",           // Moved up
+    "jobs-to-be-done",  // Moved down
+    "comparison",
+    "vs-comparison",
+    "express-cta",
+    "footer"
+  ]
+}
+```
+
+### Disable a Section
+
+**Hypertune dashboard**:
+```json
+{
+  "homepageSectionsEnabled": [
+    "hero-hybrid",
+    "social-proof",
+    "term-preview",
+    "jobs-to-be-done",
+    // "comparison" removed
+    "ace-ai",
+    "vs-comparison",
+    "express-cta",
+    "footer"
+  ]
+}
+```
+
+### A/B Test Hero Variants
+
+**Setup in Hypertune**:
+1. Create experiment: "Hero Variant Test"
+2. Variant A: `homepageSectionOrder = ["hero-improved", ...]`
+3. Variant B: `homepageSectionOrder = ["hero-hybrid", ...]`
+4. Split traffic 50/50
+
+## Event Triggers for Analytics-Driven Flags
+
+Event triggers are special Hypertune flags that log analytics events, enabling behavioral segmentation and personalization.
+
+### onboardingCompleted Event
+
+**Schema**:
+```graphql
+input OnboardingCompletedEventProperties {
+  campusId: String!
+  campusName: String!
+  campusVerified: Boolean!
+  academicYear: String!
+  major: String!
+  housingType: String!
+  dormName: String!
+  aiTone: String!
+  aiPersonality: String!
+  scheduleImported: Boolean!
+  stepsCompleted: Int!
+  totalDurationSeconds: Int!
+}
+
+type Root {
+  onboardingCompleted(properties: OnboardingCompletedEventProperties!): Void
+}
+```
+
+**Implementation**:
+```typescript
+hypertune.onboardingCompleted({
+  args: {
+    properties: {
+      campusId: formData.campus || '',
+      campusName: formData.campusName || '',
+      campusVerified: !!formData.campus,
+      academicYear: formData.year || '',
+      major: formData.major || '',
+      housingType: formData.housing || 'off-campus',
+      dormName: formData.dormName || '',
+      aiTone: formData.tone || '',
+      aiPersonality: formData.personality || '',
+      scheduleImported: false,
+      stepsCompleted: ONBOARDING_STEPS.length,
+      totalDurationSeconds: 0,
+    },
+  },
+});
+```
+
+### Using Events in Flag Logic
+
+**Example**: Show different homepage hero variants based on housing type
+
+```javascript
+// In Hypertune dashboard flag logic
+const housing = user.events.onboardingCompleted.latest.properties.housingType;
+
+if (housing === "dorm") {
+  return ["hero-dorm-focused", "social-proof", ...];
+} else if (housing === "off-campus") {
+  return ["hero-commuter-focused", "social-proof", ...];
+}
+
+return ["hero-hybrid", "social-proof", ...];
+```
+
+## Adding New Sections
+
+### Step 1: Create Component
+
+Create in `src/components/homepage/sections/`:
+
+```tsx
+// src/components/homepage/sections/TestimonialsSection.tsx
+import type { SectionProps } from './registry';
+
+export default function TestimonialsSection(_props: SectionProps) {
+  return (
+    <section className="py-16 sm:py-20">
+      <div className="mx-auto max-w-7xl px-4 sm:px-6 md:px-8 lg:px-12">
+        <h2 className="text-3xl font-bold text-[var(--ds-text-primary)]">
+          Student Testimonials
+        </h2>
+      </div>
+    </section>
+  );
+}
+```
+
+### Step 2: Add to Registry
+
+Update `src/components/homepage/sections/registry.ts`:
+
+```typescript
+const TestimonialsSection = lazy(() => import('./TestimonialsSection'));
+
+export const SECTION_REGISTRY: Record<string, SectionMetadata> = {
+  // ... existing sections ...
+  'testimonials': {
+    id: 'testimonials',
+    name: 'Testimonials',
+    description: 'Student testimonials and reviews',
+    category: 'features',
+    component: TestimonialsSection,
+    defaultEnabled: false,
+  },
+};
+```
+
+### Step 3: Update Hypertune Flags
+
+Add `'testimonials'` to the appropriate arrays in Hypertune dashboard to enable.
+
+## SDK Regeneration
+
+After updating Hypertune schema:
+
+```bash
+# From workspace root
+make hypertune-regen
+
+# OR from dormway-lockedin directory
+doppler run -- bash -c 'npx hypertune --framework nextApp --platform vercel --includeInitData true --getHypertuneImportPath "../src/lib/getHypertune"'
+```
+
+## Fallback Behavior
+
+If Hypertune is unavailable:
+- Uses default section order from registry
+- Uses default enabled sections from registry
+- Logs error to console
+- Page continues to render (graceful degradation)
+
+## Registry Helper Functions
+
+```typescript
+// Get section by ID
+const section = getSection('testimonials');
+
+// Get all section IDs
+const allIds = getAllSectionIds();
+
+// Get default order
+const defaultOrder = getDefaultSectionOrder();
+
+// Get default enabled sections
+const defaultEnabled = getDefaultEnabledSections();
+
+// Get sections by category
+const featureSections = getSectionsByCategory('features');
+
+// Validate section order
+const validation = validateSectionOrder(['hero-hybrid', 'testimonials']);
+```
+
+## Files Modified
+
+| File | Purpose |
+|------|---------|
+| `src/components/homepage/sections/registry.ts` | Section registry mapping IDs to components |
+| `src/components/homepage/sections/VSComparisonSection.tsx` | Extracted VS comparison section |
+| `src/components/homepage/sections/ExpressCTASection.tsx` | Extracted Express CTA section |
+| `src/components/homepage/DynamicSectionRenderer.tsx` | Dynamic renderer component |
+| `src/app/LandingPageClient.tsx` | Updated to use DynamicSectionRenderer |

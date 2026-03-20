@@ -1,0 +1,136 @@
+---
+title: "Campus Onboarding on New User Signup"
+description: "How the first student signup at a campus triggers full campus onboarding to create term contexts"
+source:
+  type: "obsidian"
+  path: "Engineering/Technical/Workflows/Campus-Onboarding-On-Signup.md"
+  distilled_at: "2026-03-20"
+---
+
+# Campus Onboarding on New User Signup
+
+When the **first student** signs up at a new campus, the system automatically triggers full campus onboarding to ensure term contexts are available.
+
+## The Problem
+
+Without this workflow, new campuses have:
+- No term contexts in the database
+- Courses with NULL `term_id` in `context_dependencies` table
+- Users unable to assign courses to terms
+- "Campus has no current term configured" errors
+
+## How It Works
+
+### Clerk Webhook Integration
+
+**File**: `services/api-router/src/routes/webhooks/clerk-routes.ts` (lines 902-934)
+
+When a user signs up via Clerk, the webhook handler:
+
+1. Creates the user account in PostgreSQL
+2. Runs `autoAssignCampusAndOverride(userId)` to detect campus from email domain
+3. **Triggers full campus onboarding** for the assigned campus
+4. Starts `StudentWatcher` workflow for the user
+
+```typescript
+// Trigger FULL campus onboarding to ensure terms are loaded
+if (assignedCampusId) {
+  const campusOnboardingWorkflowId = `campus-onboard-signup-${assignedCampusId}-${backendUserId}`;
+  try {
+    await temporalClient.startWorkflow({
+      workflowId: campusOnboardingWorkflowId,
+      workflowName: 'processSingleCampus',  // Full campus onboarding with Perplexity
+      taskQueue: 'campus-worker',
+      args: [assignedCampusId],  // No options = full processing
+    });
+    logger.info('Triggered FULL campus onboarding for new user signup', {
+      userId: backendUserId,
+      campusId: assignedCampusId,
+      workflowId: campusOnboardingWorkflowId,
+    });
+  } catch (campusOnboardingError: any) {
+    // May already be running, that's fine
+    if (!campusOnboardingError.message?.includes('already running')) {
+      logger.warn('Failed to trigger campus onboarding for new user', {
+        error: campusOnboardingError.message,
+        workflowId: campusOnboardingWorkflowId,
+        campusId: assignedCampusId,
+        userId: backendUserId,
+      });
+    }
+  }
+}
+```
+
+### The processSingleCampus Workflow
+
+**File**: `services/engine/src/workflows/campusProcessor.workflow.ts`
+
+When called without the `enrichmentOnly` option, this workflow:
+
+1. **Executes `gatherCampusDataWithPerplexity`**:
+   - Fetches comprehensive campus data via Perplexity AI
+   - Academic calendar with term dates
+   - Campus events, dining, facilities, transportation, safety alerts
+
+2. **Creates term contexts** from the calendar data
+3. **Enriches `campus_configs.current_term_data`**
+4. **Enables course-to-term assignment** for users
+
+## What Gets Created
+
+The full campus onboarding process:
+
+- ✅ Fetches academic calendar via Perplexity
+- ✅ Creates 3-5 term contexts in `contexts` table (type='term')
+- ✅ Updates `campus_configs.academic_calendar` with JSON array of terms
+- ✅ Sets `campus_configs.current_term_data` with current term object
+- ✅ Enriches campus metadata (city, timezone, etc.)
+
+## Idempotent Execution
+
+**Workflow ID Pattern**: `campus-onboard-signup-${campusId}-${userId}`
+
+- If multiple users sign up simultaneously at the same campus, only one onboarding runs
+- Subsequent signups see "already running" and proceed normally
+- Each campus gets onboarded exactly once
+
+## Related Workflows
+
+| Workflow | Purpose |
+|----------|---------|
+| `processSingleCampus` | **Full campus onboarding** - fetches all data via Perplexity |
+| `campusOnboardingWorkflow` | Batch onboarding from registry (multiple campuses) |
+| `enrichCampusesPrioritized` | Enrichment-only mode (skips full data fetch) |
+| `gatherCampusDataWithPerplexity` | Child workflow that fetches Perplexity data |
+
+## Testing
+
+To verify this workflow:
+
+```sql
+-- Check term contexts were created
+SELECT COUNT(*) FROM contexts
+WHERE parent_id = :campus_id AND type = 'term';
+
+-- Verify academic calendar exists
+SELECT academic_calendar FROM campus_configs
+WHERE campus_id = :campus_id;
+
+-- Check current term data
+SELECT current_term_data FROM campus_configs
+WHERE campus_id = :campus_id;
+```
+
+Check workflow execution:
+```bash
+temporal workflow list --query "WorkflowId='campus-onboard-signup-...'"
+```
+
+## Integration Points
+
+- **Clerk Webhooks**: Triggers on `user.created` events
+- **Campus Detection**: Uses email domain to identify campus
+- **Temporal Workflows**: Orchestrates the onboarding process
+- **Perplexity AI**: Fetches comprehensive campus data
+- **PostgreSQL**: Stores term contexts and campus configuration

@@ -1,0 +1,204 @@
+---
+title: "Homepage Sections Production Deployment Checklist"
+description: "Complete checklist for deploying the dynamic homepage sections feature with Hypertune configuration management."
+source:
+  type: "obsidian"
+  path: "Engineering/Technical/LockedIn/Homepage-Sections-Production-Checklist.md"
+  distilled_at: "2026-03-20"
+---
+
+# Homepage Sections Production Deployment Checklist
+
+Production deployment checklist for the dynamic homepage sections feature that allows real-time reordering and enabling/disabling of homepage sections via Hypertune flags.
+
+## Pre-Deployment Checklist
+
+### Code Changes Required
+
+- Section registry created (`src/components/homepage/sections/registry.ts`)
+- Section components extracted (VSComparisonSection, ExpressCTASection)
+- DynamicSectionRenderer implemented
+- LandingPageClient updated to use DynamicSectionRenderer
+- FlagValues in layout.tsx updated with new flags
+
+### Hypertune Configuration
+
+- `homePageSectionOrder` field added to Hypertune schema
+- `homepageSectionsEnabled` field added to Hypertune schema
+- Default values set in Hypertune Flags tab
+- SDK regenerated with `make hypertune-regen`
+
+### Local Testing
+
+**Test 1: Default homepage loading**
+- Visit http://localhost:3008
+- Verify all 9 sections render in correct order
+- Check browser console for errors
+
+**Test 2: Section reordering**
+- Go to https://app.hypertune.com/projects/7826
+- Change `homePageSectionOrder` (e.g., move 'ace-ai' before 'jobs-to-be-done')
+- Wait 5-10 seconds for propagation
+- Hard refresh homepage
+- Verify sections render in new order
+
+**Test 3: Section disabling**
+- Remove section ID from `homepageSectionsEnabled` array
+- Wait 5-10 seconds
+- Hard refresh homepage
+- Verify section no longer appears
+
+**Test 4: Vercel Toolbar override**
+- Open Vercel Toolbar (bottom-center)
+- Click Flags Explorer (🚩 icon)
+- Verify `homePageSectionOrder` and `homepageSectionsEnabled` appear
+- Override a flag value
+- Verify override persists across navigation
+
+**Test 5: Fallback behavior**
+- Temporarily break Hypertune connection (disable network in DevTools)
+- Hard refresh
+- Verify homepage still renders with default section order
+- No console errors
+
+### Build Verification
+
+```bash
+cd services/dormway-lockedin
+npx tsc --noEmit
+npm run build
+```
+
+Verify:
+- TypeScript compilation passes
+- Production build succeeds
+- No build warnings related to sections/registry
+
+### Performance Checks
+
+- Lazy loading working (check Network tab - each section component loads on-demand)
+- Lighthouse Performance score >= 90
+- First Contentful Paint (FCP) not degraded
+
+### Cross-Browser Testing
+
+Test on:
+- Chrome (latest)
+- Safari (latest)
+- Firefox (latest)
+- Mobile Safari (iOS)
+- Mobile Chrome (Android)
+
+## Staging Deployment
+
+### Deploy to Staging
+
+```bash
+git checkout -b feat/homepage-section-registry
+git add .
+git commit -m "feat: add dynamic homepage section registry with Hypertune"
+git push origin feat/homepage-section-registry
+```
+
+### Staging Verification
+
+- Visit staging URL (Vercel preview deployment)
+- Verify all sections load
+- Test Hypertune flag changes (use staging environment)
+- Test Vercel Toolbar on staging
+- Check staging analytics
+
+**Staging smoke tests:**
+```bash
+# Test homepage loads
+curl -I https://staging-url.vercel.app/
+
+# Test flag discovery endpoint
+curl -s https://staging-url.vercel.app/.well-known/vercel/flags \
+  -H "x-flag-secret: $FLAGS_SECRET" | jq .
+```
+
+## Production Deployment
+
+### Pre-Deploy Verification
+
+- All staging tests passed
+- No console errors in staging
+- Hypertune production environment configured correctly
+- FLAGS_SECRET in production Doppler
+
+### Deploy Steps
+
+1. **Merge to main** - PR approved and merged, CI/CD auto-deploys to production
+
+2. **Verify Hypertune production environment**
+   - Go to https://app.hypertune.com/projects/7826
+   - Switch to Production environment
+   - Verify `homePageSectionOrder` and `homepageSectionsEnabled` exist
+
+3. **Monitor deployment** - Watch Vercel deployment logs for errors
+
+### Post-Deploy Verification
+
+**Immediate checks (within 5 minutes):**
+- Visit https://dormway.app
+- Homepage loads successfully with all sections
+- No console errors
+- Check Sentry for new errors
+
+**Vercel Toolbar in production:**
+- Visit https://dormway.app?toolbar=1
+- Log in with Vercel account (must be team member)
+- Verify Flags Explorer shows all flags
+- Test override functionality
+
+**Performance monitoring:**
+- Check Core Web Vitals in Vercel Analytics
+- FCP, LCP, CLS within acceptable ranges
+- No performance regression
+
+## Rollback Plan
+
+**Immediate rollback via Hypertune:**
+- Revert `homePageSectionOrder` to previous value
+- Changes live in 5-10 seconds
+- No code deployment needed
+
+**Full rollback if needed:**
+```bash
+git revert <commit-hash>
+git push origin main
+```
+
+## Success Criteria
+
+Deployment is successful if:
+- Homepage loads without errors
+- All 9 sections render correctly
+- Section order matches Hypertune configuration
+- Disabled sections don't appear
+- Vercel Toolbar shows new flags
+- Flag overrides work in development
+- No performance degradation
+- No increase in error rate (Sentry)
+- Analytics tracking unchanged
+
+## Known Limitations
+
+<Warning>
+**Array flags in Vercel Toolbar**: The Flags Explorer may display arrays as raw JSON. This is expected for list-type flags.
+</Warning>
+
+<Info>
+**Propagation delay**: Hypertune changes take 5-10 seconds to propagate. Not instant.
+</Info>
+
+<Note>
+**Cache invalidation**: Users may need hard refresh (Cmd+Shift+R) to see changes immediately.
+</Note>
+
+## Emergency Resources
+
+- **Hypertune dashboard**: https://app.hypertune.com/projects/7826
+- **Vercel dashboard**: https://vercel.com/dormway
+- **Sentry errors**: https://sentry.io/organizations/dormway

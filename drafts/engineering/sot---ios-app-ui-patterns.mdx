@@ -1,0 +1,488 @@
+---
+title: "iOS App UI Patterns"
+description: "UI patterns and data binding conventions for DormWay's iOS app across iPhone, iPad, and Mac Catalyst."
+source:
+  type: "obsidian"
+  path: "Engineering/Architecture/SoT - iOS App UI Patterns.md"
+  distilled_at: "2026-03-20"
+---
+
+# iOS App UI Patterns
+
+DormWay's iOS app supports iPhone, iPad, and Mac Catalyst with platform-specific UI adaptations. This document covers UI patterns, data binding conventions, and cross-platform compatibility.
+
+## Course Color Resolution Pattern
+
+Course colors are resolved following this priority chain:
+
+1. **API Color (Primary):** Use `course.color` from `TermCourse.metadata.color` (hex string)
+2. **Fallback Color (Secondary):** Use index-based color from predefined palette when API color unavailable
+
+```swift
+/// Convert hex color string to SwiftUI Color
+private func colorFromHex(_ hex: String?) -> Color? {
+    guard let hex = hex, !hex.isEmpty else { return nil }
+
+    var hexSanitized = hex.trimmingCharacters(in: .whitespacesAndNewlines)
+    hexSanitized = hexSanitized.replacingOccurrences(of: "#", with: "")
+
+    guard hexSanitized.count == 6 else { return nil }
+
+    var rgbValue: UInt64 = 0
+    Scanner(string: hexSanitized).scanHexInt64(&rgbValue)
+
+    let r = Double((rgbValue & 0xFF0000) >> 16) / 255.0
+    let g = Double((rgbValue & 0x00FF00) >> 8) / 255.0
+    let b = Double(rgbValue & 0x0000FF) / 255.0
+
+    return Color(red: r, green: g, blue: b)
+}
+
+/// Fallback color for courses without API color
+private func fallbackColor(for index: Int) -> Color {
+    let colors: [Color] = [.purple, .blue, .green, .orange, .pink, .cyan, .indigo, .mint]
+    return colors[index % colors.count]
+}
+
+// Usage:
+color: colorFromHex(course.color) ?? fallbackColor(for: index)
+```
+
+<Note>
+- `TermCourse.color` property returns `metadata?.color`
+- Color is set in course context metadata during Canvas sync
+- Fallback palette ensures visual consistency even without API colors
+- Hex parsing handles both `#RRGGBB` and `RRGGBB` formats
+</Note>
+
+## Term Progress Bar Break State
+
+When `termInfo.isOnBreak` is true, the TermProgressBar displays break mode instead of normal term progress.
+
+**Break Mode Display:**
+- Sun icon with gradient (orange to yellow)
+- Break name or "On Break" message
+- "Classes resume [date]" with formatted start date
+- Countdown badge showing days until term starts
+- Progress bar and week markers are hidden
+
+**Normal Mode Display:**
+- Term name and week label (e.g., "Fall 2025 - Week 15 of 16")
+- Date range label
+- Gradient progress bar with capsule fill
+- Week markers ("W1" and "Finals")
+
+**Data Flow:**
+```
+CurrentTermData (API Response)
+    |
+    v
+ScheduleTermInfo (View Model)
+    |-- isOnBreak: Bool
+    |-- breakName: String?
+    |-- startDate: Date
+    |-- endDate: Date
+    |-- currentWeek: Int
+    |-- progressPercent: Double
+    |
+    v
+TermProgressBar (UI Component)
+```
+
+**Implementation Pattern:**
+
+```swift
+var body: some View {
+    VStack(alignment: .leading, spacing: 6) {
+        if termInfo.isOnBreak {
+            breakView  // Sun icon, break message, countdown
+        } else {
+            termProgressView  // Progress bar, week markers
+        }
+    }
+}
+
+private var daysUntilTermStarts: Int? {
+    let calendar = Calendar.current
+    let now = Date()
+    guard termInfo.startDate > now else { return nil }
+    return calendar.dateComponents([.day], from: now, to: termInfo.startDate).day
+}
+```
+
+## Lecture Canvas/Notes Mode Toggle (iPad)
+
+iPad's `LectureView` provides a unified lecture experience with a mode toggle between Canvas (PencilKit drawing) and Notes (markdown text editor).
+
+**Mode Enum:**
+```swift
+enum LectureMode: String, CaseIterable {
+    case canvas = "Canvas"
+    case notes = "Notes"
+}
+@State private var currentMode: LectureMode = .canvas
+```
+
+**Mode Picker UI:**
+```swift
+private var modePicker: some View {
+    Picker("Mode", selection: $currentMode) {
+        ForEach(LectureMode.allCases, id: \.self) { mode in
+            Text(mode.rawValue).tag(mode)
+        }
+    }
+    .pickerStyle(.segmented)
+    .frame(maxWidth: 200)
+}
+```
+
+**Content Switching:**
+```swift
+var body: some View {
+    VStack(spacing: 0) {
+        modePicker
+
+        if currentMode == .canvas {
+            canvasModeContent  // PencilKit canvas with drawing tools
+        } else {
+            notesModeContent   // TextEditor with markdown toolbar
+        }
+    }
+}
+```
+
+**Notes Toolbar Features:**
+- Formatting buttons: bold, italic, strikethrough
+- Headings menu (H1, H2, H3)
+- Lists: bullet, numbered, checklist
+- Code inline and blockquote
+- "Paste Transcript" button (appears when transcript available)
+- Pin button (appears during recording)
+
+**Text Notes API Integration:**
+```swift
+private func saveTextNotesIfChanged() async {
+    guard textNotes != originalTextNotes else { return }
+
+    guard let lectureService = container.resolveOptional(LectureServiceProtocol.self) else { return }
+
+    try await lectureService.saveTextNotes(lectureId: lecture.id, textNotes: textNotes)
+    originalTextNotes = textNotes
+}
+```
+
+## Platform Routing (AdaptiveLectureView)
+
+Routes users to the appropriate lecture experience based on platform capabilities:
+
+```swift
+struct AdaptiveLectureView: View {
+    private var usePencilKitCanvas: Bool {
+        #if targetEnvironment(macCatalyst)
+        return false  // Mac Catalyst → CompactLectureView (text-only)
+        #else
+        return horizontalSizeClass == .regular  // iPad → LectureView, iPhone → CompactLectureView
+        #endif
+    }
+
+    var body: some View {
+        if usePencilKitCanvas {
+            LectureView(lecture: lecture, onDismiss: onDismiss)
+        } else {
+            CompactLectureView(lecture: lecture, onDismiss: onDismiss)
+        }
+    }
+}
+```
+
+| Platform | View | Features |
+|----------|------|----------|
+| iPad (regular size class) | `LectureView` | PencilKit canvas, drawing tools, Notes mode toggle |
+| iPhone | `CompactLectureView` | Text-only, tabbed interface (Notes/Transcript/Pins/Canvas preview) |
+| Mac Catalyst | `CompactLectureView` | Text-only, tabbed interface with wide-screen context panel |
+
+<Note>
+Mac Catalyst lacks Apple Pencil support, so PencilKit canvas is not useful. The `CompactLectureView` provides full markdown notes editing with keyboard support.
+</Note>
+
+## Lecture Canvas Drawing Tools
+
+The iPad LectureView provides comprehensive PencilKit drawing tools:
+
+**Canvas Tools (`CanvasTool` enum):**
+```swift
+enum CanvasTool: String, CaseIterable {
+    case select = "Select"
+    case pen = "Pen"
+    case highlighter = "Highlighter"
+    case eraser = "Eraser"
+    case lasso = "Lasso"
+    case text = "Text"
+    case shapes = "Shapes"
+}
+```
+
+**Pen Ink Types (`PenInkType` enum):**
+```swift
+enum PenInkType: String, CaseIterable, Codable {
+    case monoline = "Monoline"
+    case pen = "Pen"
+    case marker = "Marker"
+    case pencil = "Pencil"
+}
+```
+
+**Multi-Page Canvas:**
+- `CanvasPageManager` handles multiple PencilKit pages
+- Thumbnail strip for page navigation
+- Page creation/deletion support
+- Each page stored as base64 PKDrawing data with recognized text
+
+## Lecture Audio Recording & Playback
+
+**Recording Flow:**
+```swift
+// LectureAudioRecorder - uses AVAudioEngine
+// Simultaneous recording + speech recognition (SFSpeechRecognizer)
+// Output: Audio file (CAF/M4A) + transcript segments with timestamps
+```
+
+**Playback Flow:**
+```swift
+// LectureAudioPlayer
+// 1. Fetch presigned URL from backend (GET /lectures/:id/recordings/playback-url)
+// 2. Stream audio via AVPlayer
+// 3. Publish currentTime for UI synchronization and stroke highlighting
+```
+
+**Recording Storage:**
+- Audio uploaded to S3/R2 via presigned PUT URL
+- Supported formats: m4a, mp3, wav, caf
+- Metadata saved via `POST /lectures/:id/recordings`
+
+## Lecture Pins
+
+**Pin Types:**
+```swift
+enum LecturePinType: String, Codable {
+    case important = "important"   // Star icon - key points
+    case question = "question"     // Question mark - things to ask
+    case review = "review"         // Refresh icon - review later
+    case highlight = "highlight"   // Highlighter - general highlight
+}
+```
+
+**Pin Features:**
+- `audioTimestamp` links pin to specific recording moment
+- Optional page/stroke references for canvas-based pins
+- Private or class-wide visibility
+- User notes attached to pins
+- Created via toolbar button during recording
+
+## Mac Catalyst Support
+
+DormWay supports Mac Catalyst to run the iOS app natively on macOS with platform-specific adaptations.
+
+### Title Bar Hiding
+
+Mac Catalyst apps display a macOS title bar by default. DormWay hides this for a cleaner, more native appearance.
+
+**Multi-layered approach for reliable title bar hiding:**
+
+**1. SceneDelegate (Initial Scene Connection):**
+```swift
+// App/SceneDelegate.swift
+class SceneDelegate: UIResponder, UIWindowSceneDelegate {
+    var window: UIWindow?
+
+    func scene(_ scene: UIScene, willConnectTo session: UISceneSession, options connectionOptions: UIScene.ConnectionOptions) {
+        guard let windowScene = (scene as? UIWindowScene) else { return }
+
+        #if targetEnvironment(macCatalyst)
+        if let titlebar = windowScene.titlebar {
+            titlebar.titleVisibility = .hidden
+            titlebar.toolbar = nil
+        }
+        #endif
+    }
+}
+```
+
+**2. App Init (Notification Observers):**
+```swift
+// In DormWayApp.init()
+#if targetEnvironment(macCatalyst)
+// Observe scene connections to hide title bar immediately
+NotificationCenter.default.addObserver(
+    forName: UIScene.willConnectNotification,
+    object: nil,
+    queue: .main
+) { notification in
+    DispatchQueue.main.async {
+        if let windowScene = notification.object as? UIWindowScene,
+           let titlebar = windowScene.titlebar {
+            titlebar.titleVisibility = .hidden
+            titlebar.toolbar = nil
+        }
+    }
+}
+#endif
+```
+
+**3. View Modifier (HostingWindowFinder):**
+```swift
+#if targetEnvironment(macCatalyst)
+extension View {
+    /// Hides the Mac Catalyst title bar when the view appears
+    func hideMacCatalystTitleBar() -> some View {
+        self.background(
+            HostingWindowFinder { window in
+                if let windowScene = window?.windowScene,
+                   let titlebar = windowScene.titlebar {
+                    titlebar.titleVisibility = .hidden
+                    titlebar.toolbar = nil
+                }
+            }
+        )
+    }
+}
+#endif
+```
+
+**Usage:**
+```swift
+ContentView()
+    .hideMacCatalystTitleBar()
+```
+
+### Mac Catalyst Sheet Presentation
+
+Sheets on Mac Catalyst use fixed frame sizes instead of iOS presentation detents:
+
+```swift
+.sheet(isPresented: $showingUploadSheet) {
+    uploadSheetContent
+}
+#if targetEnvironment(macCatalyst)
+.frame(minWidth: 400, minHeight: 450)
+#else
+.presentationDetents([.height(520), .large])
+.presentationDragIndicator(.visible)
+#endif
+```
+
+### Mac Catalyst Wide Screen Layouts
+
+`CompactLectureView` detects wide screens (> 700pt) and shows a context panel:
+
+```swift
+GeometryReader { geometry in
+    VStack(spacing: 0) {
+        // Main content
+    }
+    .onChange(of: geometry.size.width) { _, newWidth in
+        isCompactWidth = newWidth <= 700
+    }
+    .overlay(alignment: .trailing) {
+        if !isCompactWidth {
+            contextPanel
+                .frame(width: 340)
+                .shadow(color: .black.opacity(0.25), radius: 16, x: -4, y: 0)
+        }
+    }
+}
+```
+
+### Platform-Specific Features
+
+**Features unavailable on Mac Catalyst:**
+- Screen Time API (`DeviceActivityMonitor`)
+- Shake gestures for debug menu
+- Live Activities (use stub implementation)
+- Apple Pencil / PencilKit drawing
+
+**Conditional compilation pattern:**
+```swift
+#if targetEnvironment(macCatalyst)
+// Mac Catalyst-specific code
+return false
+#else
+// iOS-specific code
+return true
+#endif
+```
+
+## Library Context Prompt
+
+The Library tab surfaces a contextual prompt when a class is in progress or starts within 60 minutes.
+
+- Prompt actions: "Resume notes"/"Prep notes" and "Open Schedule"
+- New notes created from the prompt pass `courseContextId` into `NoteEditorSheet` when available
+- Implementation: `LibraryTabView` calls `ScheduleServiceProtocol.fetchTimeBlocksForDay`, maps to `ScheduleCalendarEvent`, and selects the current/next `.class` event
+
+## Work Session Scaffold
+
+Work Session is a full-screen sheet with three lanes: Audio/Transcript, Notes, Actions.
+
+- Audio uses `LectureAudioRecorder` to start/stop recording and show live transcript text
+- Actions include "Add homework," which opens `AddTaskSheet` and creates a task via `TasksServiceProtocol`
+
+## Key Data Models
+
+### Lecture Data Model
+
+```swift
+public struct Lecture: Codable, Sendable, Identifiable {
+    public let id: String
+    public let courseId: String
+    public let title: String
+    public var lectureNumber: Int?
+    public var scheduledStart: Date
+    public var scheduledEnd: Date?
+    public var status: LectureStatus
+    public var recording: LectureRecording?
+    public var transcript: [TranscriptSegment]?
+    public var pages: [LecturePage]?
+    public var pins: [LecturePin]?
+    public var textNotes: String?        // Markdown notes
+    public var summary: String?           // AI-generated
+    public var topics: [String]?          // AI-extracted
+}
+
+public enum LectureStatus: String, Codable, Sendable {
+    case draft
+    case recording
+    case processing
+    case ready
+    case error
+}
+```
+
+### TermCourse
+
+```swift
+public struct TermCourse: Codable, Sendable, Identifiable {
+    public let courseId: String
+    public let contextId: String
+    public let externalId: String?
+    public let name: String
+    public let courseCode: String?
+    public let courseName: String?
+    public let credits: Int?
+    public let metadata: TermCourseMetadata?
+
+    /// Course color from context metadata (hex string)
+    public var color: String? {
+        metadata?.color
+    }
+}
+
+public struct TermCourseMetadata: Codable, Sendable {
+    public let color: String?  // Hex color from context metadata
+}
+```
+
+### ScheduleTermInfo
+
+```swift
+public struct ScheduleTermInfo:

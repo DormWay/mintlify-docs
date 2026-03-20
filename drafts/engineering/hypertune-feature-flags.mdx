@@ -1,0 +1,301 @@
+---
+title: "Hypertune Feature Flags"
+description: "Feature flag platform with visual UI, instant toggling, type-safe SDK, and A/B testing capabilities"
+source:
+  type: "obsidian"
+  path: "Engineering/Technical/LockedIn/Hypertune Feature Flags.md"
+  distilled_at: "2026-03-20"
+---
+
+# Hypertune Feature Flags
+
+Hypertune is a feature flag platform that enables A/B testing, gradual rollouts, and emergency kill switches without code changes. The system provides type-safe SDK generation, real-time updates via WebSocket, and integration with the Vercel Toolbar.
+
+## Tech Stack
+
+- Hypertune SDK v2.10.1
+- Next.js 14.2 (App Router)
+- Vercel Flags SDK
+- Clerk authentication for context
+
+## Current Flags
+
+### Production Flags
+
+| Flag | Type | Options | Default | Use Case |
+|------|------|---------|---------|----------|
+| `heroVariant` | enum | `'original' \| 'improved' \| 'hybrid'` | `'original'` | Homepage hero A/B test |
+| `enableDesignV2` | boolean | `true \| false` | `false` | Design system V2 rollout |
+| `exampleFlag` | boolean | `true \| false` | `false` | Example/testing |
+
+### Implementation
+
+**Server-side flags** (layout.tsx):
+```typescript
+// src/app/layout.tsx
+const hypertune = await getHypertune();
+const flagValues = {
+  heroVariant: hypertune.heroVariant({ fallback: 'hybrid' }),
+  enableDesignV2: hypertune.enableDesignV2({ fallback: false }),
+  exampleFlag: hypertune.exampleFlag({ fallback: false }),
+};
+```
+
+**Client-side flags** (LandingPageClient.tsx):
+```typescript
+// src/app/LandingPageClient.tsx
+import { useHypertune } from '@/generated/hypertune.react';
+
+const hypertune = useHypertune();
+const heroVariant = hypertune.heroVariant({ fallback: 'hybrid' });
+```
+
+## Event Triggers (Analytics-Driven Flags)
+
+Event triggers are special Hypertune flags with `Void` return type that log analytics events to enable personalization based on user behavior.
+
+### Current Event Triggers
+
+#### `onboardingCompleted`
+
+Tracks onboarding completion for personalization and progressive feature rollout.
+
+**Location**: `src/app/onboarding/page.tsx` (line 375)
+
+**Properties** (12 total):
+```typescript
+interface OnboardingCompletedEventProperties {
+  campusId: string;           // Campus UUID or empty string
+  campusName: string;         // Campus display name
+  campusVerified: boolean;    // Whether campus was verified
+  academicYear: string;       // Academic year (freshman, sophomore, etc.)
+  major: string;              // Selected major
+  housingType: string;        // Housing type (dorm, off-campus, etc.)
+  dormName: string;           // Dorm name if applicable
+  aiTone: string;             // AI assistant tone preference
+  aiPersonality: string;      // AI assistant personality
+  scheduleImported: boolean;  // Whether schedule was imported
+  stepsCompleted: number;     // Number of onboarding steps completed
+  totalDurationSeconds: number; // Total time spent in onboarding
+}
+```
+
+**Implementation**:
+```typescript
+// Track onboarding completion (fires on submit)
+hypertune.onboardingCompleted({
+  args: {
+    properties: {
+      campusId: formData.campus || '',
+      campusName: formData.campusName || '',
+      campusVerified: !!formData.campus,
+      academicYear: formData.year || '',
+      major: formData.major || '',
+      housingType: formData.housing || 'off-campus',
+      dormName: formData.dormName || '',
+      aiTone: formData.tone || '',
+      aiPersonality: formData.personality || '',
+      scheduleImported: false,
+      stepsCompleted: ONBOARDING_STEPS.length,
+      totalDurationSeconds: 0,
+    },
+  },
+});
+```
+
+### Using Event Data in Flag Logic
+
+Access event data in Hypertune dashboard flag expressions:
+
+```javascript
+// Get latest event properties
+const latest = user.events.onboardingCompleted.latest.properties;
+```
+
+**Example: Personalize homepage by housing type**
+
+```javascript
+const housing = user.events.onboardingCompleted.latest.properties.housingType;
+
+if (housing === "dorm") {
+  return ["hero-dorm-focused", "campus-events", "social-proof", ...];
+} else if (housing === "off-campus") {
+  return ["hero-commuter-focused", "parking-info", "transit", ...];
+}
+
+return ["hero-hybrid", "social-proof", ...];  // Default
+```
+
+### Dual Tracking Pattern
+
+Track critical events to both Amplitude (analytics) and Hypertune (flag logic):
+
+```typescript
+// 1. Track to Amplitude (full analytics suite)
+trackEventWithDefaults('onboarding_completed', {
+  campus_id: formData.campus,
+  campus_verified: !!formData.campus,
+  housing_type: formData.housing,
+  major: formData.major,
+  schedule_imported: false,
+});
+
+// 2. Track to Hypertune (for flag logic)
+hypertune.onboardingCompleted({
+  args: {
+    properties: {
+      campusId: formData.campus || '',
+      campusVerified: !!formData.campus,
+      housingType: formData.housing || 'off-campus',
+      major: formData.major || '',
+      scheduleImported: false,
+    },
+  },
+});
+```
+
+## Architecture
+
+### Data Flow
+
+1. **Initial Load**: SDK has embedded init data (snapshot from generation time), enabling instant loads with latest-known values
+2. **Runtime Updates**: SDK polls Hypertune API every 10 seconds, with changes propagating in 5-10 seconds
+3. **Vercel Toolbar Overrides**: Per-session flag overrides stored in encrypted cookies bypass global flag values
+
+### File Structure
+
+```
+dormway-lockedin/
+├── generated/                           # Auto-generated (DO NOT EDIT)
+│   ├── hypertune.ts                    # Core SDK
+│   ├── hypertune.react.tsx             # React hooks
+│   └── hypertune.vercel.tsx            # Vercel Toolbar integration
+├── src/
+│   ├── lib/
+│   │   └── getHypertune.ts             # Server-side helper
+│   ├── app/
+│   │   ├── layout.tsx                  # Root layout (Vercel Toolbar)
+│   │   ├── LandingPageClient.tsx       # Client-side flag usage
+│   │   └── test-hypertune/page.tsx     # Test page for flags
+│   └── ...
+```
+
+## Adding a New Flag
+
+### Step 1: Create Flag in Hypertune Dashboard
+
+1. Go to [Hypertune Dashboard](https://app.hypertune.com/projects/7826)
+2. Click "Add Field" under `root`
+3. Configure flag with name (camelCase), type (Boolean/Enum/String), default value, and description
+
+### Step 2: Regenerate SDK
+
+```bash
+cd services/dormway-lockedin
+
+# Regenerate with Doppler (injects NEXT_PUBLIC_HYPERTUNE_TOKEN)
+bash -c 'doppler run -- bash -c '\''npx hypertune --framework nextApp --platform vercel --includeInitData true --getHypertuneImportPath "../src/lib/getHypertune"'\'''
+```
+
+### Step 3: Use Flag in Code
+
+**Server-side**:
+```typescript
+import getHypertune from '@/lib/getHypertune';
+
+const hypertune = await getHypertune();
+const enableNewDashboard = hypertune.enableNewDashboard({ fallback: false });
+
+if (enableNewDashboard) {
+  return <NewDashboard />;
+}
+return <ClassicDashboard />;
+```
+
+**Client-side**:
+```typescript
+'use client';
+import { useHypertune } from '@/generated/hypertune.react';
+
+export function MyComponent() {
+  const hypertune = useHypertune();
+  const enableNewDashboard = hypertune.enableNewDashboard({ fallback: false });
+
+  return enableNewDashboard ? <NewUI /> : <OldUI />;
+}
+```
+
+## Testing and Debugging
+
+### Test Page
+
+Visit `http://localhost:3008/test-hypertune` for a real-time flag value inspector that shows current values and updates every 5-10 seconds when flags change.
+
+### Vercel Toolbar
+
+The Vercel Toolbar provides per-session flag overrides without changing global values:
+
+1. Visit `http://localhost:3008` (toolbar appears automatically at bottom)
+2. Click the flag icon (🚩) to open Flags Explorer
+3. Override flag values - changes persist in encrypted cookies
+4. Use "Reset All" to clear overrides
+
+Works in local development, preview deployments, and production (with `?toolbar=1`).
+
+## Best Practices
+
+### Naming and Fallbacks
+
+- Use camelCase for flag names (`enableNewFeature`)
+- Use lowercase/kebab-case for enum values (`'original' | 'improved'`)
+- Always provide safe fallbacks (conservative defaults)
+- Use control variant as fallback for A/B tests
+
+### Performance
+
+**Use server flags when:**
+- Flag controls page structure (affects SSR/SEO)
+- Flag determines data fetching
+- Flag affects initial render
+
+**Use client flags when:**
+- Flag controls interactive behavior
+- Flag changes after mount
+- Flag is user-specific (after auth)
+
+### Flag Lifecycle
+
+1. **Development**: Create and test locally
+2. **Staging**: Test on preview deployment  
+3. **Gradual Rollout**: Enable for 1% → 10% → 50% → 100%
+4. **Full Rollout**: Flag always ON
+5. **Code Cleanup**: Remove flag, make feature permanent
+6. **Archive**: Delete from dashboard
+
+### A/B Testing
+
+Track variant exposure and conversions:
+
+```typescript
+const variant = hypertune.heroVariant({ fallback: 'original' });
+
+useEffect(() => {
+  trackEvent('experiment_exposed', {
+    experiment: 'hero_variant',
+    variant,
+  });
+}, [variant]);
+
+function handleSignUp() {
+  trackEvent('signup_completed', {
+    hero_variant: variant,
+  });
+}
+```
+
+## Reference
+
+- **Dashboard**: [app.hypertune.com/projects/7826](https://app.hypertune.com/projects/7826)
+- **Test Page**: `http://localhost:3008/test-hypertune`
+- **Regenerate SDK Command**: See Step 2 above
+- **Environment**: `NEXT_PUBLIC_HYPERTUNE_TOKEN` via Doppler

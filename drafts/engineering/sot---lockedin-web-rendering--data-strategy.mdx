@@ -1,0 +1,101 @@
+---
+title: "LockedIn Web Rendering & Data Strategy"
+description: "Rendering boundaries, provider scope, redirect behavior, and caching strategy for dormway-lockedin Next.js App Router application."
+source:
+  type: "obsidian"
+  path: "Engineering/Architecture/SoT - LockedIn Web Rendering & Data Strategy.md"
+  distilled_at: "2026-03-20"
+---
+
+# LockedIn Web Rendering & Data Strategy
+
+This document defines the rendering boundaries, provider scope, redirect behavior, and top-level caching strategy for `dormway-lockedin` (Next.js App Router).
+
+## Current State
+
+### Route Structure
+- **Total pages**: 111 in `src/app`, 51 in `src/app/dashboard`
+- **Client components**: 66 pages in main app, 42 pages in dashboard
+- **Root layout**: Hosts broad client runtime chain (query client, theme, realtime, analytics, chat providers)
+
+### Key Files
+- `src/app/layout.tsx` - Root provider stack
+- `src/app/dashboard/layout.tsx` - Dashboard-specific layout
+- `src/app/dashboard/page.tsx` - Dashboard root page
+- `src/app/page.tsx` - Homepage with `dynamic = 'force-dynamic'`
+- `src/lib/schoolDetection.ts` - School detection logic
+
+### Current Behavior
+- `/dashboard` redirects via client-side `useEffect`
+- Homepage performs `no-store` school detection fetch on request
+- Heavy client runtime loads on all routes
+
+## Architecture Contracts
+
+### 1. Server-First Route Contract
+
+All `page.tsx` and `layout.tsx` files are server components by default:
+
+- Add `'use client'` only for leaf-level interactivity boundaries
+- Data-read surfaces should prefer server fetch + serialized props over client bootstrapping
+- Interactive components should be minimal and focused
+
+### 2. Provider Scope Contract
+
+Provider placement must follow scoping rules:
+
+- **Root layout**: Only truly global providers required on most routes
+- **Route-scoped providers**: Must be moved below route boundaries (e.g., dashboard-only realtime)
+- **Third-party runtime**: Analytics, chat, session replay must be deferred or route-gated unless needed at first paint
+
+### 3. Redirect Contract
+
+Redirect execution must happen at the appropriate layer:
+
+- **Server redirects**: Use `redirect()` or config redirects for deterministic route redirects
+- **Client redirects**: Only when redirect decision requires client-only state
+
+### 4. Homepage Cacheability Contract
+
+Homepage caching strategy:
+
+- **Marketing shell**: Should remain cache-friendly by default
+- **Personalization**: Should not force full-route dynamic rendering unless required
+- **Strategy**: Use bounded cache strategy or deferred enrichment to keep baseline shell performant
+
+## Migration Sequence
+
+The following changes should be implemented in priority order:
+
+### 1. Redirect Hardening
+- Move `/dashboard` redirect behavior to server path
+- Eliminate client-only redirect hops
+
+### 2. RSC Boundary Reduction
+- Convert non-interactive dashboard shells to server components
+- Convert route wrappers to server components where possible
+
+### 3. Provider Narrowing
+- Re-scope root providers to dashboard-specific boundaries
+- Implement deferred provider loading
+
+### 4. Homepage Cache Strategy
+- Replace `force-dynamic`/`no-store` with explicit cache strategy
+- Document personalization tradeoffs
+
+## Acceptance Criteria
+
+The architecture should meet these targets:
+
+- `/dashboard` redirect executes server-side with no client hop
+- Dashboard route tree has significantly fewer client-entry pages/components
+- Non-dashboard paths avoid loading dashboard/realtime/chat runtime at initial paint
+- Homepage strategy is explicitly implemented with clear cache/personalization tradeoffs
+
+## Change Policy
+
+Before modifying rendering, caching, or provider behavior:
+
+1. Update this document in the same PR
+2. Document route-level tradeoffs (latency, cacheability, hydration cost)
+3. Reference impact on related systems (Home & Widgets, Homepage Animated Demo)

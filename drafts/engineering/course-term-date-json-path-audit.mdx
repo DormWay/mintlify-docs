@@ -1,0 +1,186 @@
+---
+title: "Course Term/Date JSON Path Audit"
+description: "Identifies and maps the inconsistent JSON storage paths for course term IDs and semester dates across the codebase."
+source:
+  type: "obsidian"
+  path: "Engineering/Technical/Course-Term-Date-JSON-Path-Audit.md"
+  distilled_at: "2026-03-20"
+---
+
+# Course Term/Date JSON Path Audit
+
+This audit reveals critical inconsistencies in how term IDs and semester dates are stored and retrieved across the codebase, leading to data synchronization issues.
+
+## Critical Issue: Triple Storage Not Synced
+
+<Warning>
+Term health fixing operations have three storage gaps that cause wrong semester dates and time block generation issues.
+</Warning>
+
+When running term fixes (fix-null-assignments, fix-orphaned-enrollments), the code updates:
+- ✅ `context_dependencies.term_id`
+- ✅ `context_dependencies.term_year` 
+- ❌ **GAP 1**: Does NOT update `context_dependencies.metadata.term`
+- ❌ **GAP 2**: Does NOT update `contexts.metadata.semesterDates` (course context)
+- ❌ **GAP 3**: Does NOT update `contexts.metadata.startDate/endDate` (course context)
+
+This causes:
+1. "current" to persist in enrollment `metadata.term`
+2. **Wrong semester dates** (e.g., Fall dates when term is Spring)
+3. Time blocks generated with incorrect dates
+
+## Term ID Storage Locations
+
+### Writers (where term ID is SAVED)
+
+| File | Line | Saves To |
+|------|------|----------|
+| `course-maintenance-routes.ts` | 497 | `metadata.term` |
+| `course.activities.ts` | 719 | `metadata.term` |
+| `course-maintenance-routes.ts` | 527-533 | `context_dependencies.term_id` |
+| `auroraDb.ts` | 1962 | `context_dependencies.term_id` |
+| `auth0-routes.ts` | 135, 196, 203 | `context_dependencies.term_id` |
+| `term-health-admin-routes.ts` | 765-777 | `context_dependencies.term_id` + `term_year` |
+| `termManagement.activities.ts` | 1155-1176 | `context_dependencies.term_id` + `term_year` |
+
+### Readers (where term ID is READ)
+
+| File | Line | Reads From |
+|------|------|------------|
+| `timeBlockRefresh.activities.ts` | 174, 176, 189 | Multiple paths with fallbacks |
+| `time-blocks.service.ts` | 299, 612-613 | Multiple paths with fallbacks |
+| `dashboard-aurora-service.ts` | 396 | `cd.metadata->>'term'` |
+| `syllabus.factory.ts` | 922, 956, 990 | `c.metadata->>'term'` |
+| `auroraDb.ts` | 1956 | `metadata.term_id` OR `metadata.term` |
+| `termManagement.activities.ts` | 429, 570 | Various paths |
+| `TermResolver.ts` | 84,90,95 | `metadata->>'canvas_enrollment_term_id'` |
+
+### Term ID Mismatch Summary
+
+| Writer Uses | Reader Expects | Status |
+|-------------|----------------|--------|
+| `metadata.term` | `metadata.termId` | ❌ BROKEN |
+| `metadata.term` | `metadata.term` | ✅ OK |
+| `metadata.term` | `metadata.term_id` | ❌ BROKEN |
+| `cd.term_id` | `cd.term_id` | ✅ OK |
+| `cd.term_id` | `metadata.termId` | ⚠️ PARTIAL |
+
+## Semester Date Storage Locations
+
+### Writers (where dates are SAVED)
+
+| File | Line | Saves To |
+|------|------|----------|
+| `course.activities.ts` | 722-725 | `metadata.semesterDates = { start, end }` |
+| Course Details UI | - | `metadata.startDate` / `metadata.endDate` |
+
+### Readers (where dates are READ)
+
+| File | Line | Reads From | Priority |
+|------|------|------------|----------|
+| `timeBlockRefresh.activities.ts` | 164-171 | Multiple paths with fallbacks | Ordered |
+| `time-blocks.service.ts` | 300-301 | `metadata.startDate/endDate` | Only |
+
+### Date Mismatch Summary
+
+| Writer Uses | Reader Expects | Status |
+|-------------|----------------|--------|
+| `metadata.semesterDates.start` | `metadata.semesterDates.start` | ✅ OK |
+| `metadata.startDate` | `metadata.semesterDates.start` | ❌ BROKEN |
+| `metadata.startDate` | `metadata.startDate` | ✅ OK |
+
+## The Data Inconsistency Problem
+
+1. **Original course creation** (via schedule import):
+   - Saves `metadata.semesterDates = { start: '2026-08-26', end: '2026-12-17' }` (Fall dates)
+
+2. **Admin edits course term** (via Course Details UI):
+   - Saves `metadata.term = 'spring_2026'`
+   - Saves `context_dependencies.term_id = 'spring_2026'`
+   - **Does NOT update `metadata.semesterDates`**
+   - **Does NOT update `metadata.startDate/endDate`**
+
+3. **Time block refresh runs**:
+   - Reads old Fall dates from `metadata.semesterDates` which take precedence
+   - Time blocks use Fall dates even though term was changed to Spring
+
+## CourseFactory.getForStudent() Gap
+
+The main method for getting student courses has a critical issue:
+
+```sql
+SELECT
+  c.metadata,        -- Only gets course context metadata
+  -- other fields...
+FROM context_dependencies cd
+JOIN contexts c ON c.id = cd.child_context_id  
+WHERE cd.term_id = $2  -- Filters by cd.term_id but doesn't SELECT it
+```
+
+**Problem**: The query filters by `cd.term_id` but doesn't return it, so the canonical term ID never reaches the frontend.
+
+## Recommended Canonical Paths
+
+<Tip>
+Standardize on these paths and migrate everything to use them consistently:
+</Tip>
+
+**Course Context Metadata:**
+```typescript
+metadata: {
+  termId: 'spring_2026',           // Normalized format
+  termYear: 2026,
+  termName: 'Spring 2026',         // Human-readable
+  startDate: '2026-01-07',         // Flat keys (not nested)
+  endDate: '2026-04-30',
+  // DEPRECATED - keep for backwards compatibility:
+  term: 'spring_2026',             // Legacy
+  semesterDates: { start, end },   // Legacy nested
+}
+```
+
+**Context Dependencies:**
+```typescript
+context_dependencies: {
+  term_id: 'spring_2026',          // Normalized format  
+  term_year: 2026,
+}
+```
+
+## Implementation Status
+
+<Note>
+The critical term health synchronization issue has been resolved in branch `fix/term-health-sync-metadata-term`.
+</Note>
+
+### ✅ Completed
+
+1. **Fixed dormway-core TermAssignmentService** - Updates all 3 locations
+2. **Fixed term-health-admin-routes** - API endpoints updated
+3. **Fixed termManagement.activities** - Temporal activities updated  
+4. **NEW: Bulk Fix Admin Workflow** - One-click fix for all "current" terms
+
+### Bulk Fix Usage
+
+```bash
+# Check which campuses need fixing
+curl http://localhost:3001/api/admin/term-health
+
+# Dry run to preview changes
+curl -X POST http://localhost:3001/api/admin/term-health/bulk-fix-current-terms \
+  -H "Content-Type: application/json" \
+  -d '{"dryRun": true}'
+
+# Fix all campuses with "current" terms
+curl -X POST http://localhost:3001/api/admin/term-health/bulk-fix-current-terms \
+  -H "Content-Type: application/json" \
+  -d '{"dryRun": false, "refreshTimeBlocks": true}'
+```
+
+## Remaining Implementation Priority
+
+1. **High Priority** - Fix CourseFactory.getForStudent() to include `cd.term_id/term_year`
+2. **High Priority** - Create CourseTermService to update all paths consistently
+3. **Medium Priority** - Add explicit termId/startDate/endDate to CourseEntity.toJSON()
+4. **Medium Priority** - Update all readers to use consistent paths
+5. **Low Priority** - Migration to clean up inconsistent data in production

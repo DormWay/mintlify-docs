@@ -1,0 +1,102 @@
+---
+title: "Syllabus courseContextId Invariant"
+description: "Critical rule ensuring all syllabi are stored in course partitions with valid courseContextId"
+source:
+  type: "obsidian"
+  path: "Engineering/Technical/Engine/Syllabus-CourseContextId-Invariant.md"
+  distilled_at: "2026-03-20"
+---
+
+# Syllabus courseContextId Invariant
+
+## Critical Rule
+
+**Every syllabus MUST have a `courseContextId` before being stored in Ragie.**
+
+Syllabi should NEVER be stored in user partitions (`user_<userId>`) - they should always go to course partitions (`course_<courseContextId>`).
+
+## Why This Matters
+
+1. **Query efficiency**: Course partitions allow all enrolled students to query the same syllabus without duplication
+2. **Data integrity**: Orphaned syllabi in user partitions can't be migrated later without manual intervention
+3. **Storage costs**: Duplicating syllabi to every enrolled student's partition is wasteful
+
+## Implementation Rules
+
+1. **Every syllabus MUST have a `courseContextId`** - no orphans allowed
+2. **Only ONE syllabus per course/term** - if one exists, show it instead of allowing duplicate upload
+
+## Enforcement Strategy
+
+### In-App Uploads
+
+For uploads through the app UI:
+- **Check if a syllabus already exists** for the course/term
+- **If exists** → Show the existing syllabus, don't allow duplicate upload
+- **If not exists** → Allow upload, ensure `courseContextId` is set before Ragie storage
+
+### PLG Uploads (Email-based)
+
+For email-based uploads where user prompting isn't possible:
+- Run a **daily Temporal workflow** that finds orphaned syllabi
+- Attempt to extract course info from filename/content
+- Create placeholder course contexts
+- Alert admin for manual review via the partition migration tool
+
+## Code Implementation
+
+In `syllabusProcessor.workflow.ts`, before calling `storeDocumentInRagie`:
+
+```typescript
+// CRITICAL: Ensure courseContextId exists before Ragie storage
+if (!courseContextId) {
+  // Create a placeholder course context from whatever we have
+  const fallbackCourseCode = extractedCourseCode ||
+    filename.replace(/\.(pdf|docx)$/i, '').substring(0, 50);
+
+  courseContextId = await syllabusActivities.createCourseContext(
+    fallbackCourseCode,
+    { course: { courseCode: fallbackCourseCode, courseName: 'Pending Classification' } },
+    resolvedUserId
+  );
+  logger.warn('Created placeholder course context for syllabus', {
+    syllabusId,
+    fallbackCourseCode,
+    reason: 'courseContextId was null before Ragie storage'
+  });
+}
+
+// Now safe to store - will always go to course partition
+const ragieResult = await brainGainsActivities.storeDocumentInRagie(
+  syllabusId,
+  resolvedUserId,
+  content,
+  'syllabus',
+  courseMetadata,
+  'course',  // ALWAYS course partition for syllabi
+  courseContextId
+);
+```
+
+## Admin Cleanup Tool
+
+For existing orphaned syllabi, use the admin tool at:
+- **URL**: `http://localhost:3004/syllabus/partition-migration`
+- **Features**:
+  - View orphaned syllabi (no courseContextId)
+  - Link syllabi to courses manually
+  - Migrate partitions from user to course
+
+## Related Files
+
+- `services/engine/src/workflows/syllabusProcessor.workflow.ts` - Main syllabus processing
+- `services/engine/src/activities/braingains.activities.ts` - `storeDocumentInRagie` function
+- `services/api-router/src/routes/admin/ragie-partition-migration-routes.ts` - Admin endpoints
+- `services/dormway-admin/src/pages/syllabus/SyllabusPartitionMigration.tsx` - Admin UI
+
+## Checklist for Future Syllabus Work
+
+- [ ] Does the code path ensure `courseContextId` is set before Ragie storage?
+- [ ] Is the partition type always `'course'` for syllabi?
+- [ ] If course extraction fails, is there a fallback to create a placeholder?
+- [ ] Are errors logged with enough context to debug?

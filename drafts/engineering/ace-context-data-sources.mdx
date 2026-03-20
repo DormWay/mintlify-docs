@@ -1,0 +1,246 @@
+---
+title: "Ace Context Data Sources"
+description: "Data sources and access patterns for Ace LLM context injection including weather and transit data."
+source:
+  type: "obsidian"
+  path: "Engineering/Technical/API/Ace-Context-Data-Sources.md"
+  distilled_at: "2026-03-20"
+---
+
+# Ace Context Data Sources
+
+Ace LLM uses rich context injection to answer queries like "What's due this week?" and "What's the weather like?" The context aggregator (`ace-context-aggregator.ts`) fetches data from multiple sources in parallel.
+
+## Weather Data Sources
+
+### Priority 1: Student Context Prediction
+
+The **primary source** for weather data is the student's context prediction, which includes both travel and home weather.
+
+**Method**: `studentEntity.getContextPrediction()`
+
+**Data Structure**:
+```typescript
+// The data is stored at these paths:
+contextPrediction.input.environment.travelStatus.isTraveling  // boolean
+contextPrediction.input.environment.travelWeather  // WeatherData (current location)
+contextPrediction.input.environment.homeWeather    // WeatherData (campus location)
+```
+
+<Warning>
+The travel data is NOT in a top-level `travel` property. It's nested under `input.environment`.
+</Warning>
+
+**Example**:
+```typescript
+const contextPrediction = await studentEntity.getContextPrediction();
+const env = (contextPrediction as any)?.input?.environment;
+const travelStatus = env?.travelStatus;
+const travelWeather = env?.travelWeather;
+
+if (travelStatus?.isTraveling && travelWeather) {
+  // Use travel weather (current location)
+  const temp = travelWeather.temperature;  // 55.65
+  const desc = travelWeather.description;  // "overcast clouds"
+  const location = travelStatus.currentLocationName;  // "West Hills"
+} else if (env?.homeWeather) {
+  // Use home/campus weather
+  const temp = env.homeWeather.temperature;  // 19.62
+}
+```
+
+### Priority 2: CityEntity (Fallback)
+
+If context prediction doesn't have weather, fall back to CityEntity.
+
+<Warning>
+Critical Pattern - `campusEntity.getCity()` returns raw row, NOT a CityEntity:
+</Warning>
+
+```typescript
+// ❌ WRONG - campusEntity.getCity() returns raw row, NOT a CityEntity
+const cityResult = await campusEntity.getCity();
+const weather = await cityResult.data.getWeather();  // FAILS!
+
+// ✅ CORRECT - Use factory to get proper CityEntity
+const cityFactory = getCityFactory();
+const cityResult = await cityFactory.getById(cityId);
+const weather = await cityResult.data.getWeather();  // Works!
+```
+
+## Rich APIv2 Endpoints
+
+### Campus Widget (Comprehensive)
+
+**Endpoint**: `GET /api/v2/widgets/campus`
+
+Returns everything for a student's campus:
+- Campus info (id, name, city, timezone, coordinates)
+- Weather (temperature, feelsLike, humidity, description, sunrise/sunset)
+- Logistics widgets (parking, dining, facilities)
+- City context (cityOverview, localIntelligence, environmentalContext, mobilityIntelligence)
+
+**Example Response Structure**:
+```json
+{
+  "campus": { "name": "University of Michigan", "cityName": "Ann Arbor" },
+  "weather": { "temperature": 19.62, "description": "overcast clouds" },
+  "logistics": { "widgets": [...] },
+  "cityContext": {
+    "cityOverview": { "planning_horizon": "...", "mobility_recommendation": "walking" },
+    "environmentalContext": { "activity_recommendations": {...} },
+    "mobilityIntelligence": { "transportation_status": {...} }
+  }
+}
+```
+
+### Nearest City (Travel Location)
+
+**Endpoint**: `GET /api/v2/cities/nearest?lat=X&lng=Y&include=weather,transit,context`
+
+Returns data for a specific location (useful for traveling students):
+- City metadata
+- Weather at that location
+- Transit status (road closures, traffic incidents)
+- Processed city context
+
+## Transit Data Sources
+
+### Priority 1: Travel Location (findNearestCity)
+
+When student is traveling, transit is fetched from their **current location**, not campus city.
+
+**Pattern**:
+```typescript
+const contextPrediction = await studentEntity.getContextPrediction();
+const env = (contextPrediction as any)?.input?.environment;
+const travelStatus = env?.travelStatus;
+const location = env?.location;
+
+if (travelStatus?.isTraveling && location?.latitude && location?.longitude) {
+  // Get transit from travel location
+  const cityFactory = getCityFactory();
+  const nearestResult = await cityFactory.findNearestCity(
+    location.latitude,
+    location.longitude
+  );
+  if (nearestResult.success && nearestResult.data) {
+    const transit = await nearestResult.data.city.getTransit();
+    // Transit for West Hills, not Ann Arbor
+  }
+}
+```
+
+### Priority 2: Campus City (Fallback)
+
+If not traveling, or travel city lookup fails, use campus city:
+```typescript
+const cityFactory = getCityFactory();
+const cityResult = await cityFactory.getById(campusCityId);
+const transit = await cityResult.data.getTransit();
+```
+
+### Transit Data Structure
+
+```typescript
+interface TransitData {
+  location: string;              // "West Hills, CA"
+  overall_summary: string;       // Includes event info like Rams game
+  road_closures: RoadClosure[];
+  traffic_incidents: TrafficIncident[];
+  public_transit_issues: TransitIssue[];
+  weather_advisories: WeatherAdvisory[];
+  event_closures: EventClosure[]; // Sports, concerts, etc.
+}
+```
+
+<Note>
+The `event_closures` array contains sports games and events that affect traffic. The `overall_summary` usually mentions these but check `event_closures` for details.
+</Note>
+
+## service_data Methods
+
+Weather and transit data is stored in the `service_data` table:
+
+| Method | Context Type | Description |
+|--------|-------------|-------------|
+| `fetch_weather` | city | Current weather conditions |
+| `fetch_forecast` | city | 7-day forecast |
+| `fetch_transit` | city | Road closures, traffic, transit issues |
+| `context_prediction_response` | student | Full context with travel weather |
+| `dayplan_context_update` | student | Context update with environment data |
+
+## Entity Methods Reference
+
+### StudentEntity
+```typescript
+getContextPrediction()  // Returns context with travel weather
+getContextUpdate()      // Returns dayplan context update
+getCampus()            // Returns campus (raw row, use factory for entity)
+getDayPlan()           // Returns current day plan
+getCourses()           // Returns enrolled courses
+```
+
+### CityEntity (via getCityFactory)
+```typescript
+getWeather()           // Current conditions
+getForecast()          // 7-day forecast
+getTransit()           // Road/transit status
+getProcessedContext()  // Processed city intelligence widget
+```
+
+### CampusEntity
+```typescript
+getCity()              // ⚠️ Returns raw row, NOT CityEntity
+getPerplexityData()    // Processed campus info
+getLogisticsWidget()   // Dining, parking, facilities
+getEventsWidget()      // Campus events
+```
+
+## Testing Weather & Transit
+
+<CodeGroup>
+
+```bash Test context prediction (travel status + weather)
+curl -s "http://localhost:3001/api/v2/students/me/context/prediction" \
+  -H "X-User-Id: USER_ID" \
+  -H "X-User-Role: authenticated" | \
+  jq '.data.input.environment | {travelStatus, travelWeather, location}'
+```
+
+```bash Test campus widget (weather + city context)
+curl -s "http://localhost:3001/api/v2/widgets/campus" \
+  -H "X-User-Id: USER_ID" \
+  -H "X-User-Role: authenticated" | \
+  jq '.data.content | {weather, cityContext: .cityContext.mobilityIntelligence}'
+```
+
+```bash Test campus city transit directly
+curl -s "http://localhost:3001/api/v2/cities/CITY_ID/transit" \
+  -H "X-User-Id: USER_ID" \
+  -H "X-User-Role: authenticated" | jq '.data.overall_summary'
+```
+
+```bash Test nearest city with weather AND transit (for travel location)
+curl -s "http://localhost:3001/api/v2/cities/nearest?lat=34.225&lng=-118.649&include=weather,transit" \
+  -H "X-User-Id: USER_ID" \
+  -H "X-User-Role: authenticated" | jq '{weather: .data.weather, transit: .data.transit}'
+```
+
+```bash Test Ace chat with weather/traffic queries
+curl -s -X POST "http://localhost:3001/api/search/chat" \
+  -H "Content-Type: application/json" \
+  -H "X-User-Id: USER_ID" \
+  -H "X-User-Role: authenticated" \
+  -d '{"message":"what is the weather like?","scope":{"type":"user","id":"USER_ID"}}' | jq '.answer'
+```
+
+</CodeGroup>
+
+## Related Files
+
+- `services/api-router/src/services/ace-context-aggregator.ts` - Main aggregator
+- `services/api-router/src/services/ace-context-formatters.ts` - Context formatters
+- `services/api-router/src/routes/ace-llm-chat-routes.ts` - Chat pipeline
+- `services/shared/dormway-core/src/entities/student/student.entity.ts` - Student entity
+- `services/shared/dormway-core/src/entities/city/city.entity.ts` - City entity

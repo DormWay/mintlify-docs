@@ -1,0 +1,211 @@
+---
+title: "Syllabus Crew Output Field Map"
+description: "Complete field inventory for syllabus processing crew output and rendering status across apps."
+source:
+  type: "obsidian"
+  path: "Engineering/Technical/Engine/SoT Syllabus Crew Output Field Map.md"
+  distilled_at: "2026-03-20"
+---
+
+# Syllabus Crew Output Field Map
+
+Source of truth for all fields produced by `syllabus_processor_optimized.py` and their rendering status across apps. The crew produces ~60 fields through a 16-task pipeline with dedicated class session extractor agent.
+
+## Field Inventory
+
+### Core Course Info
+
+| Field | Type | Populated | Admin | LockedIn | Webviewer | iOS |
+|-------|------|-----------|-------|----------|-----------|-----|
+| `course_code` | string | Yes | Renders | Via BFF | Renders (HeroSection) | Via BFF |
+| `course_title` | string | Yes | Renders | Via BFF | Renders (HeroSection) | Via BFF |
+| `description` | string | Yes | Renders | Via BFF | N/A | N/A |
+| `university` | string | Yes | Renders | N/A | Renders (HeroSection) | N/A |
+| `semester` | string | Yes | Renders | N/A | N/A | N/A |
+| `section` | string | Usually null | Renders | N/A | N/A | N/A |
+| `credits` | int | Usually null | Renders | Via BFF | N/A | Via BFF |
+| `prerequisites` | string | Yes | Renders | N/A | N/A | N/A |
+| `instructor` | object(8+) | Yes | Renders | Via BFF | Renders (HeroSection) | N/A |
+
+### Schedule & Dates
+
+| Field | Type | Populated | Admin | LockedIn | Webviewer | iOS |
+|-------|------|-----------|-------|----------|-----------|-----|
+| `class_sessions` | array | Yes (42) | Renders | N/A | N/A | N/A |
+| `schedule_events` | array | Yes (78) | Renders | N/A | N/A | N/A |
+| `assignments` | array(obj) | Yes (6) | Renders | Via BFF | Renders (InteractiveTimeline) | Via BFF |
+| `assignments_summary` | object(5) | Yes | **Not rendered** | N/A | **Not rendered** | N/A |
+| `critical_dates` | array | Yes (24) | Renders | N/A | Renders (InteractiveTimeline) | N/A |
+| `dates` | array | Yes (24) | Renders | N/A | N/A | N/A |
+| `recurring_events` | array | Yes (3) | **Not rendered** | N/A | **Not rendered** | N/A |
+| `special_dates` | object(5) | Yes | **Not rendered** | N/A | **Not rendered** | N/A |
+| `semester_dates` | object(3) | Yes | Renders (year extraction) | N/A | N/A | N/A |
+| `term_dates` | object(3) | Yes | N/A | N/A | N/A | N/A |
+| `meetings` | array(obj) | Yes (1) | Renders | N/A | N/A | N/A |
+| `schedule` | object(4) | Yes | Renders (date extraction) | N/A | N/A | N/A |
+
+### Academic Content
+
+| Field | Type | Populated | Admin | LockedIn | Webviewer | iOS |
+|-------|------|-----------|-------|----------|-----------|-----|
+| `grading` | object(5+) | Yes | Renders | Via BFF | Renders (GradeCalculator) | N/A |
+| `policies` | **array(25 rich items)** | Yes | **Renders** (category, criticality, consequences, etc.) | N/A | N/A | N/A |
+| `policies_flat` | object(8) | Yes | N/A (flat lookup; admin uses rich array) | N/A | N/A | N/A |
+| `learning_objectives` | array | Yes (5) | Renders | N/A | N/A | N/A |
+| `required_materials` | array | Yes (1) | Renders | N/A | N/A | N/A |
+| `projects` / `client_projects` | array | Yes (1) / null | Renders | N/A | N/A |
+
+#### Rich Policy Item Shape
+
+Each item in `policies` array has these keys:
+
+| Key | Type | Example |
+|-----|------|---------|
+| `category` | string | "attendance", "late_work", "academic_integrity" |
+| `policy_text` | string | Full policy text from syllabus |
+| `summary` | string | Short summary |
+| `criticality` | string | "high", "medium", "low" |
+| `consequences` | string | What happens on violation |
+| `strictness` | string | "strict", "moderate", "lenient" |
+| `action_required` | string | What the student must do |
+| `relevant_dates` | string/null | Key dates for this policy |
+| `section_found` | string | Where in syllabus this was found |
+
+#### Rich Assignment Item Shape
+
+Each item in `assignments` array preserves all LLM-produced keys including:
+`name`, `type`, `due_date`, `weight`, `description`, `estimated_hours`, `priority`, `preparation_needed`, `submission_method`, `rubric_summary`, `tips`, `related_learning_objectives`, `resources_needed`, `collaboration_allowed` — plus any extra keys (e.g. `isFinal`, `rubric`, `canvas_id`).
+
+### Intelligence & Insights
+
+| Field | Type | Populated | Admin | LockedIn | Webviewer | iOS |
+|-------|------|-----------|-------|----------|-----------|-----|
+| `weekly_analysis` | array | Yes (18 weeks) | Renders (workload chart) | Passed through BFF | N/A | Fully supported |
+| `action_plan` | object | Yes (keys: `week_by_week`, `major_milestones`) | **Renders** | Not rendered | N/A | Model exists |
+| `major_milestones` | array | Yes (hoisted from action_plan) | **Not rendered** | N/A | **Renders (MilestonesStrip)** | N/A |
+| `hidden_insights` | object(6) | **Yes** | Renders sub-fields | Renders sub-fields | **Renders (HiddenInsightsCard)** | Partial model |
+| `professor_style` | object(5) | Yes (also top-level) | Renders from top-level | Renders (ProfessorStyleSection) | Via hidden_insights fallback | **Model missing** |
+| `hidden_workload` | array | Yes (5, also top-level) | Via hidden_insights | Renders (RichSyllabusInsights) | Via hidden_insights fallback | Model exists |
+| `success_indicators` | array | Yes (10, also top-level) | Via hidden_insights | Renders (TipsAndSignals) | Via hidden_insights fallback | Model exists |
+| `collaboration_potential` | string | Yes (642 chars) | **Not rendered** | **Not rendered** | **Not rendered** | **Model missing** |
+| `wellness_factors` | array | Yes (5, also top-level) | **Not rendered** | **Not rendered** | **Not rendered** | **Model missing** |
+| `strategic_advantages` | array | Yes (5, also top-level) | Renders from top-level | Renders (RichSyllabusInsights) | **Not rendered** | Model exists |
+| `workload_insights` | object(6) | Yes (hoisted from workload_analysis) | **Not rendered** | N/A | **Not rendered** | N/A |
+| `workload_recommendations` | object(4) | Yes (hoisted from workload_analysis) | **Not rendered** | N/A | **Not rendered** | N/A |
+| `red_flags` | array | Yes (7) | **Not rendered** | Renders (TipsAndSignals) | **Renders (CourseIntelCard)** | N/A |
+| `opportunities` | array | Yes (5) | **Not rendered** | Renders (TipsAndSignals) | **Not rendered** | N/A |
+| `skills_gained` | array | Yes (12) | **Not rendered** | N/A | **Not rendered** | N/A |
+| `student_impact` | object(3+) | Yes | Renders (if populated) | N/A | N/A | N/A |
+| `overview` | object(5) | Yes | Renders (weekly hours) | N/A | **Renders (HeroSection difficulty + hours)** | N/A |
+| `quick_reference` | object(4) | Yes | Renders | N/A | N/A | N/A |
+| `decision_matrix` | object(4) | Yes | **Not rendered** | N/A | **Renders (CourseIntelCard)** | N/A |
+
+### Cost & Strategy
+
+| Field | Type | Populated | Admin | LockedIn | Webviewer | iOS |
+|-------|------|-----------|-------|----------|-----------|-----|
+| `cost` | null | No | Renders (if populated) | N/A | N/A | N/A |
+| `cost_analysis` | object | Sometimes | Fallback for `cost` | N/A | **Renders (CostBreakdownCard)** | N/A |
+| `grade_strategy` | object | Yes | Renders (if populated) | N/A | **Renders (GradeStrategyCard)** | N/A |
+| `grade_optimization` | object | Yes | Renders (if populated) | N/A | N/A | N/A |
+
+### Metadata & Internal
+
+| Field | Type | Populated | Admin | LockedIn | Webviewer | iOS |
+|-------|------|-----------|-------|----------|-----------|-----|
+| `crew_metadata` | object(6) | Yes | N/A | N/A | N/A | N/A |
+| `analysis_timestamp` | string | Yes | N/A | N/A | N/A | N/A |
+| `confidence_score` | null | No | N/A | N/A | N/A | N/A |
+| `missing_components` | object(0) | Empty | Renders (warnings) | N/A | N/A | N/A |
+| `warnings` | array | Yes (2) | N/A | N/A | N/A | N/A |
+| `web_experience` | object(14) | Yes | Renders (fallback source) | N/A | Renders (fallback data source) | N/A |
+| `email_design` | object(29) | Yes | N/A | N/A | N/A | N/A |
+
+## Known Issues
+
+### LLM Output Shape Variations
+
+The LLM produces inconsistent shapes for several fields across different syllabi:
+
+- `grade_strategy.gotchas` — sometimes `string[]`, sometimes `Array<{ warning, impact, how_to_avoid }>`
+- `grade_strategy.strategic_priorities` — sometimes uses `component` as the name field, sometimes `priority`
+- `grade_strategy.grade_scenarios` vs `grade_strategy.scenarios` — key name varies
+- `hidden_insights` — sometimes nested object, sometimes sub-fields hoisted to top level, sometimes null
+
+<Warning>
+All consumers must handle both shapes. The webviewer `extractIntelligenceFields()` handles these variations. The admin `SyllabusVisualization.tsx` renders raw JSON for most fields so is unaffected.
+</Warning>
+
+### Data Preservation Architecture
+
+The crew uses lightweight JSON structure validation (checking `course_code`/`course_title` exist) instead of Pydantic models. Pydantic was removed because `extra='allow'` only applied at the top-level model, not nested models, causing data loss.
+
+The normalizer preserves rich data structures:
+- **Policies**: 25-item rich list with category, policy_text, criticality, consequences, etc.
+- **Assignments**: All extra keys per item preserved (isFinal, rubric, canvas_id, etc.)
+- **Grading**: All extra keys preserved
+
+### Persistently Null Fields
+
+- `cost` — not populated by any task (legacy field)
+- `confidence_score` — not populated by any task
+- `hidden_insights` — sometimes null (varies by syllabus)
+
+### iOS Model Gaps
+
+`DashboardService.swift` `HiddenInsights` struct is missing:
+- `professorStyle: ProfessorStyle?`
+- `collaborationPotential: String?`
+- `wellnessFactors: [String]?`
+
+## Engine Consumption
+
+### Fields Engine Actively Uses
+
+| Field | Where Used | How |
+|-------|-----------|-----|
+| `class_sessions` | `semester.activities.ts` | Parsed into `time_blocks` (type=class) |
+| `schedule_events` | `semester.activities.ts` | Parsed into `time_blocks` (type varies) |
+| `assignments` | `semester.activities.ts` | Parsed into `time_blocks` (type=assignment/assessment) |
+| `critical_dates` | `semester.activities.ts` | Merged with assignments for scheduling |
+| `grading` | `semester.activities.ts` | Stored in course context metadata |
+| `policies` | `semester.activities.ts` | Stored in course context metadata |
+| `instructor` | `semester.activities.ts` | Stored in course context metadata |
+| `semester_dates` | `semester.activities.ts` | Term boundary extraction |
+| `term_dates` | `semester.activities.ts` | Term boundary extraction |
+| `weekly_analysis` | `semester.activities.ts` | Stored in service_data, passed through BFF |
+
+### Unrendered Data with Value
+
+These fields have real data but no UI in any app:
+- `collaboration_potential` (string, ~600 chars)
+- `wellness_factors` (array, 5 items)
+- `workload_insights` (object, 6 keys)
+- `workload_recommendations` (object, 4 keys)
+- `skills_gained` (array, 12 items)
+- `recurring_events` (array, 3 items)
+- `special_dates` (object, 5 keys)
+- `assignments_summary` (object, 5 keys)
+
+### High-Impact Integration Opportunities
+
+**Current utilization**: ~35% of crew output fields are actively consumed by the engine.
+
+High-impact targets for engine integration:
+1. `red_flags` → StudentWatcher alerts when approaching flagged scenarios
+2. `hidden_workload` → Inflate time estimates in day plan generation  
+3. `professor_style` → Personalize study block recommendations
+4. `workload_recommendations` → Include in Sunday preview email
+5. `recurring_events` + `special_dates` → Generate additional time_blocks
+
+## Key Files
+
+### Crew Implementation
+- `services/dormway-crews/crews/syllabus_processor_optimized.py` — Crew definition + normalization + validation
+- `services/dormway-crews/shared/agents/syllabus_experts.py` — Agent factory functions
+
+### App Rendering
+- `services/dormway-admin/src/components/SyllabusVisualization.tsx` — Admin rendering
+- `services/dormway-lockedin/src/components/courses/RichSyllabusInsights.tsx` — LockedIn rendering
+- `services/syllabus-webviewer/src/components/syllabus/` — Webviewer intelligence cards
+- `ios-clean/Packages/DWServices/Sources/DWServices/DashboardService.swift` — iOS models

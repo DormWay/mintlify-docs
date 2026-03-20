@@ -1,0 +1,199 @@
+---
+title: "DayPlan Today Screen"
+description: "GPS for your day experience that shows current status, smart timeline, and upcoming commitments"
+source:
+  type: "obsidian"
+  path: "Engineering/Technical/Prototype - DayPlan Today Screen.md"
+  distilled_at: "2026-03-20"
+---
+
+# DayPlan Today Screen
+
+The DayPlan Today Screen replaces the feed-based home with a "GPS for your day" experience. Students see where they are in their day, what's coming next, and what needs attention — driven by DayPlan V2 data.
+
+**Feature flag:** `HomeScreenMode.dayplan` (set via `@AppStorage("homeScreenMode")`)
+
+## Architecture
+
+### Mental Model
+
+Three layers, top to bottom:
+
+1. **GPS Hero** — "Here's where you're at" — single adaptive status sentence + stat pills
+2. **Smart Timeline** — "Here's your day" — chronological spine with NOW marker, day separators, past dimmed, future bright
+3. **Swipe Stack** — "Here's what else" — Tinder-style stacked feed cards (feature-flagged OFF by default)
+
+### Data Sources
+
+| Source | Endpoint | What it provides | Condition |
+|--------|----------|------------------|-----------|
+| DayPlan | `GET /api/v2/students/me/dayplan` | Timeline events, commitments, suggestions, conflicts, weather, summary | Always |
+| Presentation | `POST /api/v2/students/me/summaries/batch` | LLM-generated micro-copy for hero subtitle | Always |
+| Feed | `GET /api/v2/students/me/feed?limit=10` | Swipe stack discovery cards | Only when `showSwipeStack` flag is on |
+
+### View Hierarchy
+
+```
+HomeTabView (.dayplan case, wraps in NavigationStack)
+  └─ TodayDayPlanView
+       ├─ GPSHeroSection (pinned above ScrollView)
+       │    ├─ Date label (uppercase, tracked)
+       │    ├─ Hero text (32pt black weight, adaptive per GPSHeroState)
+       │    ├─ Subtitle (Presentation Service → .capitalized, or oneLiner fallback)
+       │    └─ StatPills (classes, due, free hours, weather)
+       ├─ SmartTimelineView
+       │    ├─ Past items (dimmed 40%)
+       │    ├─ NowMarkerView (pulsing dot on spine, auto-scrolled to with 300ms delay)
+       │    ├─ Day separator headers ("Tomorrow — Wednesday, March 18")
+       │    ├─ Future items (full opacity)
+       │    │    ├─ DueTodayBanner
+       │    │    ├─ CommitmentCard (expandable, glassy, course-colored)
+       │    │    ├─ SmartNudgeCard (travel, weather, conflict, etc.)
+       │    │    ├─ SuggestedBlockCard (dashed, future-only)
+       │    │    └─ ComingUpSection (near future assignments)
+       │    └─ [Conflicts deduped by title]
+       └─ SwipeCardStack (feature-flagged OFF — todayScreen.showSwipeStack)
+```
+
+## GPS Hero States
+
+The hero adapts based on DayPlan data + current time. Priority order:
+
+| Priority | State | Condition | Hero Text | Color |
+|----------|-------|-----------|-----------|-------|
+| 1 | On Break | `isOnBreak == true` | "{breakName}" | Brand.secondary |
+| 2 | In Class | Currently between start/end of a class-type commitment | "In class —\n{course}" | Brand.primary |
+| 3 | Head to Class | Next class-type commitment within 30 min | "Head to\n{location}" | State.warning |
+| 3.5 | Nothing Scheduled | Zero class-type commitments today | "Nothing scheduled\ntoday" | Text.primary |
+| 4 | Due Today | `dueToday` non-empty, no temporal state applies | "{n} due today" | State.error |
+| 5 | Free | Next commitment exists | "Free until\n{time}" | Text.primary |
+| 6 | Done | All commitments past | "You're done\nfor today" | Text.primary |
+| 7 | Tomorrow | `plan.date` is tomorrow (evening transition) | "Tomorrow\n{firstEvent} at {time}" | Text.primary |
+
+Only class-like types trigger "In class" — `class`, `meeting`, `lab`, `lecture`, `seminar`, `recitation`. Appointments are excluded.
+
+**Compound urgency:** All temporal states carry a `dueCount`. When `dueCount > 0`, a red urgency line appears below the hero text: "⚠ {n} due today". This prevents false confidence when "Free until 2:30" coexists with pending assignments.
+
+Hero font: 32pt `.black` weight. GPS Hero is pinned above the ScrollView — stays visible while the timeline scrolls underneath.
+
+## Smart Timeline
+
+### Item Types
+
+| Type | Source | Visual | Behavior |
+|------|--------|--------|----------|
+| Due Today Banner | `dueToday[]` | Red border, target icon, count badge + chevron | Tap header to expand/collapse. Tap item to navigate to Tasks tab. Always first. |
+| Commitment | `hardCommitments[]` | Glassy card, `.ultraThinMaterial` + course-color tint + accent bar | Tap to expand → "View Course" pushes `CourseDetailScreen` |
+| Travel Nudge | `actions[]` (class_reminder) | Warning-colored nudge card | Shows walk time + destination |
+| Weather Alert | `weather.current` | Info-colored nudge card | Shows temp + condition when extreme (<32°F or >95°F) |
+| Conflict | `conflicts[]` | Error-colored nudge card | Deduped by title |
+| Suggested Block | `suggestedBlocks[]` | Dashed green border, italic | Feature-flagged OFF (`todayScreen.showSuggestedBlocks`) |
+| Coming Up | `nearFuture[]` | Compact row list with day badges | Always last |
+
+### Filtering Rules
+
+- **Commitments:** Exclude `appointment` type — only show `class`, `meeting`, `lab`, `lecture`, `seminar`, `recitation`
+- **Suggested blocks:** Exclude if `suggestedStartTime` is in the past
+- **Conflicts:** Dedup by title (API can return duplicates)
+- **Past events:** Shown at 40% opacity, user can scroll up to see them
+- **NOW marker:** Positioned chronologically between past and future items, auto-scrolled to on load (300ms delay for layout)
+
+### Course Colors
+
+Colors resolve via `CourseColorsService.resolveColor(forCourseCode:colorScheme:)`. Course code extracted from `courseName` (e.g., "FTVM 356" from "FTVM 356 - History of Documentary Film").
+
+### Expandable Commitment Cards
+
+Tap a commitment card to expand:
+- Duration + end time
+- Type badge with icon (graduationcap for class, person.2 for meeting, etc.)
+- Full course name
+- "View Course →" button pushes `CourseDetailScreen` onto the `NavigationStack`
+- Glassy background: `.ultraThinMaterial` + course color tint (8% dark, 5% light) + subtle color border
+- Spring animation on expand/collapse, chevron rotation
+
+## Swipe Card Stack (Feature-Flagged)
+
+**Flag:** `@AppStorage("todayScreen.showSwipeStack")` — defaults to `false`. When off, feed data isn't fetched.
+
+Feed cards presented as a physical depth stack (max 3 visible). Uses the same visual design as the existing `FeedCardView`.
+
+| Gesture | Action |
+|---------|--------|
+| Swipe left | Dismiss (`.permanent`) |
+| Swipe right | Save for later (`.snoozeTomorrow`) |
+| Tap | Opens `SwipeCardDetailSheet` (bottom sheet) |
+| < threshold | Spring back to center |
+
+**Interaction details:**
+- `simultaneousGesture` (coexists with parent ScrollView)
+- `minimumDistance: 20`, only responds when horizontal > vertical movement
+- Rotation: ±2.5° proportional to drag offset
+- Haptic: `.impact(.medium)` on commit
+- Border indicator: red (left) / green (right) when |offset| > 40pt
+
+## DayPlanData V2 Model
+
+Fields added to `DayPlanData` in MeService.swift (all optional):
+
+```swift
+public let hardCommitments: [HardCommitment]?
+public let suggestedBlocks: [SuggestedBlock]?
+public let conflicts: [ConflictAlert]?
+public let nearFuture: [NearFutureItem]?
+public let readingPrep: [ReadingPrepItem]?
+public let courseIntelligence: [CourseIntelligence]?
+```
+
+## Real-Time Updates
+
+- **Ably `feed.invalidate`** → re-fetch feed cards (swipe stack refresh)
+- **Scene phase `.active`** → re-fetch DayPlan + feed if stale (>2 min)
+- **Pull to refresh** → re-fetch all sources
+- **30-second timer** → update `currentTime` for hero state + NOW marker position
+
+## File Structure
+
+### iOS Files (`App/Views/Today/`)
+
+| File | Purpose |
+|------|---------|
+| `TodayDayPlanView.swift` | Main container, ScrollView, pull-to-refresh, real-time |
+| `TodayDayPlanViewModel.swift` | `@Observable` ViewModel: data fetch, GPSHeroState, TimelineItem |
+| `GPSHeroSection.swift` | Adaptive hero header with 6 states, 32pt black font |
+| `StatPill.swift` | Reusable capsule stat component |
+| `TimeParsingHelpers.swift` | Shared `parseTime()` (ISO8601 + time-only formats) |
+| `SmartTimeline/SmartTimelineView.swift` | Timeline container, spine, dots, past/future split |
+| `SmartTimeline/NowMarkerView.swift` | Pulsing dot + gradient line + time label |
+| `SmartTimeline/CommitmentCard.swift` | Expandable glassy commitment card with course navigation |
+| `SmartTimeline/SmartNudgeCard.swift` | 7 nudge types (travel, weather, conflict, etc.) |
+| `SmartTimeline/SuggestedBlockCard.swift` | Dashed suggested study block |
+| `SmartTimeline/DueTodayBanner.swift` | Urgent red banner |
+| `SmartTimeline/ComingUpSection.swift` | Compact near-future list |
+| `SwipeStack/SwipeCardStack.swift` | Stack container, depth effect, detail sheet |
+| `SwipeStack/SwipeableCard.swift` | FeedCardView visuals + drag gesture + spring physics |
+
+### Modified Files
+
+| File | Change |
+|------|--------|
+| `Core/Models/HomeScreenMode.swift` | Added `case dayplan` |
+| `App/Views/HomeTabView.swift` | Added `.dayplan → TodayDayPlanView()` |
+| `Packages/DWServices/.../MeService.swift` | Added V2 fields to `DayPlanData` |
+
+## Analytics Events
+
+| Event | Properties | Trigger |
+|-------|------------|---------|
+| `today_dayplan_v2` | hero_state, timeline_count, swipe_cards_count | Screen appear |
+| `today_commitment_tap` | commitmentId | Tap "View Course" |
+| `today_nudge_tap` | nudgeType | Tap a nudge card |
+| `today_pull_refresh` | hero_state | Pull to refresh |
+
+<Warning>
+Feed card count may be low due to aggressive server-side scoring that filters by time window and context state. This is expected behavior, not a UI bug.
+</Warning>
+
+<Note>
+Course detail navigation uses `NavigationLink` to push `CourseDetailScreen` onto the parent `NavigationStack`. Fetches `TermCourse` by `courseId` via `TermService.fetchCurrentTerm()`, falls back to Term tab if not found.
+</Note>

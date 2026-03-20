@@ -1,0 +1,181 @@
+---
+title: "Hypertune Quick Reference"
+description: "Quick reference for using Hypertune feature flags in the LockedIn application"
+source:
+  type: "obsidian"
+  path: "Engineering/Technical/LockedIn/Hypertune Quick Reference.md"
+  distilled_at: "2026-03-20"
+---
+
+# Hypertune Quick Reference
+
+## Common Commands
+
+### Regenerate SDK After Dashboard Changes
+```bash
+# From workspace root
+make hypertune-regen
+
+# OR from dormway-lockedin directory
+doppler run -- bash -c 'npx hypertune --framework nextApp --platform vercel --includeInitData true --getHypertuneImportPath "../src/lib/getHypertune"'
+```
+
+**When to regenerate**:
+- ✅ Added new flag
+- ✅ Changed flag type (boolean → enum)
+- ✅ Added/removed enum options
+- ✅ Renamed flag
+- ❌ Changed flag VALUE (just toggle in dashboard)
+
+### Restart After SDK Changes
+```bash
+# Quick restart (workspace root)
+make rs s=lockedin
+
+# OR rebuild with dependencies
+make rb s=lockedin
+```
+
+## Test Locally
+
+### Test Page
+```
+http://localhost:3008/test-hypertune
+```
+
+Shows real-time flag values.
+
+### Enable Vercel Toolbar
+```
+http://localhost:3008?toolbar=1
+```
+
+Override flags per-session.
+
+## Code Usage
+
+### Server-Side (RSC)
+```typescript
+import getHypertune from '@/lib/getHypertune';
+
+// In async component
+const hypertune = await getHypertune();
+const enabled = hypertune.myFlag({ fallback: false });
+```
+
+### Client-Side (Hook)
+```typescript
+'use client';
+import { useHypertune } from '@/generated/hypertune.react';
+
+export function MyComponent() {
+  const hypertune = useHypertune();
+  const enabled = hypertune.myFlag({ fallback: false });
+}
+```
+
+### Conditional Rendering
+```typescript
+// Boolean flag
+return enabled ? <NewUI /> : <OldUI />;
+
+// Enum flag
+const variant = hypertune.dashboardVariant({ fallback: 'classic' });
+const Component = {
+  classic: ClassicDashboard,
+  modern: ModernDashboard,
+}[variant];
+return <Component />;
+```
+
+## Current Flags
+
+| Flag | Type | Default | Usage |
+|------|------|---------|-------|
+| `heroVariant` | enum | `'original'` | Homepage hero A/B test |
+| `enableDesignV2` | boolean | `false` | Design system rollout |
+| `exampleFlag` | boolean | `false` | Testing only |
+
+## Vercel Toolbar & Flags Explorer
+
+The toolbar appears automatically in development mode at `http://localhost:3008`.
+
+### Using the Flags Explorer
+
+1. **Look at bottom-center of screen** - Black toolbar with icons
+2. **Click the flag icon (🚩)** - Opens Flags Explorer
+3. **View all flags:**
+   - `heroVariant` (original | improved | hybrid)
+   - `enableDesignV2` (on | off)
+   - `exampleFlag` (on | off)
+4. **Override a flag** - Click flag → Select value → Page reloads
+5. **Clear overrides** - Click "Reset All" button
+
+### What's Configured
+
+- `@vercel/toolbar` package - Toolbar UI
+- `flags` package - Vercel Flags SDK
+- `next.config.js` - `withVercelToolbar()` plugin
+- `layout.tsx` - `<VercelToolbar />` + `<FlagValues />`
+- `.well-known/vercel/flags` - Discovery endpoint
+- `FLAGS_SECRET` in Doppler - Authentication
+- `middleware.ts` - Public access to `.well-known`
+
+### Clear Overrides
+- Click "Reset All" in toolbar
+- Or delete cookie: `vercel-flag-overrides`
+
+## Troubleshooting
+
+### Flag returns fallback always
+
+**Check**:
+1. SDK regenerated? (`npx hypertune ...`)
+2. Flag name correct? (case-sensitive)
+3. Init data has flag? (check `generated/hypertune.ts`)
+
+**Debug**:
+```typescript
+console.log('Hypertune:', hypertune);
+console.log('Ready?', hypertune.isReady());
+```
+
+### Toolbar not showing
+
+**Check**:
+1. Added `?toolbar=1`?
+2. `VercelFlagValues` in layout.tsx?
+3. Flag in `flagValues` object?
+
+**Debug**:
+```javascript
+// Browser console
+document.cookie.split(';').find(c => c.includes('vercel'))
+```
+
+### Changes not updating
+
+**Wait**: 5-10 seconds for propagation
+
+**Force refresh**: Clear cache + hard reload
+
+**Check init data**: Regenerate SDK to get latest snapshot
+
+## Adding a New Flag (Checklist)
+
+- [ ] Create flag in Hypertune Dashboard
+- [ ] Regenerate SDK (`npx hypertune ...`)
+- [ ] Use flag in code (`hypertune.myFlag()`)
+- [ ] Add to `flagValues` in layout.tsx (for toolbar)
+- [ ] Add tracking event with flag value
+- [ ] Test on test page
+- [ ] Test with toolbar override
+- [ ] Deploy to staging
+- [ ] Run A/B test (if applicable)
+- [ ] After rollout: remove flag code
+
+## Links
+
+- [Hypertune Dashboard](https://app.hypertune.com/projects/7826)
+- [Hypertune Docs](https://docs.hypertune.com)
+- [Vercel Toolbar Docs](https://vercel.com/docs/workflow-collaboration/vercel-toolbar)

@@ -1,0 +1,275 @@
+---
+title: "CDN Strategy: Bunny.net for Static Assets"
+description: "DormWay's CDN architecture using Bunny.net to serve static assets at cdn.dormway.app with improved performance and cost savings."
+source:
+  type: "obsidian"
+  path: "Engineering/Architecture/SoT - CDN Strategy Bunny Net.md"
+  distilled_at: "2026-03-20"
+---
+
+# CDN Strategy: Bunny.net for Static Assets
+
+DormWay uses Bunny.net CDN at `cdn.dormway.app` to serve static assets including Lottie animations, university logos, and images. This provides better global performance and significant cost savings compared to serving assets through Vercel.
+
+## Architecture Overview
+
+```mermaid
+graph TB
+    Client[Client Browser] --> CDN[cdn.dormway.app<br/>Bunny CDN Pull Zone]
+    CDN --> Storage[Bunny Storage Zone<br/>dormway-cdn-production]
+    
+    CDN --> PoP1[114 Global PoPs<br/>Sub-29ms latency]
+    
+    subgraph "Asset Types"
+        Animations[/animations/*<br/>Lottie JSON/dotLottie]
+        Logos[/logos/*<br/>University branding]
+        Images[/img/*<br/>Static images]
+        Assets[/assets/*<br/>General static content]
+    end
+```
+
+## Current Asset Distribution
+
+| Path | Content | Size | Priority |
+|------|---------|------|----------|
+| `/animations/` | Lottie animations (JSON/dotLottie) | 89MB | P0 |
+| `/logos/` | University branding assets | ~15MB | P1 |
+| `/img/` | Static images | ~20MB | P1 |
+| **Total** | | **~125MB** | |
+
+## CDN Helper Module
+
+All asset URLs are managed through a centralized helper:
+
+```typescript
+// src/lib/cdn.ts
+const CDN_BASE_URL = process.env.NEXT_PUBLIC_CDN_BASE_URL || '';
+
+export function getCdnUrl(path: string): string {
+  const cleanPath = path.startsWith('/') ? path.slice(1) : path;
+  
+  if (CDN_BASE_URL) {
+    return `${CDN_BASE_URL}/${cleanPath}`;
+  }
+  
+  // Fallback to local /public/ in development
+  return `/${cleanPath}`;
+}
+
+// Convenience helpers
+export const cdn = {
+  animation: (name: string) => getCdnUrl(`animations/${name}`),
+  logo: (name: string) => getCdnUrl(`logos/${name}`),
+  image: (name: string) => getCdnUrl(`img/${name}`),
+  asset: (path: string) => getCdnUrl(`assets/${path}`),
+};
+```
+
+**Usage Example:**
+```typescript
+import { cdn } from '@/lib/cdn';
+
+// In components
+<img src={cdn.logo('michigan.png')} alt="University of Michigan" />
+
+// In animation manifests
+export const iosAnimationManifest = {
+  Password: cdn.animation('ios/Password.json'),
+  Chat: cdn.animation('ios/Chat.json'),
+};
+```
+
+## Environment Configuration
+
+| Environment | CDN_BASE_URL | Behavior |
+|-------------|--------------|----------|
+| **Development** | _(empty)_ | Loads from local `/public/` |
+| **Staging** | `https://cdn.dormway.app` | Uses CDN |
+| **Production** | `https://cdn.dormway.app` | Uses CDN |
+
+## Asset Management Workflow
+
+### Adding New Assets
+
+1. **Development**: Place file in local `/public/` directory (gitignored)
+2. **Testing**: Test locally with development server
+3. **Upload to CDN**:
+   ```bash
+   ./scripts/cdn/upload-to-bunny.sh \
+     services/dormway-lockedin/public/animations/new-file.json \
+     /animations/new-file.json
+   ```
+4. **Update Code**: Add to relevant manifest or component
+5. **Deploy**: Push code changes (assets are NOT committed to git)
+
+### Upload Script
+
+```bash
+#!/bin/bash
+# scripts/cdn/upload-to-bunny.sh
+
+STORAGE_ZONE="dormway-cdn-production"
+BUNNY_API_KEY="${BUNNY_API_KEY}" # From Doppler
+SOURCE_DIR="${1}"
+DEST_PATH="${2}"
+
+find "$SOURCE_DIR" -type f | while read file; do
+  relative_path="${file#$SOURCE_DIR/}"
+  dest_url="https://storage.bunnycdn.com/$STORAGE_ZONE$DEST_PATH/$relative_path"
+  
+  curl -X PUT \
+    -H "AccessKey: $BUNNY_API_KEY" \
+    -H "Content-Type: application/octet-stream" \
+    --data-binary "@$file" \
+    "$dest_url"
+done
+```
+
+## Git Workflow
+
+<Warning>
+Assets are **never committed to git** after CDN migration. They are gitignored and managed through Bunny Storage.
+</Warning>
+
+### Directory Structure
+
+```
+services/dormway-lockedin/public/
+├── animations/
+│   ├── .gitkeep              # ✅ Committed
+│   ├── README.md             # ✅ Committed (workflow docs)
+│   ├── ios/*.json            # ❌ GITIGNORED
+│   └── lottie/*.lottie       # ❌ GITIGNORED
+├── university-logos/
+│   ├── .gitkeep              # ✅ Committed
+│   └── *.png                 # ❌ GITIGNORED
+└── img/
+    ├── .gitkeep              # ✅ Committed
+    └── *.*                   # ❌ GITIGNORED
+```
+
+### .gitignore Rules
+
+```gitignore
+# CDN Assets - DO NOT COMMIT
+# Source of truth: Bunny Storage Zone (cdn.dormway.app)
+/public/animations/**/*.json
+/public/animations/**/*.lottie
+/public/university-logos/**/*
+/public/img/**/*
+
+# Keep directory structure
+!/public/animations/.gitkeep
+!/public/animations/README.md
+!/public/university-logos/.gitkeep
+!/public/img/.gitkeep
+```
+
+## Performance & Cost
+
+### Performance Benefits
+
+- **Global latency**: Sub-29ms average (114 PoPs worldwide)
+- **Cache hit ratio**: >95% target
+- **Build size reduction**: 89MB+ removed from Vercel builds
+- **Faster deployments**: Assets don't rebuild with code changes
+
+### Cost Comparison
+
+| Service | Monthly Cost (1TB traffic) | Notes |
+|---------|---------------------------|--------|
+| **Bunny.net** | **$10-15** | Traffic-only billing |
+| Vercel Pro | $420 | $20 base + $40/100GB bandwidth |
+| AWS CloudFront | $92.50 | $85 transfer + $7.50 requests |
+
+**Savings**: ~96% vs Vercel, ~89% vs CloudFront
+
+## Configuration Details
+
+### Bunny.net Setup
+
+**Storage Zone**: `dormway-cdn-production`
+- Region: Multi-region with replication
+- Access: API key authentication
+
+**Pull Zone**: `dormway-cdn`
+- Origin: Bunny Storage Zone
+- Hostname: `cdn.dormway.app`
+- Cache: 1 day default, 1 year for versioned assets
+- SSL: Automatic Let's Encrypt
+
+**DNS Configuration**:
+```
+Type: CNAME
+Name: cdn
+Value: <bunny-pull-zone-hostname>.b-cdn.net
+```
+
+### Security Settings
+
+- **Hotlink Protection**: Enabled for `dormway.app` domains only
+- **CORS**: Configured for all DormWay origins
+- **SSL/TLS**: Automatic certificate management
+- **Token Authentication**: Available for sensitive content
+
+## Monitoring
+
+### Key Metrics
+
+- **Bandwidth usage** by region
+- **Cache hit ratio** (target >95%)
+- **Error rates** (404s, 5xx responses)
+- **Top requested files**
+- **Asset load times** in application
+
+### Cache Management
+
+**Cache Purging**:
+```bash
+curl -X POST \
+  -H "AccessKey: $BUNNY_API_KEY" \
+  "https://api.bunny.net/pullzone/$BUNNY_PULL_ZONE_ID/purgeCache"
+```
+
+**Cache Headers**:
+- Static assets: `Cache-Control: public, max-age=31536000` (1 year)
+- Frequently updated: `Cache-Control: public, max-age=86400` (1 day)
+
+## Disaster Recovery
+
+### Rollback Plan
+
+1. **Immediate rollback**: Set `NEXT_PUBLIC_CDN_BASE_URL=""` in Doppler
+2. **Fallback**: Application automatically uses local `/public/` files
+3. **Redeploy**: Fast deployment without asset changes
+
+### Asset Restoration
+
+- **Bunny versioning**: File history available in dashboard
+- **Local copies**: Developers can keep gitignored local files
+- **Backup strategy**: Regular snapshots of Bunny Storage
+
+## Development Workflow
+
+### New Developer Setup
+
+```bash
+# Download commonly used assets for offline development
+./scripts/cdn/download-from-bunny.sh /animations ./public/animations
+
+# Or use CDN in development (requires internet)
+echo "NEXT_PUBLIC_CDN_BASE_URL=https://cdn.dormway.app" > .env.local
+```
+
+### Asset Versioning
+
+**Recommended**: Immutable filenames
+```typescript
+// Version in filename for cache-friendly updates
+NewAnimation: cdn.animation('ios/new-animation-v2.json')
+```
+
+**Alternative**: Overwrite + cache purge
+- Same filename, purge CDN cache after upload
+- Simpler manifest management
+- Requires cache invalidation step

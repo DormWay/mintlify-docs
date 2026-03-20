@@ -1,0 +1,178 @@
+---
+title: "Term Data Canonical Source Audit"
+description: "Verification of campus_configs as the canonical source for term data across dormway-core and APIv2"
+source:
+  type: "obsidian"
+  path: "Engineering/Technical/Engine/Term Data Canonical Source Audit.md"
+  distilled_at: "2026-03-20"
+---
+
+# Term Data Canonical Source Audit
+
+This audit verifies the enforcement of `campus_configs` as the canonical source for term data across the platform.
+
+## Executive Summary
+
+✅ **APIv2 endpoints are correctly using dormway-core**  
+✅ **dormway-core TermFactory correctly uses campus_configs as primary source**  
+❌ **31 files access campus_configs directly and need review**  
+🔴 **CRITICAL: Daily term transition workflow does not exist - current_term_data becomes stale**
+
+## dormway-core TermFactory Implementation
+
+**Status:** ✅ CORRECT
+
+The TermFactory correctly implements the canonical pattern:
+
+### Primary Methods
+
+**`getCurrentForStudent()`** - Uses campus_configs first, falls back to date-based queries:
+```typescript
+// First try to get term from campus config (canonical source)
+const configTermResult = await this.getTermFromCampusConfig(studentContextId);
+if (configTermResult.success && configTermResult.data) {
+  // Use campus_configs.current_term_data
+}
+```
+
+**`getTermFromCampusConfig()`** - Reads canonical source:
+```sql
+SELECT cc.current_term_data
+FROM contexts student
+JOIN contexts campus ON campus.id = student.parent_id
+LEFT JOIN campus_configs cc ON cc.campus_id = campus.id
+```
+
+**`getTermDatesFromCampus()`** - Prefers campus_configs over context metadata:
+```typescript
+// Prefer campus_configs.academic_calendar, fall back to context metadata
+const academicCalendar =
+  result.rows[0].academic_calendar ||
+  result.rows[0].metadata?.academicCalendar;
+```
+
+## APIv2 Endpoints
+
+**Status:** ✅ CORRECT
+
+All term-related endpoints use TermFactory from dormway-core:
+
+### `/v2/terms/*` routes
+```typescript
+const termFactory = getTermFactory();
+const result = await termFactory.getAllForStudent(student.contextId);
+```
+
+### `/v2/students/me/*` routes
+- `/me/terms` uses `termFactory.getAllForStudent()`
+- `/me/current-term` uses `termFactory.getCurrentForStudent()`
+- Has legitimate fallback for fresh users with no enrollment data
+
+## Files Accessing campus_configs Directly
+
+**Status:** ❌ NEEDS REVIEW - 31 files identified
+
+### Critical Files
+
+**`campusEnrichment.activities.ts`**
+- ✅ LEGITIMATE - Updates `campus_configs.academic_calendar` (writes canonical source)
+
+**`TermResolver.ts`**
+- ⚠️ REVIEW NEEDED - Duplicates TermFactory logic for Canvas sync
+- Query:
+  ```sql
+  SELECT cc.current_term_data, cc.academic_calendar
+  FROM contexts c
+  LEFT JOIN campus_configs cc ON cc.campus_id = c.id
+  ```
+
+**Other files require individual audit to determine legitimacy**
+
+## Critical Gap: Term Transition Mechanism
+
+**Status:** ❌ MISSING
+
+### The Problem
+
+Term detection only runs during campus enrichment:
+
+```typescript
+const currentDate = new Date();
+const currentTerm = parsed.academicCalendar?.terms?.find((term: any) => {
+  const start = new Date(term.startDate);
+  const end = new Date(term.endDate);
+  return currentDate >= start && currentDate <= end;
+});
+```
+
+**Issue:** Enrichment is periodic (every 30+ days), not daily.
+
+### Example Scenario: Winter Quarter Starts
+
+| Date | Campus State | Issue |
+|------|--------------|-------|
+| 1/1/26 | `current_term_data: Fall 2025` | Enriched 30 days ago |
+| 1/11/26 | `current_term_data: Fall 2025` ❌ | Winter starts but data is stale |
+| API Query | Returns `Fall 2025` | Wrong current term! |
+
+### Current Schedules
+
+| Schedule | Frequency | Purpose |
+|----------|-----------|---------|
+| `sync-hourly-smart` | Every hour | Smart sync (10 campuses) |
+| `sync-term-data-enrichment` | Daily 5 AM | Missing term data only (20 campuses) |
+| `sync-daily-force` | Daily 4 AM | Force sync (5 entities) |
+
+**None check existing calendars for term transitions.**
+
+## Required Solutions
+
+### Priority 1: Implement Daily Term Transition
+
+Create workflow that runs daily at 1 AM:
+
+1. Query all campuses with `academic_calendar` data
+2. For each campus:
+   - Parse `academic_calendar.terms`
+   - Find term matching today's date
+   - Compare to `current_term_data`
+   - Update if different and notify
+
+**Benefits:**
+- Idempotent and safe to run daily
+- No API costs (just date math)
+- Ensures `current_term_data` is always accurate
+- Immediate student notifications
+
+### Priority 2: Complete File Audit
+
+Categorize remaining files as:
+- ✅ LEGITIMATE (writes canonical source)
+- ✅ ALREADY USING dormway-core
+- ⚠️ NEEDS REFACTOR (should use TermFactory)
+
+### Priority 3: Add Enforcement
+
+- Linting rules to prevent new direct `campus_configs` access
+- Documentation of canonical pattern
+- Clear exceptions for legitimate use cases
+
+## Architecture
+
+The correct data flow:
+
+```
+campus_configs (canonical source)
+    ↓
+dormway-core TermFactory
+    ↓
+APIv2 endpoints
+    ↓
+Client applications
+```
+
+**Exception:** Enrichment activities that write to the canonical source.
+
+<Warning>
+The missing daily term transition workflow is critical - it affects all students when terms change and current_term_data becomes stale.
+</Warning>

@@ -1,0 +1,240 @@
+---
+title: "iOS UI Consistency Audit"
+description: "Comprehensive UI evaluation of the DormWay iOS app covering iOS 26 conformance, design system adoption, and interaction consistency"
+source:
+  type: "obsidian"
+  path: "Engineering/Architecture/SoT - iOS UI Consistency Audit.md"
+  distilled_at: "2026-03-20"
+---
+
+# iOS UI Consistency Audit
+
+## Scope
+
+Comprehensive UI evaluation of the DormWay iOS app across three dimensions:
+- **iOS 26 conformance** - Liquid Glass adoption, deprecated APIs, system component usage
+- **Information density & visual hierarchy** - Typography compliance, spacing consistency, screen density
+- **Interaction paradigms & consistency** - Gesture patterns, feedback systems, component adoption
+
+## Current State Overview
+
+The app has a well-designed design system (`DWDesign`) that is systematically under-adopted at the app layer. This is the root cause of most consistency issues.
+
+| Dimension | Score | Status |
+|-----------|-------|--------|
+| iOS 26 / Liquid Glass | 7/10 | Real iOS 26 `.glassEffect()` wrappers exist with proper fallbacks |
+| Navigation | 9/10 | All NavigationView migrated to NavigationStack (31 files) |
+| Typography & Color | 6/10 | 1,010 raw `.font()` migrated to `.dsTypography()` (~60% compliance) |
+| Information Density | 7/10 | Dashboard strong; detail screens inconsistent |
+| Interaction Paradigms | 5/10 | DSToggle 100%, DSButton started, DSSelector/cards still pending |
+| Design Consistency | 6/10 | Foundation cleanup done; some parallel systems remain |
+
+## Architecture
+
+### Design System Structure
+
+```
+DWDesign/
+├── Foundations/
+│   ├── LiquidGlass.swift              # Simulated glass system
+│   ├── DSMotionAndHaptics.swift       # Motion & haptic system
+│   └── Generated/
+│       ├── DS+Material.swift          # Material configs
+│       ├── DS+Typography.swift        # Type scale
+│       └── DS+Haptic.swift           # Haptic tokens
+├── Components/
+│   ├── DSButton.swift                # Button component
+│   ├── DSToggle.swift               # Toggle component (~100% adoption)
+│   └── DSSelector.swift             # Selector component
+├── Views/
+│   ├── DWEmptyStateView.swift       # Empty state (unused in app)
+│   └── LoadingStateViews.swift      # Loading states
+└── Modifiers/
+    ├── LiquidGlassModifiers.swift   # Real iOS 26 glass wrappers
+    ├── LayeredGlassModifier.swift   # Multi-layer glass presets
+    └── ShimmerModifier.swift        # Shimmer effects
+```
+
+### Glass System Architecture
+
+Two glass systems exist that need unification:
+
+| System | Location | Approach |
+|--------|----------|----------|
+| Simulated | `LiquidGlass.swift:219` | `.ultraThinMaterial` + gradient overlay simulation |
+| Real iOS 26 | `LiquidGlassModifiers.swift:8` | `#available(iOS 26.0, *)` → native `.glassEffect()` with fallback |
+
+<Warning>
+The simulated system should defer to the real API wrappers. `DS.Material` configs use opaque `Color` backgrounds instead of real SwiftUI `Material` types, so "glass" materials aren't actually translucent.
+</Warning>
+
+## Key Findings
+
+### Typography Compliance
+
+**1,010 raw `.font()` calls migrated to `.dsTypography()` across 115 files, bringing compliance to ~60%.**
+
+| Layer | Raw `.font()` calls | DS `.dsTypography()` calls | Compliance |
+|-------|---------------------|----------------------------|------------|
+| DWWidgets | 238 (34 files) | 781 (41 files) | ~77% |
+| App layer | ~453 (post-migration) | ~1,341 (post-migration) | ~60% |
+
+Remaining ~453 raw calls are unmappable due to:
+- Non-standard sizes (10, 11, 13, 17, 19, 22, 26, 30, 32pt)
+- Font variants (`.design: .rounded`, `.monospaced`)
+- Size/weight combinations without DS tokens
+
+### Component Adoption Status
+
+| DS Component | App Adoption | Status |
+|-------------|-------------|--------|
+| `DSToggle` | **100%** (69 replacements) | ✅ Complete |
+| `DSButton` | ~20% (debug views migrated) | 🔄 In progress |
+| `DSSelector` | 0% | Not a Picker replacement — different UX |
+| `DWEmptyStateView` | 0% | Requires per-feature design decisions |
+
+<Note>
+Most raw `Button()` instances are toolbar/Form buttons that should remain native SwiftUI components.
+</Note>
+
+### Liquid Glass Implementation
+
+Current usage of real `.glassEffect()`:
+- `GlassQuickActionsBar`
+- `BrainGainsAssistantButton` 
+- `BrainGainsContainer`
+
+Additional surfaces that should adopt iOS 26+ glass effects:
+- Tab bar
+- Navigation bars  
+- Widget cards
+
+## Design Token Reference
+
+### Spacing System (4pt grid)
+```swift
+// Base tokens
+none(0), xs(4), sm(8), md(16), lg(24), xl(32), xxl(48), xxxl(64)
+
+// Semantic tokens
+cardInternal(20), cardGap(12), sectionGap(28), contentMargin(20)
+```
+
+<Warning>
+Off-grid semantic values exist:
+- `cardInternal = 20` (should be 16 or 24)
+- `contentMargin = 20` (should be 16 or 24)  
+- `sectionGap = 28` (should be 24 or 32)
+</Warning>
+
+### Typography Scale
+Lexend-based type scale:
+- Headers: h1(34pt) through h6(16pt)
+- Body: body(16/18/14/12pt)
+- Labels: labels(16/14/12pt)
+- Widget: widget(18/15pt)
+
+### Border Radius
+```swift
+xs(4), sm(8), md(12), lg(16), xl(24), 2xl(32), card(24), sheet(24)
+```
+
+### Glass Materials
+```swift
+DS.Glass.backgroundMaterial = .ultraThinMaterial
+LiquidGlassMaterial opacity: Light=0.85, Dark=0.90, AllClear=0.15
+```
+
+## Interaction Patterns
+
+### Haptic Feedback
+
+Unified haptic system using `DS.Haptic.trigger()`:
+```swift
+// Correct - checks user preference
+DS.Haptic.trigger(.impact(.medium))
+
+// Avoid - bypasses user preference  
+UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+```
+
+### Swipe-to-Delete Patterns
+
+Four different implementations exist across tabs:
+
+| Screen | Pattern |
+|--------|---------|
+| Dashboard widgets | Custom `WidgetSwipeActions.swift` with configurable thresholds |
+| Tasks tab | SwiftUI `.swipeActions` on `TaskItemRow` |
+| Library | Context menus/buttons (no swipe) |
+| Schedule | `.onDelete` callback on `ForEach` |
+
+### Long Press Duration Variance
+
+| Context | Duration |
+|---------|----------|
+| Dashboard edit mode | 0.5s |
+| Drag-drop | 0.3s |
+| Widget browser | 0.1s |
+| DS buttons | 0.0s |
+
+## iOS 26 Adoption Opportunities
+
+| Feature | Current Status | Recommendation |
+|---------|---------------|----------------|
+| `Tab` type for `TabView` | Tag-based TabView | Migrate to declarative `Tab` type with automatic Liquid Glass |
+| `.glassEffect()` surfaces | Limited usage | Expand to tab bar, nav bars, widget cards on iOS 26+ |
+| `@Observable` macro | 25 `ObservableObject` remain | Migrate remaining for performance |
+| `.sensoryFeedback()` modifier | Manual `UIImpactFeedbackGenerator` | Replace with declarative modifier |
+
+## Implementation Guidelines
+
+### Adding New Screens
+- Use `.dsTypography()` instead of raw `.font()`
+- Use `DSButton` and `DSToggle` components
+- Use `LiquidGlassModifiers.swift` wrappers, not `LiquidGlass.swift` simulation
+- Use `DS.Haptic.trigger()` for haptic feedback
+- Use `DWEmptyStateView` for empty states
+- Use `ShimmerModifier.swift` `.shimmering()` for loading states
+
+### Code Examples
+
+#### Typography Migration
+```swift
+// Before
+Text("Hello World").font(.system(size: 16, weight: .medium))
+
+// After  
+Text("Hello World").dsTypography(.bodyMedium)
+```
+
+#### Glass Effect Usage
+```swift
+// Correct - iOS 26 with fallback
+struct MyView: View {
+    var body: some View {
+        Rectangle()
+            .liquidGlass() // Uses LiquidGlassModifiers.swift
+    }
+}
+```
+
+#### Haptic Feedback
+```swift
+// Correct - respects user preference
+DS.Haptic.trigger(.impact(.light))
+
+// Component integration
+DSButton("Save") {
+    // Action automatically triggers haptic
+    save()
+}
+```
+
+## Known Limitations
+
+- ~453 raw `.font()` calls remain due to unmappable variants
+- `DS.Material` uses opaque colors instead of real SwiftUI `Material` translucency  
+- 1x1 widgets have insufficient padding (4pt minimum)
+- No unified toast/snackbar system for confirmations
+- Card variant proliferation (14+ variants should consolidate to 4-5)
