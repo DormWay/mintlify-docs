@@ -1,17 +1,29 @@
 ---
 title: "Platform Architecture"
-description: "High-level architecture of the DormWay platform: services, data flows, and infrastructure."
+description: "The current logical architecture of DormWay: clients, gateway, BFF, workflows, realtime, AI pipelines, and data contracts."
 source:
-  type: "manual"
-  path: ""
-  distilled_at: "2026-03-19"
+  type: "obsidian"
+  path: "Product/DormWay Technical Depth - What We Actually Built (Current).md"
+  paths:
+    - "Engineering/Architecture/Source of Truth Index.md"
+    - "Engineering/Architecture/SoT - StudentWatcher.md"
+    - "Engineering/Architecture/SoT - Sync Orchestration & Schedules.md"
+    - "Engineering/Architecture/SoT - Context System.md"
+    - "Engineering/Architecture/SoT - Database Model & Access Patterns (Neon).md"
+  distilled_at: "2026-04-03"
 ---
 
 # Platform Architecture
 
-DormWay is a multi-service platform. This page gives a high-level map of how the services connect, where data lives, and how requests flow from a student's device to the database and back.
+DormWay looks simple on the surface because the complexity is pushed underneath it. Students see Today, Tasks, Schedule, Courses, and Ace. Underneath that is a service graph that keeps each student's academic state current over time.
 
-For deep implementation details on specific services, see the [Engineering Reference](/docs/engineering) section.
+This page focuses on the **logical architecture** and the contracts between systems. Deployment topology changes more often than the product model, so the service boundaries matter more than any one hosting diagram.
+
+## Consumer Surface Map
+
+Before the backend service map, this diagram shows the current client-facing footprint across pre-auth, onboarding, iOS, and web surfaces. It is broader than the canonical navigation IA, so flagged or secondary surfaces can appear here even when they are not part of the five-item top-level navigation contract.
+
+![DormWay consumer-facing surface map across iOS and web routes, onboarding, tabs, sheets, and major screen clusters](/images/dormway-consumer-surfaces.svg)
 
 ---
 
@@ -20,195 +32,197 @@ For deep implementation details on specific services, see the [Engineering Refer
 ```mermaid
 graph TD
     subgraph Clients
-        W[Web App<br/>Next.js / LockedIn]
-        iOS[iOS App<br/>SwiftUI]
+        W[LockedIn web<br/>Next.js]
+        IOS[iPhone and iPad app<br/>SwiftUI]
     end
 
-    subgraph Gateway
-        Z[Zuplo API Gateway<br/>:9000<br/>Auth & routing]
+    subgraph Edge
+        Z[Zuplo gateway<br/>auth, routing, rate limits]
     end
 
-    subgraph Backend
-        API[api-router<br/>:3001<br/>Express.js BFF]
-        ENG[engine<br/>:3030<br/>Temporal workflows]
-        CREWS[dormway-crews<br/>:8000<br/>Python / CrewAI]
-        ABLY[ably-relay<br/>:3032<br/>Realtime bridge]
+    subgraph App Layer
+        API[api-router<br/>Express BFF]
+        CORE[@dormway/core<br/>shared entities + domain logic]
+        RELAY[ably-relay<br/>realtime bridge]
+        CREWS[dormway-crews<br/>AI batch pipelines]
     end
 
-    subgraph Data
-        DB[(Neon PostgreSQL<br/>serverless)]
-        RAGIE[Ragie RAG<br/>Document index]
+    subgraph Workflow Layer
+        ENG[engine<br/>Temporal workers + schedules]
+        SW[StudentWatcher<br/>per-student workflows]
     end
 
-    subgraph Infra
-        RW[Railway<br/>Production host]
-        DOP[Doppler<br/>Secrets]
-        BUNNY[Bunny CDN<br/>Asset delivery]
+    subgraph Data and Integrations
+        DB[(Neon PostgreSQL)]
+        RAG[Ragie / document index]
+        EXT[Canvas, calendars,<br/>campus and city data]
     end
 
     W --> Z
-    iOS --> Z
+    IOS --> Z
     Z --> API
-    API --> ENG
-    API --> CREWS
+    API --> CORE
     API --> DB
-    ENG --> DB
-    CREWS --> RAGIE
-    ABLY --> W
-    ABLY --> iOS
-    API --> ABLY
+    API --> RELAY
+    API --> ENG
+    API --> EXT
+    ENG --> SW
+    SW --> DB
+    ENG --> CREWS
+    ENG --> EXT
+    CREWS --> RAG
+    RELAY --> W
+    RELAY --> IOS
 ```
 
 ---
 
 ## Services
 
-### Zuplo API Gateway (port 9000)
+### Clients
 
-The public entry point for all client requests. Handles:
-- JWT validation via Clerk
-- User identity enrichment (injects `X-User-Id` and `X-User-Role` headers)
-- Rate limiting and routing
-- All traffic from web and iOS passes through Zuplo before reaching api-router
+- **LockedIn web** is the student-facing Next.js app inside `dormway-platform`
+- **iPhone and iPad** use the native SwiftUI app in `ios-clean`
+- Both surfaces are trying to answer the same student question with different density and interaction models
 
-### api-router (port 3001)
+### Zuplo Gateway
 
-The primary backend service — an Express.js BFF (Backend for Frontend). Responsibilities:
-- Serves all `/v2/` API endpoints consumed by web and iOS
-- Composes data from multiple sources into client-ready responses (BFF pattern)
-- Manages Canvas LMS integration: syncs courses, assignments, grades
-- Handles auth-aware database queries via dormway-core entities
-- Triggers Temporal workflow signals and queries
-- Publishes realtime events to Ably
+Zuplo is the public edge for client traffic. It handles request validation, routing, and identity enrichment before requests reach application services.
 
-### engine (port 3030)
+### `api-router`
 
-The Temporal workflow host. Long-running and scheduled work runs here:
-- **StudentWatcher** — Digital twin per student; monitors schedule, triggers day plan generation
-- **DayPlan generation** — Runs at 05:00 campus local time each day
-- **Syllabus processing** — Orchestrates syllabus crew jobs from upload to database insertion
-- **Campus and term lifecycle** — Semester transitions, academic calendar management
-- **Canvas sync workflows** — Periodic and on-demand LMS data refresh
+`api-router` is the main Backend for Frontend. It is where client-oriented endpoints get composed for web and iOS. Responsibilities include:
 
-### dormway-crews (port 8000)
+- Serving the main authenticated API surface
+- Joining data from multiple sources into client-ready payloads
+- Triggering Temporal signals and workflow queries
+- Coordinating realtime event publication
+- Handling integrations and business logic that should not live in the client
 
-Python microservice built on the CrewAI multi-agent framework. Handles AI-intensive batch work:
-- Syllabus analysis: extracts deadlines, grading policies, professor insights, peak weeks
-- Crew document Q&A: indexes uploaded files in Ragie and answers member questions with streaming responses
-- Called by the engine via HTTP; results written back to the database
+This is also where the current codebase still carries some legacy direct database access. The target architecture centralizes domain behavior in `@dormway/core`, but that migration is not yet 100% complete.
 
-### ably-relay (port 3032)
+### `@dormway/core`
 
-A thin service that bridges api-router events to Ably channels. Clients subscribe to channels named by their user or context ID and receive live pushes for:
-- Grade postings
-- New assignments
-- Schedule changes
-- Context transitions (current class, next event)
+`@dormway/core` is the shared domain library used by the backend services. It owns the most important entity and context contracts:
+
+- Context graph traversal
+- Shared entity serialization
+- Domain services for students, terms, courses, and campus logic
+- RLS-aware and admin-aware database access patterns
+
+### `engine`
+
+`engine` is the workflow runtime built on Temporal. It owns the long-running and scheduled work that should survive restarts and keep student state fresh over time.
+
+Major responsibilities include:
+
+- StudentWatcher workflows
+- Day plan generation
+- Sync orchestration and recurring schedules
+- Syllabus-processing orchestration
+- Term and campus lifecycle workflows
+- Notification timing and downstream triggers
+
+### StudentWatcher
+
+StudentWatcher is the most important architectural unit in DormWay. Each student gets a durable workflow that can run for months, receive signals, evaluate sync cadence, and coordinate downstream work without being reduced to a simple cron entry.
+
+### `dormway-crews`
+
+`dormway-crews` handles AI-heavy batch workflows such as syllabus analysis and document-grounded Q&A. It is called from the workflow layer rather than directly from clients.
+
+### `ably-relay`
+
+`ably-relay` turns application events into realtime channel updates for the clients. That is how changes in assignments, grades, plans, or context can reach students without forcing constant polling.
 
 ---
 
-## Data Layer
+## Core Data Contracts
 
 ### Neon PostgreSQL
 
-All persistent data lives in a single Neon serverless PostgreSQL database. Key tables:
+Neon-backed PostgreSQL is the canonical data layer. Important contracts include:
 
-| Table | Purpose |
-|-------|---------|
-| `accounts` | User accounts (linked to Clerk) |
-| `contexts` | Hierarchical entity store — cities, campuses, buildings, courses, students |
-| `student_time_blocks` | All scheduled events: classes, assignments, focus blocks, personal events |
-| `service_data` | Time-series data from external services (Canvas, syllabus crews); partitioned by month |
-| `crews` / `crew_members` | Crews collaboration data |
+| Table / concept | Role |
+|-----------------|------|
+| `contexts` + `context_dependencies` | The tree-plus-graph model for cities, campuses, buildings, students, and courses |
+| `student_time_blocks` / `time_blocks` | The normalized schedule layer |
+| `service_data` | Time-series and ingestion output store used across sync and intelligence flows |
+| `migration_history` | Schema migration tracking |
 
-The **contexts table** is the backbone of DormWay's data model. A context can be a city, campus, building, course, or student — with a consistent `type` field and hierarchical parent/child relationships. This lets the entire platform reason about "where a student is" and "what they're enrolled in" through one unified model.
+### Context graph
 
-### dormway-core
+DormWay's context model is one of its defining architectural choices. The system reasons about cities, campuses, buildings, courses, and students through one graph-backed model instead of a pile of disconnected tables.
 
-A shared TypeScript library (not a running service) used by both api-router and engine. It contains:
-- Entity classes with `toJSON()` serialization (the source of truth for API response shapes)
-- Factory methods for common database query patterns
-- Domain services for campus, term, course, and student logic
-- All database access in application code must go through dormway-core — no raw SQL in routes or activities
+### RLS and admin access
+
+The platform uses separate access patterns for student-safe and admin-level queries:
+
+- Standard application access uses `DATABASE_URL` with RLS semantics
+- Admin and workflow paths can use `DATABASE_URL_ADMIN`
+- Session-bound queries set user and role context explicitly
 
 ---
 
-## Request Flow
+## Key Flows
 
-A typical API request from a student's device:
+### Student asks "what matters now?"
 
 ```mermaid
 sequenceDiagram
-    participant C as Client (web/iOS)
-    participant Z as Zuplo :9000
-    participant A as api-router :3001
+    participant C as Client
+    participant Z as Zuplo
+    participant A as api-router
+    participant CORE as @dormway/core
     participant DB as Neon PostgreSQL
+    participant R as ably-relay
 
-    C->>Z: GET /v2/students/me/courses (with JWT)
-    Z->>Z: Validate JWT via Clerk
-    Z->>A: Forward request (X-User-Id, X-User-Role headers added)
-    A->>DB: Query via dormway-core entity
-    DB-->>A: Row data
-    A-->>C: JSON response (entity.toJSON() shape)
+    C->>Z: Request dashboard / today data
+    Z->>A: Forward authenticated request
+    A->>CORE: Resolve student, context, and timeline data
+    CORE->>DB: Query RLS-safe data
+    DB-->>A: Student state
+    A-->>C: Composed response
+    A->>R: Publish follow-up realtime changes when state updates later
+    R-->>C: Push update
 ```
 
-For data that requires AI processing (syllabus analysis, Crews document Q&A), the flow extends through the engine and dormway-crews:
+### Student uploads a syllabus
 
 ```mermaid
 sequenceDiagram
     participant C as Client
     participant A as api-router
-    participant E as engine (Temporal)
+    participant E as engine
     participant CR as dormway-crews
     participant DB as Neon PostgreSQL
 
-    C->>A: POST /v2/syllabi/upload
-    A->>E: Signal: processSyllabus workflow
-    E->>CR: HTTP: analyze syllabus
-    CR-->>E: Structured extraction result
-    E->>DB: Write service_data record
-    E->>A: Workflow complete
-    A-->>C: 200 OK (processing complete)
+    C->>A: Upload syllabus
+    A->>E: Trigger processing workflow
+    E->>CR: Run extraction and analysis pipeline
+    CR-->>E: Structured result
+    E->>DB: Store canonical extracted data + intelligence output
+    E-->>A: Workflow result / downstream signals
+    A-->>C: Updated course state becomes available
 ```
 
 ---
 
-## Infrastructure
+## Scheduled and Realtime Contracts
 
-| Concern | Solution |
-|---------|---------|
-| Production hosting | Railway (all services) |
-| Secrets management | Doppler (configs: `prd`, `stg`, `dev`, per-developer branches) |
-| Database | Neon PostgreSQL (serverless, branch-per-developer for local dev) |
-| Asset delivery | Bunny CDN |
-| Realtime | Ably pub/sub |
-| Authentication | Clerk |
-| Observability | OpenTelemetry distributed tracing; PortKey for LLM call monitoring |
+The architecture depends on a few recurring contracts being true:
 
-### Environment Model
+- Sync schedules are provisioned and managed through Temporal
+- StudentWatcher loops continuously and uses `continueAsNew` to stay healthy over long periods
+- Realtime updates move through Ably channels
+- The context graph, not just flat task tables, drives personalization and campus awareness
 
-Doppler holds all secrets and injects them at runtime. Each developer has their own Neon branch (via Doppler config `dev_<name>`), so local development runs against a full isolated copy of the schema with no shared state.
-
-Railway auto-deploys on push. Doppler changes (new env var) trigger a Railway redeploy automatically — no manual redeploy needed.
+Supporting services such as `canvas-sync`, `trigger`, and plugin-runner schedules fill in specialized orchestration and automation paths around the core system.
 
 ---
 
-## BFF Pattern
+## Why It Is Built This Way
 
-api-router is a BFF (Backend for Frontend). Each `/v2/` endpoint is designed for a specific client view — it fetches from multiple database tables, joins with external data (Canvas, campus metadata), applies business logic, and returns a single composed response.
+DormWay's architecture is opinionated because the product promise is opinionated. A student should not have to manually maintain a planner, manually refresh multiple tools, or guess which source is right.
 
-This means the client does not orchestrate multiple API calls. A single request to `/v2/students/me/dashboard` returns everything the dashboard needs to render. The BFF layer absorbs the complexity of data composition so clients stay simple.
-
----
-
-## Web App Rendering
-
-The web app (`dormway-lockedin`) uses Next.js App Router. Architecture contracts:
-
-- `page.tsx` and `layout.tsx` files are server components by default
-- `'use client'` is added only at leaf-level interactivity boundaries
-- Deterministic route redirects execute on the server (`redirect()`)
-- Root layout hosts only truly global providers (query client, theme, Clerk)
-- Dashboard-specific concerns (realtime, analytics) are scoped below the dashboard route boundary
-
-This keeps initial page loads fast and prevents non-dashboard routes from loading dashboard-heavy runtimes.
+The architecture exists to make the surface feel simpler than the underlying reality. That is the product standard the system is serving.

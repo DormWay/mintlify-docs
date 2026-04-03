@@ -1,15 +1,15 @@
 ---
 title: "StudentWatcher Workflow"
-description: "The per-student Temporal digital twin that manages DayPlan generation, notifications, and schedule sync."
+description: "The per-student Temporal digital twin that coordinates DayPlan generation, sync checks, notifications, and context updates."
 source:
   type: "obsidian"
-  path: "Engineering/Technical/Engine/Workflow-Triage-System.md"
-  distilled_at: "2026-03-19"
+  path: "Engineering/Architecture/SoT - StudentWatcher.md"
+  distilled_at: "2026-04-03"
 ---
 
 # StudentWatcher Workflow
 
-The StudentWatcher is a long-running Temporal workflow — one per student — that acts as each student's persistent digital twin. It runs continuously on the `student-worker` task queue, managing DayPlan generation, push notifications, Canvas sync, calendar sync, and live activity updates.
+StudentWatcher is DormWay's per-student Temporal digital twin. There is one long-running workflow per student, and it owns the background rhythm for daily planning, notification triggers, sync evaluation, and context-driven updates.
 
 ## Overview
 
@@ -20,145 +20,58 @@ The StudentWatcher is a long-running Temporal workflow — one per student — t
 | Workflow ID pattern | `student-watcher-${studentId}` |
 | Source file | `services/engine/src/workflows/studentWatcher.simplified.workflow.ts` |
 
-The workflow is started once when a user signs up (via the Clerk webhook) and runs indefinitely using Temporal's `continueAsNew` pattern to manage history size.
+The workflow starts during onboarding or signup flows and rolls forward with `continueAsNew` to keep Temporal history manageable.
 
-## Signals
+## Key Signals
 
-The workflow accepts the following signals:
+- `daily_plan`
+- `context_update`
+- `generate_plan`
+- `preferences_update`
+- `trigger_calendar_sync`
+- `trigger_canvas_sync`
+- `send_evening_briefing`
+- `generate_feed_cards`
+- `test_push_notification`
+- `send_push_notification`
+- `trigger_dayplan_push`
 
-| Signal | Name | Description |
-|--------|------|-------------|
-| `dailyPlanSignal` | `daily_plan` | Receive a completed DayPlan from the engine |
-| `contextUpdateSignal` | `context_update` | Receive student context updates (location, travel) |
-| `generatePlanSignal` | `generate_plan` | Trigger DayPlan generation (optionally force-regenerate) |
-| `preferencesUpdateSignal` | `preferences_update` | Update in-memory user preferences |
-| `triggerCalendarSyncSignal` | `trigger_calendar_sync` | Request calendar ICS sync |
-| `triggerCanvasSyncSignal` | `trigger_canvas_sync` | Request Canvas sync |
-| `sendEveningBriefingSignal` | `send_evening_briefing` | Trigger evening summary notification |
-| `sendWeekPreviewSignal` | `send_week_preview` | Trigger weekly preview email |
-| `generateFeedCardsSignal` | `generate_feed_cards` | Regenerate home feed cards |
-| `termTransitionedSignal` | `term_transitioned` | Notify of academic term change |
-| `liveActivityRegisteredSignal` | `live_activity_registered` | iOS Live Activity registered |
-| `sendPushNotificationSignal` | `send_push_notification` | Send push notification directly |
-| `testPushNotificationSignal` | `test_push_notification` | Admin test push notification |
-| `triggerDayPlanPushSignal` | `trigger_dayplan_push` | Trigger DayPlan push notification |
+## Runtime Cadence
 
-## Queries
+- main loop checks roughly every 5 minutes
+- DayPlan generation happens at 5 AM in the user's timezone
+- evening briefing uses the configured evening hour
+- calendar and Canvas sync are evaluated hourly and usually trigger when last successful sync is 6 hours old or older
+- auto-sync driven plan regeneration is throttled so it does not churn constantly
 
-| Query | Name | Returns |
-|-------|------|---------|
-| `getStatusQuery` | `getStatus` | `WorkflowStatus` (checksToday, isActive, lastPlanGeneration) |
-| `getDayPlanQuery` | `getDayPlan` | Full DayPlan object (admin testing) |
+## Start Points
 
-## Sync Intervals
+- signup and onboarding flows can start it
+- admin routes can signal it
+- city-level sync jobs can fan out signals to relevant student workflows
 
-| Operation | Interval |
-|-----------|----------|
-| Canvas sync | 6 hours |
-| Calendar (ICS) sync | 6 hours |
-| Auto DayPlan regen | 30 minutes |
-| Manual calendar sync cooldown | 1 minute |
-| Live Activity check | 1 minute |
+## City Fan-Out
 
-## State Management
+City-driven updates can signal both home-campus students and traveling students whose GPS location is near a campus in the target city. That traveling-student logic is part of the current production contract, not a future idea.
 
-The workflow maintains in-memory state across its run:
+## Persisted State
 
-- **`dayPlan`** — The student's current DayPlan object.
-- **`checksToday`** — Number of plan checks on the current day.
-- **`lastPlanGeneration`** — Timestamp of the most recent plan generation.
-- **`lastEmailSentDate`** — Date of last morning email (prevents duplicates).
-- **`lastEveningBriefingSentDate`** — Date of last evening briefing.
-- **`lastWeekPreviewSentDate`** — Date of last weekly preview.
-- **`currentContextMode`** — Student's behavioral mode (`idle`, `study_mode`, `class_mode`, `commute_mode`, `social_mode`, `sleep_mode`).
-- **`isPlanGenerationInProgress`** — Mutex to prevent concurrent plan regeneration.
-- **`hasPendingTermTransition`** — Whether a deferred term transition regeneration is pending.
+- `student_watcher_state` stores the workflow's durable state snapshots
+- workflow status queries expose current plan and generation metadata
 
-State is persisted to the `student_watcher_state` database table via the `saveWorkflowState()` activity. On startup, state is loaded from the database via `loadStudentWorkflowContext()`, which fetches timezone, preferences, and prior workflow state in a single query.
+## Known Risk
 
-### Timezone-Aware Date Dedup
-
-Signal handlers use timezone-aware date comparisons to prevent processing the same signal twice on the same day:
-
-```typescript
-// Correct — uses campus timezone
-new Date().toLocaleDateString('en-CA', { timeZone: timezone })
-
-// Wrong — UTC will mismatch the cron's local "today"
-new Date().toISOString().split('T')[0]
-```
-
-## Adding New Behavior: Versioning with `patched()`
-
-StudentWatcher workflows run for months without restarting. Adding new activity calls to the workflow without versioning causes non-determinism errors on replay.
-
-```typescript
-import { patched } from '@temporalio/workflow';
-
-// New feature must be gated with patched()
-const result = patched('my-new-feature-v1')
-  ? await myNewActivities.doSomething()
-  : fallbackValue;
-```
-
-Rules:
-- Always use `patched()` when adding new activity calls to the main workflow body.
-- Provide a safe fallback for old workflows (usually `false` or `null`).
-- Never remove `patched()` calls — they must remain for replay compatibility.
-- Increment the version suffix (`-v2`, `-v3`) if behavior changes.
-
-## Workflow Triage System
-
-When a workflow encounters an unrecoverable error, it can flag itself for admin review using Temporal custom search attributes:
-
-```typescript
-import { markNeedsTriage } from '../utils/triage';
-
-markNeedsTriage('permanent_failure', {
-  entityType: 'student',
-  entityId: studentId
-});
-```
-
-### Custom Search Attributes
-
-| Attribute | Type | Values |
-|-----------|------|--------|
-| `NeedsTriage` | Bool | `true` / `false` |
-| `TriageReason` | Keyword | `permanent_failure`, `timeout`, `invalid_input`, `external_service_down`, `configuration_error`, `data_corruption`, `quota_exceeded`, `authentication_failure`, `manual_review_required` |
-| `ProcessingStatus` | Keyword | `pending`, `in_progress`, `needs_review`, `triaged` |
-| `EntityType` | Keyword | `student`, `syllabus`, `course`, `campus` |
-| `EntityId` | Keyword | UUID of the affected entity |
-
-### Triage Admin Endpoints
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/admin/temporal-workflows?needsTriage=true` | GET | List workflows needing attention |
-| `/api/admin/temporal-workflows/triage` | GET | Dedicated triage queue |
-| `/api/admin/temporal-workflows/triage/stats` | GET | Stats by reason and entity type |
-| `/api/admin/temporal-workflows/:id/resolve-triage` | POST | Mark as resolved |
-
-### Temporal Queries
-
-```sql
--- All workflows needing triage
-NeedsTriage = true
-
--- Failed syllabus processing
-NeedsTriage = true AND EntityType = "syllabus"
-
--- Specific student
-EntityType = "student" AND EntityId = "uuid-here"
-```
+`preferences-routes` still uses `studentWatcher-${userId}` in one path while the canonical workflow ID is `student-watcher-${userId}`. Signals sent with the old format can miss the active workflow.
 
 ## Key Files
 
-| File | Purpose |
-|------|---------|
-| `services/engine/src/workflows/studentWatcher.simplified.workflow.ts` | Main workflow |
-| `services/engine/src/activities/dayplan.activities.ts` | DayPlan generation activities |
-| `services/engine/src/activities/workflowState.activities.ts` | State persistence |
-| `services/engine/src/activities/notification.activities.ts` | Push notifications |
-| `services/engine/src/utils/triage.ts` | Triage helper functions |
-| `services/dormway-admin/src/pages/temporal/index.tsx` | Triage admin UI |
+- `services/engine/src/workflows/studentWatcher.simplified.workflow.ts`
+- `services/engine/src/activities/student.activities.ts`
+- `services/engine/src/activities/workflowState.activities.ts`
+- `services/engine/src/types/dayplan.types.ts`
+- `services/engine/src/workflows/studentProcessor.workflow.ts`
+- `services/shared/dormway-core/src/entities/student/student.factory.ts`
+- `services/api-router/src/routes/webhooks/clerk-routes.ts`
+- `services/api-router/src/routes/admin/dayplan-admin-actions.ts`
+- `services/api-router/src/routes/admin/preferences-routes.ts`
+- `services/api-router/src/routes/admin-routes.ts`

@@ -1,164 +1,76 @@
 ---
 title: "Tasks and Assignments"
-description: "How tasks and assignments are created, stored, deduplicated, and surfaced from Canvas, syllabi, and manual entry."
+description: "DormWay's canonical task model, assignment completion rules, planner blocks, Task Bank, and the contract with student_time_blocks."
 source:
-  type: "manual"
-  path: "services/engine/src/activities/canvasICS.activities.ts"
-  distilled_at: "2026-03-19"
+  type: "obsidian"
+  path: "Engineering/Architecture/SoT - Tasks, Assignments, Planner Blocks.md"
+  distilled_at: "2026-04-03"
 ---
 
 # Tasks and Assignments
 
-Tasks and assignments in DormWay are stored as rows in `student_time_blocks` with a `type` of `assignment` or `assessment`. They can originate from three sources: Canvas ICS sync, syllabus crew processing, or manual student entry.
+DormWay now treats tasks, assignment completion, and planner blocks as related but distinct layers. The canonical persistent task table is `tasks`, while assignment deadlines and scheduled work still flow through `student_time_blocks`.
 
-## Data Model
+## Canonical Storage Layers
 
-```sql
--- student_time_blocks (key columns)
-id                    UUID PRIMARY KEY
-student_context_id    UUID  -- the student's context row
-course_context_id     UUID  -- the associated course context
-title                 TEXT
-type                  time_block_type  -- 'assignment', 'assessment', 'class', etc.
-source                TEXT  -- 'canvas', 'lms', 'syllabus', 'manual'
-source_type           TEXT  -- used for dedup key
-start_time            TIMESTAMPTZ
-end_time              TIMESTAMPTZ
-course_code_normalized TEXT
-metadata              JSONB  -- assignment_type, external_id, etc.
-is_active             BOOLEAN
-```
+| Layer | Canonical use |
+|-------|---------------|
+| `tasks` | Persistent user task lifecycle: `pending`, `scheduled`, `completed`, `deleted` |
+| `assignment_completion` | Completion tracking for Canvas, syllabus, and generic assignments |
+| `student_time_blocks` | Assignment deadlines, schedule artifacts, and planner blocks |
 
-## Sources
+## Source Rules
 
-### Canvas ICS Sync
+- Canvas sync creates assignment-backed tasks and keeps completion aligned with submissions
+- Syllabus tasks can appear as synthetic tasks and use IDs like `syllabus-{courseContextId}-{index}`
+- Manual tasks live in `tasks`
+- Scheduling a task creates a manual planner block in `student_time_blocks` and links it via `scheduled_block_id`
 
-The `canvasICSSync` Temporal workflow fetches each student's Canvas ICS feed and parses assignment events into `student_time_blocks`. The sync runs every 6 hours via the StudentWatcher's `triggerCanvasSyncSignal`.
+## Task Bank
 
-Assignment events are identified by:
-- Canvas: SUMMARY containing `[CourseCode]` brackets
-- Moodle: CATEGORIES field identifying the course, zero-duration DTSTART=DTEND events
+Task Bank is the unified unscheduled work surface. It merges:
 
-All parsers normalize to the same Canvas API format before storage, so the downstream `syncCanvasAssignments()` activity is platform-agnostic.
+- persistent tasks
+- Canvas assignments
+- syllabus-derived tasks
+- quick captures
+- DayPlan-suggested work
 
-### Syllabus Crew Processing
+Both `/api/mobile/planner/task-bank` and `/v2/students/me/task-bank` share canonicalization rules so web and mobile do not drift.
 
-When a student uploads a syllabus, the `syllabusProcessor` Temporal workflow runs a CrewAI pipeline that extracts:
-- `assignments` — named assignments with due dates, weights, and types
-- `critical_dates` — exams, quizzes, project milestones
-- `class_sessions` — recurring class meeting times
+## Scheduling Contract
 
-These are parsed by `semester.activities.ts` and stored as `student_time_blocks` with `source_type = 'syllabus'`. The table uses `ON CONFLICT` to avoid self-duplication within a single syllabus processing run.
+| Action | Result |
+|--------|--------|
+| Schedule a task | Create `student_time_blocks` row with `source='manual_planner'`, update task to `scheduled` |
+| Unschedule a task | Remove planner block, reset task to `pending` |
+| Manual planner block | Stored in `student_time_blocks`, soft-deleted via lifecycle status |
 
-### Manual Entry
+## Assignment Completion Rules
 
-Students can manually add tasks and events. These get `source = 'manual'` and are never overwritten by sync processes.
+- Canvas completion keys use `canvas-<canvas_assignment_id>`
+- Syllabus completion keys use `syllabus-<courseContextId>-<index>`
+- Manual completion must keep task status and assignment completion in sync
+- DueSoon and dashboard surfaces treat submitted or graded Canvas work as completed before overdue logic runs
 
-## Assignment Types
+## Important Invariants
 
-The `type` column uses the `time_block_type` enum. Assignment-specific subtypes live in `metadata.assignment_type`:
-
-```json
-{
-  "assignment_type": "quiz",
-  "weight": 0.15,
-  "estimated_hours": 2,
-  "submission_method": "online",
-  "canvas_id": "12345"
-}
-```
-
-Common `assignment_type` values: `quiz`, `exam`, `project`, `homework`, `paper`, `lab`, `presentation`.
-
-## Deduplication
-
-### Within-Source Dedup
-
-Syllabus tasks use `ON CONFLICT` based on `(student_context_id, course_context_id, source_type, title, start_time)` to prevent duplicates when a syllabus is reprocessed.
-
-### Cross-Source Dedup
-
-When both Canvas and a syllabus produce a task for the same assignment, syllabus yields to Canvas:
-
-- If a Canvas version of the assignment already exists in `student_time_blocks`, the syllabus insert is skipped.
-- Canvas version is identified by matching course code, approximate date, and title similarity.
-
-This prevents the "double homework" problem where Canvas and syllabus both show the same due date.
-
-### Admin Cleanup
-
-A bulk dedup tool is available in dormway-admin for clearing duplicate tasks and time blocks across a campus or student:
-
-```
-POST /api/admin/schedule/backfill-stb-context
-```
-
-This endpoint:
-- Matches orphaned `student_time_blocks` to course contexts using canonicalized course codes.
-- Writes `course_code_normalized` when a canonical code can be derived.
-- Logs any rows that cannot be matched for manual review.
-
-## Canvas ICS Assignment Shape (Normalized)
-
-After parsing, all LMS assignments are normalized to this shape before storage:
-
-```typescript
-interface NormalizedAssignment {
-  title: string;
-  dueDate: Date;
-  courseCode: string;
-  courseContextId?: string;
-  externalId?: string;      // Canvas UID from ICS
-  htmlUrl?: string;         // Deep link back to Canvas
-  source: 'canvas' | 'moodle' | 'blackboard';
-  assignmentType?: string;
-}
-```
-
-## Syllabus Crew Assignment Shape
-
-The crew outputs `assignments` as an array of rich objects. Key fields:
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `name` | string | Assignment title |
-| `type` | string | `homework`, `quiz`, `exam`, `project`, etc. |
-| `due_date` | string | ISO date string |
-| `weight` | number | Grade weight (0–1) |
-| `estimated_hours` | number | Estimated completion time |
-| `priority` | string | `high`, `medium`, `low` |
-| `submission_method` | string | `online`, `in-class`, etc. |
-| `rubric_summary` | string | Brief grading criteria |
-| `tips` | string | Study tips from the syllabus |
-| `collaboration_allowed` | boolean | Whether group work is permitted |
-
-The engine stores these in `service_data` (method `processed_syllabus_crew`) and also parses them into `student_time_blocks` via `semester.activities.ts`.
-
-## Accessing Assignments via API
-
-```bash
-# Student's courses with syllabus and assignment metadata
-GET /api/v2/students/me/courses
-
-# Response includes per-course syllabus status and assignment count
-{
-  "courses": [
-    {
-      "contextId": "...",
-      "courseCode": "EECS 281",
-      "hasSyllabus": true,
-      "assignmentCount": 12
-    }
-  ]
-}
-```
+- `tasks` is the canonical lifecycle table
+- `student_time_blocks` is still the source for assignment deadlines and scheduled blocks
+- DayPlan consumes pending, unscheduled work but does not mutate task rows directly
+- Smart Schedule intent writes time blocks; it does not create persistent tasks unless the source came from Task Bank
 
 ## Key Files
 
-| File | Purpose |
-|------|---------|
-| `services/engine/src/activities/canvasICS.activities.ts` | ICS parsing for all LMS types |
-| `services/engine/src/workflows/canvasICSSync.workflow.ts` | Canvas sync workflow |
-| `services/engine/src/activities/semester.activities.ts` | Syllabus to time blocks conversion |
-| `services/shared/dormway-core/src/entities/syllabus/syllabus.factory.ts` | `hasSyllabusForCourses()` |
-| `services/api-router/src/routes/canvas-routes.ts` | ICS connect endpoint |
+- `services/api-router/src/routes/task-routes.ts`
+- `services/api-router/src/routes/v2/students.routes.ts`
+- `services/api-router/src/routes/v2/widgets.routes.ts`
+- `services/api-router/src/routes/mobile-routes.ts`
+- `services/api-router/src/services/dashboard-aurora-service.ts`
+- `services/api-router/src/services/dashboard-composite-transformer.ts`
+- `services/shared/dormway-core/src/entities/student/student.entity.ts`
+- `services/shared/dormway-core/src/domains/day-plan-data/day-plan-data.service.ts`
+- `services/engine/src/activities/dayplan.activities.ts`
+- `services/engine/src/activities/student.activities.ts`
+- `infrastructure/database/migrations/20251009_add_tasks_table.sql`
+- `infrastructure/database/migrations/20251003_create_assignment_completion.sql`

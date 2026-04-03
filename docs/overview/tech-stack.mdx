@@ -1,208 +1,139 @@
 ---
 title: "Tech Stack"
-description: "Languages, frameworks, infrastructure, and third-party services DormWay is built on."
+description: "The current frameworks, runtimes, services, and vendors powering DormWay across web, iOS, API, workflows, and ops."
 source:
-  type: "manual"
-  path: ""
-  distilled_at: "2026-03-19"
+  type: "obsidian"
+  path: "Product/DormWay Technical Depth - What We Actually Built (Current).md"
+  paths:
+    - "Engineering/Architecture/Source of Truth Index.md"
+  distilled_at: "2026-04-03"
 ---
 
 # Tech Stack
 
-DormWay is a multi-platform, multi-service product. This page catalogs every technology in use — organized by layer — so developers, engineers joining the team, and technical stakeholders can get oriented quickly.
+DormWay is a multi-repo, multi-runtime product. This page captures the technologies currently in use across the main student surfaces and the backend systems that keep them current.
+
+<Note>
+  Version callouts on this page were rechecked against the live repo manifests on **April 3, 2026**. For deployment topology, treat this as the logical stack first and the vendor map second.
+</Note>
 
 ---
 
-## Frontend
-
-### Web — dormway-lockedin (Next.js)
+## Web App (`dormway-lockedin`)
 
 | Technology | Role |
 |-----------|------|
-| **Next.js 14** (App Router) | Student-facing web application at app.dormway.com |
-| **React** | UI component library |
-| **TypeScript** | All application code |
-| **Tailwind CSS** | Utility-first styling |
-| **Turbopack** | Dev bundler (production uses Next.js standard build) |
-| **TanStack Query** | Server state management, caching, background refetch |
-| **Clerk** | Authentication and user session management |
-| **Ably** | Realtime pub/sub client (grade updates, schedule changes) |
+| **Next.js 15.5.7** | App Router web client for the core student product |
+| **React 19.2.1** | UI runtime |
+| **TypeScript 5.x** | Main application language |
+| **Tailwind CSS 3.4** | Styling system |
+| **TanStack Query 5.90** | Client-side server-state management |
+| **Clerk** | Auth on the web surface |
+| **Ably** | Realtime client delivery |
+| **Sanity** | Content-backed surfaces where needed |
+| **Motion / Framer Motion** | Rich interaction and animation layers |
+| **Vercel Analytics / Speed Insights** | Web instrumentation on the client side |
 
-**Rendering strategy:** App Router with server components by default. `'use client'` is added only at interactivity leaf boundaries. Dashboard-specific providers (realtime, analytics) are scoped below the dashboard route boundary to avoid loading them on public-facing pages.
+The web app also carries the current Today customization system, public school pages, and student growth/program surfaces.
 
-### Admin — dormway-admin (Vite + React)
+---
 
-| Technology | Role |
-|-----------|------|
-| **Vite** | Build tool |
-| **React** | UI |
-| **TypeScript** | All application code |
-
-Internal admin dashboard for DormWay staff. Runs on port 3004.
-
-### iOS — ios-clean (SwiftUI)
+## Native Apple App (`ios-clean`)
 
 | Technology | Role |
 |-----------|------|
-| **Swift** | Language |
+| **Swift 6** | Main application language |
 | **SwiftUI** | UI framework |
-| **Mac Catalyst** | Runs the same iOS codebase on macOS |
-| **PencilKit** | Lecture note canvas (iPad + Apple Pencil) |
-| **WidgetKit** | Home screen widgets |
-| **ActivityKit / AlarmKit** | Live Activities, class alarms |
-| **App Intents** | Siri shortcuts and Control Center integration |
+| **iOS 18+** | Current deployment target |
+| **WidgetKit** | Home screen widget support |
+| **ActivityKit / AlarmKit** | Live Activities and class alarms on supported devices |
+| **App Intents** | Siri and shortcut-style system integrations |
+| **PencilKit** | Rich note and lecture workflows on iPad-class surfaces |
+| **Ably** | Realtime delivery into the dashboard store |
+
+The iOS app is modularized through Swift packages and uses a dashboard composite endpoint rather than direct Aurora-style reads.
 
 ---
 
-## Backend
+## API and Workflow Layer
 
-### api-router (Express.js)
-
-| Technology | Role |
-|-----------|------|
-| **Node.js / Express** | HTTP server, all `/v2/` API endpoints |
-| **TypeScript** | All application code |
-| **dormway-core** | Shared entity/service library for all DB access |
-| **Ably** | Publishes realtime events to subscribers |
-
-The api-router is a BFF (Backend for Frontend). It composes data from multiple sources — database, Canvas API, campus metadata — into single client-ready responses. No raw SQL in routes; all DB access goes through dormway-core.
-
-### engine (Temporal)
+### Gateway and BFF
 
 | Technology | Role |
 |-----------|------|
-| **Node.js / TypeScript** | Workflow and activity host |
-| **Temporal** | Durable workflow orchestration |
-| **dormway-core** | Shared entity/service library |
-| **date-fns-tz v2** | Timezone-aware date arithmetic (note: v2 API, not v3) |
+| **Zuplo 6** | Public API gateway layer |
+| **Node.js + Express 5.1.0** | `api-router` BFF for web and iOS |
+| **TypeScript** | Main backend language |
+| **@dormway/core** | Shared domain/entity library used across services |
 
-Major workflows: StudentWatcher digital twin, DayPlan generation (05:00 campus local time), syllabus processing, Canvas sync, semester transition management.
-
-### dormway-crews (Python / CrewAI)
+### Durable workflows
 
 | Technology | Role |
 |-----------|------|
-| **Python** | Language |
-| **CrewAI** | Multi-agent AI framework |
-| **FastAPI** | HTTP server exposing crew endpoints to the engine |
-| **Ragie** | RAG (Retrieval-Augmented Generation) for Crews document Q&A |
-| **OpenTelemetry** | Distributed tracing |
-| **PortKey** | LLM call monitoring and gateway |
+| **Temporal 1.11.x** | Durable workflow orchestration |
+| **Node.js 20.x** | Workflow runtime in `engine` |
+| **date-fns / date-fns-tz** | Timezone-aware scheduling logic |
 
-Handles all AI-intensive batch work: syllabus analysis (extracts deadlines, policies, insights) and Crews document Q&A (index files, stream answers).
+### AI batch and document pipelines
 
-### ably-relay (Node.js)
-
-A thin bridge service. Receives events from api-router and publishes them to named Ably channels so web and iOS clients receive live updates without polling.
-
-### Zuplo API Gateway
-
-All external traffic from clients passes through Zuplo before reaching api-router. Zuplo handles JWT validation, user enrichment, and rate limiting. It injects `X-User-Id` and `X-User-Role` headers that api-router trusts unconditionally.
+| Technology | Role |
+|-----------|------|
+| **Python service layer** | AI-heavy background work such as syllabus analysis |
+| **Ragie** | Document indexing and retrieval-backed Q&A |
+| **OpenAI SDK** | LLM access in the workflow layer |
+| **Portkey** | LLM gateway and observability |
+| **node-ical / PDF parsers / OCR utilities** | File and calendar ingestion support |
 
 ---
 
-## Shared Library — dormway-core
-
-`dormway-core` is a TypeScript npm package (not a running service) shared by api-router and engine. It is the single source of truth for:
-
-- Entity classes with `toJSON()` methods that define API response shapes
-- Factory methods for common database query patterns
-- Domain service classes (campus, term, course, student logic)
-- All database access in application code must use dormway-core — no raw SQL in activities or routes
-
-When dormway-core changes, it must be rebuilt (`npm run build`) and dependent services restarted.
-
----
-
-## Database
+## Data, Identity, and Realtime
 
 | Technology | Role |
 |-----------|------|
-| **PostgreSQL** | Primary relational database |
-| **Neon** | Serverless PostgreSQL host (no local Postgres — Neon only) |
-| **PostGIS** | Geospatial extensions for campus location data |
+| **PostgreSQL** | Primary relational store |
+| **Neon** | Managed Postgres with branch-based developer workflow |
+| **PostGIS** | Geospatial campus/location support |
+| **Clerk** | Primary user auth and session identity |
+| **Auth0 / Supabase integrations** | Still present in parts of the backend and adjacent workflows |
+| **Ably** | Realtime pub/sub transport |
+| **Redis** | Caching and coordination where needed |
 
-**Neon branch model:** Each developer has their own Neon branch for local development (configured via Doppler `dev_<name>`). The production database runs on the Neon main branch. Branches provide instant schema isolation without provisioning separate servers.
-
-**Row-Level Security:** The database has RLS enabled. Application code uses `DATABASE_URL` (RLS-enforced). Admin/debug tooling uses `DATABASE_URL_ADMIN` (bypasses RLS) — never mix these.
+Important operational rule: application-safe queries use `DATABASE_URL`, while admin and workflow paths may use `DATABASE_URL_ADMIN`.
 
 ---
 
-## AI and Intelligence
+## Observability and Operations
 
 | Technology | Role |
 |-----------|------|
-| **CrewAI** | Multi-agent framework for syllabus processing and document analysis |
-| **Ragie** | RAG service — indexes Crews documents, answers member questions with source citations |
-| **PortKey** | LLM gateway — handles routing, monitoring, and cost tracking for all LLM calls |
-| **OpenAI / Anthropic** | Underlying LLM providers (routed through PortKey) |
+| **OpenTelemetry** | Distributed tracing across backend services |
+| **Sentry** | Error monitoring on the web and backend |
+| **Doppler** | Secrets and environment management |
+| **Docker** | Local and service container workflows |
+
+The exact deployment host mix can change by environment. DormWay's architecture docs should stay anchored to service boundaries and data contracts first.
 
 ---
 
-## Infrastructure and Deployment
+## Repository Map
 
-| Technology | Role |
-|-----------|------|
-| **Railway** | Production hosting for all services |
-| **Doppler** | Secrets management — injects environment variables at runtime |
-| **Bunny CDN** | Asset delivery (images, static files) |
-| **Docker** | Service containerization for local and remote development |
-| **Mutagen** | File sync for remote Docker development (local edits → remote container) |
-
-**Deployment model:** Services run as Docker containers on Railway. Doppler manages all secrets across environments (`prd`, `stg`, `dev`, `dev_<name>`). Pushing a new env var in Doppler triggers a Railway redeploy automatically.
-
-**No AWS.** DormWay runs entirely on Railway — not ECS, Fargate, Lambda, or any other AWS service.
-
----
-
-## Authentication
-
-| Technology | Role |
-|-----------|------|
-| **Clerk** | User authentication, session management, JWT issuance |
-
-Clerk issues JWTs for all authenticated users. Zuplo validates JWTs on every request and enriches them with `X-User-Id` before forwarding to api-router.
-
----
-
-## Realtime
-
-| Technology | Role |
-|-----------|------|
-| **Ably** | Pub/sub realtime messaging |
-
-Clients subscribe to channels named by user ID or context ID. The ably-relay service publishes events when backend state changes. Web and iOS clients receive live updates without polling — grade postings, new assignments, schedule changes, and context transitions all fire through Ably.
-
----
-
-## Observability
-
-| Technology | Role |
-|-----------|------|
-| **OpenTelemetry** | Distributed tracing across all services |
-| **PortKey** | LLM call monitoring, cost tracking, latency metrics |
-
----
-
-## Repository Layout
-
-```
+```text
 dormway-platform/
-├── services/
-│   ├── api-router/          # Express.js BFF
-│   ├── engine/              # Temporal workflow host
-│   ├── dormway-lockedin/    # Next.js web app
-│   ├── dormway-admin/       # Vite admin dashboard
-│   ├── dormway-crews/       # Python CrewAI service
-│   ├── ably-relay/          # Realtime bridge
-│   └── shared/
-│       └── dormway-core/    # Shared TypeScript library
-├── infrastructure/
-│   └── database/
-│       └── migrations/      # PostgreSQL migrations
+  services/
+    dormway-lockedin/   Next.js core web app
+    api-router/         Express BFF
+    engine/             Temporal workers and schedules
+    ably-relay/         Realtime bridge
+    shared/dormway-core Shared domain library
+
+dormway-api-2/          Zuplo gateway repo
+ios-clean/              Native SwiftUI app
+mintlify-docs/          Docs site
 ```
 
-```
-ios-clean/     # iOS / SwiftUI app (separate repo)
-mintlify-docs/ # Documentation site (separate repo)
-```
+---
+
+## Notes on Accuracy
+
+- `@dormway/core` is the target center of gravity for shared backend logic, but some legacy direct database usage still remains in parts of `api-router`
+- Hosting details evolve faster than package/framework choices, so this page intentionally emphasizes stable stack decisions over one specific vendor diagram

@@ -1,0 +1,61 @@
+---
+title: "CrossSourceDedupService"
+description: "Deduplicates student tasks and time blocks that exist in both a Canvas (authoritative) and a syllabus/LMS source. When a match is found above the configured si…"
+source:
+  type: "codegen"
+  paths:
+    - "services/shared/dormway-core/src/domains/task-dedup/cross-source-dedup.service.ts"
+  generated_at: "2026-04-03"
+---
+
+# CrossSourceDedupService
+
+Deduplicates student tasks and time blocks that exist in both a Canvas
+(authoritative) and a syllabus/LMS source.  When a match is found above the
+configured similarity threshold the syllabus-sourced record is superseded —
+student_time_blocks.lifecycle_status = 'superseded', tasks.status = 'completed'.
+
+Uses PostgreSQL pg_trgm similarity() for fuzzy title matching: one SQL
+statement per table, executed entirely in the database.  The CROSS JOIN is
+O(n×m) but runs in Postgres (not N² TypeScript loops) and is bounded per
+(user, course) pair where n and m are typically < 50.
+
+Usage:
+  const svc = new CrossSourceDedupService(pool);
+  const result = await svc.deduplicateForCourse(userId, courseContextId);
+  // { superseded_time_blocks: 3, superseded_tasks: 2 }
+
+**Source:** `services/shared/dormway-core/src/domains/task-dedup/cross-source-dedup.service.ts`
+
+## Methods
+
+### `deduplicateForCourse`
+
+```typescript
+deduplicateForCourse(userId: string, courseContextId: string, options: DedupOptions): Promise<DedupResult>
+```
+
+Deduplicate all assignment-type records for a single (user, course) pair.
+
+### `deduplicateForUser`
+
+```typescript
+deduplicateForUser(userId: string, options: DedupOptions): Promise<DedupResult>
+```
+
+Deduplicate all courses for a single user.
+
+Queries the distinct courseContextIds from the user's syllabus time blocks
+then calls deduplicateForCourse for each one.
+
+### `backfillAll`
+
+```typescript
+backfillAll(options: DedupOptions): Promise<BackfillResult>
+```
+
+Backfill all users who have both Canvas and syllabus sources in
+student_time_blocks.
+
+Uses INTERSECT to find users with records in both sources, then iterates
+them sequentially (to avoid overwhelming the DB).

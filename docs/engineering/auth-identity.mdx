@@ -1,179 +1,82 @@
 ---
 title: "Auth and Identity"
-description: "Authentication flows, Clerk integration, JWT validation, RLS patterns, and mobile device key auth."
+description: "DormWay auth contracts across Zuplo, api-router, Clerk, Auth0 system routes, device keys, and service-to-service credentials."
 source:
-  type: "manual"
-  path: "services/api-router/src/routes/webhooks/clerk-routes.ts"
-  distilled_at: "2026-03-19"
+  type: "obsidian"
+  path: "Engineering/Architecture/SoT - Auth & Identity.md"
+  distilled_at: "2026-04-03"
 ---
 
 # Auth and Identity
 
-DormWay uses Clerk for web authentication and a device-key pattern for mobile. All requests flow through Zuplo (API gateway) before reaching the api-router.
+DormWay auth is multi-surface, not single-provider. Web traffic usually arrives through Zuplo with Clerk JWTs, mobile uses device-key based identity, and system flows still include Auth0 action routes plus internal, cron, and Temporal credentials.
 
-<Warning>
-Some older docs reference Auth0. Auth0 is NOT used. The platform uses Clerk exclusively for web authentication.
-</Warning>
+## Canonical Auth Order
 
-## Request Flow
+Core auth resolves credentials in this order:
 
-```mermaid
-sequenceDiagram
-    participant Web as dormway-lockedin / dormway-admin
-    participant Mobile as iOS App
-    participant Zuplo as Zuplo (:9000)
-    participant Router as api-router (:3001)
-    participant DB as Neon PostgreSQL
+- internal API key
+- Temporal worker key
+- device key
+- Clerk JWT
+- API gateway `x-user-*` headers
+- direct JWT verification
 
-    Web->>Zuplo: Request + Clerk JWT
-    Zuplo->>Zuplo: Validate Clerk JWT
-    Zuplo->>Router: Forward + x-user-id, x-user-role headers
-    Router->>DB: Query with user context
+That ordering lives in the shared auth factory and is the contract other middleware builds on.
 
-    Mobile->>Zuplo: Request + Device Key
-    Zuplo->>Router: Forward + x-user-id header
-```
+## Surface Matrix
 
-## Clerk (Web Authentication)
+| Surface | Primary credential | Important contract |
+|---------|--------------------|--------------------|
+| LockedIn / Admin web | Clerk JWT | Usually validated at Zuplo, then forwarded via user headers |
+| iOS app | Device key | Resolved into a backend user before api-router handlers run |
+| Auth0 actions | `SYSTEM_API_KEY` + `x-auth0-action` | Used for system provisioning and claim context routes |
+| Cron / internal routes | API key headers | Must match cron/system middleware expectations |
+| App-auth flows | HMAC headers | `x-app-signature` and `x-app-timestamp` gate app-integrity style requests |
 
-### How It Works
+## Provisioning Flows
 
-1. Users sign up or log in via Clerk's hosted UI or embedded components.
-2. Clerk issues a short-lived JWT signed with Clerk's JWKS endpoint.
-3. `dormway-lockedin` and `dormway-admin` attach the JWT as a Bearer token.
-4. Zuplo validates the JWT and injects `x-user-id` and `x-user-role` headers.
-5. `api-router` reads these headers — it never validates JWTs directly.
+### Clerk signup webhook
 
-### Services Using Clerk
+`POST /api/webhooks/clerk` creates the account, links student context, and starts StudentWatcher. Signup should succeed even if the workflow start is logged as a non-blocking failure.
 
-| Service | Port | Auth Method |
-|---------|------|-------------|
-| `dormway-lockedin` | 3008 | Clerk JWT |
-| `dormway-admin` | 3004 | Clerk JWT + RBAC (admin role required) |
-| iOS App | — | Device Key (not Clerk) |
+### Auth0 system routes
 
-### User Creation: Clerk Webhook
+Auth0 is not the primary end-user web auth path anymore, but it is still part of the provisioning and claims surface. The important system routes require `SYSTEM_API_KEY` and an allowed `x-auth0-action` value.
 
-When a user signs up, Clerk fires a `user.created` webhook to `POST /api/webhooks/clerk`.
+### Magic link resend
 
-The webhook handler:
-1. Creates the account row in the `accounts` table.
-2. Runs `autoAssignCampusAndOverride(userId)` to detect the campus from email domain.
-3. Triggers `processSingleCampus` Temporal workflow for the assigned campus (ensures term contexts exist).
-4. Starts the `studentWatcherWorkflow` Temporal workflow for the new user.
+`POST /api/v2/auth/resend-magic-link` goes through Clerk plus Customer.io. This is part of the PLG auth path, not a separate legacy-only branch.
 
-The campus onboarding workflow ID is idempotent: `campus-onboard-signup-${campusId}-${userId}`.
+## Identity Model
 
-### Local Development
+- Backend user identity is the UUID that ultimately lands in `req.user.id`
+- Clerk JWTs map `backend_user_id` first, then fall back to `sub`
+- Accounts do not carry a canonical `campus_id` column; campus identity resolves through the context graph
+- Guest flows still exist for crew participation and later account merge
 
-For local testing, skip Zuplo by passing headers directly to api-router:
+## RLS and Database Access
 
-```bash
-curl -s "http://localhost:3001/api/v2/students/me/context" \
-  -H "X-User-Id: USER_UUID" \
-  -H "X-User-Role: authenticated"
-```
-
-For admin endpoints:
-```bash
-curl -s "http://localhost:3001/api/admin/..." \
-  -H "X-User-Id: ADMIN_UUID" \
-  -H "X-User-Role: admin"
-```
-
-## Mobile Authentication (Device Keys)
-
-iOS devices authenticate using device keys managed via Customer.io. There is no Clerk integration for the mobile app.
-
-Mobile requests arrive at Zuplo with a device key, which Zuplo resolves to a `user_id` and injects the `x-user-id` header before forwarding to api-router.
-
-## accounts Table
-
-| Column | Type | Notes |
-|--------|------|-------|
-| `id` | uuid | Primary key |
-| `email` | text | Unique |
-| `given_name` | text | NOT `first_name` |
-| `family_name` | text | NOT `last_name` |
-| `user_type` | text | `'full'` or `'guest'` |
-| `guest_token` | text | Set for guest users |
-| `active_crew_id` | uuid | Active Crew for guest users |
-
-<Warning>
-The `accounts` table has NO `campus_id` column. Campus is determined by joining through the `contexts` table:
-
-```sql
-SELECT c.*
-FROM accounts a
-JOIN contexts student_ctx ON student_ctx.user_id = a.id AND student_ctx.type = 'student'
-JOIN contexts c ON c.id = student_ctx.parent_id AND c.type = 'campus'
-WHERE a.id = $1;
-```
-</Warning>
-
-## Row Level Security (RLS)
-
-DormWay uses PostgreSQL Row Level Security to enforce data isolation. Most tables have RLS policies that filter rows by `app.current_user_id()`.
-
-Two connection strings are available:
-
-| Variable | RLS | Use Case |
-|----------|-----|----------|
-| `DATABASE_URL` | Enforced | User-scoped reads (normal API requests) |
+| Connection | RLS | Usage |
+|------------|-----|-------|
+| `DATABASE_URL` | Enforced | User-scoped application reads |
 | `DATABASE_URL_ADMIN` | Bypassed | System writes, migrations, admin operations |
 
-In `@dormway/core`:
-
-```typescript
-// Respects RLS — for user-scoped queries
-const pool = await getAuroraPoolOrThrow();
-
-// Bypasses RLS — for admin/system queries
-const adminPool = await getAdminPoolOrThrow();
-```
-
-<Note>
-When debugging with psql, always use `DATABASE_URL_ADMIN`. `DATABASE_URL` with RLS active will return empty results if the session user doesn't match the data's `user_id`.
-</Note>
-
-## Guest Mode
-
-Crews supports a guest mode for viral sharing. Guests get:
-- An HttpOnly cookie (`guest_token`) with a 90-day TTL.
-- Full participation in **one** Crew.
-- `accounts.user_type = 'guest'`
-
-The guest-to-account conversion flow:
-
-```
-POST /api/v2/crew-guest/join
-  → HttpOnly cookie set
-  → guest account created
-
-Second crew attempt → 403 GUEST_CREW_LIMIT
-
-User signs up → POST /v2/auth/complete-signup-from-crew
-  → mergeGuestToAccount() carries all data
-  → campus auto-assigned from crew.school_id
-```
-
-## Environment and Secrets
-
-All secrets are managed via Doppler. Never commit `.env` files.
-
-Doppler configs:
-- `dev` — Local development
-- `dev_ethan` / `dev_riley` — Per-developer overrides
-- `stg` — Staging
-- `prd` — Production
-
-Production runs on Railway. Railway auto-deploys when Doppler pushes a new environment variable.
+`@dormway/core` relies on this split. If you debug with the user-scoped URL and do not set the expected RLS session, empty results are often the correct behavior.
 
 ## Key Files
 
-| File | Purpose |
-|------|---------|
-| `services/api-router/src/routes/webhooks/clerk-routes.ts` | Clerk webhook handler (user.created) |
-| `services/api-router/src/services/aurora-client.ts` | `adminAuroraClient` vs `auroraClient` |
-| `services/shared/dormway-core/src/adapters/database/` | Database pool access |
-| `.repos/dormway-api-2/config/routes.oas.json` | Zuplo route config (JWT validation) |
+- `services/api-router/src/middleware/auth.ts`
+- `services/shared/dormway-core/src/middleware/factories/auth.factory.ts`
+- `services/api-router/src/middleware/gateway-auth.ts`
+- `services/api-router/src/middleware/system-auth.ts`
+- `services/api-router/src/middleware/cron-auth.ts`
+- `services/api-router/src/middleware/internal-auth.ts`
+- `services/api-router/src/middleware/app-auth.ts`
+- `services/api-router/src/routes/auth0-routes.ts`
+- `services/api-router/src/routes/webhooks/clerk-routes.ts`
+- `services/api-router/src/routes/v2/auth.routes.ts`
+
+<Warning>
+  Do not document DormWay as "Clerk only." The current canonical state is Clerk for primary web auth plus Auth0 system routes, device-key auth, cron/internal keys, and gateway-auth headers.
+</Warning>

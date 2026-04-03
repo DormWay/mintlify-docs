@@ -1,17 +1,22 @@
 ---
 title: "Webhooks"
-description: "Inbound webhook configuration for the Ambassador referral platform — events, payloads, and signature verification."
+description: "DormWay's inbound Ambassador webhook integration plus the new admin-managed outbound webhook delivery system."
 source:
   type: "obsidian"
-  path: "Engineering/Technical/Ambassador Webhook Configuration.md"
-  distilled_at: "2026-03-19"
+  paths:
+    - "Engineering/Technical/Ambassador Webhook Configuration.md"
+    - "Engineering/Technical/Webhooks/SoT - Outbound Webhook System.md"
+  distilled_at: "2026-04-03"
 ---
 
 # Webhooks
 
-DormWay currently ingests webhooks from the **Ambassador** referral platform (getambassador.com). These webhooks notify DormWay when commissions change state or referral events occur.
+DormWay now has two webhook directions:
 
-## Webhook Endpoint
+- inbound webhooks from Ambassador
+- outbound webhooks managed in admin and delivered to tools like n8n, Slack, or Google Sheets
+
+## Inbound: Ambassador
 
 | Environment | URL |
 |-------------|-----|
@@ -21,175 +26,66 @@ DormWay currently ingests webhooks from the **Ambassador** referral platform (ge
 
 The handler lives at `api-router/src/routes/webhooks/ambassador-routes.ts`.
 
-## Authentication & Signature Verification
+### Signature Verification
 
 Ambassador signs each webhook with HMAC-SHA256:
 
 | Header | Value |
 |--------|-------|
 | `x-ambassador-signature` | `HMAC-SHA256("{timestamp}.{rawBody}", secret)` |
-| `x-ambassador-timestamp` | Unix timestamp (seconds) |
+| `x-ambassador-timestamp` | Unix timestamp |
 
-The webhook secret is stored in Doppler as `AMBASSADOR_WEBHOOK_SECRET`. Requests with timestamps older than 5 minutes are rejected to prevent replay attacks.
+The webhook secret is stored as `AMBASSADOR_WEBHOOK_SECRET`.
 
-### Verifying a Signature Locally
+### Core inbound event families
 
-```bash
-TIMESTAMP=$(date +%s)
-BODY='{"event_type":"commission.created","data":{}}'
-SECRET="your-webhook-secret"
+| Event family | DormWay behavior |
+|--------------|------------------|
+| Commission events | Update local commission records and status |
+| Referral events | Track funnel and referral outcomes |
+| Ambassador profile events | Log external platform changes |
 
-SIGNATURE=$(echo -n "${TIMESTAMP}.${BODY}" | openssl dgst -sha256 -hmac "${SECRET}" | cut -d' ' -f2)
+## Outbound: Admin-Managed Deliveries
 
-curl -X POST http://localhost:3001/webhooks/ambassador \
-  -H "Content-Type: application/json" \
-  -H "x-ambassador-signature: ${SIGNATURE}" \
-  -H "x-ambassador-timestamp: ${TIMESTAMP}" \
-  -d "${BODY}"
+DormWay can now dispatch outbound webhook POSTs on platform events through the shared webhook domain service.
+
+### Delivery model
+
+```text
+Platform event
+  -> WebhookService.dispatchEvent(...)
+  -> active subscriptions for matching events
+  -> POST to subscriber URL
 ```
 
-## Event Types
+### Supported outbound events
 
-### Commission Events
+| Event | Typical trigger |
+|-------|-----------------|
+| `user.signup` | Clerk `user.created` |
+| `user.onboarding_complete` | onboarding workflow completion |
+| `syllabus.uploaded` | syllabus upload API |
+| `syllabus.processed` | syllabus processor completion |
+| `canvas.connected` | Canvas connection routes |
+| `schedule.imported` | schedule import completion |
 
-| Event | DormWay Action |
-|-------|----------------|
-| `commission.created` | Creates `ambassador_commissions` record |
-| `commission.pending` | Updates status to `pending` |
-| `commission.approved` | Updates status to `approved` |
-| `commission.paid` | Updates status to `paid`, sets `paid_at` |
-| `commission.rejected` | Updates status to `rejected` |
-| `commission.cancelled` | Updates status to `rejected` |
+### Delivery contract
 
-### Referral Events
+- HTTP method: `POST`
+- body: JSON
+- optional shared secret: sent in `X-Webhook-Secret`
+- timeout: 5 seconds
+- delivery style: fire-and-forget, never block the primary product action
 
-| Event | DormWay Action |
-|-------|----------------|
-| `referral.created` | Logs event for funnel analytics |
-| `referral.converted` | Verifies and records referral in local DB |
+### Admin management
 
-### Ambassador Profile Events
+Subscriptions live in `webhook_subscriptions` and are managed in `dormway-admin` at `/webhooks`.
 
-| Event | DormWay Action |
-|-------|----------------|
-| `ambassador.created` | Logs event |
-| `ambassador.updated` | Logs event |
+## Key Files
 
-## Payload Schemas
-
-### Commission Event
-
-```json
-{
-  "event_type": "commission.approved",
-  "timestamp": "2026-01-21T12:00:00Z",
-  "data": {
-    "commission": {
-      "uid": 12345,
-      "amount": 25.00,
-      "currency": "USD",
-      "status": "approved",
-      "ambassador_uid": 67890,
-      "campaign_uid": 11111,
-      "referral_uid": 22222,
-      "customer": {
-        "email": "referred@example.com",
-        "uid": "dormway-internal-user-id"
-      },
-      "created_at": "2026-01-15T10:00:00Z",
-      "approved_at": "2026-01-21T12:00:00Z"
-    }
-  }
-}
-```
-
-### Referral Event
-
-```json
-{
-  "event_type": "referral.created",
-  "timestamp": "2026-01-21T12:00:00Z",
-  "data": {
-    "referral": {
-      "uid": 22222,
-      "short_code": "7fjnwc",
-      "ambassador_uid": 67890,
-      "customer": {
-        "email": "newuser@example.com",
-        "first_name": "John",
-        "last_name": "Doe"
-      },
-      "status": "pending",
-      "created_at": "2026-01-21T12:00:00Z"
-    }
-  }
-}
-```
-
-## Retention Milestones
-
-Ambassador commissions are triggered by DormWay when a referred student hits retention milestones:
-
-| Milestone | Event Type | Commission |
-|-----------|------------|-----------|
-| Onboarding complete | `onboarding_complete` | $5 |
-| Day 7 retained | `day_7_retained` | $2 |
-| Week 4 retained | `week_4_retained` | $3 |
-
-Max payout per fully retained referral: **$10**
-
-## Custom Fields (Ambassador → DormWay Mapping)
-
-| Field | Usage |
-|-------|-------|
-| `custom1` | Campus context ID (reserved for metadata) |
-| `custom2` | Onboarding complete counter |
-| `custom3` | Day-7 retained counter |
-| `custom5` | Week-4 retained counter |
-
-`custom4` is intentionally unused for retention counters.
-
-## Database Tables
-
-### ambassador_commissions
-
-Stores commission records received via webhook:
-
-| Column | Type | Notes |
-|--------|------|-------|
-| `id` | UUID | Primary key |
-| `ambassador_id` | UUID | FK to accounts |
-| `commission_id` | string | External Ambassador ID |
-| `amount_cents` | integer | Amount in cents |
-| `currency` | string | Default: `USD` |
-| `status` | enum | `pending`, `approved`, `paid`, `rejected` |
-| `event_id` | UUID | Associated referral event |
-| `paid_at` | timestamp | Set when status = `paid` |
-
-### referral_events
-
-Tracks referral relationships:
-
-| Column | Type | Notes |
-|--------|------|-------|
-| `referrer_id` | UUID | Ambassador's account ID |
-| `referred_id` | UUID | Referred user's account ID |
-| `event_type` | enum | `onboarding_complete`, `day_7_retained`, `week_4_retained` |
-| `status` | enum | `pending`, `synced`, `failed` |
-
-## Configuring in the Ambassador Dashboard
-
-1. Navigate to **Settings > Webhooks**
-2. Add New Webhook with URL: `https://relay.dormway.app/webhooks/ambassador`
-3. Set the secret (must match `AMBASSADOR_WEBHOOK_SECRET` in Doppler)
-4. Enable all commission events + `referral.created` + `referral.converted`
-5. Use "Send Test" to verify a `200` response
-
-## Troubleshooting
-
-| Issue | Cause | Solution |
-|-------|-------|----------|
-| 401 Unauthorized | Invalid signature | Verify webhook secret matches Doppler |
-| 401 Timestamp expired | Clock skew > 5 min | Sync server clock |
-| 500 Internal Error | Database issue | Check api-router logs |
-| No webhook received | Network / firewall | Verify endpoint is publicly reachable |
+- `services/api-router/src/routes/webhooks/ambassador-routes.ts`
+- `services/shared/dormway-core/src/domains/webhooks/webhook.service.ts`
+- `services/shared/dormway-core/src/domains/webhooks/types.ts`
+- `services/api-router/src/routes/admin/webhook-routes.ts`
+- `services/engine/src/activities/webhook.activities.ts`
+- `infrastructure/database/migrations/20260324_webhook_subscriptions.sql`
