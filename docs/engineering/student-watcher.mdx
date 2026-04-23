@@ -3,13 +3,15 @@ title: "StudentWatcher Workflow"
 description: "The per-student Temporal digital twin that coordinates DayPlan generation, sync checks, notifications, and context updates."
 source:
   type: "obsidian"
-  path: "Engineering/Architecture/SoT - StudentWatcher.md"
-  distilled_at: "2026-04-03"
+  path: "Notes/Worklogs/2026-04-16-studentwatcher-phase1a-implementation.md"
+  paths:
+    - "Engineering/Technical/AI/LLM-Temporal-Cost-Optimization-Spec.md"
+  distilled_at: "2026-04-23"
 ---
 
 # StudentWatcher Workflow
 
-StudentWatcher is DormWay's per-student Temporal digital twin. There is one long-running workflow per student, and it owns the background rhythm for daily planning, notification triggers, sync evaluation, and context-driven updates.
+StudentWatcher is DormWay's per-student Temporal workflow and still the main owner of student state. The current April 2026 direction is more precise than the old "watcher does everything" model: StudentWatcher should own state, signals, and plan regeneration, while timer-heavy delivery work gradually moves into dedicated routers.
 
 ## Overview
 
@@ -22,37 +24,48 @@ StudentWatcher is DormWay's per-student Temporal digital twin. There is one long
 
 The workflow starts during onboarding or signup flows and rolls forward with `continueAsNew` to keep Temporal history manageable.
 
-## Key Signals
+## Current Responsibility Boundary
 
-- `daily_plan`
-- `context_update`
-- `generate_plan`
-- `preferences_update`
-- `trigger_calendar_sync`
-- `trigger_canvas_sync`
-- `send_evening_briefing`
-- `generate_feed_cards`
-- `test_push_notification`
-- `send_push_notification`
-- `trigger_dayplan_push`
+The important current split is:
 
-## Runtime Cadence
+- **StudentWatcher owns** student state, signal handling, preference changes, DayPlan regeneration, and sync-trigger fan-in
+- **Routers are starting to own** due-intent delivery work like scheduled DayPlan sends
 
-- main loop checks roughly every 5 minutes
-- DayPlan generation happens at 5 AM in the user's timezone
-- evening briefing uses the configured evening hour
-- calendar and Canvas sync are evaluated hourly and usually trigger when last successful sync is 6 hours old or older
-- auto-sync driven plan regeneration is throttled so it does not churn constantly
+That is the architecture to preserve when adding new work.
+
+## Phase 1A Changes That Landed
+
+The April 16 watcher work changed a few major runtime behaviors:
+
+- replay-safe smart sleep using `condition()` for new histories instead of a fixed 1-minute loop
+- dedicated wake-time helpers in `studentWatcherWakeTime.ts`
+- signal wake flags so real signals wake the workflow immediately
+- startup dayplan recovery so pending scheduled actions survive restarts
+- lightweight Canvas connection-status caching in workflow state
+- time-based hourly checks replacing older modulo-style timing gates in the new path
+
+The relevant patch markers introduced in this phase are:
+
+- `studentwatcher-condition-smart-sleep-v1`
+- `studentwatcher-startup-dayplan-recovery-v1`
+
+## Router Handoff
+
+StudentWatcher is no longer the only place timed DayPlan work can live.
+
+The current routed-delivery path uses:
+
+- durable `engine_delivery_intents` rows
+- a global `dayPlanRouter.workflow.ts`
+- a handoff feature flag: `feature.dayplan_router_enabled`
+
+When that path is enabled, scheduled DayPlan push delivery can be claimed and sent by the router instead of waking StudentWatcher just to proxy the send.
 
 ## Start Points
 
 - signup and onboarding flows can start it
 - admin routes can signal it
 - city-level sync jobs can fan out signals to relevant student workflows
-
-## City Fan-Out
-
-City-driven updates can signal both home-campus students and traveling students whose GPS location is near a campus in the target city. That traveling-student logic is part of the current production contract, not a future idea.
 
 ## Persisted State
 
@@ -61,17 +74,15 @@ City-driven updates can signal both home-campus students and traveling students 
 
 ## Known Risk
 
-`preferences-routes` still uses `studentWatcher-${userId}` in one path while the canonical workflow ID is `student-watcher-${userId}`. Signals sent with the old format can miss the active workflow.
+Any new timed feature that defaults into the watch loop works against the current direction. If the work is really "claim due item and send it," it probably belongs in a routed delivery path rather than in StudentWatcher itself.
 
 ## Key Files
 
 - `services/engine/src/workflows/studentWatcher.simplified.workflow.ts`
+- `services/engine/src/workflows/utils/studentWatcherWakeTime.ts`
+- `services/engine/src/workflows/dayPlanRouter.workflow.ts`
+- `services/engine/src/activities/dayplanRouter.activities.ts`
+- `services/engine/src/activities/deliveryIntent.activities.ts`
 - `services/engine/src/activities/student.activities.ts`
 - `services/engine/src/activities/workflowState.activities.ts`
 - `services/engine/src/types/dayplan.types.ts`
-- `services/engine/src/workflows/studentProcessor.workflow.ts`
-- `services/shared/dormway-core/src/entities/student/student.factory.ts`
-- `services/api-router/src/routes/webhooks/clerk-routes.ts`
-- `services/api-router/src/routes/admin/dayplan-admin-actions.ts`
-- `services/api-router/src/routes/admin/preferences-routes.ts`
-- `services/api-router/src/routes/admin-routes.ts`

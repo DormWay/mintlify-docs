@@ -3,14 +3,11 @@ title: "Platform Architecture"
 description: "The current logical architecture of DormWay: clients, gateway, BFF, workflows, realtime, AI pipelines, and data contracts."
 source:
   type: "obsidian"
-  path: "Product/DormWay Technical Depth - What We Actually Built (Current).md"
+  path: "Plans/Growth/PLG Engineering Context.md"
   paths:
-    - "Engineering/Architecture/Source of Truth Index.md"
-    - "Engineering/Architecture/SoT - StudentWatcher.md"
-    - "Engineering/Architecture/SoT - Sync Orchestration & Schedules.md"
-    - "Engineering/Architecture/SoT - Context System.md"
-    - "Engineering/Architecture/SoT - Database Model & Access Patterns (Neon).md"
-  distilled_at: "2026-04-03"
+    - "Engineering/Technical/AI/LLM-Temporal-Cost-Optimization-Spec.md"
+    - "Notes/Worklogs/2026-04-16-studentwatcher-phase1a-implementation.md"
+  distilled_at: "2026-04-23"
 ---
 
 # Platform Architecture
@@ -50,12 +47,14 @@ graph TD
     subgraph Workflow Layer
         ENG[engine<br/>Temporal workers + schedules]
         SW[StudentWatcher<br/>per-student workflows]
+        DPR[DayPlanRouter<br/>global timed delivery router]
     end
 
     subgraph Data and Integrations
         DB[(Neon PostgreSQL)]
         RAG[Ragie / document index]
         EXT[Canvas, calendars,<br/>campus and city data]
+        CIO[Customer.io]
     end
 
     W --> Z
@@ -67,9 +66,12 @@ graph TD
     API --> ENG
     API --> EXT
     ENG --> SW
+    ENG --> DPR
     SW --> DB
     ENG --> CREWS
     ENG --> EXT
+    ENG --> CIO
+    DPR --> CIO
     CREWS --> RAG
     RELAY --> W
     RELAY --> IOS
@@ -123,9 +125,13 @@ Major responsibilities include:
 - Term and campus lifecycle workflows
 - Notification timing and downstream triggers
 
+As of the April 2026 watcher work, the engine layer is no longer only "StudentWatcher plus cron." It now also includes the first dedicated timed-delivery router path (`DayPlanRouter`) backed by durable delivery intents.
+
 ### StudentWatcher
 
 StudentWatcher is the most important architectural unit in DormWay. Each student gets a durable workflow that can run for months, receive signals, evaluate sync cadence, and coordinate downstream work without being reduced to a simple cron entry.
+
+The current direction is to keep StudentWatcher as the **student state owner** while moving timer-heavy delivery into domain routers. That split matters when you reason about new timed features: not every reminder or send should live in the watch loop anymore.
 
 ### `dormway-crews`
 
@@ -134,6 +140,16 @@ StudentWatcher is the most important architectural unit in DormWay. Each student
 ### `ably-relay`
 
 `ably-relay` turns application events into realtime channel updates for the clients. That is how changes in assignments, grades, plans, or context can reach students without forcing constant polling.
+
+### Flag and rollout control
+
+DormWay now has a production-ready three-layer rollout model:
+
+- **Hypertune** for client-side flags and exposure tracking
+- **`system_config`** for server-side kill switches and operational toggles
+- **`campus_configs.feature_flags`** for per-campus overrides
+
+This is part of the platform architecture, not only a growth detail, because public surfaces and routed delivery paths are being shipped behind those controls.
 
 ---
 

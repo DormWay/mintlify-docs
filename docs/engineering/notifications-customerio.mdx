@@ -3,39 +3,74 @@ title: "Notifications and Customer.io"
 description: "Customer.io adapter contracts, push and email template routing, preference gating, and StudentWatcher-driven notification delivery."
 source:
   type: "obsidian"
-  path: "Engineering/Architecture/SoT - Notifications (Customer.io).md"
-  distilled_at: "2026-04-03"
+  path: "Notes/Worklogs/2026-04-21-dorm-1195-welcome-reshape.md"
+  paths:
+    - "Plans/Growth/Pre-Arrival Email Sequence Spec - Customer.io.md"
+    - "Plans/Growth/PLG Engineering Context.md"
+    - "Engineering/Technical/2026-04-01-signup-platform-tracking.md"
+  distilled_at: "2026-04-23"
 ---
 
 # Notifications and Customer.io
 
-DormWay's notification system uses Customer.io for most visible push and transactional email delivery, with workflow logic handling timing, gating, and retries.
+DormWay uses Customer.io as the main outbound system for visible push, transactional email, and activation lifecycle messaging. Customer.io does the sending, but DormWay still owns timing, deep-link correctness, trait truth, preference gating, and dedupe behavior.
 
 ## Core Responsibilities
 
-- Track API event delivery
-- App API transactional email and push delivery
+- profile identification and trait updates through the shared adapter
+- transactional email and push delivery
 - preference-aware channel gating
 - scheduled reminder and briefing delivery
+- activation and recovery messaging after signup
 - hybrid routing between direct push paths and Customer.io-backed flows
 
-## Important Contracts
+## Trait Contract
 
-- Track API needs site ID and track API key
-- App API features need `CUSTOMER_IO_API_KEY`
-- user identifiers are normalized to lowercase before send
-- push defaults to `last_used` when appropriate
-- workflow logic, not Customer.io payload idempotency, handles dedupe
+Traits that already exist and matter:
+
+- `campus_id`
+- `campus_name`
+- academic profile fields like `academic_year` and `major`
+
+Traits called out by the current activation docs:
+
+- `first_action_completed`
+- `first_action_date`
+- `next_best_first_action`
+- `first_action_type`
+
+One of the important April findings was timing-related: the welcome campaign can render before some first-action traits are available if those traits are only written after activation.
 
 ## Common Notification Families
 
 | Family | Typical source |
 |--------|----------------|
-| DayPlan push and email | StudentWatcher and DayPlan activities |
+| DayPlan push and email | StudentWatcher, DayPlan activities, and routed delivery intents |
 | briefing and check-in sends | notification delivery activities |
 | syllabus success or failure email | syllabus processing workflows |
+| signup / activation recovery | onboarding flows plus Customer.io journeys |
 | magic link resend | auth routes plus Customer.io |
 | Canvas alerts | canvas activities |
+
+## Welcome Campaign Reality
+
+The current Welcome campaign is a reshape, not a greenfield build.
+
+What matters operationally:
+
+- the campaign already existed in Customer.io
+- timing was reworked toward `0h / +1h / +24h / +48h`
+- LMS-connect branching was added for Canvas and non-Canvas campuses
+- several legacy CTA URLs were invalid and had to be corrected
+
+### Canonical deep links
+
+| Intent | URL |
+|--------|-----|
+| Syllabus upload | `/dashboard/library?openUpload=1` |
+| Schedule import | `/dashboard/schedule?scheduleModal=import` |
+| Canvas connect | `/dashboard/courses?tab=canvas` |
+| Generic LMS connect | `/dashboard/settings?tab=connections` |
 
 ## Preference Gating
 
@@ -44,11 +79,22 @@ DormWay's notification system uses Customer.io for most visible push and transac
 - per-type flags like class reminders and assignment deadlines must be respected
 - push channel availability implies in-app availability in the shared delivery model
 
+## Delivery Ownership
+
+Customer.io is not the only runtime involved in notifications.
+
+- engine activities still decide when a send should happen
+- StudentWatcher still participates in message timing around DayPlan and sync-driven updates
+- `DayPlanRouter` is now the first dedicated routed delivery path for due intents
+- workflow logic, not Customer.io payload idempotency alone, is where DormWay handles dedupe and supersession semantics
+
 ## Key Files
 
 - `services/shared/dormway-core/src/adapters/customerio/customerio.adapter.ts`
 - `services/shared/dormway-core/src/adapters/customerio/types.ts`
 - `services/engine/src/services/customerio.ts`
+- `services/engine/src/activities/deliveryIntent.activities.ts`
+- `services/engine/src/workflows/dayPlanRouter.workflow.ts`
 - `services/engine/src/activities/notification.activities.ts`
 - `services/engine/src/activities/notificationDeliveryActivities.ts`
 - `services/engine/src/activities/visible-push.activities.ts`

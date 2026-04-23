@@ -3,8 +3,10 @@ title: "Sync Orchestration"
 description: "Temporal schedule provisioning, smart sync orchestration, workflow dedupe, and the schedule import/removal contract."
 source:
   type: "obsidian"
-  path: "Engineering/Architecture/SoT - Sync Orchestration & Schedules.md"
-  distilled_at: "2026-04-03"
+  path: "Engineering/Technical/AI/LLM-Temporal-Cost-Optimization-Spec.md"
+  paths:
+    - "Notes/Worklogs/2026-04-16-studentwatcher-phase1a-implementation.md"
+  distilled_at: "2026-04-23"
 ---
 
 # Sync Orchestration
@@ -26,6 +28,8 @@ Current core schedules:
 
 All of these use skip-style overlap behavior so a backlog does not explode into duplicate runs.
 
+As of the April 2026 optimization work, it is also important to separate **schedule provisioning** from **due-intent delivery**. The orchestration layer still owns recurring city/campus/account jobs, while routed DayPlan delivery is starting to move into its own workflow path.
+
 ## Orchestration Flow
 
 1. Temporal schedule triggers a workflow bridge
@@ -34,12 +38,21 @@ All of these use skip-style overlap behavior so a backlog does not explode into 
 4. City or campus workflows start with idempotent IDs
 5. Results eventually land in canonical stores like `service_data`
 
+## Student-Level Runtime Split
+
+The old mental model was "StudentWatcher owns basically all timed student work." The current model is more specific:
+
+- orchestration schedules still trigger city, campus, and other recurring system jobs
+- StudentWatcher still owns per-student state and sync-trigger fan-in
+- `DayPlanRouter` now owns the first dedicated batch claim/send path for due DayPlan intents
+
 ## Dedupe Rules
 
 - city workflows: `city-sync-${contextId}`
 - campus workflows: `campus-sync-${contextId}`
 - calendar-triggered workflows use sharded and bucketed IDs
 - account-level calendar sync also uses dedupe windows to suppress burst fan-out
+- delivery intents are deduped and superseded separately from orchestration schedules
 
 ## Schedule Import and Removal
 
@@ -56,6 +69,9 @@ This is important because student-facing schedule cleanup cannot assume `student
 - `services/engine/src/schedules/cleanupSchedules.ts`
 - `services/engine/src/schedules/pluginRunnerSchedules.ts`
 - `services/engine/src/index.ts`
+- `services/engine/src/workflows/dayPlanRouter.workflow.ts`
+- `services/engine/src/activities/dayplanRouter.activities.ts`
+- `services/engine/src/activities/deliveryIntent.activities.ts`
 - `services/engine/src/workflows/utils/calendarSyncLoadShedding.ts`
 - `services/engine/src/workflows/studentWatcher.simplified.workflow.ts`
 - `services/engine/src/activities/student.activities.ts`

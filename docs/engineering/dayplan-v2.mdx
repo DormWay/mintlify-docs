@@ -3,8 +3,12 @@ title: "DayPlan V2"
 description: "The 5 AM daily planning artifact, how it is generated, what it stores, and how it drives notifications and downstream surfaces."
 source:
   type: "obsidian"
-  path: "Engineering/Architecture/SoT - DayPlan V2.md"
-  distilled_at: "2026-04-03"
+  path: "Engineering/Technical/AI/LLM-Temporal-Cost-Optimization-Spec.md"
+  paths:
+    - "Notes/Worklogs/2026-04-16-studentwatcher-phase1a-implementation.md"
+    - "Notes/Worklogs/2026-04-15-dayplan-audit-followups.md"
+    - "Notes/Worklogs/2026-04-04-dayplan-duplicate-email-investigation.md"
+  distilled_at: "2026-04-23"
 ---
 
 # DayPlan V2
@@ -18,7 +22,7 @@ DayPlan is DormWay's daily intelligence artifact. V2 is the current production p
 | generation time | 5 AM user local time |
 | storage | `service_data` with method `dayplan` |
 | trigger owner | StudentWatcher |
-| downstream effects | feed generation, briefings, client refreshes |
+| downstream effects | feed generation, delivery intents, briefings, client refreshes |
 
 ## V2 Output Shape
 
@@ -32,6 +36,7 @@ The important V2 fields are:
 - `summary`
 - `notificationContent`
 - `currentState`
+- `actions`
 
 Older timeline fields still exist for compatibility, but V2's product meaning comes from the priority-first fields above.
 
@@ -43,16 +48,39 @@ Older timeline fields still exist for compatibility, but V2's product meaning co
 4. the model returns the structured plan
 5. the plan is stored and can trigger feed regeneration and outbound delivery work
 
+## Delivery Architecture
+
+The key April 2026 change is that DayPlan delivery is no longer treated as a single watcher-owned concern.
+
+Current shape:
+
+- DayPlan generation still happens from the watcher path
+- a deterministic DayPlan-to-intent builder writes durable `engine_delivery_intents`
+- stale intents are superseded when a newer plan replaces the old one
+- `DayPlanRouter` can claim due intents and send them directly when the feature flag is on
+
 ## Important Contracts
 
 - generation is timezone-aware
 - `currentState` updates separately from full plan generation
 - downstream systems should not treat every state touch as a full plan refresh
 - Ace can reference DayPlan as context, but Ace does not own schedule recommendations
+- quiet hours, preference gates, and superseded-plan checks still apply before delivery
+
+## Current Reliability Notes
+
+Recent DayPlan work surfaced a few important truths:
+
+- duplicate morning emails were traced to insufficient watcher-side resend guards on fresh runs
+- prompt and schema logic in `dayplan.activities.ts` is powerful but still complex enough that auditability matters
+- the router migration is meant to reduce timing and delivery complexity without changing the student-facing meaning of the DayPlan itself
 
 ## Key Files
 
 - `services/engine/src/types/dayplan.types.ts`
 - `services/engine/src/activities/dayplan.activities.ts`
+- `services/engine/src/activities/dayplan/dayplan-delivery-intents.ts`
+- `services/engine/src/activities/deliveryIntent.activities.ts`
+- `services/engine/src/workflows/dayPlanRouter.workflow.ts`
 - `services/engine/src/workflows/studentWatcher.simplified.workflow.ts`
 - `services/engine/src/activities/notificationDeliveryActivities.ts`
