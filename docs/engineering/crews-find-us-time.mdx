@@ -1,0 +1,83 @@
+---
+title: "Crews and Find Us Time"
+description: "The current private-group coordination contract, including rollout gates, availability capture, ranked overlap suggestions, and confirmation flow."
+source:
+  type: "obsidian"
+  path: "Engineering/Architecture/SoT - Crews & Find Us Time.md"
+  paths:
+    - "Engineering/Technical/SoT - Crews.md"
+    - "DormWay/Notes/Worklogs/2026-04-20-dorm-1207-crews-soft-launch-spec.md"
+  distilled_at: "2026-04-23"
+---
+
+# Crews and Find Us Time
+
+Crews is DormWay's private group coordination layer. `Find Us Time` is the scheduling module inside that layer, built around schedule-aware availability capture, ranked overlap suggestions, and explicit organizer confirmation.
+
+<Note>
+  Current production posture: Crews is live behind `feature.crews_enabled`, while the **Find Us Time tab** remains independently gated through Hypertune.
+</Note>
+
+---
+
+## Four-Gate Rollout Contract
+
+The current SoT is explicit that these gates are separate on purpose:
+
+| Gate | Where it lives | What it controls |
+|------|----------------|------------------|
+| `feature.crews_enabled` | `system_config` | Entire Crews surface and endpoint availability |
+| `plg.crews.creator_allowlist` | `system_config` | Who is allowed to create crews |
+| `CREW_TYPE_DEFAULTS` + `crew_module_matrix` | code + DB | Which modules, including `find_us_time`, are enabled for a crew type |
+| `plgFindATime` | Hypertune | Whether the locked-in UI actually renders the Find Times tab |
+
+That means a crew can exist, accept members, and support chat or polls even while the Find Times tab is still hidden.
+
+---
+
+## Core Invariants
+
+- Busy windows are canonical; free time is inferred from them.
+- Manual member input always overrides auto-prefill.
+- The server owns suggestion ranking.
+- Privacy defaults to aggregate overlap, not raw event sharing.
+- Two-person comparison is a first-class use case, not a special case.
+
+The ranking contract is deterministic and server-owned, which matters because web, iOS, and any admin tooling should all see the same best-slot ordering.
+
+---
+
+## Scheduling Flow
+
+| Step | Current behavior |
+|------|------------------|
+| **1. Create session** | Organizer creates a Crew session from the crew detail flow. |
+| **2. Prefill availability** | DormWay users get schedule-aware prefill from `student_time_blocks` when they open the session detail. |
+| **3. Manual edits** | Members can refine availability manually; guests submit anonymous availability with an edit token. |
+| **4. Rank slots** | Server computes suggestions and annotates nearby academic conflicts without exposing raw event details. |
+| **5. Confirm slot** | Organizer confirms one suggestion, moving the session to `confirmed` and triggering downstream activity / reminder flows. |
+
+One operational gotcha matters a lot: **prefill only happens when a member actually opens the session detail page**. Accepting an invite without opening the session leaves them out of the overlap calculation.
+
+---
+
+## Privacy and Visibility Rules
+
+The current contract is intentionally narrow:
+
+- other members should not see raw personal calendar events by default
+- conflict annotations expose only the minimum useful detail
+- public social-graph behavior is out of scope for V1
+
+So Crews is not a campus feed or discoverability system. It is a private coordination object with scheduling as one module.
+
+---
+
+## Practical Read
+
+Use this doc when you need to answer:
+
+- what actually enables Crews in production
+- why Find Us Time can be module-enabled but still invisible in the UI
+- where schedule-aware prefill happens
+- what privacy guarantees and ranking rules the feature is supposed to preserve

@@ -1,15 +1,31 @@
 ---
 title: "Canvas LMS Integration"
-description: "How DormWay connects to LMS platforms via ICS feeds to sync courses, assignments, and schedules."
+description: "DormWay's Canvas and LMS contract across PAT, OAuth2, and ICS sync paths, plus parser and change-detection rules."
 source:
-  type: "manual"
+  type: "obsidian"
+  path: "Engineering/Architecture/SoT - Canvas Integration.md"
+  distilled_at: "2026-04-23"
 ---
 
 # Canvas LMS Integration
 
-DormWay syncs a student's course schedule and assignment due dates by parsing ICS (iCalendar) feeds from their LMS. The feed is fetched periodically, parsed into a normalized format, and stored as course-context-linked assignments.
+DormWay does **not** have a single Canvas path. The current contract supports:
 
-## Supported Platforms
+- full Canvas API sync via **PAT**
+- full Canvas API sync via **OAuth2**
+- a lighter **ICS calendar feed** path that also covers several non-Canvas LMS variants
+
+The API-based paths are the richer integration. ICS is the lightweight fallback and the cross-LMS compatibility layer.
+
+## Connection Modes
+
+| Mode | Current role | Important contract |
+|------|--------------|--------------------|
+| **PAT** | Direct Canvas API sync with bearer token auth | Token is stored encrypted; no refresh-token flow exists in this mode. |
+| **OAuth2** | Direct Canvas API sync with refresh-capable credential storage | Refresh token is stored, but the main engine sync path does not auto-refresh yet. |
+| **ICS feed** | Lightweight calendar/assignment ingestion and the multi-LMS compatibility path | Uses stored feed URLs plus LMS-specific parsers and normalization rules. |
+
+## ICS Feed Support
 
 | Platform | Status | Parser |
 |----------|--------|--------|
@@ -21,7 +37,15 @@ DormWay syncs a student's course schedule and assignment due dates by parsing IC
 
 The `lms_type` is stored in `service_credentials` at connect time and determines which parser runs. Routing is by stored type — not by PRODID auto-detection.
 
-## How the Sync Works
+## Sync Paths
+
+| Path | What it does today |
+|------|--------------------|
+| **Canvas API sync** | Pulls courses, assignments, submissions, discussions, calendar events, and classmates through Canvas endpoints. |
+| **ICS sync** | Fetches and parses iCalendar feeds, normalizes events into a Canvas-like shape, and feeds the same downstream assignment/schedule pipeline. |
+| **Canary checks** | Uses activity-stream checks for API users and ETag / last-modified checks for ICS users to detect meaningful change cheaply. |
+
+### ICS Sync Flow
 
 ```mermaid
 sequenceDiagram
@@ -42,6 +66,10 @@ The entry points are:
 - `api-router/src/routes/canvas-routes.ts` — ICS connect endpoint
 - `engine/src/workflows/canvasICSSync.workflow.ts` — sync orchestration
 - `engine/src/activities/canvasICS.activities.ts` — per-platform parsers
+
+<Note>
+  The ICS path is only one branch of the integration. The current SoT also treats **PAT** and **OAuth2** Canvas API sync as first-class, production contracts.
+</Note>
 
 ## Platform Details
 

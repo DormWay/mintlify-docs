@@ -1,0 +1,79 @@
+---
+title: "Data Freshness and Validity"
+description: "The current cache TTL, staleness, cleanup, and freshness-API rules that govern whether DormWay treats data as usable."
+source:
+  type: "obsidian"
+  path: "Engineering/Architecture/SoT - Data Freshness & Validity Rules.md"
+  distilled_at: "2026-04-23"
+---
+
+# Data Freshness and Validity
+
+DormWay does not treat every stored value as equally trustworthy forever. The freshness system decides when cached or synced data is still usable, when it should be marked stale, and when old schedule artifacts should be cleaned up entirely.
+
+---
+
+## Core Freshness Signals
+
+| Area | Current contract |
+|------|------------------|
+| **Dashboard caching** | Uses Redis TTLs plus ETags; stale cache can be served temporarily during a single-flight refresh lock. |
+| **DayPlan** | Considered stale if `lastUpdated` is missing or older than 24 hours for timeline fallback use. |
+| **City sync freshness** | Driven by `contexts.next_sync_at`; missing or null values count as stale. |
+| **Campus sync freshness** | Driven by `campus_configs.last_modified_at`; older-than-24h is stale for mobile sync status. |
+| **Campus enrichment** | Derived from `service_data.updated_at` for campus metadata and academic calendar payloads. |
+| **Syllabus parsing cache** | Valid only when the raw-file hash and parser version still match. |
+
+The important design choice is that freshness is a product contract, not only an ops metric. Stale data changes what the UI should show and what fallbacks are allowed.
+
+---
+
+## Default Freshness Thresholds
+
+| Type | Default threshold |
+|------|-------------------|
+| **Schedule** | 5 minutes |
+| **Cue / headsup** | 5 minutes |
+| **Tasks** | 15 minutes |
+| **Courses** | 15 minutes |
+| **Weather** | 30 minutes |
+| **DayPlan** | 6 hours |
+
+These thresholds drive the global freshness API and the system-health decisions that sit above individual widgets or surfaces.
+
+---
+
+## Cleanup Rules
+
+DormWay also encodes validity through cleanup:
+
+- time blocks older than **90 days in the past** are removed by default
+- time blocks more than **365 days into the future** are removed by default
+- duplicate time blocks are de-duped by start time, end time, title, source type, and type
+
+That keeps scheduling stores from quietly accumulating invalid or duplicate data that would distort planning surfaces later.
+
+---
+
+## Global Freshness API
+
+The current SoT treats freshness as an explicit API surface:
+
+| Endpoint | Scope |
+|----------|-------|
+| `GET /v2/students/me/freshness` | Authenticated per-user freshness |
+| `GET /v2/students/:id/freshness` | Admin access to a specific user's freshness |
+| `GET /v2/freshness` | Admin scope for campus, city, or system freshness |
+
+Freshness responses can be summary or detailed, and stale reasons are normalized into a small set such as `never_synced`, `threshold_exceeded`, `sync_failed`, and `source_unavailable`.
+
+---
+
+## Practical Read
+
+Use this page when you need to answer:
+
+- whether a stale widget is a product bug or an expected freshness outcome
+- which timestamps and TTLs govern dashboard or campus freshness
+- how old schedule data is pruned
+- where a system-health or freshness card should get its truth
