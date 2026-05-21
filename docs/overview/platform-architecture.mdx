@@ -48,10 +48,12 @@ graph TD
         ENG[engine<br/>Temporal workers + schedules]
         SW[StudentWatcher<br/>per-student workflows]
         DPR[DayPlanRouter<br/>global timed delivery router]
+        PS[Pre-semester dispatch<br/>cohort reminders]
     end
 
     subgraph Data and Integrations
         DB[(Neon PostgreSQL)]
+        RR[(Read replica<br/>eligible reads)]
         RAG[Ragie / document index]
         EXT[Canvas, calendars,<br/>campus and city data]
         CIO[Customer.io]
@@ -62,16 +64,19 @@ graph TD
     Z --> API
     API --> CORE
     API --> DB
+    API --> RR
     API --> RELAY
     API --> ENG
     API --> EXT
     ENG --> SW
     ENG --> DPR
+    ENG --> PS
     SW --> DB
     ENG --> CREWS
     ENG --> EXT
     ENG --> CIO
     DPR --> CIO
+    PS --> CIO
     CREWS --> RAG
     RELAY --> W
     RELAY --> IOS
@@ -127,6 +132,8 @@ Major responsibilities include:
 
 As of the April 2026 watcher work, the engine layer is no longer only "StudentWatcher plus cron." It now also includes the first dedicated timed-delivery router path (`DayPlanRouter`) backed by durable delivery intents.
 
+As of the May 2026 pre-semester work, the engine also owns verified cohort-event dispatch. Admin-reviewed campus deadline rows start deterministic dispatcher workflows that sleep until their computed send time and then render through Customer.io.
+
 ### StudentWatcher
 
 StudentWatcher is the most important architectural unit in DormWay. Each student gets a durable workflow that can run for months, receive signals, evaluate sync cadence, and coordinate downstream work without being reduced to a simple cron entry.
@@ -165,6 +172,10 @@ Neon-backed PostgreSQL is the canonical data layer. Important contracts include:
 | `student_time_blocks` / `time_blocks` | The normalized schedule layer |
 | `service_data` | Time-series and ingestion output store used across sync and intelligence flows |
 | `migration_history` | Schema migration tracking |
+
+Read-heavy paths are being migrated to explicit read helpers rather than implicit primary reads. Public campus pages, mobile campus discovery, dashboard Aurora reads, and many authenticated mobile GET paths now use `readQuery`, `readQueryWithSession`, or `readQuerySingleWithSession` so eligible traffic can use a read pool while writes stay on the primary.
+
+See [Schedule Runtime Reliability](/docs/engineering/schedule-runtime-reliability) for the current read-replica and schedule-processing contracts.
 
 ### Context graph
 
