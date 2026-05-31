@@ -1,83 +1,160 @@
 ---
-title: "Crews and Find Us Time"
-description: "The current private-group coordination contract, including rollout gates, availability capture, ranked overlap suggestions, and confirmation flow."
+title: "Mix and Find Times"
+description: "The shipped Mix (formerly Crews) coordination layer — 6 Mix types, modules, guest-first join, Find Times, and the four-gate rollout contract as it is today — plus the planned go-fully-live + Mix Pro changes decided 2026-05-30 (DORM-1518)."
 source:
-  type: "obsidian"
-  path: "Engineering/Architecture/SoT - Crews & Find Us Time.md"
+  type: "code"
+  path: "services/api-router/src/routes/v2/crews/"
   paths:
-    - "Engineering/Technical/SoT - Crews.md"
-    - "DormWay/Notes/Worklogs/2026-04-20-dorm-1207-crews-soft-launch-spec.md"
-  distilled_at: "2026-04-23"
+    - "services/dormway-platform/services/dormway-lockedin/src/app/dashboard/crews/page.tsx"
+    - "services/dormway-platform/services/api-router/src/routes/v2/crews/crews.routes.ts"
+    - "services/dormway-platform/services/api-router/src/routes/v2/crews/crew-sessions.routes.ts"
+    - "services/dormway-platform/services/api-router/src/routes/v2/crews/crew-guest.routes.ts"
+    - "services/dormway-platform/services/shared/dormway-core/src/entities/crew/crew.types.ts"
+    - "services/dormway-platform/services/shared/dormway-core/src/domains/crew/module-matrix.domain.ts"
+    - "obsidian-vault/Product/Go-to-Market/Homepage Redesign & Mix Marketing PRD (Draft).md"
+    - "obsidian-vault/Product/Go-to-Market/Competitive — Mindgrasp & Shovel (2026-05).md"
+  distilled_at: "2026-05-30"
 ---
 
-# Crews and Find Us Time
+# Mix and Find Times
 
-Crews is DormWay's private group coordination layer. `Find Us Time` is the scheduling module inside that layer, built around schedule-aware availability capture, ranked overlap suggestions, and explicit organizer confirmation.
+Mix is DormWay's private group-coordination layer — shared deadlines, schedule, files, and chat for a room, study group, project team, dorm, or event. **Find Times** is the scheduling module inside Mix: schedule-aware availability capture, ranked overlap suggestions, and explicit organizer confirmation.
 
 <Note>
-  Current production posture: Crews is live behind `feature.crews_enabled`, while the **Find Us Time tab** remains independently gated through Hypertune.
+  **Naming.** "Mix" is the current product name (renamed from "Crews" around 2026-04-25). Use "Mix" in any partner- or product-facing prose. The code identifiers remain `crews` / `crew_*` — routes live under `/v2/crews`, the type is `CrewType`, etc. Both refer to the same feature.
+</Note>
+
+<Note>
+  **Current production posture.** Mix is live behind `feature.crews_enabled` (defaults ON). **Creating** a Mix is still gated by a creator allowlist (`plg.crews.creator_allowlist`); **joining** via invite link is open. The Find Times tab is independently gated by the `plgFindATime` Hypertune flag. The "go fully live" and "Mix Pro" items below are **decisions (2026-05-30, DORM-1518), not shipped** — see [Planned](#planned-decided-2026-05-30-dorm-1518).
 </Note>
 
 ---
 
-## Four-Gate Rollout Contract
+## The 6 Mix types
 
-The current engineering contract is explicit that these gates are separate on purpose:
+The creation UI (`dashboard/crews/page.tsx`) and `CrewType` (dormway-core `crew.types.ts`) expose six selectable types. The product label and the underlying code value differ for the two housing types.
+
+| Product label | Code value (`crew_type`) | Purpose |
+|---|---|---|
+| Coordination | `coordination` | Move-in, shared spaces, roommate logistics |
+| Study | `study` | Class Mixes with scheduling + Find Times |
+| Project | `project` | Team projects — tasks, deadlines, file sharing |
+| Event | `event` | Plan an event — polls, scheduling, chat |
+| Dorm | `housing` | Dorm-building Mix — amenities, issues, quiet hours |
+| Room | `housing_room` | Room Mix for roommate coordination (room-deduped on create) |
+
+<Note>
+  The `CrewType` union also contains a legacy `dorm` literal alongside `housing` / `housing_room`. The current create flow only emits `housing` and `housing_room`; `dorm` is a latent inconsistency in the type, not a seventh selectable type.
+</Note>
+
+---
+
+## Modules
+
+Each Mix enables a set of modules. The canonical module keys live in `ALL_MODULE_KEYS` (dormway-core `crew.types.ts`); each type's defaults are in `CREW_TYPE_DEFAULTS` and the admin-toggleable set in `CREW_TYPE_OPTIONAL`. The `crew_module_matrix` table (read by `module-matrix.domain.ts`) can override defaults per `crew_type` + `anchor_type`.
+
+| Module key | Label | What it does |
+|---|---|---|
+| `claiming` | Item Claiming | Members claim items to track who's doing what (atomic claim with conflict 409) |
+| `progress` | Progress Tracking | Completion bar across items |
+| `templates` | Templates | Start from a pre-populated item list |
+| `chat` | Chat | In-Mix messaging |
+| `find_us_time` | Find Times | Schedule meetings around everyone's availability |
+| `deadlines` | Deadline Sync | Sync due dates from Canvas + syllabi into items (course-anchored) |
+| `polls` | Polls | Group decisions / votes |
+| `files` | File Sharing | Share files + documents |
+| `calendar` | Calendar Feeds | Import iCal / Google Calendar |
+| `amenities` | Shared Amenities | Track laundry, kitchen, study rooms (housing) |
+| `building_issues` | Building Notices | Report/track maintenance issues (housing) |
+| `quiet_hours` | Quiet Hours | Quiet-hour norms + exam-mode schedule (housing) |
+
+A notebook surface and crew **events** (auto-created from a confirmed Find Times session, synced to new members' calendars) are also wired as sub-routers. Beyond modules, housing Mixes carry settings-backed **amenities**, **house rules**, **quiet hours**, and **reports/upvotes** stored in `crew.settings` JSONB or dedicated tables — capabilities, not entries in the module enum.
+
+**Course deadline sync.** For a course-anchored Mix with the `deadlines` module enabled, opening the Mix detail runs a lazy deadline sync from the course's Canvas/syllabus deadlines; a manual trigger exists at `POST /v2/crews/:id/sync-deadlines`.
+
+---
+
+## Guest-first join via invite link
+
+The entry path is **link/code-based, not email**. An admin generates an `invite_code`; the share URL is `https://dormway.app/join/[code]`.
+
+- **Preview** — `GET /v2/crew-guest/preview?code=XXX` (no auth) returns Mix name, emoji, member count, and creator name. Fires `invite_clicked` analytics (including for invalid codes, to surface broken-link clicks).
+- **Guest join** — `POST /v2/crew-guest/join` (no auth) takes `invite_code` + `display_name`; **email is optional**. The joiner becomes a **guest member (no account)**, gets an `HttpOnly` `guest_session` cookie (90-day) and a subscribe-only Ably token. Guests are limited to **one Mix**; joining a second prompts account creation (`GUEST_CREW_LIMIT`).
+- **Reclaim** — `POST /v2/crew-guest/reclaim` restores a guest session by the email used at join.
+- **Authenticated join** — `POST /v2/crews/join/:code` upserts membership for a logged-in user, syncs existing Mix events to their calendar, and fires `invite_accepted` + `member_joined` only on a true first join.
+
+Guests can later convert to a full account (guest→account merge moves their traits and membership over).
+
+---
+
+## Four-gate rollout contract (as it is today)
+
+These gates are separate on purpose; all four are verified in code as of 2026-05-30.
 
 | Gate | Where it lives | What it controls |
-|------|----------------|------------------|
-| `feature.crews_enabled` | `system_config` | Entire Crews surface and endpoint availability |
-| `plg.crews.creator_allowlist` | `system_config` | Who is allowed to create crews |
-| `CREW_TYPE_DEFAULTS` + `crew_module_matrix` | code + DB | Which modules, including `find_us_time`, are enabled for a crew type |
-| `plgFindATime` | Hypertune | Whether the locked-in UI actually renders the Find Times tab |
+|---|---|---|
+| `feature.crews_enabled` | `system_config` (default ON) | Whether the entire Mix surface + endpoints respond (else `503 CREWS_DISABLED`). Admins bypass. |
+| `plg.crews.creator_allowlist` | `system_config` (CSV) | **Who may create.** Applies to `POST /v2/crews` and the create-branch of `POST /v2/crews/for-course/:id`. Empty allowlist ⇒ non-admins are **invite-only** (`403 CREWS_CREATE_NOT_AUTHORIZED`). Does NOT gate joining, reads, or existing members. Admins bypass. |
+| `CREW_TYPE_DEFAULTS` + `crew_module_matrix` | dormway-core + DB | Which modules (including `find_us_time`) are on for a given `crew_type` / `anchor_type`. |
+| `plgFindATime` | Hypertune | Whether the LockedIn UI renders the Find Times tab. |
 
-That means a crew can exist, accept members, and support chat or polls even while the Find Times tab is still hidden.
+A Mix can therefore exist, accept members, and support chat/polls/items while the Find Times tab is still hidden, and creation can be invite-only while joining is wide open. The authenticated UI reads creation eligibility from `GET /v2/crews/creation-status` (`can_create`, `reason`, `message`).
 
 ---
 
-## Core Invariants
+## Find Times — scheduling flow
+
+Sessions live under `/v2/crews/:crewId/sessions` (`crew-sessions.routes.ts`), backed by `FindTimeDomainService`.
+
+| Step | Behavior |
+|---|---|
+| 1. Create session | Any member creates a session (title, duration, search range). Title/description are content-moderated at submit. |
+| 2. Prefill availability | DormWay members get schedule-aware prefill from their class schedule via `POST .../prefill` — **no-ops if the member already submitted or their schedule is empty**. |
+| 3. Submit availability | Members upsert when2meet-style slots (`best` / `okay` / `avoid`). Guests can submit anonymously (email optional, for confirmation). |
+| 4. Rank slots | Server computes ranked suggestions once **≥2 members have submitted** (else `NOT_ENOUGH_AVAILABILITY`). |
+| 5. Confirm slot | An **admin** confirms a slot → session moves to confirmed, a `crew_event` is auto-created, and anonymous respondents who left an email get a confirmation email. Admins can also reopen or cancel. |
+
+**Public/shareable.** A confirmed session exposes a `public_code`; anonymous respondents are emailed a `https://dormway.app/schedule/[public_code]` link. Every shared link is an invite — the intended viral loop.
+
+---
+
+## Core invariants (privacy + ranking)
 
 - Busy windows are canonical; free time is inferred from them.
-- Manual member input always overrides auto-prefill.
-- The server owns suggestion ranking.
-- Privacy defaults to aggregate overlap, not raw event sharing.
-- Two-person comparison is a first-class use case, not a special case.
+- Manual member input overrides auto-prefill.
+- The **server owns suggestion ranking** — web, iOS, and admin tooling all see the same best-slot ordering.
+- Privacy defaults to **aggregate overlap**, not raw event sharing; conflict annotations expose only minimal detail.
+- Discovery candidates (class/dorm/room) show **no member list or schedules before joining**.
 
-The ranking contract is deterministic and server-owned, which matters because web, iOS, and any admin tooling should all see the same best-slot ordering.
+These reinforce the brand invariant below.
 
----
-
-## Scheduling Flow
-
-| Step | Current behavior |
-|------|------------------|
-| **1. Create session** | Organizer creates a Crew session from the crew detail flow. |
-| **2. Prefill availability** | DormWay users get schedule-aware prefill from `student_time_blocks` when they open the session detail. |
-| **3. Manual edits** | Members can refine availability manually; guests submit anonymous availability with an edit token. |
-| **4. Rank slots** | Server computes suggestions and annotates nearby academic conflicts without exposing raw event details. |
-| **5. Confirm slot** | Organizer confirms one suggestion, moving the session to `confirmed` and triggering downstream activity / reminder flows. |
-
-One operational gotcha matters a lot: **prefill only happens when a member actually opens the session detail page**. Accepting an invite without opening the session leaves them out of the overlap calculation.
+<Note>
+  **Mix is not a social network / feed.** It is a private coordination object anchored to a real thing — a room, a class, a project — visible only to who you invite. No feed, no followers, no strangers, no public social graph. This invariant is load-bearing (Executive Context + Framing Guardrails).
+</Note>
 
 ---
 
-## Privacy and Visibility Rules
+## Planned (decided 2026-05-30, DORM-1518)
 
-The current contract is intentionally narrow:
+These are **founder decisions and proposals — not shipped**. Tracked in Linear **DORM-1518** and the *Homepage Redesign & Mix Marketing PRD (Draft)*. They are pending build and Riley sign-off; do not represent them as current behavior.
 
-- other members should not see raw personal calendar events by default
-- conflict annotations expose only the minimum useful detail
-- public social-graph behavior is out of scope for V1
+- **Mix goes fully live.** Remove the creator allowlist so any authenticated user can create + invite (keeping `feature.crews_enabled` as the master switch). Gated on a brand-new account completing create→invite→join end-to-end on dev, and on the iOS invite/deeplink race (`fix/ipad-mix-deeplink-race`) being resolved on the surfaces marketing drives to.
+- **Email quick-start entry (net-new, unbuilt).** A guest-first flow: enter your + roommates' emails → creates a Room Mix → emails each roommate a `/join/[code]` link → creator claims via magic link. **Double opt-in** (invitees confirm before joining); does **not** rely on `.edu`/campus-email domain matching.
+- **Mix Pro (coming).** For continuity-driven groups — sports teams, clubs, departments, Greek life, intramurals, student gov, course staff, RAs — where value spans terms. Adds **cross-term rosters, archiving**, roster sync, admin roles, recurring schedules/deadlines, larger membership, and a branded org space. Surfaced as **"coming"** with a waitlist; no live purchase.
+- **Free = per-term; Pro = cross-term.** Free Mix is scoped to a single academic term. **At term end** a free Mix goes **read-only** and surfaces a Mix Pro upgrade prompt ("carry your roster forward / archive this Mix") — **data is preserved, not deleted**. There is no per-term ceiling in the code today; this is a planned behavior.
 
-So Crews is not a campus feed or discoverability system. It is a private coordination object with scheduling as one module.
+<Note>
+  **Monetization line (canon-safe).** "Students always free. Mix Pro is for teams, clubs & departments that need more." Free for students stays true at the core — never "free forever."
+</Note>
 
 ---
 
-## Practical Read
+## Practical read
 
-Use this doc when you need to answer:
+Use this doc to answer:
 
-- what actually enables Crews in production
-- why Find Us Time can be module-enabled but still invisible in the UI
-- where schedule-aware prefill happens
-- what privacy guarantees and ranking rules the feature is supposed to preserve
+- What actually enables Mix in production today (and what's still invite-only) vs what's only decided.
+- The 6 Mix types and which product label maps to which `crew_type` code value.
+- Which modules exist and how Find Times can be module-enabled yet still hidden in the UI (`plgFindATime`).
+- How guests join with no account via `/join/[code]`, and how Find Times ranking + privacy guarantees work.
+- The free-per-term / Mix-Pro boundary — and that it is planned, not shipped.

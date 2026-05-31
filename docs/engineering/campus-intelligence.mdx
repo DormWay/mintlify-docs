@@ -1,6 +1,6 @@
 ---
 title: "Campus Intelligence"
-description: "Campus Discovery, campus configuration, school classification, and the roadmap toward structured campus tags."
+description: "DormWay's per-campus and college-town world model, campus enrichment, Campus Discovery, configuration, and the roadmap toward structured campus tags."
 source:
   type: "obsidian"
   path: "DormWay/Engineering/Architecture/2026-05-19 Campus Classification — school_type Field.md"
@@ -8,21 +8,91 @@ source:
     - "Engineering/specs/2026-05-21-campus-classifications-taxonomy.md"
     - "Engineering/specs/2026-05-21-campus-classifications-finding.md"
     - "DormWay/Operations/Runbooks/Adding-A-Campus-To-Pre-Semester-Layer.md"
+    - "services/engine/src/activities/campus.activities.ts"
+    - "services/api-router/src/services/campus-config-service.ts"
+    - "services/shared/dormway-core/src/domains/city/city.service.ts"
+    - "services/shared/dormway-core/src/domains/city/types.ts"
   verified_against:
+    - "services/engine/src/activities/campus.activities.ts"
+    - "services/api-router/src/services/campus-config-service.ts"
+    - "services/shared/dormway-core/src/domains/city/city.service.ts"
     - "services/api-router/src/routes/admin/campus-discovery-state-routes.ts"
     - "services/api-router/src/routes/v2/campus-discovery.routes.ts"
     - "services/engine/src/workflows/campusDiscoveryIngestion.workflow.ts"
     - "services/engine/src/activities/campusDiscovery.activities.ts"
     - "services/api-router/src/routes/school-request-routes.ts"
     - "services/shared/dormway-core/src/domains/campus/k12-defaults.ts"
-  distilled_at: "2026-05-21"
+  distilled_at: "2026-05-30"
 ---
 
 # Campus Intelligence
 
-DormWay's campus layer is no longer only a list of schools. It is becoming the data substrate for pre-arrival activation, student-visible campus pages, term calendars, K-12 handling, cohort analysis, and future campus classification queries.
+DormWay's campus layer is not a list of schools. It is a **per-campus and per-college-town world model**: weather, dining, events, safety/news, transport and parking, the school's real academic calendar, and housing — merged with the student's personal sources (Canvas, syllabi, schedule). This is the core differentiator. A study-materials tool or a generic planner has no campus or world context; DormWay does.
 
 This page separates what is live today from what is planned, because several of the latest Obsidian docs are implementation plans rather than shipped code.
+
+## The World Model (Differentiator)
+
+DormWay maintains two layers of place-aware context, both grounded in the `contexts` hierarchy (see [Context System](/docs/engineering/context-system)) and stored as time-stamped rows in the partitioned `service_data` table:
+
+| Layer | Stored on | What it carries |
+|-------|-----------|-----------------|
+| College-town (city) | the campus's parent city context | weather, multi-day forecast, transit issues, local news, processed city context |
+| Campus | the campus context | events, dining, news and safety alerts, logistics (parking, facilities, closures), the school's academic calendar, housing |
+
+The student layer then merges this place context with the student's own deadlines and schedule. Neither half alone is the product — the merge is.
+
+<Note>
+**Capability vs. rollout.** The *structure* spans every campus and college town in the system. Deep LLM enrichment (events, news, safety, logistics) is rolling out **target-campus-first** and is live on only a handful of pilot campuses today. Do not represent deep enrichment as complete for the full footprint. See [Enrichment Coverage](#enrichment-coverage-capability-vs-rollout).
+</Note>
+
+### Substrate at a Glance
+
+Grounded counts (verified 2026-05-30):
+
+| Substrate | Count | Role |
+|-----------|-------|------|
+| `campus_configs` | 6,456 | Per-campus config: academic calendar, current term, feature flags, data sources, metadata |
+| `city_configs` (college towns) | 2,884 | Per-college-town config and sync schedule |
+| `contexts` type = `city` | 2,891 | City nodes in the hierarchy |
+| `contexts` type = `building` | 28,983 | Buildings (incl. residence halls) under campuses |
+
+### Campus Enrichment Pipeline
+
+Enrichment runs as Temporal activities on the `campus-worker` queue (`services/engine/src/activities/campus.activities.ts`). The default data-collection method for most campuses is `perplexity`; a small number of campuses use custom workflows.
+
+1. **Source via Perplexity** — `fetchCampusEventsWithPerplexity` and the broader campus enrichment pull events, dining, news, safety, transportation/parking, facilities, and term dates, scoped to the campus's local timezone, city, and state.
+2. **Persist as `processed_perplexity_campus_data`** — `savePerplexityCampusData` stores the raw enrichment (hash-deduplicated) and **backfills `campus_configs.academic_calendar` and `current_term_data`** when the calendar is valid. Writes are skipped if `campus_metadata.calendar_locked` is set, and terms that ended more than 18 months ago are rejected as stale (DORM-949).
+3. **Transform into widgets** — single-shot LLM calls turn the enrichment into student-facing widgets, replacing the older multi-agent crews:
+   - `campus-logistics-widgets` → `processed_campus_logistics_crew` (parking, facilities, dining, weather)
+   - `campus-events-widgets` → `processed_campus_events_crew`
+   - `campus-news-widgets` → `processed_campus_news_crew` (the **news & safety** surface)
+4. **City context** — weather, forecast, transit, and news are fetched and processed at the city level (`fetch_weather`, `fetch_forecast`, `fetch_transit`, `fetch_news`, `processed_city_context`) and read up the hierarchy by campus activities.
+
+### Enrichment Coverage (Capability vs. Rollout)
+
+Enrichment is **priority-scored and rolling**, not a one-time full-footprint backfill. `getCampusesForEnrichment` ranks campuses by active accounts, student count, course count, housing signal, enrollment, and staleness, then enriches the top of the list. `checkCampusNeedsEnrichment` treats a campus as needing enrichment if it was never enriched or last enriched more than 30 days ago; the batch selector uses a 7-day floor.
+
+The honest framing for partners and employees:
+
+- The **per-campus / per-college-town model is structural** and exists across the footprint.
+- **Deep LLM enrichment** (events, news, safety, logistics widgets) is **live on a handful of pilot/target campuses**, expanding outward by priority.
+- Academic-calendar coverage is broader than widget coverage because calendar backfill rides on the same enrichment pass and is the highest-value field.
+
+### Implementation Map: World Model
+
+| Concern | Primary paths |
+|---------|---------------|
+| Campus enrichment + widget transforms | `services/engine/src/activities/campus.activities.ts` |
+| Campus config + calendar backfill | `services/api-router/src/services/campus-config-service.ts`, `campus.activities.ts` (`savePerplexityCampusData`) |
+| City (college-town) context | `services/shared/dormway-core/src/domains/city/city.service.ts`, `city/types.ts` |
+| Context hierarchy | `services/shared/dormway-core/src/database/context-graph/context-graph.service.ts` (see [Context System](/docs/engineering/context-system)) |
+
+---
+
+## Campus Classification &amp; Discovery
+
+Beyond the world model, the campus layer is the data substrate for pre-arrival activation, student-visible campus pages, K-12 handling, cohort analysis, and future campus classification queries.
 
 ## Current Live Model
 

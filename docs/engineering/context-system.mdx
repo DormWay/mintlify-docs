@@ -1,22 +1,42 @@
 ---
 title: "Context System"
-description: "DormWay's context tree plus dependency graph, session-scoped RLS access, lifecycle ranking, and onboarding context creation."
+description: "DormWay's context tree plus dependency graph — the substrate for the campus world model — session-scoped RLS access, lifecycle ranking, and onboarding context creation."
 source:
   type: "obsidian"
   path: "Engineering/Architecture/SoT - Context System.md"
-  distilled_at: "2026-04-23"
+  paths:
+    - "services/engine/src/activities/campus.activities.ts"
+    - "services/shared/dormway-core/src/domains/city/city.service.ts"
+  distilled_at: "2026-05-30"
 ---
 
 # Context System
 
 DormWay's context model is a tree plus a graph. `contexts.parent_id` gives you the hierarchy, while `context_dependencies` captures enrollment, lifecycle, and other directed relationships that cannot be represented as a simple parent-child chain.
 
+This hierarchy, together with the partitioned `service_data` table, is the substrate for DormWay's per-campus and college-town world model (see [Campus Intelligence](/docs/engineering/campus-intelligence)). Place-aware context — weather, dining, events, safety, transport — hangs off these nodes.
+
 ## Core Model
 
 | Layer | Purpose |
 |-------|---------|
-| `contexts` | Hierarchical entities like city, campus, course, and student |
+| `contexts` | Hierarchical entities like city, campus, building, course, and student |
 | `context_dependencies` | Directed relationships like `enrolled_in`, `completed`, `dropped`, `has_taken` |
+| `service_data` | Time-stamped external/enriched payloads keyed by `context_id` (partitioned by month) — where world-model data lands |
+
+## The Hierarchy
+
+`contexts.parent_id` forms a single tree from place down to person:
+
+```
+Country → State → City → Campus → Building → Course → Student
+```
+
+Each level can carry enriched context as `service_data` rows. City nodes carry weather, forecast, transit, and news (`fetch_weather`, `fetch_forecast`, `fetch_transit`, `fetch_news`, `processed_city_context`). Campus nodes carry events, dining, news/safety, logistics, and the academic calendar. Campus activities resolve a campus's parent city via `parent_id`, falling back to `campus_metadata` or the `city_configs.campus_ids` mapping when the direct link is absent.
+
+<Note>
+Buildings (including residence halls) live in `contexts` as `type = 'building'` under their campus — roughly 28,983 building nodes across ~2,891 city nodes as of 2026-05-30.
+</Note>
 
 ## RLS and Session Semantics
 
